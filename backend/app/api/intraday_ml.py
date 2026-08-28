@@ -240,7 +240,38 @@ async def run_ml_scan(custom_list=None):
     best_ticker = best_trade['ticker']
     best_trade['scanned_tickers'] = scanned_tickers
     
-    yield format_sse({"type": "info", "message": f"Winner found: {best_ticker}. Saving to AI Trade History...", "progress": 98})
+    yield format_sse({"type": "info", "message": f"Running NLP Sentiment Analysis on live news for {best_ticker}...", "progress": 96})
+    
+    try:
+        from app.analytics.nlp_engine import nlp_engine
+        nlp_result = nlp_engine.analyze_ticker_news(best_ticker)
+        sentiment_score = nlp_result['score']
+        headline = nlp_result['headline']
+        
+        penalty = 0
+        if sentiment_score < -50:
+            penalty = -15
+            yield format_sse({"type": "info", "message": f"🚨 CRITICAL NLP WARNING: Highly negative news detected (Sentiment: {sentiment_score}). Applying -15 Conviction Penalty."})
+            yield format_sse({"type": "info", "message": f"🗞️ Latest Headline: \"{headline}\""})
+        elif sentiment_score < -20:
+            penalty = -5
+            yield format_sse({"type": "info", "message": f"⚠️ Mildly negative news detected (Sentiment: {sentiment_score}). Applying -5 Conviction Penalty."})
+        elif sentiment_score > 50:
+            penalty = 5
+            yield format_sse({"type": "info", "message": f"🔥 NLP Catalyst Detected! Highly positive news (Sentiment: {sentiment_score}). Giving +5 Conviction Boost."})
+            yield format_sse({"type": "info", "message": f"🗞️ Latest Headline: \"{headline}\""})
+        else:
+            yield format_sse({"type": "info", "message": f"News Sentiment is NEUTRAL (Score: {sentiment_score}). Proceeding with pure technicals."})
+            
+        best_trade['score'] += penalty
+        best_trade['nlp_sentiment'] = sentiment_score
+        best_trade['nlp_headline'] = headline
+    except Exception as e:
+        yield format_sse({"type": "error", "message": f"NLP Engine failed: {e}. Skipping sentiment check."})
+        best_trade['nlp_sentiment'] = 0
+        best_trade['nlp_headline'] = "NLP Analysis failed."
+
+    yield format_sse({"type": "info", "message": f"Winner finalized: {best_ticker}. Saving to AI Trade History...", "progress": 98})
     
     # Save the real ML trade to history
     from app.api.ml_history import save_ml_trade, evaluate_ml_history
