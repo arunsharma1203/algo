@@ -178,10 +178,10 @@ export default function SwingScanner() {
         <div>
           {result ? (
             <div className="bg-white rounded-xl shadow-lg border border-purple-100 overflow-hidden sticky top-8">
-              <div className="bg-gradient-to-r from-purple-600 to-indigo-700 p-6 text-white">
+              <div className={`p-6 text-white ${result.is_bullish !== False ? 'bg-gradient-to-r from-purple-600 to-indigo-700' : 'bg-gradient-to-r from-red-600 to-orange-700'}`}>
                 <div className="flex justify-between items-start">
                   <div>
-                    <span className="bg-white/20 px-2 py-1 rounded text-xs font-bold tracking-wider mb-2 inline-block">SWING BUY</span>
+                    <span className="bg-white/20 px-2 py-1 rounded text-xs font-bold tracking-wider mb-2 inline-block">{result.is_bullish !== False ? 'SWING BUY' : 'SWING SHORT'}</span>
                     <h2 className="text-3xl font-black">{result.ticker}</h2>
                   </div>
                   <div className="bg-white text-purple-700 font-black text-xl px-3 py-2 rounded-lg shadow-inner">
@@ -225,13 +225,13 @@ export default function SwingScanner() {
                 <button 
                    onClick={() => handleExecuteClick({
                      ticker: result.ticker,
-                     type: 'BUY',
+                     type: result.is_bullish !== False ? 'BUY' : 'SELL',
                      entry: result.entry,
                      sl: result.sl,
                      tp1: result.tp1,
                      tp2: result.tp2
                    })}
-                   className="w-full bg-gray-900 hover:bg-black text-white font-bold py-4 rounded-lg shadow-lg flex items-center justify-center transition transform hover:scale-105"
+                   className={`w-full text-white font-bold py-4 rounded-lg shadow-lg flex items-center justify-center transition transform hover:scale-105 ${result.is_bullish !== False ? 'bg-gray-900 hover:bg-black' : 'bg-red-700 hover:bg-red-800'}`}
                 >
                   <Shield size={18} className="mr-2 text-purple-400" />
                   1-Click Execution Mode

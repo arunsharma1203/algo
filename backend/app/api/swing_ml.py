@@ -39,6 +39,27 @@ def run_swing_scan(custom_tickers: list = None):
         
         scan_history = []
         
+        yield format_sse({"type": "info", "message": "Analyzing Macro Market Regime (NIFTY 50)...", "progress": 5})
+        
+        regime = "BULLISH"
+        try:
+            nifty = yf.download("^NSEI", period="1y", interval="1d", progress=False)
+            if not nifty.empty and len(nifty) > 200:
+                # Use close as 1D array to avoid pd.Series deprecation issues
+                close_prices = nifty['Close'].squeeze()
+                nifty['SMA_200'] = close_prices.rolling(window=200).mean()
+                current_nifty = float(close_prices.iloc[-1])
+                sma_200 = float(nifty['SMA_200'].iloc[-1])
+                
+                if current_nifty > sma_200:
+                    regime = "BULLISH"
+                    yield format_sse({"type": "info", "message": f"Macro Regime is BULLISH (NIFTY {current_nifty:.2f} > 200 SMA {sma_200:.2f}). Market conditions optimal."})
+                else:
+                    regime = "BEARISH"
+                    yield format_sse({"type": "info", "message": f"Macro Regime is BEARISH (NIFTY {current_nifty:.2f} < 200 SMA {sma_200:.2f}). Applying -20 point Conviction penalty to all Longs."})
+        except Exception as e:
+            yield format_sse({"type": "error", "message": f"Failed to fetch NIFTY 50. Defaulting to BULLISH regime."})
+            
         yield format_sse({"type": "system", "message": f"Bulk fetching 5 years of daily data for {len(universe)} symbols..."})
         try:
             bulk_data = yf.download(universe, period="5y", interval="1d", progress=False)
@@ -76,9 +97,9 @@ def run_swing_scan(custom_tickers: list = None):
                 df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
                 df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
                 
-                # Swing ML Target: Will it go up at least 3% over the next 5 days?
                 df['future_5d'] = df['close'].shift(-5)
                 df['future_return'] = (df['future_5d'] - df['close']) / df['close']
+                # Swing ML Target: Will it go up at least 3% over the next 5 days?
                 df['target'] = (df['future_return'] > 0.03).astype(int)
                 
                 ml_df = df.dropna().copy()
@@ -176,7 +197,7 @@ def run_swing_scan(custom_tickers: list = None):
             from app.api.ml_history import save_ml_trade
             save_ml_trade(
                 ticker=best_conviction['ticker'],
-                is_bullish=True,
+                is_bullish=best_conviction['is_bullish'],
                 entry=best_conviction['entry'],
                 sl=best_conviction['sl'],
                 tp1=best_conviction['tp1'],
