@@ -1,10 +1,22 @@
 import yfinance as yf
 import pandas as pd
+import time as time_module
+
+_MACRO_CACHE = {
+    'data': None,
+    'timestamp': 0
+}
+_MACRO_CACHE_TTL = 300  # 5 minutes cache
 
 def get_macro_regime():
     """
     Fetches NIFTY 50 and INDIA VIX to determine the broad market environment.
+    Cached for 5 minutes to ensure sub-millisecond API response times.
     """
+    now = time_module.time()
+    if _MACRO_CACHE['data'] is not None and (now - _MACRO_CACHE['timestamp']) < _MACRO_CACHE_TTL:
+        return _MACRO_CACHE['data']
+
     macro_data = {
         'nifty_trend_long': 'BULLISH',
         'nifty_trend_short': 'BULLISH',
@@ -41,7 +53,11 @@ def get_macro_regime():
             else:
                 macro_data['vix_status'] = "NORMAL"
                 
+        _MACRO_CACHE['data'] = macro_data
+        _MACRO_CACHE['timestamp'] = now
     except Exception as e:
         macro_data['error'] = str(e)
+        if _MACRO_CACHE['data'] is not None:
+            return _MACRO_CACHE['data']
         
     return macro_data

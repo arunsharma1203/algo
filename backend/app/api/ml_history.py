@@ -96,9 +96,24 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
     conn.commit()
     conn.close()
 
-def evaluate_ml_history():
+_EVAL_CACHE = {
+    'data': None,
+    'timestamp': 0
+}
+_EVAL_CACHE_TTL = 30  # 30 seconds cache
+
+def evaluate_ml_history(force_refresh: bool = False):
+    """
+    Evaluates recorded ML trade history against subsequent market price action.
+    Cached for 30s for instant UI loading without blocking on network requests.
+    """
+    import time as time_module
+    now = time_module.time()
+    if not force_refresh and _EVAL_CACHE['data'] is not None and (now - _EVAL_CACHE['timestamp']) < _EVAL_CACHE_TTL:
+        return _EVAL_CACHE['data']
+
     ensure_ml_table()
-    conn = sqlite3.connect('market_data.db')
+    conn = sqlite3.connect('market_data.db', timeout=30.0)
     try:
         conn.execute("ALTER TABLE ml_trade_history ADD COLUMN trade_type TEXT DEFAULT 'INTRADAY'")
     except:
@@ -117,9 +132,15 @@ def evaluate_ml_history():
     conn.close()
     
     if df_trades.empty:
+        _EVAL_CACHE['data'] = []
+        _EVAL_CACHE['timestamp'] = now
         return []
         
     results = []
+    
+    # Pre-fetch Macro State once for all trades
+    from app.analytics.macro_engine import get_macro_regime
+    macro = get_macro_regime()
     
     # Group by ticker to batch fetch data
     tickers = df_trades['ticker'].unique().tolist()
@@ -290,6 +311,8 @@ def evaluate_ml_history():
             "risk_audit": risk_audit_data
         })
         
+    _EVAL_CACHE['data'] = results
+    _EVAL_CACHE['timestamp'] = now
     return results
 
 

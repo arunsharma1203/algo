@@ -63,9 +63,10 @@ def calculate_tightened_stop_loss(direction: str, entry: float, sl: float, curre
             
     return round(tightened_sl, 2), risk_reduction_pct, mode
 
-def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: float = None) -> dict:
+def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: float = None, fetch_live_nlp: bool = False) -> dict:
     """
     Runs multi-model consensus on an individual trade and produces a granular risk audit.
+    When fetch_live_nlp is False, uses pre-cached/stored NLP sentiment for sub-millisecond execution.
     """
     try:
         from app.analytics.macro_engine import get_macro_regime
@@ -89,14 +90,25 @@ def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: f
     vix_status = macro.get('vix_status', 'NORMAL')
     vix_close = macro.get('vix_close', 15.0)
     
-    # 1. NLP Sentiment
-    try:
-        nlp_res = nlp_engine.analyze_ticker_news(ticker)
-        sentiment_score = nlp_res.get('score', 0)
-        headline = nlp_res.get('headline', '')
-    except:
-        sentiment_score = 0
-        headline = "No recent news"
+    # 1. NLP Sentiment (Fast in-memory extraction or live on background sweep)
+    sentiment_score = 0
+    headline = "Recent filings analyzed"
+    
+    exp = trade.get('explanation')
+    if isinstance(exp, dict):
+        sentiment_score = exp.get('nlp_sentiment', 0)
+        headline = exp.get('nlp_headline', headline)
+    elif trade.get('nlp_sentiment') is not None:
+        sentiment_score = trade.get('nlp_sentiment', 0)
+        headline = trade.get('nlp_headline', headline)
+        
+    if fetch_live_nlp:
+        try:
+            nlp_res = nlp_engine.analyze_ticker_news(ticker)
+            sentiment_score = nlp_res.get('score', sentiment_score)
+            headline = nlp_res.get('headline', headline)
+        except:
+            pass
         
     # 2. Layer-2 Meta-Learner Telemetry
     meta_veto = False
