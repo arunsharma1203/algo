@@ -142,20 +142,18 @@ def evaluate_ml_history(force_refresh: bool = False):
     from app.analytics.macro_engine import get_macro_regime
     macro = get_macro_regime()
     
-    # Group by ticker to batch fetch data
-    tickers = df_trades['ticker'].unique().tolist()
+    # Group by ticker to batch fetch data ONLY for currently OPEN trades (sub-second performance)
+    open_trades_df = df_trades[df_trades['status'] != 'CLOSED']
+    open_tickers = open_trades_df['ticker'].unique().tolist() if not open_trades_df.empty else []
     
-    # We only need data from the oldest trade timestamp, or just last 5 days
-    # Fetched 60d to ensure Swing Trades have enough history to evaluate
     market_data = {}
-    try:
-        # bulk fetch
-        if tickers:
-            hist = yf.download(tickers, period="60d", interval="15m", progress=False)
-            if len(tickers) == 1:
-                market_data[tickers[0]] = hist
+    if open_tickers:
+        try:
+            hist = yf.download(open_tickers, period="5d", interval="15m", progress=False, timeout=5)
+            if len(open_tickers) == 1:
+                market_data[open_tickers[0]] = hist
             else:
-                for ticker in tickers:
+                for ticker in open_tickers:
                     if ticker in hist['Close']:
                         df_tick = pd.DataFrame({
                             'High': hist['High'][ticker],
@@ -163,8 +161,9 @@ def evaluate_ml_history(force_refresh: bool = False):
                             'Close': hist['Close'][ticker]
                         })
                         market_data[ticker] = df_tick
-    except:
-        pass
+        except Exception as e:
+            logger.warning(f"Fast yfinance download failed: {e}")
+            pass
 
     for _, row in df_trades.iterrows():
         ticker = row['ticker']

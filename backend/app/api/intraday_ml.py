@@ -427,7 +427,7 @@ async def get_ml_alerts():
     return alerts
 
 @router.get("/history")
-async def get_ml_history():
+def get_ml_history():
     from app.api.ml_history import evaluate_ml_history
     return evaluate_ml_history()
 
