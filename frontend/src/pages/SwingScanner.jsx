@@ -281,6 +281,13 @@ export default function SwingScanner() {
         </div>
       </div>
       <AITradeHistory tradeType="SWING" />
+      <MLBacktestModal 
+        isOpen={backtestModalOpen} 
+        onClose={() => setBacktestModalOpen(false)} 
+        ticker={result?.ticker}
+        defaultType="SWING"
+      />
+
     </div>
   );
 }

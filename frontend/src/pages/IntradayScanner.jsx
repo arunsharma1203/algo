@@ -281,6 +281,13 @@ export default function IntradayScanner() {
         </div>
       </div>
       <AITradeHistory tradeType="INTRADAY" />
+      <MLBacktestModal 
+        isOpen={backtestModalOpen} 
+        onClose={() => setBacktestModalOpen(false)} 
+        ticker={result?.ticker}
+        defaultType="INTRADAY"
+      />
+
     </div>
   );
 }
