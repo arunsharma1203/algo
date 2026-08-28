@@ -184,132 +184,98 @@ export default function SwingScanner() {
 
         <div>
           {result ? (
-            <div className="bg-white rounded-xl shadow-lg border border-purple-100 overflow-hidden sticky top-8">
-              <div className={`p-6 text-white ${result.is_bullish !== false ? 'bg-gradient-to-r from-purple-600 to-indigo-700' : 'bg-gradient-to-r from-red-600 to-orange-700'}`}>
-                <div className="flex justify-between items-start">
+            <div className="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden sticky top-8">
+              {/* Compact Header */}
+              <div className={`px-5 py-4 text-white ${result.is_bullish !== false ? 'bg-gradient-to-r from-purple-700 via-indigo-700 to-indigo-800' : 'bg-gradient-to-r from-red-600 to-orange-700'}`}>
+                <div className="flex justify-between items-center">
                   <div>
-                    <span className="bg-white/20 px-2 py-1 rounded text-xs font-bold tracking-wider mb-2 inline-block">{result.is_bullish !== false ? 'SWING BUY' : 'SWING SHORT'}</span>
-                    <h2 className="text-3xl font-black">{result.ticker}</h2>
-                  </div>
-                  <div className="bg-white text-purple-700 px-3.5 py-2 rounded-xl shadow-md text-right">
-                    <div className="flex items-baseline justify-end space-x-1">
-                      <span className="font-black text-2xl">{result.score.toFixed(1)}%</span>
+                    <div className="flex items-center space-x-2">
+                      <span className="bg-white/20 px-2 py-0.5 rounded text-[10px] font-black tracking-wider uppercase">
+                        {result.is_bullish !== false ? 'SWING BUY' : 'SWING SHORT'}
+                      </span>
+                      <h2 className="text-2xl font-black tracking-tight">{result.ticker}</h2>
                     </div>
-                    <span className="block text-[10px] font-bold text-purple-500 uppercase tracking-wider text-center">
+                    <div className="mt-1 flex items-baseline space-x-1.5">
+                      <span className="text-2xl font-light">₹{result.entry.toFixed(2)}</span>
+                      <span className="text-xs text-purple-200 font-medium">Entry</span>
+                    </div>
+                  </div>
+                  <div className="bg-white/10 backdrop-blur-sm border border-white/20 px-3 py-1.5 rounded-xl text-right shadow-xs">
+                    <div className="font-black text-xl leading-none">{result.score.toFixed(1)}%</div>
+                    <span className="block text-[9px] font-bold text-purple-200 uppercase tracking-wider mt-0.5">
                       {result.calibration ? 'CALIBRATED' : 'CONVICTION'}
                     </span>
                     {result.raw_score !== undefined && result.raw_score !== result.score && (
-                      <span className="block text-[9px] text-gray-400 font-mono text-center">
+                      <span className="block text-[8px] text-purple-300 font-mono">
                         Raw: {result.raw_score.toFixed(1)}%
                       </span>
                     )}
                   </div>
                 </div>
-                <div className="mt-6 flex items-end">
-                  <span className="text-4xl font-light">₹{result.entry.toFixed(2)}</span>
-                  <span className="ml-2 text-purple-200 mb-1">Entry Price</span>
+              </div>
+
+              {/* Compact 3-Column Targets & SL */}
+              <div className="grid grid-cols-3 gap-2 p-3 bg-slate-50 border-b border-slate-100">
+                <div className="bg-white p-2 rounded-lg border border-red-100 text-center shadow-xs">
+                  <span className="text-[10px] font-bold text-red-600 uppercase block">Stop Loss</span>
+                  <span className="font-mono font-bold text-xs text-red-700">₹{result.sl?.toFixed(2) || '-'}</span>
+                </div>
+                <div className="bg-white p-2 rounded-lg border border-green-100 text-center shadow-xs">
+                  <span className="text-[10px] font-bold text-green-600 uppercase block">Target 1 (1:1.5)</span>
+                  <span className="font-mono font-bold text-xs text-green-700">₹{result.tp1?.toFixed(2) || '-'}</span>
+                </div>
+                <div className="bg-white p-2 rounded-lg border border-emerald-100 text-center shadow-xs">
+                  <span className="text-[10px] font-bold text-emerald-600 uppercase block">Target 2 (1:3.0)</span>
+                  <span className="font-mono font-bold text-xs text-emerald-700">₹{result.tp2?.toFixed(2) || '-'}</span>
                 </div>
               </div>
-              
-              <div className="p-6 space-y-4 bg-gray-50">
-                <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-red-100 shadow-sm">
-                  <div className="flex items-center text-red-600">
-                    <AlertTriangle size={18} className="mr-2" />
-                    <span className="font-bold text-sm">Swing Stop Loss</span>
+
+              {/* Compact Multi-Factor Telemetry & Sizing Bar */}
+              <div className="p-3 bg-slate-900 text-white space-y-2">
+                <div className="flex items-center justify-between text-[11px] pb-1.5 border-b border-slate-800">
+                  <div className="flex items-center space-x-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                    <span className="font-bold text-emerald-400 text-[10px] uppercase">Layer-2 Signals</span>
                   </div>
-                  <span className="font-mono font-bold text-red-700">₹{result.sl?.toFixed(2) || '-'}</span>
+                  {result.nlp_sentiment !== undefined && (
+                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${result.nlp_sentiment > 0 ? 'bg-emerald-950 text-emerald-300' : result.nlp_sentiment < 0 ? 'bg-rose-950 text-rose-300' : 'bg-slate-800 text-slate-300'}`}>
+                      News: {result.nlp_sentiment > 0 ? '+' : ''}{result.nlp_sentiment}
+                    </span>
+                  )}
                 </div>
-                
-                <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-green-100 shadow-sm">
-                  <div className="flex items-center text-green-600">
-                    <Crosshair size={18} className="mr-2" />
-                    <span className="font-bold text-sm">Target 1 (1:1.5)</span>
+
+                <div className="grid grid-cols-3 gap-2 text-center text-[10px]">
+                  <div className="bg-slate-800/80 px-2 py-1 rounded border border-slate-700/60">
+                    <span className="text-slate-400 block text-[9px]">Volume Surge</span>
+                    <span className="font-bold text-emerald-300">{(result.telemetry?.volume_ratio || result.volume_ratio || 1.0).toFixed(1)}x SMA</span>
                   </div>
-                  <span className="font-mono font-bold text-green-700">₹{result.tp1?.toFixed(2) || '-'}</span>
-                </div>
-                
-                <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-emerald-100 shadow-sm">
-                  <div className="flex items-center text-emerald-600">
-                    <Target size={18} className="mr-2" />
-                    <span className="font-bold text-sm">Target 2 (1:3.0)</span>
+                  <div className="bg-slate-800/80 px-2 py-1 rounded border border-slate-700/60">
+                    <span className="text-slate-400 block text-[9px]">ATR Range</span>
+                    <span className="font-bold text-indigo-300">{(result.telemetry?.atr_pct || result.atr_pct || 2.0).toFixed(1)}%</span>
                   </div>
-                  <span className="font-mono font-bold text-emerald-700">₹{result.tp2?.toFixed(2) || '-'}</span>
-                </div>
-              </div>
-              
-              {result.nlp_sentiment !== undefined && (
-                <div className={`p-4 mx-6 mb-4 rounded-lg border ${result.nlp_sentiment < -20 ? 'bg-red-50 border-red-200' : result.nlp_sentiment > 20 ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'}`}>
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-xs font-bold uppercase tracking-wider text-gray-500">NLP News Sentiment</span>
-                    <span className={`font-bold ${result.nlp_sentiment < -20 ? 'text-red-600' : result.nlp_sentiment > 20 ? 'text-green-600' : 'text-gray-600'}`}>
-                      {result.nlp_sentiment > 0 ? '+' : ''}{result.nlp_sentiment} Score
+                  <div className="bg-slate-800/80 px-2 py-1 rounded border border-slate-700/60">
+                    <span className="text-slate-400 block text-[9px]">Macro Bias</span>
+                    <span className={`font-bold ${result.telemetry?.macro_aligned !== false ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {result.telemetry?.macro_aligned !== false ? 'Aligned' : 'Headwind'}
                     </span>
                   </div>
-                  <p className="text-sm text-gray-700 italic border-l-2 border-gray-300 pl-3">"{result.nlp_headline}"</p>
                 </div>
-              )}
 
-              {/* Meta-Learner Telemetry Card */}
-              {(result.telemetry || result.volume_ratio !== undefined) && (
-                <div className="p-4 mx-6 mb-4 bg-slate-900 text-white rounded-xl border border-slate-700 shadow-md">
-                  <div className="flex justify-between items-center mb-3 border-b border-slate-800 pb-2">
-                    <div className="flex items-center space-x-2">
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
-                      <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">Layer-2 Meta Telemetry</span>
+                {/* Platt Calibration Bar */}
+                {result.calibration && (
+                  <div className="pt-1.5 border-t border-slate-800">
+                    <div className="flex justify-between text-[10px] text-slate-400 mb-1">
+                      <span>Platt Calibration:</span>
+                      <span className="font-mono text-purple-300 font-bold">{result.raw_score?.toFixed(1)}% &rarr; {result.score.toFixed(1)}%</span>
                     </div>
-                    {result.telemetry?.total_adjustment !== undefined && (
-                      <span className={`text-xs font-bold px-2 py-0.5 rounded ${result.telemetry.total_adjustment >= 0 ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' : 'bg-rose-950 text-rose-300 border border-rose-700'}`}>
-                        {result.telemetry.total_adjustment > 0 ? '+' : ''}{result.telemetry.total_adjustment} Conviction Shift
-                      </span>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-3 gap-3 text-center">
-                    <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700">
-                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Volume Surge</p>
-                      <p className={`text-sm font-black ${(result.telemetry?.volume_ratio || result.volume_ratio || 1) >= 1.4 ? 'text-emerald-400' : (result.telemetry?.volume_ratio || result.volume_ratio || 1) < 0.8 ? 'text-amber-400' : 'text-slate-200'}`}>
-                        {(result.telemetry?.volume_ratio || result.volume_ratio || 1.0).toFixed(1)}x <span className="text-[10px] font-normal text-slate-400">SMA</span>
-                      </p>
-                    </div>
-                    <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700">
-                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Normalized ATR</p>
-                      <p className="text-sm font-black text-indigo-300">
-                        {(result.telemetry?.atr_pct || result.atr_pct || 2.0).toFixed(1)}% <span className="text-[10px] font-normal text-slate-400">Range</span>
-                      </p>
-                    </div>
-                    <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700">
-                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Macro Alignment</p>
-                      <p className={`text-xs font-bold mt-0.5 ${result.telemetry?.macro_aligned !== false ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {result.telemetry?.macro_aligned !== false ? '✅ Aligned' : '⚠️ Headwind'}
-                      </p>
+                    <div className="w-full bg-slate-800 rounded-full h-1 overflow-hidden">
+                      <div className="bg-gradient-to-r from-indigo-400 to-purple-400 h-1 rounded-full" style={{ width: `${Math.min(100, Math.max(0, result.score))}%` }} />
                     </div>
                   </div>
-                  {result.meta_learner_msg && (
-                    <p className="text-[11px] text-slate-300 italic mt-3 bg-slate-800/50 p-2 rounded border border-slate-700/50">
-                      {result.meta_learner_msg}
-                    </p>
-                  )}
+                )}
+              </div>
 
-                  {/* Platt Probability Calibration Bar */}
-                  {result.calibration && (
-                    <div className="mt-3 pt-3 border-t border-slate-800">
-                      <div className="flex justify-between text-[11px] mb-1">
-                        <span className="text-slate-400">Platt Probability Calibration:</span>
-                        <span className="font-mono text-purple-300 font-bold">
-                          {result.raw_score?.toFixed(1)}% Raw ➔ {result.score.toFixed(1)}% Calibrated
-                        </span>
-                      </div>
-                      <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                        <div 
-                          className="bg-gradient-to-r from-indigo-500 to-purple-400 h-1.5 rounded-full" 
-                          style={{ width: `${Math.min(100, Math.max(0, result.score))}%` }}
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-              
-
+              {/* Dynamic Position Sizing Strip */}
               {(() => {
                 const savedProfileStr = localStorage.getItem('swing_profile');
                 const defaultProfile = savedProfileStr ? JSON.parse(savedProfileStr) : { defaultCapital: 100000, maxRiskPerTrade: 2.0 };
@@ -327,57 +293,44 @@ export default function SwingScanner() {
                 const capitalRequired = qty * result.entry;
 
                 return (
-                  <div className="px-6 pb-4">
-                    <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-4 shadow-sm">
-                      <div className="flex items-center justify-between mb-3 border-b border-indigo-100 pb-2">
-                        <div className="text-indigo-800 font-bold flex items-center text-sm">
-                          <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" /></svg>
-                          Dynamic Position Sizing
-                        </div>
-                        <span className="text-xs font-bold text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded">
-                          {maxRisk}% Risk (₹{riskAmount.toFixed(0)})
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-end mb-2">
-                        <span className="text-xs text-indigo-700 font-bold uppercase">Recommended Qty</span>
-                        <span className="text-xl font-black text-indigo-900">{qty} Shares</span>
-                      </div>
-                      <div className="flex justify-between items-end">
-                        <span className="text-xs text-indigo-600 font-medium">Capital Required</span>
-                        <span className="text-sm font-bold text-indigo-800">₹{capitalRequired.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
-                      </div>
+                  <div className="px-4 py-2.5 bg-indigo-50/70 border-b border-indigo-100 flex items-center justify-between text-xs">
+                    <div className="text-indigo-900">
+                      <span className="font-bold">Position Sizing: </span>
+                      <span className="font-black text-indigo-700">{qty} Shares</span>
+                      <span className="text-[11px] text-indigo-600 ml-1.5">(₹{capitalRequired.toLocaleString('en-IN', { maximumFractionDigits: 0 })})</span>
                     </div>
+                    <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded">
+                      {maxRisk}% Risk (₹{riskAmount.toFixed(0)})
+                    </span>
                   </div>
                 );
               })()}
 
-              <div className="p-6 bg-white border-t border-gray-100">
-               <div className="flex gap-4 w-full">
-                <button 
-                   onClick={() => handleExecuteClick({
-                     ticker: result.ticker,
-                     type: result.is_bullish !== false ? 'BUY' : 'SELL',
-                     entry: result.entry,
-                     sl: result.sl,
-                     tp1: result.tp1,
-                     tp2: result.tp2
-                   })}
-                   className={`flex-1 text-white font-bold py-4 rounded-lg shadow-lg flex items-center justify-center transition transform hover:scale-105 ${result.is_bullish !== false ? 'bg-gray-900 hover:bg-black' : 'bg-red-700 hover:bg-red-800'}`}
-                >
-                  <Shield size={18} className="mr-2 text-purple-400" />
-                  1-Click Execution Mode
-                </button>
-                
-                <button 
-                  onClick={() => setBacktestModalOpen(true)}
-                  className="px-6 bg-purple-100 text-purple-700 hover:bg-purple-200 font-bold rounded-lg shadow-sm flex items-center justify-center transition border border-purple-200"
-                >
-                  Verify History
-                </button>
-              </div>
-                <p className="text-center text-xs text-gray-400 mt-3 font-medium">
-                  Swing setup evaluated on Daily (1D) interval.
-                </p>
+              {/* Actions Footer */}
+              <div className="p-3 bg-white">
+                <div className="flex gap-2 w-full">
+                  <button 
+                    onClick={() => handleExecuteClick({
+                      ticker: result.ticker,
+                      type: result.is_bullish !== false ? 'BUY' : 'SELL',
+                      entry: result.entry,
+                      sl: result.sl,
+                      tp1: result.tp1,
+                      tp2: result.tp2
+                    })}
+                    className={`flex-1 text-white font-bold py-2.5 px-3 rounded-lg shadow-sm flex items-center justify-center text-xs transition cursor-pointer ${result.is_bullish !== false ? 'bg-gray-900 hover:bg-black' : 'bg-red-700 hover:bg-red-800'}`}
+                  >
+                    <Shield size={14} className="mr-1.5 text-purple-400" />
+                    1-Click Execute
+                  </button>
+                  
+                  <button 
+                    onClick={() => setBacktestModalOpen(true)}
+                    className="px-3 py-2.5 bg-purple-50 text-purple-700 hover:bg-purple-100 font-bold rounded-lg text-xs transition border border-purple-200 cursor-pointer"
+                  >
+                    Verify Backtest
+                  </button>
+                </div>
               </div>
             </div>
           ) : (
