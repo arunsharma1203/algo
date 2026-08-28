@@ -39,13 +39,17 @@ class TradeMetaLearner:
         # Determine Macro Alignment
         macro_aligned = 1 if (is_bullish and nifty_trend == 'BULLISH') or (not is_bullish and nifty_trend == 'BEARISH') else 0
         
-        # 1. Fetch evaluated history to see how past trades performed
-        from app.api.ml_history import evaluate_ml_history
+        # 1. Fetch resolved past trades directly from database (eliminating recursion)
+        import sqlite3
+        resolved = []
         try:
-            history = evaluate_ml_history()
-            resolved = [t for t in history if t.get('outcome') not in ('OPEN', None)]
+            conn = sqlite3.connect('market_data.db', timeout=5.0)
+            df_hist = pd.read_sql_query("SELECT * FROM ml_trade_history WHERE status = 'CLOSED'", conn)
+            conn.close()
+            if not df_hist.empty:
+                resolved = df_hist.to_dict(orient='records')
         except Exception as e:
-            logger.warning(f"Meta-Learner failed reading history: {e}")
+            logger.warning(f"Meta-Learner fast history read: {e}")
             resolved = []
             
         success_prob = 0.5
@@ -57,7 +61,12 @@ class TradeMetaLearner:
                 df = pd.DataFrame(resolved)
                 df['is_bullish'] = (df['direction'] == 'BULLISH').astype(int)
                 df['is_swing'] = (df.get('trade_type', 'INTRADAY') == 'SWING').astype(int)
-                df['target'] = (df['profit_pct'] > 0).astype(int)
+                if 'profit_pct' in df.columns:
+                    df['target'] = (df['profit_pct'] > 0).astype(int)
+                elif 'outcome' in df.columns:
+                    df['target'] = (df['outcome'] == 'TARGET MET').astype(int)
+                else:
+                    df['target'] = 1
                 
                 # Synthetic or default fallback features for legacy historical records
                 if 'atr_pct' not in df.columns:

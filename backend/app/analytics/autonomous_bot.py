@@ -102,17 +102,14 @@ def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: f
         sentiment_score = trade.get('nlp_sentiment', 0)
         headline = trade.get('nlp_headline', headline)
         
-    if fetch_live_nlp:
-        try:
-            nlp_res = nlp_engine.analyze_ticker_news(ticker)
-            sentiment_score = nlp_res.get('score', sentiment_score)
-            headline = nlp_res.get('headline', headline)
-        except:
-            pass
+    try:
+        sentiment_score = float(sentiment_score) if sentiment_score is not None else 0.0
+    except:
+        sentiment_score = 0.0
         
     # 2. Layer-2 Meta-Learner Telemetry
     meta_veto = False
-    meta_adjustment = 0
+    meta_adjustment = 0.0
     meta_msg = "Model aligned"
     try:
         _, _, meta_telemetry = meta_learner.evaluate_new_trade(
