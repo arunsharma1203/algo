@@ -18,7 +18,7 @@ router = APIRouter()
 from app.api.intraday_ml import INDIAN_STOCK_UNIVERSE
 
 def format_sse(data: dict) -> str:
-    return f"{json.dumps(data)}\\n"
+    return f"{json.dumps(data)}\n"
 
 def run_swing_scan(custom_tickers: list = None):
     try:
