@@ -51,6 +51,9 @@ class FinancialSentimentAnalyzer:
             best_headline = ""
             max_intensity = -1
             
+            base_ticker = ticker.split('.')[0].upper()
+            
+            valid_news = 0
             for item in news_items:
                 # Yahoo Finance news items have title and summary inside 'content' or directly
                 title = item.get('title', '')
@@ -63,6 +66,12 @@ class FinancialSentimentAnalyzer:
                     
                 text = f"{title}. {summary}"
                 
+                # STRICT FILTER: Ensure the news is ACTUALLY about this exact stock.
+                # Yahoo often bundles generic sector news or competitor news under a ticker.
+                if base_ticker not in text.upper():
+                    continue
+                    
+                valid_news += 1
                 scores = self.analyzer.polarity_scores(text)
                 total_compound += scores['compound']
                 
@@ -72,7 +81,9 @@ class FinancialSentimentAnalyzer:
                     max_intensity = intensity
                     best_headline = title
                     
-            avg_compound = total_compound / len(news_items)
+            if valid_news == 0:
+                return {"score": 0, "headline": "No strictly related news detected."}
+            avg_compound = total_compound / valid_news
             
             # Map [-1.0, 1.0] to [-100, 100]
             normalized_score = round(avg_compound * 100, 1)

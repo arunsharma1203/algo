@@ -23,6 +23,7 @@ export default function SwingScanner() {
 
   const [execModalOpen, setExecModalOpen] = useState(false);
   const [backtestModalOpen, setBacktestModalOpen] = useState(false);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [execTradeData, setExecTradeData] = useState(null);
 
   const terminalContainerRef = useRef(null);
@@ -71,6 +72,7 @@ export default function SwingScanner() {
             
             if (data.type === 'result') {
               setResult(data.data);
+              setRefreshTrigger(prev => prev + 1);
             }
             if (data.progress !== undefined) {
               setProgress(data.progress);
@@ -280,7 +282,7 @@ export default function SwingScanner() {
           )}
         </div>
       </div>
-      <AITradeHistory tradeType="SWING" />
+      <AITradeHistory tradeType="SWING" refreshTrigger={refreshTrigger} />
       <MLBacktestModal 
         isOpen={backtestModalOpen} 
         onClose={() => setBacktestModalOpen(false)} 
