@@ -213,7 +213,7 @@ async def run_ml_backtest(req: MLBacktestRequest):
                 prob = ensemble.predict_proba(X_live)[0][1]
                 
                 # If highly confident
-                if prob > 0.65:
+                if prob > 0.55:
                     entry_price = current_price
                     # Set SL and TP
                     if model_type == "SWING":
