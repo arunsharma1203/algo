@@ -64,15 +64,34 @@ export default function MLLab() {
           </div>
         </div>
 
-        <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-200">
-          <div className="flex items-center text-gray-500 mb-4 font-bold text-sm uppercase tracking-wider">
-            <BrainCircuit className="mr-2" size={18} /> Active Models
+        <div className="bg-gradient-to-br from-indigo-900 to-purple-900 rounded-xl p-6 shadow-lg border border-purple-700 text-white relative overflow-hidden">
+          <div className="absolute -right-4 -top-4 opacity-10">
+            <BrainCircuit size={120} />
           </div>
-          <p className="text-5xl font-black text-indigo-600">3</p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <span className="px-2 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold rounded">RandomForest</span>
-            <span className="px-2 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold rounded">GradientBoost</span>
-            <span className="px-2 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold rounded">SVM Classifier</span>
+          <div className="flex items-center text-purple-200 mb-2 font-bold text-sm uppercase tracking-wider relative z-10">
+            <BrainCircuit className="mr-2" size={18} /> Deep Learning Stack
+          </div>
+          <div className="flex items-baseline space-x-2 relative z-10">
+            <p className="text-6xl font-black text-white">4</p>
+            <p className="text-purple-300 font-medium tracking-wide">Live Models</p>
+          </div>
+          <div className="mt-5 grid grid-cols-1 gap-2 relative z-10">
+            <div className="flex items-center text-xs font-bold bg-white/10 rounded p-1.5 border border-white/10">
+              <span className="w-2 h-2 rounded-full bg-blue-400 mr-2"></span>
+              Hunter Ensembles (RF/GB/SVM)
+            </div>
+            <div className="flex items-center text-xs font-bold bg-white/10 rounded p-1.5 border border-white/10">
+              <span className="w-2 h-2 rounded-full bg-pink-400 mr-2"></span>
+              FinBERT NLP (Sentiment Engine)
+            </div>
+            <div className="flex items-center text-xs font-bold bg-white/10 rounded p-1.5 border border-white/10">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 mr-2"></span>
+              Meta-Learner (Layer 2 Veto)
+            </div>
+            <div className="flex items-center text-xs font-bold bg-white/10 rounded p-1.5 border border-white/10">
+              <span className="w-2 h-2 rounded-full bg-yellow-400 mr-2"></span>
+              Macro Regime (VIX/Trend)
+            </div>
           </div>
         </div>
 

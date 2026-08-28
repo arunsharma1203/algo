@@ -335,6 +335,19 @@ async def run_ml_scan(custom_list=None):
     yield format_sse({"type": "info", "message": "Scan complete!", "progress": 100})
     yield format_sse({"type": "result", "data": best_trade})
 
+@router.get("/alerts")
+async def get_ml_alerts():
+    import sqlite3
+    conn = sqlite3.connect('market_data.db')
+    try:
+        cur = conn.execute("SELECT * FROM ml_alerts ORDER BY id DESC LIMIT 50")
+        columns = [column[0] for column in cur.description]
+        alerts = [dict(zip(columns, row)) for row in cur.fetchall()]
+    except:
+        alerts = []
+    conn.close()
+    return alerts
+
 @router.get("/history")
 async def get_ml_history():
     from app.api.ml_history import evaluate_ml_history

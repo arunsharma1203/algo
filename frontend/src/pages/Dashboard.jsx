@@ -13,6 +13,7 @@ export default function Dashboard() {
   const [error, setError] = useState(null);
   const [recentSearches, setRecentSearches] = useState([]);
   const [lastStats, setLastStats] = useState(null);
+  const [alerts, setAlerts] = useState([]);
   
   const { triggerFetchIndicator } = useLiveIndicator();
 
@@ -27,6 +28,20 @@ export default function Dashboard() {
     setTickerInput(defaultTicker);
     setActiveTicker(defaultTicker);
     fetchMarketData(defaultTicker);
+    
+    // Fetch Autonomous Bot Alerts
+    const fetchAlerts = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/api/ml/alerts');
+        if (response.ok) {
+          const data = await response.json();
+          setAlerts(data);
+        }
+      } catch (err) {}
+    };
+    fetchAlerts();
+    const interval = setInterval(fetchAlerts, 10000); // Check every 10s
+    return () => clearInterval(interval);
     
     const stats = localStorage.getItem('last_backtest_stats');
     if (stats) setLastStats(JSON.parse(stats));

@@ -11,6 +11,15 @@ logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
 # Run hoarding job every day at 16:00 IST (approximate if server is in IST)
 scheduler.add_job(hoard_intraday_data, 'cron', hour=16, minute=0)
+
+# 🤖 AUTONOMOUS BOT: Active Trade Manager
+# Runs every 5 minutes to cross-reference open trades against all 4 ML models
+try:
+    from app.analytics.autonomous_bot import active_trade_tracker
+    scheduler.add_job(active_trade_tracker, 'interval', minutes=5)
+except Exception as e:
+    logger.error(f"Failed to load autonomous bot: {e}")
+
 scheduler.start()
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.backtest import router as backtest_router
