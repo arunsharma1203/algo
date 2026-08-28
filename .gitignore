@@ -1,0 +1,26 @@
+# Node
+node_modules/
+dist/
+.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+
+# Database
+market_data.db
+*.sqlite3
+*.db
+
+# OS
+.DS_Store
+
+# Patch scripts
+patch_*.py
+fix_*.py
+restore_*.py
