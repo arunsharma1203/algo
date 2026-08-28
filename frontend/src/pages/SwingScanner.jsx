@@ -239,6 +239,7 @@ export default function SwingScanner() {
               )}
               
               <div className="p-6 bg-white border-t border-gray-100">
+               <div className="flex gap-4 w-full">
                 <button 
                    onClick={() => handleExecuteClick({
                      ticker: result.ticker,
@@ -248,11 +249,19 @@ export default function SwingScanner() {
                      tp1: result.tp1,
                      tp2: result.tp2
                    })}
-                   className={`w-full text-white font-bold py-4 rounded-lg shadow-lg flex items-center justify-center transition transform hover:scale-105 ${result.is_bullish !== false ? 'bg-gray-900 hover:bg-black' : 'bg-red-700 hover:bg-red-800'}`}
+                   className={`flex-1 text-white font-bold py-4 rounded-lg shadow-lg flex items-center justify-center transition transform hover:scale-105 ${result.is_bullish !== false ? 'bg-gray-900 hover:bg-black' : 'bg-red-700 hover:bg-red-800'}`}
                 >
                   <Shield size={18} className="mr-2 text-purple-400" />
                   1-Click Execution Mode
                 </button>
+                
+                <button 
+                  onClick={() => setBacktestModalOpen(true)}
+                  className="px-6 bg-purple-100 text-purple-700 hover:bg-purple-200 font-bold rounded-lg shadow-sm flex items-center justify-center transition border border-purple-200"
+                >
+                  Verify History
+                </button>
+              </div>
                 <p className="text-center text-xs text-gray-400 mt-3 font-medium">
                   Swing setup evaluated on Daily (1D) interval.
                 </p>

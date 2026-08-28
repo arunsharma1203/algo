@@ -239,6 +239,7 @@ export default function IntradayScanner() {
               )}
               
               <div className="p-6 bg-white border-t border-gray-100">
+               <div className="flex gap-4 w-full">
                 <button 
                    onClick={() => handleExecuteClick({
                      ticker: result.ticker,
@@ -253,6 +254,14 @@ export default function IntradayScanner() {
                   <Shield size={18} className="mr-2 text-purple-400" />
                   1-Click Execution Mode
                 </button>
+                
+                <button 
+                  onClick={() => setBacktestModalOpen(true)}
+                  className="px-6 bg-purple-100 text-purple-700 hover:bg-purple-200 font-bold rounded-lg shadow-sm flex items-center justify-center transition border border-purple-200"
+                >
+                  Verify History
+                </button>
+              </div>
                 <p className="text-center text-xs text-gray-400 mt-3 font-medium">
                   Intraday setup evaluated on 15m interval.
                 </p>
