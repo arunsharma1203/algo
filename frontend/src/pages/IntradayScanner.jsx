@@ -45,7 +45,10 @@ export default function IntradayScanner() {
     setResult(null);
 
     try {
-      const response = await fetch('http://localhost:8000/api/ml/intraday-scan');
+      const savedWatchlist = localStorage.getItem('watchlist');
+      const customTickers = savedWatchlist ? JSON.parse(savedWatchlist).join(',') : '';
+      const url = customTickers ? `http://localhost:8000/api/ml/intraday-scan?custom_tickers=${customTickers}` : 'http://localhost:8000/api/ml/intraday-scan';
+      const response = await fetch(url);
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
       
