@@ -40,7 +40,7 @@ export default function IntradayScanner() {
 
   const startScan = async () => {
     setScanning(true);
-    setLogs([{ type: 'system', message: 'Initiating Swing Trade ML Sweep (1D Candles, 5-Year History)...' }]);
+    setLogs([{ type: 'system', message: 'Initiating Intraday ML Sweep (15m Candles, 60-Day Deep History)...' }]);
     setProgress(0);
     setResult(null);
 
