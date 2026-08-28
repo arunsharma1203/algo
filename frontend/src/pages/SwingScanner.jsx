@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Terminal, Play, Loader, TrendingUp, AlertTriangle, Crosshair, Target, CheckCircle, Shield } from 'lucide-react';
 import AITradeHistory from '../components/AITradeHistory';
+import MLBacktestModal from '../components/MLBacktestModal';
 import ExecutionModal from '../components/ExecutionModal';
 
 export default function SwingScanner() {
@@ -21,6 +22,7 @@ export default function SwingScanner() {
   });
 
   const [execModalOpen, setExecModalOpen] = useState(false);
+  const [backtestModalOpen, setBacktestModalOpen] = useState(false);
   const [execTradeData, setExecTradeData] = useState(null);
 
   const terminalContainerRef = useRef(null);
