@@ -108,8 +108,8 @@ def evaluate_ml_history(force_refresh: bool = False):
     Cached for 30s for instant UI loading without blocking on network requests.
     """
     import time as time_module
-    now = time_module.time()
-    if not force_refresh and _EVAL_CACHE['data'] is not None and (now - _EVAL_CACHE['timestamp']) < _EVAL_CACHE_TTL:
+    epoch_now = time_module.time()
+    if not force_refresh and _EVAL_CACHE['data'] is not None and (epoch_now - _EVAL_CACHE['timestamp']) < _EVAL_CACHE_TTL:
         return _EVAL_CACHE['data']
 
     ensure_ml_table()
@@ -165,6 +165,7 @@ def evaluate_ml_history(force_refresh: bool = False):
             logger.warning(f"Fast yfinance download failed: {e}")
             pass
 
+    closed_ids_to_update = []
     for _, row in df_trades.iterrows():
         ticker = row['ticker']
         entry_time_str = row['timestamp']
@@ -253,15 +254,9 @@ def evaluate_ml_history(force_refresh: bool = False):
             if now.hour > 15 or (now.hour == 15 and now.minute >= 30) or now.hour < 9:
                 outcome = 'MARKET_CLOSED'
         
-        # Sync outcome back to the status column so the fast API can read it
+        # Collect closed IDs for a single batch update at the end
         if outcome != 'OPEN':
-            try:
-                sync_conn = sqlite3.connect('market_data.db')
-                sync_conn.execute("UPDATE ml_trade_history SET status = 'CLOSED' WHERE id = ?", (row['id'],))
-                sync_conn.commit()
-                sync_conn.close()
-            except:
-                pass
+            closed_ids_to_update.append(row['id'])
                 
         explanation_data = None
         if 'explanation' in row and pd.notna(row['explanation']) and row['explanation']:
@@ -310,8 +305,17 @@ def evaluate_ml_history(force_refresh: bool = False):
             "risk_audit": risk_audit_data
         })
         
+    if closed_ids_to_update:
+        try:
+            batch_conn = sqlite3.connect('market_data.db', timeout=10.0)
+            batch_conn.executemany("UPDATE ml_trade_history SET status = 'CLOSED' WHERE id = ?", [(cid,) for cid in closed_ids_to_update])
+            batch_conn.commit()
+            batch_conn.close()
+        except Exception as e:
+            logger.warning(f"Batch status sync failed: {e}")
+
     _EVAL_CACHE['data'] = results
-    _EVAL_CACHE['timestamp'] = now
+    _EVAL_CACHE['timestamp'] = time_module.time()
     return results
 
 
