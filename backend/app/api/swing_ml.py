@@ -166,11 +166,16 @@ def run_swing_scan(custom_tickers: list = None):
                     "price": current_price
                 })
                 
+                # Apply Bearish Macro Penalty
+                if regime == "BEARISH":
+                    score -= 20
+                    
                 if score > best_score:
                     best_score = score
                     best_conviction = {
                         "ticker": ticker,
                         "action": "BUY",
+                        "is_bullish": True,
                         "score": score,
                         "prob": bullish_prob,
                         "entry": current_price,

@@ -73,13 +73,27 @@ async def run_ml_scan(custom_list=None):
     results = []
     total = len(top_stocks)
     
+    yield format_sse({"type": "info", "message": f"Bulk fetching 60-day deep 15m history for {total} stocks...", "progress": 10})
+    try:
+        bulk_data = yf.download(top_stocks, period="60d", interval="15m", progress=False)
+    except Exception as e:
+        yield format_sse({"type": "error", "message": f"Bulk fetch failed: {e}", "progress": 100})
+        return
+        
     for idx, ticker in enumerate(top_stocks):
-        progress = 5 + int((idx / total) * 85)
-        yield format_sse({"type": "info", "message": f"Fetching 60-day deep intraday history for {ticker}...", "progress": progress})
+        progress = 15 + int((idx / total) * 75)
         
         try:
-            # INCREASED TO 60 DAYS (Max allowed for 15m) TO PROVIDE ~1,500 ROWS FOR PROPER ML TRAINING
-            df = yf.download(ticker, period="60d", interval="15m", progress=False)
+            if isinstance(bulk_data.columns, pd.MultiIndex):
+                try:
+                    df = bulk_data.xs(ticker, level=1, axis=1).copy()
+                except KeyError:
+                    continue
+            else:
+                if len(top_stocks) == 1:
+                    df = bulk_data.copy()
+                else:
+                    continue
             
             if df.empty or len(df) < 500:
                 continue
