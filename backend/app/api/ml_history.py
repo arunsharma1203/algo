@@ -33,7 +33,30 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
     except:
         pass
     direction = "BULLISH" if is_bullish else "BEARISH"
-    timestamp = datetime.now().isoformat()
+    now = datetime.now()
+    timestamp = now.isoformat()
+    
+    # DEDUPLICATION LOGIC:
+    # Prevent artificially inflating the Win Rate by saving the exact same trade 10 times a day
+    cur = conn.execute("""
+        SELECT timestamp FROM ml_trade_history 
+        WHERE ticker = ? AND trade_type = ? AND direction = ?
+        ORDER BY id DESC LIMIT 1
+    """, (ticker, trade_type, direction))
+    
+    last_trade = cur.fetchone()
+    if last_trade:
+        import pandas as pd
+        last_time_str = last_trade[0]
+        try:
+            last_time = datetime.fromisoformat(last_time_str)
+        except:
+            last_time = pd.to_datetime(last_time_str)
+            
+        # If we already saved this exact trade on the same calendar day, skip saving the duplicate!
+        if last_time.date() == now.date():
+            conn.close()
+            return
     
     conn.execute("""
         INSERT INTO ml_trade_history (timestamp, ticker, direction, entry, sl, tp1, tp2, confidence, trade_type)
