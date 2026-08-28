@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { History, CheckCircle, XCircle, Clock } from 'lucide-react';
+import { History, CheckCircle, XCircle, Clock, AlertTriangle, ShieldAlert, ShieldCheck, ArrowRight, X, Info, Activity } from 'lucide-react';
 import axios from 'axios';
 
 function ConvictionTooltip({ trade }) {
@@ -80,9 +80,151 @@ function ConvictionTooltip({ trade }) {
   );
 }
 
+function AITradeRiskAuditModal({ trade, onClose }) {
+  if (!trade || !trade.risk_audit) return null;
+  const audit = trade.risk_audit;
+  const models = audit.model_breakdown || {};
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4 animate-fade-in">
+      <div className="bg-slate-900 border border-slate-700 text-white rounded-2xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col max-h-[90vh]">
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-slate-800 flex justify-between items-center bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900">
+          <div className="flex items-center space-x-3">
+            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shadow-inner ${audit.risk_level === 'CRITICAL' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'}`}>
+              {audit.risk_level === 'CRITICAL' ? <ShieldAlert size={20} /> : <AlertTriangle size={20} />}
+            </div>
+            <div>
+              <div className="flex items-center space-x-2">
+                <h3 className="font-bold text-lg text-white tracking-tight">{trade.ticker}</h3>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${trade.direction === 'BULLISH' ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' : 'bg-rose-950 text-rose-300 border border-rose-700'}`}>
+                  {trade.direction}
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                  {trade.trade_type || 'SWING'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5">Live AI Risk &amp; Model Responsibility Audit</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer">
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Scrollable Body */}
+        <div className="p-6 overflow-y-auto space-y-5">
+          {/* Threat Meter */}
+          <div className="bg-slate-850 p-4 rounded-xl border border-slate-800">
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-400">AI Panic Threat Meter</span>
+              <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${audit.panic_level >= 70 ? 'bg-rose-900/60 text-rose-300' : audit.panic_level >= 40 ? 'bg-amber-900/60 text-amber-300' : 'bg-emerald-900/60 text-emerald-300'}`}>
+                {audit.panic_level} / 100 Threat Score
+              </span>
+            </div>
+            <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+              <div 
+                className={`h-2 rounded-full transition-all duration-500 ${audit.panic_level >= 70 ? 'bg-gradient-to-r from-amber-500 to-rose-500' : audit.panic_level >= 40 ? 'bg-gradient-to-r from-indigo-500 to-amber-400' : 'bg-emerald-500'}`}
+                style={{ width: `${Math.min(100, Math.max(5, audit.panic_level))}%` }}
+              />
+            </div>
+            <p className="text-[11px] text-slate-400 mt-2">
+              {audit.risk_level === 'CRITICAL' 
+                ? '🚨 Multiple models have triggered an Emergency Exit consensus. Capital is at high risk.' 
+                : '⚠️ Market conditions have deteriorated against this trade. Tightening stop-loss protects capital from severe drawdown.'}
+            </p>
+          </div>
+
+          {/* Actionable Stop Loss Plan */}
+          <div className="bg-gradient-to-r from-indigo-950/60 via-slate-850 to-slate-900 p-4 rounded-xl border border-indigo-900/40">
+            <div className="flex justify-between items-center mb-3">
+              <span className="text-xs font-bold text-indigo-300 uppercase tracking-wider flex items-center">
+                <ShieldCheck size={14} className="mr-1.5 text-indigo-400" /> Actionable Stop Loss Adjustment
+              </span>
+              <span className="text-[10px] font-bold bg-indigo-900/80 text-indigo-200 px-2 py-0.5 rounded border border-indigo-700/50">
+                {audit.sl_mode}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-slate-900/80 p-3 rounded-lg border border-slate-800 text-center">
+                <span className="text-[10px] text-slate-400 uppercase font-semibold block">Original Stop Loss</span>
+                <span className="text-lg font-mono font-bold text-slate-300 line-through">₹{audit.original_sl?.toFixed(2)}</span>
+              </div>
+              <div className="bg-indigo-900/30 p-3 rounded-lg border border-indigo-500/40 text-center shadow-inner">
+                <span className="text-[10px] text-indigo-300 uppercase font-bold block">Recommended Tightened SL</span>
+                <span className="text-xl font-mono font-black text-emerald-400">₹{audit.tightened_sl?.toFixed(2)}</span>
+              </div>
+            </div>
+
+            <div className="mt-3 flex items-center justify-between text-[11px] text-slate-300 pt-2 border-t border-slate-800/80">
+              <span>Entry Fill: <strong className="text-white font-mono">₹{audit.entry?.toFixed(2)}</strong></span>
+              <span className="text-emerald-400 font-bold">🛡️ {audit.risk_reduction_pct}% Risk Cut Active</span>
+            </div>
+          </div>
+
+          {/* Model Responsibility Matrix */}
+          <div>
+            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
+              Multi-Model Responsibility Matrix
+            </h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {Object.entries(models).map(([key, model]) => (
+                <div 
+                  key={key} 
+                  className={`p-3 rounded-xl border transition ${model.triggered ? 'bg-rose-950/20 border-rose-800/40' : 'bg-slate-850/60 border-slate-800'}`}
+                >
+                  <div className="flex justify-between items-start mb-1.5">
+                    <span className="font-bold text-xs text-white">{model.name}</span>
+                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded font-mono ${model.triggered ? 'bg-rose-900/70 text-rose-300 border border-rose-700' : 'bg-slate-800 text-slate-400'}`}>
+                      {model.triggered ? `+${model.points} pts` : '0 pts'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-snug">{model.detail}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Consensus Reasons List */}
+          {audit.reasons && audit.reasons.length > 0 && (
+            <div className="bg-slate-850 p-4 rounded-xl border border-slate-800">
+              <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-2">
+                Trigger Reasons Identified by AI Consensus
+              </span>
+              <ul className="space-y-1.5 text-xs text-slate-200">
+                {audit.reasons.map((reason, idx) => (
+                  <li key={idx} className="flex items-center text-amber-300">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 mr-2 shrink-0"></span>
+                    {reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 bg-slate-950 border-t border-slate-800 flex justify-between items-center">
+          <span className="text-[11px] text-slate-500">
+            Audit Evaluated: {new Date(audit.evaluated_at).toLocaleTimeString()}
+          </span>
+          <button 
+            onClick={onClose}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-lg transition shadow-md cursor-pointer"
+          >
+            Acknowledge &amp; Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [selectedAuditTrade, setSelectedAuditTrade] = useState(null);
 
   useEffect(() => {
     const fetchHistory = async () => {
@@ -117,7 +259,7 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
             <tr>
               <th className="px-6 py-3 text-left font-semibold text-gray-500 uppercase text-xs">Timestamp</th>
               <th className="px-6 py-3 text-left font-semibold text-gray-500 uppercase text-xs">Symbol</th>
-              <th className="px-6 py-3 text-center font-semibold text-gray-500 uppercase text-xs">Conviction & SHAP</th>
+              <th className="px-6 py-3 text-center font-semibold text-gray-500 uppercase text-xs">Conviction &amp; SHAP</th>
               <th className="px-6 py-3 text-center font-semibold text-gray-500 uppercase text-xs">Engines Active</th>
               <th className="px-6 py-3 text-right font-semibold text-gray-500 uppercase text-xs">Entry / Eff.</th>
               <th className="px-6 py-3 text-right font-semibold text-gray-500 uppercase text-xs">Stop Loss</th>
@@ -175,7 +317,19 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                     </div>
                   )}
                 </td>
-                <td className="px-6 py-4 text-right text-red-500 font-medium">₹{trade.sl.toFixed(2)}</td>
+                <td className="px-6 py-4 text-right font-medium">
+                  <div className="text-red-500">₹{trade.sl.toFixed(2)}</div>
+                  {trade.risk_audit && trade.risk_audit.risk_level !== 'NORMAL' && (
+                    <button 
+                      onClick={() => setSelectedAuditTrade(trade)}
+                      className="mt-1 inline-flex items-center text-[10px] bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 font-bold px-1.5 py-0.5 rounded cursor-pointer transition shadow-2xs"
+                      title="AI detected weakness: Click to view model audit"
+                    >
+                      <AlertTriangle size={10} className="mr-1 text-amber-600" />
+                      Tighten: ₹{trade.risk_audit.tightened_sl.toFixed(2)} 🔍
+                    </button>
+                  )}
+                </td>
                 <td className="px-6 py-4 text-right text-green-500 font-medium">₹{trade.tp1.toFixed(2)}</td>
                 <td className="px-6 py-4 text-right font-mono">
                   <span className={`font-bold ${trade.profit_pct > 0 ? 'text-green-600' : trade.profit_pct < 0 ? 'text-red-600' : 'text-gray-500'}`}>
@@ -200,6 +354,22 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                     <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto">
                       <CheckCircle size={14} className="mr-1" /> SQ OFF
                     </span>
+                  ) : trade.risk_audit && trade.risk_audit.risk_level === 'CRITICAL' ? (
+                    <button 
+                      onClick={() => setSelectedAuditTrade(trade)}
+                      className="bg-rose-100 hover:bg-rose-200 text-rose-800 border border-rose-300 px-2.5 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto cursor-pointer transition shadow-xs animate-pulse"
+                      title="Click to view detailed model breakdown and exit advisory"
+                    >
+                      <ShieldAlert size={14} className="mr-1 text-rose-600" /> EARLY EXIT 🔍
+                    </button>
+                  ) : trade.risk_audit && trade.risk_audit.risk_level === 'WARNING' ? (
+                    <button 
+                      onClick={() => setSelectedAuditTrade(trade)}
+                      className="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-2.5 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto cursor-pointer transition shadow-xs"
+                      title="Click to view detailed model breakdown and stop loss advisory"
+                    >
+                      <AlertTriangle size={14} className="mr-1 text-amber-600" /> AI WARNING 🔍
+                    </button>
                   ) : (
                     <span className="bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto">
                       <Clock size={14} className="mr-1" /> ACTIVE
@@ -211,6 +381,14 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
           </tbody>
         </table>
       </div>
+
+      {/* Model Responsibility Audit Modal */}
+      {selectedAuditTrade && (
+        <AITradeRiskAuditModal 
+          trade={selectedAuditTrade} 
+          onClose={() => setSelectedAuditTrade(null)} 
+        />
+      )}
     </div>
   );
 }

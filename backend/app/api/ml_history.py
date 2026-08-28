@@ -250,6 +250,26 @@ def evaluate_ml_history():
             except:
                 explanation_data = None
 
+        risk_audit_data = None
+        if outcome == "OPEN":
+            try:
+                from app.analytics.autonomous_bot import evaluate_single_trade_risk
+                risk_audit_data = evaluate_single_trade_risk(
+                    trade={
+                        'id': row['id'],
+                        'ticker': ticker,
+                        'direction': direction,
+                        'entry': raw_entry,
+                        'sl': row['sl'],
+                        'trade_type': trade_type,
+                        'confidence': row['confidence'],
+                        'timestamp': entry_time_str
+                    },
+                    current_price=current_price if 'current_price' in locals() else raw_entry
+                )
+            except Exception as e:
+                risk_audit_data = None
+
         results.append({
             "id": row['id'],
             "timestamp": entry_time_str[:16].replace("T", " "),
@@ -266,7 +286,8 @@ def evaluate_ml_history():
             "outcome": outcome,
             "profit_pct": round(profit_pct, 2),
             "trade_type": trade_type,
-            "explanation": explanation_data
+            "explanation": explanation_data,
+            "risk_audit": risk_audit_data
         })
         
     return results
