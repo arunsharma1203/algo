@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { History, CheckCircle, XCircle, Clock } from 'lucide-react';
 import axios from 'axios';
 
-export default function AITradeHistory({ tradeType }) {
+export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -21,7 +21,7 @@ export default function AITradeHistory({ tradeType }) {
     // Refresh every 60 seconds
     const interval = setInterval(fetchHistory, 60000);
     return () => clearInterval(interval);
-  }, []);
+  }, [tradeType, refreshTrigger]);
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-10">
