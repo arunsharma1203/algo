@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Target, Activity, Search, BookmarkPlus, FolderOpen, BrainCircuit, Database, Network, Settings, TrendingUp, Zap } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
@@ -32,18 +32,70 @@ function LinkItem({ to, icon: Icon, label }) {
 }
 
 function App() {
+  const [activeMonitors, setActiveMonitors] = useState([]);
+  const [lastScan, setLastScan] = useState(null);
+
+  useEffect(() => {
+    const fetchMonitors = async () => {
+      try {
+        const res = await fetch('http://localhost:8000/api/ml/active-monitors');
+        if (res.ok) {
+          const data = await res.json();
+          setActiveMonitors(data);
+          setLastScan(new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'}));
+        }
+      } catch (err) {}
+    };
+    fetchMonitors();
+    const interval = setInterval(fetchMonitors, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
   return (
     <LiveIndicatorProvider>
       <Router>
         <div className="flex h-screen bg-gray-50 font-sans text-gray-900 overflow-hidden">
           
-          <nav className="w-64 bg-gray-900 text-white flex flex-col p-4 shadow-xl z-10 relative">
-            <div className="flex items-center justify-center mb-10 mt-4">
+          <nav className="w-64 bg-gray-900 text-white flex flex-col shadow-xl z-10 relative overflow-hidden">
+            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+            <div className="flex items-center justify-center mb-6 mt-4">
               <div className="w-10 h-10 bg-indigo-500 rounded-lg flex items-center justify-center shadow-lg transform -rotate-6 mr-3">
                 <Target size={24} className="text-white transform rotate-6" />
               </div>
               <h1 className="text-xl font-black tracking-tight text-white">SWING<span className="text-indigo-400">AI</span></h1>
             </div>
+            
+            {/* Global Active Monitor Badge */}
+            {activeMonitors.length > 0 && (
+              <div className="mx-4 mb-8 bg-gray-800 border border-gray-700 rounded-xl p-3 flex flex-col">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">AI Guard</span>
+                  <div className="flex items-center space-x-1">
+                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                    <span className="text-[10px] font-bold text-green-400">ACTIVE</span>
+                  </div>
+                </div>
+                <div className="text-sm font-medium text-white mb-1">
+                  Monitoring {activeMonitors.length} Trades
+                </div>
+                {lastScan && (
+                  <div className="text-[10px] text-gray-400 mb-2 font-mono flex items-center">
+                    <Zap size={10} className="mr-1 text-yellow-500" /> Last Sweep: {lastScan}
+                  </div>
+                )}
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {activeMonitors.slice(0, 3).map((m, i) => (
+                    <span key={i} className="text-[10px] px-1.5 py-0.5 bg-gray-700 text-gray-300 rounded">
+                      {m.ticker.replace('.NS', '')}
+                    </span>
+                  ))}
+                  {activeMonitors.length > 3 && <span className="text-[10px] px-1.5 py-0.5 text-gray-400">+{activeMonitors.length - 3}</span>}
+                </div>
+              </div>
+            )}
+            {activeMonitors.length === 0 && (
+              <div className="mb-8"></div>
+            )}
             
             <div className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-3 px-2">Market Engine</div>
             <LinkItem to="/" icon={LayoutDashboard} label="Dashboard" />
@@ -64,6 +116,7 @@ function App() {
                 <LinkItem to="/data-dump" icon={Database} label="System Cache Dump" />
                 <LinkItem to="/profile" icon={Settings} label="Settings & Profile" />
               </div>
+            </div>
             </div>
           </nav>
           

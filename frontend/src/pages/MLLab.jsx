@@ -161,6 +161,100 @@ export default function MLLab() {
           </div>
         </div>
       </div>
+
+      {/* Layer-2 Meta-Learner Multi-Signal Matrix */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 p-6 text-white flex justify-between items-center">
+          <div>
+            <div className="flex items-center space-x-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              <h3 className="text-lg font-bold">Layer-2 Meta-Learner: Multi-Signal Decision Matrix</h3>
+            </div>
+            <p className="text-xs text-slate-300 mt-1">Cross-references individual model conviction against macro conditions, volatility, and volume surges before executing.</p>
+          </div>
+          <span className="text-xs font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-3 py-1 rounded-full">
+            REAL-TIME ARBITRATION ACTIVE
+          </span>
+        </div>
+        <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold uppercase text-slate-500">Signal 1: Volume Multiplier</span>
+              <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded">Breakout Gate</span>
+            </div>
+            <p className="text-sm font-semibold text-slate-800">Relative Volume (Vol / SMA20)</p>
+            <p className="text-xs text-slate-500 mt-1">Boosts conviction if Volume &ge; 1.4x; applies safety penalty if below 0.7x liquidity.</p>
+          </div>
+
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold uppercase text-slate-500">Signal 2: Volatility Regime</span>
+              <span className="text-xs font-bold text-purple-600 bg-purple-50 px-2 py-0.5 rounded">ATR Dynamic</span>
+            </div>
+            <p className="text-sm font-semibold text-slate-800">Normalized ATR (% Price Range)</p>
+            <p className="text-xs text-slate-500 mt-1">Favors 1.8% - 4.0% ATR for Swing trades; penalizes excessive &gt; 5.5% tail-risk swings.</p>
+          </div>
+
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold uppercase text-slate-500">Signal 3: Macro Alignment</span>
+              <span className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded">Regime Veto</span>
+            </div>
+            <p className="text-sm font-semibold text-slate-800">NIFTY 50 & INDIA VIX Bias</p>
+            <p className="text-xs text-slate-500 mt-1">Applies up to -8 pts penalty if trade direction opposes NIFTY trend or if VIX spikes.</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Probability Calibration Layer */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="bg-gradient-to-r from-purple-950 via-slate-900 to-indigo-950 p-6 text-white flex justify-between items-center">
+          <div>
+            <div className="flex items-center space-x-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-purple-400 animate-pulse"></span>
+              <h3 className="text-lg font-bold">Probability Calibration: Platt Sigmoid Scaling</h3>
+            </div>
+            <p className="text-xs text-slate-300 mt-1">Converts raw uncalibrated heuristic scores into strictly monotonic, empirical win probabilities.</p>
+          </div>
+          <span className="text-xs font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30 px-3 py-1 rounded-full">
+            PLATT SCALING ACTIVE
+          </span>
+        </div>
+        <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="space-y-4">
+            <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Calibration Function Mapping</h4>
+            <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 font-mono text-xs space-y-2">
+              <div className="flex justify-between border-b border-gray-200 pb-1.5">
+                <span className="text-gray-500">Heuristic Raw 50%</span>
+                <span className="text-purple-700 font-bold">&rarr; 51.1% Empirical Prob</span>
+              </div>
+              <div className="flex justify-between border-b border-gray-200 pb-1.5">
+                <span className="text-gray-500">Heuristic Raw 75%</span>
+                <span className="text-purple-700 font-bold">&rarr; 64.4% Empirical Prob</span>
+              </div>
+              <div className="flex justify-between border-b border-gray-200 pb-1.5">
+                <span className="text-gray-500">Heuristic Raw 95%</span>
+                <span className="text-purple-700 font-bold">&rarr; 73.2% Empirical Prob</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">Heuristic Raw 110%</span>
+                <span className="text-purple-700 font-bold">&rarr; 82.3% Empirical Prob</span>
+              </div>
+            </div>
+          </div>
+          <div className="space-y-4 flex flex-col justify-between">
+            <div>
+              <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Overconfidence Prevention</h4>
+              <p className="text-xs text-gray-600 mt-2 leading-relaxed">
+                Raw machine learning scores suffer from optimism bias when technical bonuses accumulate. Platt Sigmoid Calibration shrinks raw confidence down towards statistically verifiable win-rates, ensuring position sizing remains grounded in historical reality.
+              </p>
+            </div>
+            <div className="p-3 bg-purple-50 border border-purple-100 rounded-lg text-purple-900 text-xs font-medium">
+              &check; <strong>Strict Monotonicity Guaranteed:</strong> Higher raw scores are mathematically proven to yield higher calibrated win probabilities with zero curve inversion.
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

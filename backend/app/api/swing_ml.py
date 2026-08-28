@@ -92,7 +92,7 @@ def run_swing_scan(custom_tickers: list = None):
                 
                 df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
                 
-                # Feature Engineering
+                # Feature Engineering                # Calculate indicators
                 df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
                 macd = ta.trend.MACD(df['close'])
                 df['macd'] = macd.macd()
@@ -153,6 +153,10 @@ def run_swing_scan(custom_tickers: list = None):
                 # Record to history
                 current_price = float(latest_data['close'])
                 atr = float(latest_data['atr'])
+                atr_pct_val = (atr / current_price * 100) if current_price > 0 else 2.0
+                
+                vol_sma20 = df['volume'].rolling(20).mean().iloc[-1] if 'volume' in df.columns else 0
+                vol_ratio = float(latest_data['volume'] / vol_sma20) if (vol_sma20 and vol_sma20 > 0) else 1.0
                 
                 # Swing Trading Stop Loss (Wider: 2x ATR)
                 sl = current_price - (atr * 2)
@@ -185,6 +189,8 @@ def run_swing_scan(custom_tickers: list = None):
                         "sl": sl,
                         "tp1": tp1,
                         "tp2": tp2,
+                        "atr_pct": round(atr_pct_val, 2),
+                        "volume_ratio": round(vol_ratio, 2),
                         "rsi": float(latest_data['rsi']),
                         "macd_diff": float(latest_data['macd_diff']),
                         "adx": float(latest_data['adx']),
@@ -212,8 +218,6 @@ def run_swing_scan(custom_tickers: list = None):
             headline = nlp_result['headline']
             
             # NLP adjustments:
-            # If news is extremely bearish (e.g. -50 to -100), slap a penalty on the conviction score
-            # If news is extremely bullish, give a slight boost
             penalty = 0
             if sentiment_score < -50:
                 penalty = -15
@@ -235,28 +239,63 @@ def run_swing_scan(custom_tickers: list = None):
 
 
             # ==========================================
-            # META-LEARNER / FEEDBACK LOOP INJECTION
+            # META-LEARNER / MULTI-FACTOR TELEMETRY INJECTION
             # ==========================================
             try:
                 from app.analytics.meta_learner import meta_learner
-                yield format_sse({"type": "info", "message": "Invoking Meta-Learner (Layer 2) to cross-reference historical AI mistakes..."})
+                yield format_sse({"type": "info", "message": "Invoking Meta-Learner (Layer 2) with Volume/Volatility/Macro telemetry..."})
                 
-                adjusted_score, meta_message = meta_learner.evaluate_new_trade(
+                adjusted_score, meta_message, telemetry = meta_learner.evaluate_new_trade(
                     ticker=best_conviction['ticker'],
                     direction="BULLISH" if best_conviction['is_bullish'] else "BEARISH",
                     trade_type="SWING",
                     base_confidence=best_conviction['score'],
-                    nlp_sentiment=best_conviction.get('nlp_sentiment', 0)
+                    nlp_sentiment=best_conviction.get('nlp_sentiment', 0),
+                    macro_state=macro,
+                    atr_pct=best_conviction.get('atr_pct', 2.0),
+                    volume_ratio=best_conviction.get('volume_ratio', 1.0)
                 )
                 
                 best_conviction['score'] = adjusted_score
                 best_conviction['meta_learner_msg'] = meta_message
+                best_conviction['telemetry'] = telemetry
                 
                 yield format_sse({"type": "info", "message": f"🤖 {meta_message}"})
             except Exception as e:
                 yield format_sse({"type": "error", "message": f"Meta-Learner Offline: {e}"})
+
+            # ==========================================
+            # PROBABILITY CALIBRATION LAYER
+            # ==========================================
+            try:
+                from app.analytics.calibration import calibrator
+                calibrated_score, raw_score, calib_meta = calibrator.calibrate(best_conviction['score'])
+                best_conviction['raw_score'] = raw_score
+                best_conviction['score'] = calibrated_score
+                best_conviction['calibration'] = calib_meta
+                yield format_sse({"type": "info", "message": f"📊 Calibrated Win Probability: {calibrated_score}% (Raw Score: {raw_score}%)"})
+            except Exception as e:
+                best_conviction['raw_score'] = best_conviction['score']
+                best_conviction['calibration'] = {"raw_score": best_conviction['score'], "calibrated_score": best_conviction['score']}
                 
             from app.api.ml_history import save_ml_trade
+            
+            explanation_payload = {
+                "base_score": round(float(best_conviction.get("prob", 70.0)), 1),
+                "raw_score": best_conviction.get("raw_score", best_conviction['score']),
+                "calibrated_score": best_conviction['score'],
+                "calibration_meta": best_conviction.get("calibration", {}),
+                "nlp_sentiment": best_conviction.get("nlp_sentiment", 0),
+                "nlp_headline": best_conviction.get("nlp_headline", ""),
+                "atr_pct": best_conviction.get("atr_pct", 2.0),
+                "volume_ratio": best_conviction.get("volume_ratio", 1.0),
+                "macro_regime": best_conviction.get("telemetry", {}).get("macro_trend", "BULLISH"),
+                "macro_aligned": best_conviction.get("telemetry", {}).get("macro_aligned", True),
+                "adjustments": best_conviction.get("telemetry", {}).get("adjustments_breakdown", {}),
+                "meta_message": best_conviction.get("meta_learner_msg", "")
+            }
+
+            # Save to SQLite History
             save_ml_trade(
                 ticker=best_conviction['ticker'],
                 is_bullish=best_conviction['is_bullish'],
@@ -265,9 +304,28 @@ def run_swing_scan(custom_tickers: list = None):
                 tp1=best_conviction['tp1'],
                 tp2=best_conviction['tp2'],
                 confidence=best_conviction['score'],
-                trade_type='SWING'
+                trade_type="SWING",
+                explanation=explanation_payload
             )
             
+            # Push to Telegram!
+            try:
+                from app.analytics.telegram_notifier import send_telegram_message
+                trade_type = 'SWING'
+                direction = '🟢 BUY' if best_conviction['is_bullish'] else '🔴 SHORT'
+                
+                lines = [
+                    f"<b>🎯 NEW {trade_type} ALERT: {best_conviction['ticker']}</b>",
+                    f"<b>Action:</b> {direction}",
+                    f"<b>Entry:</b> ₹{best_conviction['entry']:.2f}",
+                    f"<b>Stop Loss:</b> ₹{best_conviction['sl']:.2f}",
+                    f"<b>Target:</b> ₹{best_conviction['tp1']:.2f}",
+                    f"<b>Conviction:</b> {best_conviction['score']:.1f}/100"
+                ]
+                send_telegram_message("\n".join(lines))
+            except Exception as e:
+                pass
+                
             # Sort history
             scan_history = sorted(scan_history, key=lambda x: x['score'], reverse=True)
             best_conviction['history'] = scan_history
@@ -286,4 +344,3 @@ def run_swing_scan(custom_tickers: list = None):
 def trigger_swing_scan(custom_tickers: str = None):
     tickers = custom_tickers.split(',') if custom_tickers else None
     return StreamingResponse(run_swing_scan(tickers), media_type="text/event-stream")
-

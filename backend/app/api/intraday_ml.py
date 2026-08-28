@@ -218,6 +218,10 @@ async def run_ml_scan(custom_list=None):
             elif recent_returns_std < baseline_std * 0.5:
                 atr_multiplier = 1.2 # Tighten stops for low volatility
                 
+            atr_pct_val = (float(latest_atr) / float(latest_close) * 100) if latest_close > 0 else 1.5
+            vol_sma20 = ml_df['volume'].rolling(20).mean().iloc[-1] if 'volume' in ml_df.columns else 0
+            vol_ratio = float(ml_df['volume'].iloc[-1] / vol_sma20) if (vol_sma20 and vol_sma20 > 0) else 1.0
+                
             if is_bullish:
                 sl = latest_close - (latest_atr * atr_multiplier)
                 tp1 = latest_close + (latest_atr * atr_multiplier)
@@ -234,6 +238,8 @@ async def run_ml_scan(custom_list=None):
                 "adx": float(latest_adx),
                 "rsi": float(latest_rsi),
                 "macd_diff": float(latest_macd_diff),
+                "atr_pct": round(atr_pct_val, 2),
+                "volume_ratio": round(vol_ratio, 2),
                 "is_bullish": is_bullish,
                 "entry": float(latest_close),
                 "sl": float(sl),
@@ -295,29 +301,63 @@ async def run_ml_scan(custom_list=None):
     yield format_sse({"type": "info", "message": f"Winner finalized: {best_ticker}. Saving to AI Trade History...", "progress": 98})
     
     # ==========================================
-    # META-LEARNER / FEEDBACK LOOP INJECTION
+    # META-LEARNER / MULTI-FACTOR TELEMETRY INJECTION
     # ==========================================
     try:
         from app.analytics.meta_learner import meta_learner
-        yield format_sse({"type": "info", "message": "Invoking Meta-Learner (Layer 2) to cross-reference historical AI mistakes..."})
+        yield format_sse({"type": "info", "message": "Invoking Meta-Learner (Layer 2) with Volume/Volatility/Macro telemetry..."})
         
-        adjusted_score, meta_message = meta_learner.evaluate_new_trade(
+        adjusted_score, meta_message, telemetry = meta_learner.evaluate_new_trade(
             ticker=best_trade['ticker'],
             direction="BULLISH" if best_trade['is_bullish'] else "BEARISH",
             trade_type="INTRADAY",
             base_confidence=best_trade['prob_up'],
-            nlp_sentiment=best_trade.get('nlp_sentiment', 0)
+            nlp_sentiment=best_trade.get('nlp_sentiment', 0),
+            macro_state=macro,
+            atr_pct=best_trade.get('atr_pct', 1.5),
+            volume_ratio=best_trade.get('volume_ratio', 1.0)
         )
         
         best_trade['prob_up'] = adjusted_score
         best_trade['meta_learner_msg'] = meta_message
+        best_trade['telemetry'] = telemetry
         
         yield format_sse({"type": "info", "message": f"🤖 {meta_message}"})
     except Exception as e:
         yield format_sse({"type": "error", "message": f"Meta-Learner Offline: {e}"})
 
+    # ==========================================
+    # PROBABILITY CALIBRATION LAYER
+    # ==========================================
+    try:
+        from app.analytics.calibration import calibrator
+        calibrated_score, raw_score, calib_meta = calibrator.calibrate(best_trade['prob_up'])
+        best_trade['raw_score'] = raw_score
+        best_trade['prob_up'] = calibrated_score
+        best_trade['calibration'] = calib_meta
+        yield format_sse({"type": "info", "message": f"📊 Calibrated Win Probability: {calibrated_score}% (Raw Score: {raw_score}%)"})
+    except Exception as e:
+        best_trade['raw_score'] = best_trade['prob_up']
+        best_trade['calibration'] = {"raw_score": best_trade['prob_up'], "calibrated_score": best_trade['prob_up']}
+
     # Save the real ML trade to history
     from app.api.ml_history import save_ml_trade, evaluate_ml_history
+    
+    explanation_payload = {
+        "base_score": round(float(best_trade.get("score", 70.0)), 1),
+        "raw_score": best_trade.get("raw_score", best_trade['prob_up']),
+        "calibrated_score": best_trade['prob_up'],
+        "calibration_meta": best_trade.get("calibration", {}),
+        "nlp_sentiment": best_trade.get("nlp_sentiment", 0),
+        "nlp_headline": best_trade.get("nlp_headline", ""),
+        "atr_pct": best_trade.get("atr_pct", 1.5),
+        "volume_ratio": best_trade.get("volume_ratio", 1.0),
+        "macro_regime": best_trade.get("telemetry", {}).get("macro_trend", "BULLISH"),
+        "macro_aligned": best_trade.get("telemetry", {}).get("macro_aligned", True),
+        "adjustments": best_trade.get("telemetry", {}).get("adjustments_breakdown", {}),
+        "meta_message": best_trade.get("meta_learner_msg", "")
+    }
+
     save_ml_trade(
         ticker=best_trade['ticker'],
         is_bullish=best_trade['is_bullish'],
@@ -325,8 +365,19 @@ async def run_ml_scan(custom_list=None):
         sl=best_trade['sl'],
         tp1=best_trade['tp1'],
         tp2=best_trade['tp2'],
-        confidence=best_trade['prob_up']
+        confidence=best_trade['prob_up'],
+        trade_type="INTRADAY",
+        explanation=explanation_payload
     )
+    
+    # Push to Telegram!
+    try:
+        from app.analytics.telegram_notifier import send_telegram_message
+        direction = "🟢 BUY" if best_trade['is_bullish'] else "🔴 SHORT"
+        tg = f'<b>🎯 NEW INTRADAY ALERT: {best_trade["ticker"]}</b>\n<b>Action:</b> {direction}\n<b>Entry:</b> ₹{best_trade["entry"]:.2f}\n<b>Stop Loss:</b> ₹{best_trade["sl"]:.2f}\n<b>Target:</b> ₹{best_trade["tp1"]:.2f}\n<b>Conviction:</b> {best_trade["prob_up"]:.1f}/100'
+        send_telegram_message(tg)
+    except Exception as e:
+        pass
     
     # Fetch global history evaluated against live prices
     history = evaluate_ml_history()
@@ -334,6 +385,19 @@ async def run_ml_scan(custom_list=None):
 
     yield format_sse({"type": "info", "message": "Scan complete!", "progress": 100})
     yield format_sse({"type": "result", "data": best_trade})
+
+@router.get("/active-monitors")
+async def get_active_monitors():
+    import sqlite3
+    conn = sqlite3.connect('market_data.db')
+    try:
+        cur = conn.execute("SELECT ticker, trade_type, entry, direction FROM ml_trade_history WHERE status = 'OPEN' ORDER BY id DESC")
+        columns = [column[0] for column in cur.description]
+        trades = [dict(zip(columns, row)) for row in cur.fetchall()]
+    except:
+        trades = []
+    conn.close()
+    return trades
 
 @router.get("/alerts")
 async def get_ml_alerts():

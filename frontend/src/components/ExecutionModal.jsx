@@ -15,8 +15,8 @@ export default function ExecutionModal({ trade, onClose, onSuccess }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const capital = defaultProfile.defaultCapital || 100000;
-  const maxRisk = defaultProfile.maxRiskPerTrade || 2.0;
+  const capital = Number(defaultProfile.defaultCapital) || 100000;
+  const maxRisk = Number(defaultProfile.maxRiskPerTrade) || 2.0;
   
   // Dynamic Risk-Based Position Sizing
   const riskAmount = capital * (maxRisk / 100);

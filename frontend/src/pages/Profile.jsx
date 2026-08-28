@@ -3,6 +3,7 @@ import { User, Key, Shield, HardDrive, DollarSign, Activity, DatabaseZap } from 
 import axios from 'axios';
 
 export default function Profile() {
+  const [telegram, setTelegram] = useState({ bot_token: '', chat_id: '' });
   const [profile, setProfile] = useState({
     name: '',
     apiKey: '',
@@ -19,6 +20,12 @@ export default function Profile() {
 
   useEffect(() => {
     // Load from local storage on mount
+    // Fetch Telegram Config
+    fetch('http://localhost:8000/api/settings/telegram')
+      .then(res => res.json())
+      .then(data => setTelegram({ bot_token: data.bot_token || '', chat_id: data.chat_id || '' }))
+      .catch(e => console.error(e));
+
     const saved = localStorage.getItem('swing_profile');
     if (saved) {
       try {
@@ -39,6 +46,13 @@ export default function Profile() {
     // Auto-save whenever profile changes, but don't overwrite if it's the initial empty state
     if (profile.name || profile.apiKey || profile.dataSource !== 'yfinance') {
       localStorage.setItem('swing_profile', JSON.stringify(profile));
+    
+    // Save Telegram config to backend
+    fetch('http://localhost:8000/api/settings/telegram', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(telegram)
+    }).catch(e => console.error(e));
       localStorage.setItem('indmoney_api_token', profile.apiKey);
     }
   }, [profile]);
@@ -47,8 +61,37 @@ export default function Profile() {
     setProfile(p => ({ ...p, [field]: value }));
   };
 
+  const [testStatus, setTestStatus] = useState('');
+  
+  const handleTestTelegram = async () => {
+    setTestStatus('Testing...');
+    try {
+      const response = await fetch('http://localhost:8000/api/settings/telegram/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(telegram)
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        setTestStatus('✅ Success! Check your Telegram.');
+      } else {
+        setTestStatus('❌ Failed: ' + data.message);
+      }
+    } catch (e) {
+      setTestStatus('❌ Error connecting to server.');
+    }
+    setTimeout(() => setTestStatus(''), 5000);
+  };
+
   const handleSave = () => {
     localStorage.setItem('swing_profile', JSON.stringify(profile));
+    
+    // Save Telegram config to backend
+    fetch('http://localhost:8000/api/settings/telegram', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(telegram)
+    }).catch(e => console.error(e));
     localStorage.setItem('indmoney_api_token', profile.apiKey);
     
     setSavedMessage(true);
@@ -122,6 +165,62 @@ export default function Profile() {
                 />
               </div>
               <p className="text-xs text-gray-500 mt-2">Calculates exact position sizing based on your Stop Loss so you never lose more than this percentage of your capital.</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Autonomous Bot Telegram Integration */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-6">
+          <div className="bg-blue-50 px-6 py-4 border-b border-blue-200 flex items-center justify-between">
+            <div className="flex items-center">
+              <svg className="w-5 h-5 text-blue-500 mr-2" fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.892-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+              <h2 className="font-bold text-gray-800">Telegram Bot Integration</h2>
+            </div>
+            <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded">PUSH ALERTS</span>
+          </div>
+          
+          <div className="p-6">
+            <p className="text-sm text-gray-600 mb-6">
+              Connect the Autonomous AI to your Telegram. When the bot finds a new trade or triggers an Early Exit, it will send a push notification directly to your phone.
+            </p>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">Telegram Bot Token</label>
+                <input 
+                  type="password" 
+                  value={telegram.bot_token}
+                  onChange={(e) => setTelegram({...telegram, bot_token: e.target.value})}
+                  className="w-full border border-gray-300 rounded-lg py-3 px-4 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                  placeholder="1234567890:ABCdefGHIjklMNOpqrs..."
+                />
+                <p className="text-xs text-gray-500 mt-2">Get this from @BotFather on Telegram.</p>
+              </div>
+              
+              <div>
+                <div className="flex justify-between items-center mb-2">
+                  <label className="block text-sm font-bold text-gray-700">Your Chat ID</label>
+                  <button 
+                    onClick={handleTestTelegram}
+                    className="text-xs font-bold text-blue-600 bg-blue-100 hover:bg-blue-200 px-2 py-1 rounded transition"
+                  >
+                    Test Connection
+                  </button>
+                </div>
+                <input 
+                  type="text" 
+                  value={telegram.chat_id}
+                  onChange={(e) => setTelegram({...telegram, chat_id: e.target.value})}
+                  className="w-full border border-gray-300 rounded-lg py-3 px-4 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                  placeholder="123456789"
+                />
+                <p className="text-xs text-gray-500 mt-2">Get this from @userinfobot on Telegram.</p>
+                {testStatus && (
+                  <p className={`text-xs font-bold mt-2 ${testStatus.includes('✅') ? 'text-green-600' : testStatus.includes('❌') ? 'text-red-600' : 'text-blue-600'}`}>
+                    {testStatus}
+                  </p>
+                )}
+              </div>
             </div>
           </div>
         </div>

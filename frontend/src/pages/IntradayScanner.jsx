@@ -191,9 +191,18 @@ export default function IntradayScanner() {
                     <span className="bg-white/20 px-2 py-1 rounded text-xs font-bold tracking-wider mb-2 inline-block">INTRADAY BUY</span>
                     <h2 className="text-3xl font-black">{result.ticker}</h2>
                   </div>
-                  <div className="bg-white text-purple-700 font-black text-xl px-3 py-2 rounded-lg shadow-inner">
-                    {result.score.toFixed(1)}
-                    <span className="block text-[10px] text-purple-400 text-center mt-0.5">SCORE</span>
+                  <div className="bg-white text-purple-700 px-3.5 py-2 rounded-xl shadow-md text-right">
+                    <div className="flex items-baseline justify-end space-x-1">
+                      <span className="font-black text-2xl">{result.score.toFixed(1)}%</span>
+                    </div>
+                    <span className="block text-[10px] font-bold text-purple-500 uppercase tracking-wider text-center">
+                      {result.calibration ? 'CALIBRATED' : 'CONVICTION'}
+                    </span>
+                    {result.raw_score !== undefined && result.raw_score !== result.score && (
+                      <span className="block text-[9px] text-gray-400 font-mono text-center">
+                        Raw: {result.raw_score.toFixed(1)}%
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="mt-6 flex items-end">
@@ -240,12 +249,72 @@ export default function IntradayScanner() {
                 </div>
               )}
               
+              {/* Meta-Learner Telemetry Card */}
+              {(result.telemetry || result.volume_ratio !== undefined) && (
+                <div className="p-4 mx-6 mb-4 bg-slate-900 text-white rounded-xl border border-slate-700 shadow-md">
+                  <div className="flex justify-between items-center mb-3 border-b border-slate-800 pb-2">
+                    <div className="flex items-center space-x-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
+                      <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">Layer-2 Meta Telemetry</span>
+                    </div>
+                    {result.telemetry?.total_adjustment !== undefined && (
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded ${result.telemetry.total_adjustment >= 0 ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' : 'bg-rose-950 text-rose-300 border border-rose-700'}`}>
+                        {result.telemetry.total_adjustment > 0 ? '+' : ''}{result.telemetry.total_adjustment} Conviction Shift
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-3 gap-3 text-center">
+                    <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700">
+                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Volume Surge</p>
+                      <p className={`text-sm font-black ${(result.telemetry?.volume_ratio || result.volume_ratio || 1) >= 1.4 ? 'text-emerald-400' : (result.telemetry?.volume_ratio || result.volume_ratio || 1) < 0.8 ? 'text-amber-400' : 'text-slate-200'}`}>
+                        {(result.telemetry?.volume_ratio || result.volume_ratio || 1.0).toFixed(1)}x <span className="text-[10px] font-normal text-slate-400">SMA</span>
+                      </p>
+                    </div>
+                    <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700">
+                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Normalized ATR</p>
+                      <p className="text-sm font-black text-indigo-300">
+                        {(result.telemetry?.atr_pct || result.atr_pct || 1.5).toFixed(1)}% <span className="text-[10px] font-normal text-slate-400">Range</span>
+                      </p>
+                    </div>
+                    <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700">
+                      <p className="text-[10px] text-slate-400 uppercase font-semibold">Macro Alignment</p>
+                      <p className={`text-xs font-bold mt-0.5 ${result.telemetry?.macro_aligned !== false ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {result.telemetry?.macro_aligned !== false ? '✅ Aligned' : '⚠️ Headwind'}
+                      </p>
+                    </div>
+                  </div>
+                  {result.meta_learner_msg && (
+                    <p className="text-[11px] text-slate-300 italic mt-3 bg-slate-800/50 p-2 rounded border border-slate-700/50">
+                      {result.meta_learner_msg}
+                    </p>
+                  )}
+
+                  {/* Platt Probability Calibration Bar */}
+                  {result.calibration && (
+                    <div className="mt-3 pt-3 border-t border-slate-800">
+                      <div className="flex justify-between text-[11px] mb-1">
+                        <span className="text-slate-400">Platt Probability Calibration:</span>
+                        <span className="font-mono text-purple-300 font-bold">
+                          {result.raw_score?.toFixed(1)}% Raw ➔ {result.score.toFixed(1)}% Calibrated
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                        <div 
+                          className="bg-gradient-to-r from-indigo-500 to-purple-400 h-1.5 rounded-full" 
+                          style={{ width: `${Math.min(100, Math.max(0, result.score))}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              
 
               {(() => {
                 const savedProfileStr = localStorage.getItem('swing_profile');
                 const defaultProfile = savedProfileStr ? JSON.parse(savedProfileStr) : { defaultCapital: 100000, maxRiskPerTrade: 2.0 };
-                const capital = defaultProfile.defaultCapital || 100000;
-                const maxRisk = defaultProfile.maxRiskPerTrade || 2.0;
+                const capital = Number(defaultProfile.defaultCapital) || 100000;
+                const maxRisk = Number(defaultProfile.maxRiskPerTrade) || 2.0;
                 
                 const riskAmount = capital * (maxRisk / 100);
                 const riskPerShare = Math.abs(result.entry - result.sl);

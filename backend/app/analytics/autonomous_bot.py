@@ -15,6 +15,15 @@ def log_alert(level, ticker, message):
     conn.commit()
     conn.close()
     logger.info(f"[{level}] {ticker}: {message}")
+    
+    # Push to Telegram
+    try:
+        from app.analytics.telegram_notifier import send_telegram_message
+        emoji = '🚨' if level == 'CRITICAL' else '⚠️' if level == 'WARNING' else 'ℹ️'
+        tg = f'<b>{emoji} AUTONOMOUS AI ALERT</b>\n<b>Ticker:</b> {ticker}\n<b>Level:</b> {level}\n<b>Message:</b> {message}'
+        send_telegram_message(tg)
+    except Exception as e:
+        logger.error(f'Failed to trigger telegram notifier: {e}')
 
 def active_trade_tracker():
     """
@@ -82,6 +91,23 @@ def active_trade_tracker():
             if sentiment_score > 15:
                 panic_level += 40
                 reasons.append(f"Positive News Break ({sentiment_score} score)")
+                
+        # 4b. Consult Meta-Learner (Layer 2)
+        try:
+            from app.analytics.meta_learner import meta_learner
+            _, _, meta_telemetry = meta_learner.evaluate_new_trade(
+                ticker=ticker,
+                direction=direction,
+                trade_type=trade.get('trade_type', 'INTRADAY'),
+                base_confidence=trade.get('confidence', 70.0),
+                nlp_sentiment=sentiment_score,
+                macro_state=macro
+            )
+            if meta_telemetry.get('total_adjustment', 0) <= -12:
+                panic_level += 35
+                reasons.append("Meta-Learner Veto Triggered")
+        except Exception as e:
+            pass
                 
         # 5. The Decision (Trigger Early Exit Alerts)
         if panic_level >= 70:

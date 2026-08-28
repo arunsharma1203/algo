@@ -14,6 +14,7 @@ export default function Dashboard() {
   const [recentSearches, setRecentSearches] = useState([]);
   const [lastStats, setLastStats] = useState(null);
   const [alerts, setAlerts] = useState([]);
+  const [activeMonitors, setActiveMonitors] = useState([]);
   
   const { triggerFetchIndicator } = useLiveIndicator();
 
@@ -36,6 +37,11 @@ export default function Dashboard() {
         if (response.ok) {
           const data = await response.json();
           setAlerts(data);
+        }
+        
+        const monitorRes = await fetch('http://localhost:8000/api/ml/active-monitors');
+        if (monitorRes.ok) {
+          setActiveMonitors(await monitorRes.json());
         }
       } catch (err) {}
     };
@@ -107,6 +113,52 @@ export default function Dashboard() {
         </div>
       )}
       
+      {/* Autonomous Bot Alert Feed */}
+      <div className="mb-8">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-xl font-bold text-gray-800 flex items-center">
+            <Activity className="mr-2 text-indigo-500 animate-pulse" /> Autonomous Trade Manager (Live)
+          </h2>
+          {activeMonitors.length > 0 && (
+            <div className="flex space-x-2">
+              {activeMonitors.map((m, i) => (
+                <span key={i} className="text-xs font-bold bg-gray-100 text-gray-600 px-2 py-1 rounded border border-gray-200">
+                  <span className={m.direction === 'BULLISH' ? 'text-green-600' : 'text-red-600'}>●</span> {m.ticker.replace('.NS', '')}
+                </span>
+              ))}
+            </div>
+          )}
+          <span className="text-xs font-bold bg-green-100 text-green-700 px-2 py-1 rounded animate-pulse flex items-center">
+            <span className="w-2 h-2 rounded-full bg-green-500 mr-2"></span>
+            Monitoring Active Calls
+          </span>
+        </div>
+        
+        {alerts && alerts.length > 0 ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {alerts.slice(0, 3).map((alert, i) => (
+              <div key={i} className={`p-4 rounded-xl border shadow-sm ${alert.level === 'CRITICAL' ? 'bg-red-50 border-red-200' : alert.level === 'WARNING' ? 'bg-orange-50 border-orange-200' : 'bg-blue-50 border-blue-200'}`}>
+                <div className="flex justify-between items-start mb-2">
+                  <span className={`font-black ${alert.level === 'CRITICAL' ? 'text-red-700' : alert.level === 'WARNING' ? 'text-orange-700' : 'text-blue-700'}`}>
+                    {alert.ticker}
+                  </span>
+                  <span className="text-xs text-gray-500 font-mono">
+                    {new Date(alert.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                  </span>
+                </div>
+                <p className={`text-sm ${alert.level === 'CRITICAL' ? 'text-red-900 font-medium' : alert.level === 'WARNING' ? 'text-orange-900' : 'text-blue-900'}`}>
+                  {alert.message}
+                </p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="bg-gray-50 border border-gray-200 border-dashed rounded-xl p-6 text-center text-gray-500 text-sm">
+            ✅ <strong>All Systems Nominal.</strong> The Autonomous Bot is running in the background and scanning open trades. No critical market shifts detected.
+          </div>
+        )}
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-100 hover:shadow-md transition">
           <div className="flex justify-between items-start">

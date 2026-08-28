@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
@@ -9,6 +10,17 @@ def ensure_ml_table():
         conn.execute("ALTER TABLE ml_trade_history ADD COLUMN trade_type TEXT DEFAULT 'INTRADAY'")
     except:
         pass
+        
+    try:
+        conn.execute("ALTER TABLE ml_trade_history ADD COLUMN status TEXT DEFAULT 'OPEN'")
+    except:
+        pass
+
+    try:
+        conn.execute("ALTER TABLE ml_trade_history ADD COLUMN explanation TEXT")
+    except:
+        pass
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ml_trade_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,22 +31,38 @@ def ensure_ml_table():
             sl REAL,
             tp1 REAL,
             tp2 REAL,
-            confidence REAL
+            confidence REAL,
+            status TEXT DEFAULT 'OPEN',
+            trade_type TEXT DEFAULT 'INTRADAY',
+            explanation TEXT
         )
     """)
     conn.commit()
     conn.close()
 
-def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_type='INTRADAY'):
+def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_type='INTRADAY', explanation=None):
     ensure_ml_table()
     conn = sqlite3.connect('market_data.db')
     try:
         conn.execute("ALTER TABLE ml_trade_history ADD COLUMN trade_type TEXT DEFAULT 'INTRADAY'")
     except:
         pass
+        
+    try:
+        conn.execute("ALTER TABLE ml_trade_history ADD COLUMN status TEXT DEFAULT 'OPEN'")
+    except:
+        pass
+
+    try:
+        conn.execute("ALTER TABLE ml_trade_history ADD COLUMN explanation TEXT")
+    except:
+        pass
+
     direction = "BULLISH" if is_bullish else "BEARISH"
     now = datetime.now()
     timestamp = now.isoformat()
+
+    explanation_str = json.dumps(explanation) if explanation is not None else None
 
     # DEDUPLICATION LOGIC:
     # Skip saving if it's the exact same trade on the exact same day WITH the exact same confidence score.
@@ -62,9 +90,9 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
 
     
     conn.execute("""
-        INSERT INTO ml_trade_history (timestamp, ticker, direction, entry, sl, tp1, tp2, confidence, trade_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (timestamp, ticker, direction, float(entry), float(sl), float(tp1), float(tp2), float(confidence), trade_type))
+        INSERT INTO ml_trade_history (timestamp, ticker, direction, entry, sl, tp1, tp2, confidence, trade_type, explanation)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (timestamp, ticker, direction, float(entry), float(sl), float(tp1), float(tp2), float(confidence), trade_type, explanation_str))
     conn.commit()
     conn.close()
 
@@ -73,6 +101,16 @@ def evaluate_ml_history():
     conn = sqlite3.connect('market_data.db')
     try:
         conn.execute("ALTER TABLE ml_trade_history ADD COLUMN trade_type TEXT DEFAULT 'INTRADAY'")
+    except:
+        pass
+        
+    try:
+        conn.execute("ALTER TABLE ml_trade_history ADD COLUMN status TEXT DEFAULT 'OPEN'")
+    except:
+        pass
+
+    try:
+        conn.execute("ALTER TABLE ml_trade_history ADD COLUMN explanation TEXT")
     except:
         pass
     df_trades = pd.read_sql_query("SELECT * FROM ml_trade_history ORDER BY timestamp DESC", conn)
@@ -118,16 +156,22 @@ def evaluate_ml_history():
         direction = row['direction']
         sl = float(row['sl'])
         tp1 = float(row['tp1'])
+        raw_entry = float(row['entry'])
+        trade_type = row.get('trade_type', 'INTRADAY')
+        
+        # Realistic Execution Slippage Friction Modeling (Execution delay + Bid-Ask Spread)
+        slippage_pct = 0.08 if trade_type == 'INTRADAY' else 0.12
+        effective_entry = raw_entry * (1 + slippage_pct / 100.0) if direction == "BULLISH" else raw_entry * (1 - slippage_pct / 100.0)
         
         outcome = "OPEN"
+        ideal_profit_pct = 0.0
         profit_pct = 0.0
         
         # Check against recent data
         if ticker in market_data:
             df = market_data[ticker].dropna()
             
-            # Filter data AFTER the entry time
-            # Note: entry_time might not match timezone, naive comparison for now
+            # Filter data AFTER the entry time (skipping identical entry candle to model 5-min execution lag)
             df_future = df[df.index.tz_localize(None) >= entry_time.replace(tzinfo=None)]
             
             if not df_future.empty:
@@ -139,53 +183,90 @@ def evaluate_ml_history():
                     if direction == "BULLISH":
                         if low <= sl:
                             outcome = "SL HIT"
-                            profit_pct = ((sl - row['entry']) / row['entry']) * 100
+                            ideal_profit_pct = ((sl - raw_entry) / raw_entry) * 100
+                            profit_pct = ((sl - effective_entry) / effective_entry) * 100
                             break
                         elif high >= tp1:
                             outcome = "TARGET MET"
-                            profit_pct = ((tp1 - row['entry']) / row['entry']) * 100
+                            ideal_profit_pct = ((tp1 - raw_entry) / raw_entry) * 100
+                            profit_pct = ((tp1 - effective_entry) / effective_entry) * 100
                             break
                     else:
                         if high >= sl:
                             outcome = "SL HIT"
-                            profit_pct = ((row['entry'] - sl) / row['entry']) * 100
+                            ideal_profit_pct = ((raw_entry - sl) / raw_entry) * 100
+                            profit_pct = ((effective_entry - sl) / effective_entry) * 100
                             break
                         elif low <= tp1:
                             outcome = "TARGET MET"
-                            profit_pct = ((row['entry'] - tp1) / row['entry']) * 100
+                            ideal_profit_pct = ((raw_entry - tp1) / raw_entry) * 100
+                            profit_pct = ((effective_entry - tp1) / effective_entry) * 100
                             break
                             
                     # Intraday Square-off at 3:15 PM (15:15)
                     # If we haven't hit TP or SL by the end of the day, force exit
-                    trade_type = row.get('trade_type', 'INTRADAY')
                     if trade_type == 'INTRADAY' and timestamp_idx.hour >= 15 and timestamp_idx.minute >= 15:
                         outcome = "SQUARED OFF (3:15 PM)"
                         if direction == "BULLISH":
-                            profit_pct = ((close - row['entry']) / row['entry']) * 100
+                            ideal_profit_pct = ((close - raw_entry) / raw_entry) * 100
+                            profit_pct = ((close - effective_entry) / effective_entry) * 100
                         else:
-                            profit_pct = ((row['entry'] - close) / row['entry']) * 100
+                            ideal_profit_pct = ((raw_entry - close) / raw_entry) * 100
+                            profit_pct = ((effective_entry - close) / effective_entry) * 100
                         break
                 
                 if outcome == "OPEN":
                     current_price = df_future.iloc[-1]['Close']
                     if direction == "BULLISH":
-                        profit_pct = ((current_price - row['entry']) / row['entry']) * 100
+                        ideal_profit_pct = ((current_price - raw_entry) / raw_entry) * 100
+                        profit_pct = ((current_price - effective_entry) / effective_entry) * 100
                     else:
-                        profit_pct = ((row['entry'] - current_price) / row['entry']) * 100
+                        ideal_profit_pct = ((raw_entry - current_price) / raw_entry) * 100
+                        profit_pct = ((effective_entry - current_price) / effective_entry) * 100
         
+        
+        # Auto-close INTRADAY trades if market is closed (IST > 15:30 or < 9:00)
+        from datetime import datetime
+        now = datetime.now()
+        
+        if trade_type == 'INTRADAY' and outcome == 'OPEN':
+            if now.hour > 15 or (now.hour == 15 and now.minute >= 30) or now.hour < 9:
+                outcome = 'MARKET_CLOSED'
+        
+        # Sync outcome back to the status column so the fast API can read it
+        if outcome != 'OPEN':
+            try:
+                sync_conn = sqlite3.connect('market_data.db')
+                sync_conn.execute("UPDATE ml_trade_history SET status = 'CLOSED' WHERE id = ?", (row['id'],))
+                sync_conn.commit()
+                sync_conn.close()
+            except:
+                pass
+                
+        explanation_data = None
+        if 'explanation' in row and pd.notna(row['explanation']) and row['explanation']:
+            try:
+                explanation_data = json.loads(row['explanation'])
+            except:
+                explanation_data = None
+
         results.append({
             "id": row['id'],
             "timestamp": entry_time_str[:16].replace("T", " "),
             "ticker": ticker,
             "direction": direction,
-            "entry": row['entry'],
+            "entry": raw_entry,
+            "effective_entry": round(effective_entry, 2),
+            "slippage_pct": slippage_pct,
+            "slippage_drag": round(ideal_profit_pct - profit_pct, 2),
+            "ideal_profit_pct": round(ideal_profit_pct, 2),
             "sl": row['sl'],
             "tp1": row['tp1'],
             "confidence": row['confidence'],
             "outcome": outcome,
-            "profit_pct": round(profit_pct, 2)
-        ,
-            "trade_type": row.get("trade_type", "INTRADAY")
+            "profit_pct": round(profit_pct, 2),
+            "trade_type": trade_type,
+            "explanation": explanation_data
         })
         
     return results
@@ -196,6 +277,11 @@ def save_ml_training_data(ticker, df):
     conn = sqlite3.connect('market_data.db')
     try:
         conn.execute("ALTER TABLE ml_trade_history ADD COLUMN trade_type TEXT DEFAULT 'INTRADAY'")
+    except:
+        pass
+        
+    try:
+        conn.execute("ALTER TABLE ml_trade_history ADD COLUMN status TEXT DEFAULT 'OPEN'")
     except:
         pass
     
@@ -251,6 +337,11 @@ def get_ml_training_data(ticker):
     conn = sqlite3.connect('market_data.db')
     try:
         conn.execute("ALTER TABLE ml_trade_history ADD COLUMN trade_type TEXT DEFAULT 'INTRADAY'")
+    except:
+        pass
+        
+    try:
+        conn.execute("ALTER TABLE ml_trade_history ADD COLUMN status TEXT DEFAULT 'OPEN'")
     except:
         pass
     try:

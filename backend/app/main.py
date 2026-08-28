@@ -29,6 +29,7 @@ from app.api.ml_lab import router as ml_lab_router
 from app.api.broker import router as broker_router
 from app.api.swing_ml import router as swing_router
 from app.api.ml_backtest import router as ml_backtest_router
+from app.api.settings import router as settings_router
 
 app = FastAPI(title="Swing Trading AI Backend")
 
@@ -47,6 +48,7 @@ app.include_router(ml_lab_router, prefix="/api/ml", tags=["ml_lab"])
 app.include_router(broker_router, prefix="/api/broker", tags=["broker"])
 app.include_router(swing_router, prefix="/api/ml", tags=["swing_ml"])
 app.include_router(ml_backtest_router, prefix="/api/ml", tags=["ml_backtest"])
+app.include_router(settings_router, prefix="/api/settings", tags=["settings"])
 
 @app.get("/")
 def read_root():
