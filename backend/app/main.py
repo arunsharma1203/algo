@@ -7,6 +7,21 @@ from app.tasks.hoarder import hoard_intraday_data
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Enable SQLite Write-Ahead Logging (WAL) for concurrent read/writes
+def init_db_wal():
+    import sqlite3
+    try:
+        conn = sqlite3.connect('market_data.db', timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.commit()
+        conn.close()
+        logger.info("SQLite WAL (Write-Ahead Logging) Mode Enabled.")
+    except Exception as e:
+        logger.warning(f"Could not enable WAL mode: {e}")
+
+init_db_wal()
+
 # Initialize APScheduler
 scheduler = BackgroundScheduler()
 # Run hoarding job every day at 16:00 IST (approximate if server is in IST)

@@ -9,7 +9,7 @@ import ta
 
 logger = logging.getLogger(__name__)
 
-def hoard_intraday_data():
+def hoard_intraday_data(data_source: str = 'yfinance', api_key: str = ''):
     """
     Background job to fetch 15m data for the universe, compute features, and cache it.
     """

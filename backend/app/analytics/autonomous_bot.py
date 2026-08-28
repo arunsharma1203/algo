@@ -7,7 +7,7 @@ import yfinance as yf
 logger = logging.getLogger(__name__)
 
 def log_alert(level, ticker, message):
-    conn = sqlite3.connect('market_data.db')
+    conn = sqlite3.connect('market_data.db', timeout=30.0)
     conn.execute(
         "INSERT INTO ml_alerts (timestamp, level, ticker, message) VALUES (?, ?, ?, ?)",
         (datetime.now().isoformat(), level, ticker, message)
@@ -33,8 +33,9 @@ def active_trade_tracker():
     try:
         from app.api.ml_history import evaluate_ml_history
         from app.analytics.macro_engine import get_macro_regime
-        from app.analytics.nlp_engine import analyze_sentiment
-    except ImportError:
+        from app.analytics.nlp_engine import nlp_engine
+    except Exception as e:
+        logger.error(f"Autonomous Bot dependency load failed: {e}")
         return
         
     logger.info("Autonomous Bot: Waking up to cross-reference active trades across all ML models...")
@@ -62,10 +63,8 @@ def active_trade_tracker():
         
         # 3. Get Live NLP Sentiment (NLP Engine)
         try:
-            tick = yf.Ticker(ticker)
-            news = tick.news
-            headline = news[0]['title'] if news else ""
-            sentiment_score = analyze_sentiment(headline, ticker) if headline else 0
+            nlp_res = nlp_engine.analyze_ticker_news(ticker)
+            sentiment_score = nlp_res.get('score', 0)
         except:
             sentiment_score = 0
             
