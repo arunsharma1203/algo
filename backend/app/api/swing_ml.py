@@ -113,14 +113,28 @@ def run_swing_scan(custom_tickers: list = None):
                 X = ml_df[features].values
                 y = ml_df['target'].values
                 
-                # Random Forest
-                rf_clf = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
+                # Load Bayesian Tuned Hyperparameters
+                from app.analytics.optuna_tuner import load_best_params
+                hp = load_best_params()
+
+                # Random Forest (Optuna Tuned)
+                rf_clf = RandomForestClassifier(
+                    n_estimators=hp.get('rf_n_estimators', 100),
+                    max_depth=hp.get('rf_max_depth', 5),
+                    min_samples_split=hp.get('rf_min_samples_split', 2),
+                    random_state=42
+                )
                 
-                # Gradient Boosting
-                gb_clf = GradientBoostingClassifier(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42)
+                # Gradient Boosting (Optuna Tuned)
+                gb_clf = GradientBoostingClassifier(
+                    n_estimators=hp.get('gb_n_estimators', 100),
+                    learning_rate=hp.get('gb_learning_rate', 0.1),
+                    max_depth=hp.get('gb_max_depth', 3),
+                    random_state=42
+                )
                 
-                # Support Vector Machine (Scaled)
-                svm_clf = make_pipeline(StandardScaler(), SVC(probability=True, random_state=42))
+                # Support Vector Machine (Optuna Tuned)
+                svm_clf = make_pipeline(StandardScaler(), SVC(C=hp.get('svm_c', 1.0), probability=True, random_state=42))
                 
                 # Ensemble Voting Classifier
                 ensemble = VotingClassifier(

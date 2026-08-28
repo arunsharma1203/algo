@@ -1,0 +1,14 @@
+{
+  "rf_n_estimators": 110,
+  "rf_max_depth": 6,
+  "rf_min_samples_split": 5,
+  "gb_n_estimators": 40,
+  "gb_learning_rate": 0.1429,
+  "gb_max_depth": 4,
+  "svm_c": 0.355,
+  "best_f1_score": 0.0564,
+  "best_accuracy": 0.0592,
+  "n_trials": 3,
+  "last_tuned": "2026-08-28T19:12:09.350021",
+  "validation_method": "TimeSeriesSplit(n_splits=4, walk_forward=True)"
+}

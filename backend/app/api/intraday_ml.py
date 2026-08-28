@@ -171,16 +171,30 @@ async def run_ml_scan(custom_list=None):
             
             yield format_sse({"type": "info", "message": f"Training Ensemble Committee (RF + GB + SVM) on {len(X)} historical rows...", "progress": progress + 2})
             
-            # 1. Random Forest
-            rf_clf = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
+            # Load Optuna Tuned Hyperparameters
+            from app.analytics.optuna_tuner import load_best_params
+            hp = load_best_params()
+
+            # 1. Random Forest (Optuna Tuned)
+            rf_clf = RandomForestClassifier(
+                n_estimators=hp.get('rf_n_estimators', 100),
+                max_depth=hp.get('rf_max_depth', 5),
+                min_samples_split=hp.get('rf_min_samples_split', 2),
+                random_state=42
+            )
             rf_clf.fit(X, y)
             
-            # 2. Gradient Boosting
-            gb_clf = HistGradientBoostingClassifier(random_state=42, max_depth=5)
+            # 2. Gradient Boosting (Optuna Tuned)
+            gb_clf = HistGradientBoostingClassifier(
+                max_iter=hp.get('gb_n_estimators', 100),
+                learning_rate=hp.get('gb_learning_rate', 0.1),
+                max_depth=hp.get('gb_max_depth', 3),
+                random_state=42
+            )
             gb_clf.fit(X, y)
             
-            # 3. Support Vector Machine
-            svm_clf = SVC(probability=True, random_state=42)
+            # 3. Support Vector Machine (Optuna Tuned)
+            svm_clf = SVC(C=hp.get('svm_c', 1.0), probability=True, random_state=42)
             svm_clf.fit(X, y)
             
             # Save Feature Importances from RF

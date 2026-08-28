@@ -89,13 +89,23 @@ def get_lab_stats():
 
     conn.close()
     
+    from app.analytics.optuna_tuner import load_best_params
+    optuna_params = load_best_params()
+
     return {
         "status": "success",
         "memory_stats": memory_stats,
         "feature_importance": features,
         "win_rate": win_rate,
-        "total_closed_trades": total
+        "total_closed_trades": total,
+        "optuna_params": optuna_params
     }
+
+@router.post("/optuna/tune")
+def trigger_optuna_tune(trials: int = 10):
+    from app.analytics.optuna_tuner import run_optuna_tuning
+    res = run_optuna_tuning(n_trials=trials)
+    return {"status": "success", "data": res}
 
 @router.get("/report/{ticker}")
 def get_ml_report(ticker: str):
