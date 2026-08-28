@@ -131,7 +131,8 @@ def evaluate_ml_history():
                             
                     # Intraday Square-off at 3:15 PM (15:15)
                     # If we haven't hit TP or SL by the end of the day, force exit
-                    if timestamp_idx.hour >= 15 and timestamp_idx.minute >= 15:
+                    trade_type = row.get('trade_type', 'INTRADAY')
+                    if trade_type == 'INTRADAY' and timestamp_idx.hour >= 15 and timestamp_idx.minute >= 15:
                         outcome = "SQUARED OFF (3:15 PM)"
                         if direction == "BULLISH":
                             profit_pct = ((close - row['entry']) / row['entry']) * 100
