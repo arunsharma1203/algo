@@ -43,6 +43,27 @@ async def run_ml_scan(custom_list=None):
     if custom_list is None:
         custom_list = []
         
+    yield format_sse({"type": "info", "message": "Analyzing Macro Market Regime (NIFTY 50 & INDIA VIX)...", "progress": 1})
+    from app.analytics.macro_engine import get_macro_regime
+    macro = get_macro_regime()
+    
+    nifty_trend = macro['nifty_trend_short']
+    vix_status = macro['vix_status']
+    vix_val = macro['vix_close']
+    
+    if macro['nifty_close'] > 0:
+        if nifty_trend == "BULLISH":
+            yield format_sse({"type": "info", "message": f"📈 Intraday Bias is BULLISH (NIFTY {macro['nifty_close']:.2f} > 20 EMA {macro['ema_20']:.2f})."})
+        else:
+            yield format_sse({"type": "info", "message": f"📉 Intraday Bias is BEARISH (NIFTY {macro['nifty_close']:.2f} < 20 EMA {macro['ema_20']:.2f})."})
+            
+        if vix_status == "HIGH":
+            yield format_sse({"type": "info", "message": f"⚠️ VIX Spike Detected! (INDIA VIX = {vix_val:.2f}). Intraday noise will be extreme. -15 Penalty applied."})
+        elif vix_status == "LOW":
+            yield format_sse({"type": "info", "message": f"💤 VIX is extremely low ({vix_val:.2f}). Intraday breakouts may fail. -10 Penalty applied."})
+        else:
+            yield format_sse({"type": "info", "message": f"📊 VIX is NORMAL ({vix_val:.2f}). Optimal conditions for Intraday."})
+
     yield format_sse({"type": "info", "message": f"Fetching live volumes for an expanded universe of {len(INDIAN_STOCK_UNIVERSE)} stocks (including mid/small caps)...", "progress": 2})
     
     # Bulk fetch 1-day volume to find the most heavily traded stocks today
@@ -273,6 +294,28 @@ async def run_ml_scan(custom_list=None):
 
     yield format_sse({"type": "info", "message": f"Winner finalized: {best_ticker}. Saving to AI Trade History...", "progress": 98})
     
+    # ==========================================
+    # META-LEARNER / FEEDBACK LOOP INJECTION
+    # ==========================================
+    try:
+        from app.analytics.meta_learner import meta_learner
+        yield format_sse({"type": "info", "message": "Invoking Meta-Learner (Layer 2) to cross-reference historical AI mistakes..."})
+        
+        adjusted_score, meta_message = meta_learner.evaluate_new_trade(
+            ticker=best_trade['ticker'],
+            direction="BULLISH" if best_trade['is_bullish'] else "BEARISH",
+            trade_type="INTRADAY",
+            base_confidence=best_trade['prob_up'],
+            nlp_sentiment=best_trade.get('nlp_sentiment', 0)
+        )
+        
+        best_trade['prob_up'] = adjusted_score
+        best_trade['meta_learner_msg'] = meta_message
+        
+        yield format_sse({"type": "info", "message": f"🤖 {meta_message}"})
+    except Exception as e:
+        yield format_sse({"type": "error", "message": f"Meta-Learner Offline: {e}"})
+
     # Save the real ML trade to history
     from app.api.ml_history import save_ml_trade, evaluate_ml_history
     save_ml_trade(

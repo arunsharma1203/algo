@@ -16,9 +16,21 @@ export default function ExecutionModal({ trade, onClose, onSuccess }) {
   const [error, setError] = useState(null);
 
   const capital = defaultProfile.defaultCapital || 100000;
-  const qty = Math.floor(capital / trade.entry);
-  const potentialLoss = ((trade.entry - trade.sl) * qty).toFixed(2);
-  const potentialGain = ((trade.tp1 - trade.entry) * qty).toFixed(2);
+  const maxRisk = defaultProfile.maxRiskPerTrade || 2.0;
+  
+  // Dynamic Risk-Based Position Sizing
+  const riskAmount = capital * (maxRisk / 100);
+  const riskPerShare = Math.abs(trade.entry - trade.sl);
+  let qty = 0;
+  if (riskPerShare > 0) {
+    qty = Math.floor(riskAmount / riskPerShare);
+  }
+  // Safeguard: Ensure we don't exceed total capital
+  const maxQtyByCapital = Math.floor(capital / trade.entry);
+  qty = Math.min(qty, maxQtyByCapital);
+
+  const potentialLoss = (riskPerShare * qty).toFixed(2);
+  const potentialGain = (Math.abs(trade.tp1 - trade.entry) * qty).toFixed(2);
 
   const handleExecute = async () => {
     if (!apiToken || apiToken.length < 10) {

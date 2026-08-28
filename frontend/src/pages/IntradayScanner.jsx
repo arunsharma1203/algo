@@ -240,6 +240,48 @@ export default function IntradayScanner() {
                 </div>
               )}
               
+
+              {(() => {
+                const savedProfileStr = localStorage.getItem('swing_profile');
+                const defaultProfile = savedProfileStr ? JSON.parse(savedProfileStr) : { defaultCapital: 100000, maxRiskPerTrade: 2.0 };
+                const capital = defaultProfile.defaultCapital || 100000;
+                const maxRisk = defaultProfile.maxRiskPerTrade || 2.0;
+                
+                const riskAmount = capital * (maxRisk / 100);
+                const riskPerShare = Math.abs(result.entry - result.sl);
+                let qty = 0;
+                if (riskPerShare > 0) {
+                  qty = Math.floor(riskAmount / riskPerShare);
+                }
+                const maxQtyByCapital = Math.floor(capital / result.entry);
+                qty = Math.min(qty, maxQtyByCapital);
+                const capitalRequired = qty * result.entry;
+
+                return (
+                  <div className="px-6 pb-4">
+                    <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-4 shadow-sm">
+                      <div className="flex items-center justify-between mb-3 border-b border-indigo-100 pb-2">
+                        <div className="text-indigo-800 font-bold flex items-center text-sm">
+                          <svg className="w-4 h-4 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" /></svg>
+                          Dynamic Position Sizing
+                        </div>
+                        <span className="text-xs font-bold text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded">
+                          {maxRisk}% Risk (₹{riskAmount.toFixed(0)})
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-end mb-2">
+                        <span className="text-xs text-indigo-700 font-bold uppercase">Recommended Qty</span>
+                        <span className="text-xl font-black text-indigo-900">{qty} Shares</span>
+                      </div>
+                      <div className="flex justify-between items-end">
+                        <span className="text-xs text-indigo-600 font-medium">Capital Required</span>
+                        <span className="text-sm font-bold text-indigo-800">₹{capitalRequired.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
               <div className="p-6 bg-white border-t border-gray-100">
                <div className="flex gap-4 w-full">
                 <button 

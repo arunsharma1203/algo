@@ -39,26 +39,29 @@ def run_swing_scan(custom_tickers: list = None):
         
         scan_history = []
         
-        yield format_sse({"type": "info", "message": "Analyzing Macro Market Regime (NIFTY 50)...", "progress": 5})
+        yield format_sse({"type": "info", "message": "Analyzing Macro Market Regime (NIFTY 50 & INDIA VIX)...", "progress": 5})
         
-        regime = "BULLISH"
-        try:
-            nifty = yf.download("^NSEI", period="1y", interval="1d", progress=False)
-            if not nifty.empty and len(nifty) > 200:
-                # Use close as 1D array to avoid pd.Series deprecation issues
-                close_prices = nifty['Close'].squeeze()
-                nifty['SMA_200'] = close_prices.rolling(window=200).mean()
-                current_nifty = float(close_prices.iloc[-1])
-                sma_200 = float(nifty['SMA_200'].iloc[-1])
+        from app.analytics.macro_engine import get_macro_regime
+        macro = get_macro_regime()
+        
+        regime = macro['nifty_trend_long']
+        vix_status = macro['vix_status']
+        vix_val = macro['vix_close']
+        
+        if macro['nifty_close'] > 0:
+            if regime == "BULLISH":
+                yield format_sse({"type": "info", "message": f"📈 Macro Regime is BULLISH (NIFTY {macro['nifty_close']:.2f} > 200 SMA {macro['sma_200']:.2f})."})
+            else:
+                yield format_sse({"type": "info", "message": f"📉 Macro Regime is BEARISH (NIFTY {macro['nifty_close']:.2f} < 200 SMA {macro['sma_200']:.2f}). -20 Penalty to Longs."})
                 
-                if current_nifty > sma_200:
-                    regime = "BULLISH"
-                    yield format_sse({"type": "info", "message": f"Macro Regime is BULLISH (NIFTY {current_nifty:.2f} > 200 SMA {sma_200:.2f}). Market conditions optimal."})
-                else:
-                    regime = "BEARISH"
-                    yield format_sse({"type": "info", "message": f"Macro Regime is BEARISH (NIFTY {current_nifty:.2f} < 200 SMA {sma_200:.2f}). Applying -20 point Conviction penalty to all Longs."})
-        except Exception as e:
-            yield format_sse({"type": "error", "message": f"Failed to fetch NIFTY 50. Defaulting to BULLISH regime."})
+            if vix_status == "HIGH":
+                yield format_sse({"type": "info", "message": f"⚠️ VIX Spike Detected! (INDIA VIX = {vix_val:.2f}). High volatility warning. -10 Penalty applied."})
+            elif vix_status == "LOW":
+                yield format_sse({"type": "info", "message": f"💤 VIX is extremely low ({vix_val:.2f}). Markets are very quiet."})
+            else:
+                yield format_sse({"type": "info", "message": f"📊 VIX is NORMAL ({vix_val:.2f}). Safe environment for Swing Trades."})
+        else:
+            yield format_sse({"type": "error", "message": f"Failed to fetch Macro indicators. Defaulting to Neutral Regime."})
             
         yield format_sse({"type": "system", "message": f"Bulk fetching 5 years of daily data for {len(universe)} symbols..."})
         try:
@@ -230,6 +233,29 @@ def run_swing_scan(custom_tickers: list = None):
             best_conviction['nlp_sentiment'] = sentiment_score
             best_conviction['nlp_headline'] = headline
 
+
+            # ==========================================
+            # META-LEARNER / FEEDBACK LOOP INJECTION
+            # ==========================================
+            try:
+                from app.analytics.meta_learner import meta_learner
+                yield format_sse({"type": "info", "message": "Invoking Meta-Learner (Layer 2) to cross-reference historical AI mistakes..."})
+                
+                adjusted_score, meta_message = meta_learner.evaluate_new_trade(
+                    ticker=best_conviction['ticker'],
+                    direction="BULLISH" if best_conviction['is_bullish'] else "BEARISH",
+                    trade_type="SWING",
+                    base_confidence=best_conviction['score'],
+                    nlp_sentiment=best_conviction.get('nlp_sentiment', 0)
+                )
+                
+                best_conviction['score'] = adjusted_score
+                best_conviction['meta_learner_msg'] = meta_message
+                
+                yield format_sse({"type": "info", "message": f"🤖 {meta_message}"})
+            except Exception as e:
+                yield format_sse({"type": "error", "message": f"Meta-Learner Offline: {e}"})
+                
             from app.api.ml_history import save_ml_trade
             save_ml_trade(
                 ticker=best_conviction['ticker'],

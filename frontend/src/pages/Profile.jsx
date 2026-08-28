@@ -106,6 +106,23 @@ export default function Profile() {
               </div>
               <p className="text-xs text-gray-500 mt-2">Used by the ML Scanner to calculate default trade quantities.</p>
             </div>
+
+            <div className="pt-4 border-t border-gray-100 mt-4">
+              <label className="block text-sm font-bold text-gray-700 mb-2">Max Risk Per Trade (%)</label>
+              <div className="relative">
+                <div className="absolute inset-y-0 right-0 pr-4 flex items-center pointer-events-none">
+                  <span className="text-gray-500 font-bold">%</span>
+                </div>
+                <input 
+                  type="number" 
+                  step="0.1"
+                  value={profile.maxRiskPerTrade || 2.0}
+                  onChange={(e) => handleChange('maxRiskPerTrade', parseFloat(e.target.value))}
+                  className="w-full border border-gray-300 rounded-lg py-3 pl-4 pr-10 focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+                />
+              </div>
+              <p className="text-xs text-gray-500 mt-2">Calculates exact position sizing based on your Stop Loss so you never lose more than this percentage of your capital.</p>
+            </div>
           </div>
         </div>
 
