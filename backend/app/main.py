@@ -20,6 +20,14 @@ try:
 except Exception as e:
     logger.error(f"Failed to load autonomous bot: {e}")
 
+# 🔄 WEEKLY RETRAINING PIPELINE
+# Runs every Sunday at 23:00 to retrain models and apply Champion vs Challenger gate
+try:
+    from app.analytics.retrain_models import execute_retraining_pipeline
+    scheduler.add_job(execute_retraining_pipeline, 'cron', day_of_week='sun', hour=23, minute=0)
+except Exception as e:
+    logger.error(f"Failed to schedule weekly retraining pipeline: {e}")
+
 scheduler.start()
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.backtest import router as backtest_router

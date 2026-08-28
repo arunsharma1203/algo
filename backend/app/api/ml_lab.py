@@ -90,7 +90,10 @@ def get_lab_stats():
     conn.close()
     
     from app.analytics.optuna_tuner import load_best_params
+    from app.analytics.retrain_models import load_champion_metadata, get_retraining_history
     optuna_params = load_best_params()
+    champion_meta = load_champion_metadata()
+    retrain_history = get_retraining_history(limit=5)
 
     return {
         "status": "success",
@@ -98,13 +101,30 @@ def get_lab_stats():
         "feature_importance": features,
         "win_rate": win_rate,
         "total_closed_trades": total,
-        "optuna_params": optuna_params
+        "optuna_params": optuna_params,
+        "champion_meta": champion_meta,
+        "retrain_history": retrain_history
     }
 
 @router.post("/optuna/tune")
 def trigger_optuna_tune(trials: int = 10):
     from app.analytics.optuna_tuner import run_optuna_tuning
     res = run_optuna_tuning(n_trials=trials)
+    return {"status": "success", "data": res}
+
+@router.get("/retraining/history")
+def get_retrain_history_api(limit: int = 15):
+    from app.analytics.retrain_models import get_retraining_history, load_champion_metadata
+    return {
+        "status": "success",
+        "champion": load_champion_metadata(),
+        "history": get_retraining_history(limit=limit)
+    }
+
+@router.post("/retraining/trigger")
+def trigger_retraining_api():
+    from app.analytics.retrain_models import execute_retraining_pipeline
+    res = execute_retraining_pipeline()
     return {"status": "success", "data": res}
 
 @router.get("/report/{ticker}")

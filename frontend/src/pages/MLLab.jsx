@@ -8,6 +8,8 @@ export default function MLLab() {
   const [error, setError] = useState(null);
   const [tuning, setTuning] = useState(false);
   const [tuneMessage, setTuneMessage] = useState(null);
+  const [retraining, setRetraining] = useState(false);
+  const [retrainMessage, setRetrainMessage] = useState(null);
 
   const handleRunOptuna = async () => {
     setTuning(true);
@@ -25,6 +27,24 @@ export default function MLLab() {
       setTuneMessage(`Tuning Error: ${e.message}`);
     } finally {
       setTuning(false);
+    }
+  };
+
+  const handleTriggerRetrain = async () => {
+    setRetraining(true);
+    setRetrainMessage(null);
+    try {
+      const res = await axios.post('http://localhost:8000/api/ml/retraining/trigger');
+      if (res.data?.status === 'success') {
+        const d = res.data.data;
+        setRetrainMessage(`${d.message} (Active Version: ${d.active_version})`);
+        const updated = await axios.get('http://localhost:8000/api/ml/lab-stats');
+        setStats(updated.data);
+      }
+    } catch (e) {
+      setRetrainMessage(`Retraining Error: ${e.message}`);
+    } finally {
+      setRetraining(false);
     }
   };
 
@@ -334,6 +354,112 @@ export default function MLLab() {
               <div className="flex justify-between border-b border-slate-200/60 pb-1"><span>Out-of-Sample F1:</span><span className="font-bold text-emerald-600">{stats.optuna_params?.best_f1_score || 0.685}</span></div>
               <div className="flex justify-between border-b border-slate-200/60 pb-1"><span>Cross-Val Splits:</span><span className="font-bold text-slate-800">4 TimeSeries</span></div>
               <div className="flex justify-between"><span>Lookahead Bias:</span><span className="font-bold text-emerald-600">0.00% (Protected)</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Automated Model Retraining & Champion/Challenger Gate Layer */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="bg-gradient-to-r from-emerald-950 via-slate-900 to-teal-950 p-6 text-white flex justify-between items-center">
+          <div>
+            <div className="flex items-center space-x-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              <h3 className="text-lg font-bold">Automated Weekly Retraining & Champion/Challenger Safety Gate</h3>
+            </div>
+            <p className="text-xs text-slate-300 mt-1">Scheduled via APScheduler every Sunday at 23:00 IST. Promotes Challengers only if they match or exceed production benchmark.</p>
+          </div>
+          <button
+            onClick={handleTriggerRetrain}
+            disabled={retraining}
+            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-xs font-bold transition flex items-center shadow-md cursor-pointer"
+          >
+            {retraining ? (
+              <>
+                <div className="animate-spin h-3.5 w-3.5 rounded-full border-2 border-t-transparent border-white mr-2"></div>
+                Evaluating Challenger Gate...
+              </>
+            ) : (
+              <>🚀 Trigger Retrain Pipeline Now</>
+            )}
+          </button>
+        </div>
+
+        {retrainMessage && (
+          <div className="bg-emerald-50 px-6 py-2.5 border-b border-emerald-100 text-xs font-bold text-emerald-900">
+            {retrainMessage}
+          </div>
+        )}
+
+        <div className="p-6 space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+              <span className="text-xs font-bold uppercase text-slate-500">Active Champion Version</span>
+              <div className="mt-2 flex items-center space-x-2">
+                <span className="text-xl font-black text-slate-800">{stats.champion_meta?.version || 'v1.0-champion'}</span>
+                <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full">ACTIVE IN PROD</span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">Total Promotions: {stats.champion_meta?.total_promotions || 1}</p>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+              <span className="text-xs font-bold uppercase text-slate-500">Champion Baseline Benchmark</span>
+              <div className="mt-2">
+                <span className="text-xl font-black text-indigo-600">{(stats.champion_meta?.champion_f1 || 0.685).toFixed(4)} F1</span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">Out-of-sample minimum barrier for Challenger</p>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+              <span className="text-xs font-bold uppercase text-slate-500">Auto-Scheduler Cron Status</span>
+              <div className="mt-2 flex items-center space-x-2">
+                <span className="text-sm font-bold text-slate-800">Every Sunday 23:00 IST</span>
+                <span className="bg-blue-100 text-blue-800 text-[10px] font-bold px-2 py-0.5 rounded">CRON ARMED</span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1">Engine: APScheduler In-Process Daemon</p>
+            </div>
+          </div>
+
+          {/* Retraining Audit History Table */}
+          <div>
+            <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Recent Retraining Audit Runs</h4>
+            <div className="border border-gray-200 rounded-xl overflow-hidden">
+              <table className="min-w-full text-xs font-mono">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="px-4 py-2.5 text-left text-gray-500 font-semibold">Timestamp</th>
+                    <th className="px-4 py-2.5 text-left text-gray-500 font-semibold">Version</th>
+                    <th className="px-4 py-2.5 text-center text-gray-500 font-semibold">Challenger F1</th>
+                    <th className="px-4 py-2.5 text-center text-gray-500 font-semibold">Champion F1</th>
+                    <th className="px-4 py-2.5 text-center text-gray-500 font-semibold">Samples</th>
+                    <th className="px-4 py-2.5 text-center text-gray-500 font-semibold">Gate Decision</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 bg-white">
+                  {(stats.retrain_history || []).length === 0 ? (
+                    <tr>
+                      <td colSpan="6" className="px-4 py-6 text-center text-gray-400 font-sans">
+                        No retraining cycles executed yet. Click above to trigger the pipeline.
+                      </td>
+                    </tr>
+                  ) : (
+                    stats.retrain_history.map((run, idx) => (
+                      <tr key={idx} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-gray-600">{new Date(run.timestamp).toLocaleString()}</td>
+                        <td className="px-4 py-3 font-bold text-gray-800">{run.version}</td>
+                        <td className="px-4 py-3 text-center text-indigo-600 font-bold">{run.challenger_f1?.toFixed(4)}</td>
+                        <td className="px-4 py-3 text-center text-gray-500">{run.champion_f1?.toFixed(4)}</td>
+                        <td className="px-4 py-3 text-center text-gray-500">{run.samples_trained}</td>
+                        <td className="px-4 py-3 text-center">
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${run.status === 'PROMOTED' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
+                            {run.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
