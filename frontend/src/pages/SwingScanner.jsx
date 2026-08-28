@@ -221,6 +221,18 @@ export default function SwingScanner() {
                 </div>
               </div>
               
+              {result.nlp_sentiment !== undefined && (
+                <div className={`p-4 mx-6 mb-4 rounded-lg border ${result.nlp_sentiment < -20 ? 'bg-red-50 border-red-200' : result.nlp_sentiment > 20 ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'}`}>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-gray-500">NLP News Sentiment</span>
+                    <span className={`font-bold ${result.nlp_sentiment < -20 ? 'text-red-600' : result.nlp_sentiment > 20 ? 'text-green-600' : 'text-gray-600'}`}>
+                      {result.nlp_sentiment > 0 ? '+' : ''}{result.nlp_sentiment} Score
+                    </span>
+                  </div>
+                  <p className="text-sm text-gray-700 italic border-l-2 border-gray-300 pl-3">"{result.nlp_headline}"</p>
+                </div>
+              )}
+              
               <div className="p-6 bg-white border-t border-gray-100">
                 <button 
                    onClick={() => handleExecuteClick({

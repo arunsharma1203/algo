@@ -194,6 +194,37 @@ def run_swing_scan(custom_tickers: list = None):
         time.sleep(1)
         
         if best_conviction:
+            yield format_sse({"type": "info", "message": f"Running NLP Sentiment Analysis on live news for {best_conviction['ticker']}...", "progress": 96})
+            import asyncio
+            # In sync context, we can just call it
+            from app.analytics.nlp_engine import nlp_engine
+            nlp_result = nlp_engine.analyze_ticker_news(best_conviction['ticker'])
+            
+            sentiment_score = nlp_result['score']
+            headline = nlp_result['headline']
+            
+            # NLP adjustments:
+            # If news is extremely bearish (e.g. -50 to -100), slap a penalty on the conviction score
+            # If news is extremely bullish, give a slight boost
+            penalty = 0
+            if sentiment_score < -50:
+                penalty = -15
+                yield format_sse({"type": "info", "message": f"🚨 CRITICAL NLP WARNING: Highly negative news detected (Sentiment: {sentiment_score}). Applying -15 Conviction Penalty."})
+                yield format_sse({"type": "info", "message": f"🗞️ Latest Headline: \"{headline}\""})
+            elif sentiment_score < -20:
+                penalty = -5
+                yield format_sse({"type": "info", "message": f"⚠️ Mildly negative news detected (Sentiment: {sentiment_score}). Applying -5 Conviction Penalty."})
+            elif sentiment_score > 50:
+                penalty = 5
+                yield format_sse({"type": "info", "message": f"🔥 NLP Catalyst Detected! Highly positive news (Sentiment: {sentiment_score}). Giving +5 Conviction Boost."})
+                yield format_sse({"type": "info", "message": f"🗞️ Latest Headline: \"{headline}\""})
+            else:
+                yield format_sse({"type": "info", "message": f"News Sentiment is NEUTRAL (Score: {sentiment_score}). Proceeding with pure technicals."})
+                
+            best_conviction['score'] += penalty
+            best_conviction['nlp_sentiment'] = sentiment_score
+            best_conviction['nlp_headline'] = headline
+
             from app.api.ml_history import save_ml_trade
             save_ml_trade(
                 ticker=best_conviction['ticker'],
