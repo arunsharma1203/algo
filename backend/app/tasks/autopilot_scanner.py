@@ -1,7 +1,18 @@
 import logging
 import sqlite3
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import ta
 from datetime import datetime
 from typing import Optional
+
+from app.data.validator import MarketDataValidator
+from app.analytics.model_manager import ModelManager
+from app.analytics.calibration import calibrator
+from app.analytics.macro_engine import get_macro_regime
+from app.analytics.kelly_sizer import get_portfolio_heat_status
+from app.api.ml_history import save_ml_trade
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +32,8 @@ def is_autopilot_enabled() -> bool:
 def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
     """
     Autonomous Discovery Scanner executed at 09:30, 11:30, and 13:30 IST.
-    Discovers high-probability setups and auto-broadcasts them to Telegram.
+    Uses verified production Intraday Champion model to scan high-volume leaders.
+    Strictly fails closed without trading if data or model validation fails.
     """
     from app.analytics.autonomous_bot import is_market_open, log_alert
     
@@ -37,9 +49,11 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
         return
 
     # 1. Portfolio Heat Safety & Risk Ceiling Check
-    from app.analytics.kelly_sizer import get_portfolio_heat_status
-    from app.analytics.telegram_notifier import send_telegram_message
-    
+    try:
+        from app.analytics.telegram_notifier import send_telegram_message
+    except Exception:
+        def send_telegram_message(msg): pass
+
     heat = get_portfolio_heat_status()
     if heat.get('status') == 'MAX_REACHED':
         msg = (
@@ -47,19 +61,22 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"⚠️ Current portfolio risk is `{heat['current_heat_pct']}%` (Cap: `{heat['max_heat_cap_pct']}%`).\n"
             f"📊 Active open trades: `{heat['open_positions']}`\n"
-            f"⏸️ Autopilot discovery has paused new order dispatches to protect capital until open trades resolve.\n"
+            f"⏸️ Autopilot discovery has paused new order dispatches to protect capital.\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
         send_telegram_message(msg)
-        logger.warning(f"[Autopilot] Skipped new order dispatch due to active portfolio heat ({heat['current_heat_pct']}% >= {heat['max_heat_cap_pct']}%).")
+        logger.warning(f"[Autopilot] Skipped order dispatch due to active portfolio heat ({heat['current_heat_pct']}% >= {heat['max_heat_cap_pct']}%).")
         return
 
-    # 2. Run Intraday & Swing ML Discovery
-    from app.analytics.macro_engine import get_macro_regime
+    # 2. Load Persisted Intraday Champion Model Artifact
+    champion_model, champion_meta = ModelManager.load_champion("intraday")
+    if champion_model is None:
+        logger.error("[Autopilot] No active Intraday Champion model found. Aborting sweep safely.")
+        return
+
     macro = get_macro_regime()
     nifty_trend = macro.get('nifty_trend_short', 'BULLISH')
     
-    # Priority Tickers for fast automated scan
     priority_tickers = [
         "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
         "BHARTIARTL.NS", "SBIN.NS", "ITC.NS", "LT.NS", "KOTAKBANK.NS",
@@ -67,36 +84,46 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
         "BAJFINANCE.NS", "JSWSTEEL.NS", "TATASTEEL.NS", "POWERGRID.NS", "NTPC.NS"
     ]
     
-    from app.api.intraday_ml import fetch_15m_data, extract_intraday_features, train_or_load_intraday_model
-    from app.api.ml_history import save_ml_trade
-    from app.analytics.calibration import calibrator
-    from app.analytics.telegram_notifier import send_telegram_message
-
-    model = train_or_load_intraday_model()
+    features = ['rsi', 'macd', 'macd_diff', 'adx', 'returns']
     discovered_count = 0
 
     for ticker in priority_tickers:
         try:
-            df = fetch_15m_data(ticker)
-            if df.empty or len(df) < 50:
+            df = yf.download(ticker, period="60d", interval="15m", progress=False)
+            if df.empty:
                 continue
-                
-            features_df = extract_intraday_features(df)
-            if features_df.empty:
+
+            # Validate structural data quality
+            val_report = MarketDataValidator.validate_ohlcv(df, ticker=ticker, timeframe="15m", min_rows=50)
+            if not val_report["valid"]:
                 continue
-                
-            latest_row = features_df.iloc[-1:]
-            feature_cols = ['rsi', 'macd_diff', 'adx', 'returns', 'vol_ratio', 'atr_pct']
-            X_live = latest_row[feature_cols].fillna(0)
+
+            df.columns = [col.lower() for col in df.columns]
             
-            # Predict Probabilities
-            raw_prob = float(model.predict_proba(X_live)[0][1]) * 100.0
-            calibrated_prob, _, _ = calibrator.calibrate(raw_prob)
+            # Technical Indicators
+            df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+            macd = ta.trend.MACD(df['close'])
+            df['macd'] = macd.macd()
+            df['macd_diff'] = macd.macd_diff()
+            df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
+            df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
+            df['returns'] = df['close'].pct_change()
             
-            current_price = float(df.iloc[-1]['Close'])
-            atr = float(latest_row['atr'].iloc[0]) if 'atr' in latest_row else current_price * 0.015
+            ml_df = df.dropna(subset=features).copy()
+            if len(ml_df) < 50:
+                continue
+
+            latest_row = ml_df.iloc[-1]
+            latest_features = latest_row[features].values.reshape(1, -1)
             
-            # Filter for High-Conviction Trades (Calibrated >= 70%)
+            # Predict using Persisted Champion
+            raw_prob = float(champion_model.predict_proba(latest_features)[0][1]) * 100.0
+            calibrated_prob, _, calib_meta = calibrator.calibrate(raw_prob)
+            
+            current_price = float(latest_row['close'])
+            atr = float(latest_row['atr'])
+            
+            # Filter for High-Conviction Setups (Calibrated >= 70% for Long, <= 30% for Short)
             if calibrated_prob >= 70.0:
                 is_bullish = True
                 direction = "BULLISH"
@@ -113,11 +140,11 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
             else:
                 continue
 
-            # Macro Alignment Gate: Avoid counter-trend intraday trades
+            # Macro Alignment Gate
             if (direction == "BULLISH" and nifty_trend == "BEARISH") or (direction == "BEARISH" and nifty_trend == "BULLISH"):
                 continue
 
-            # Auto-save trade to database
+            # Save trade to database
             save_ml_trade(
                 ticker=ticker,
                 is_bullish=is_bullish,
@@ -130,12 +157,12 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
                 explanation={
                     "source": f"Autopilot {session_name}",
                     "macro_nifty": nifty_trend,
-                    "calibrated_win_rate": calibrated_prob
+                    "calibrated_win_rate": calibrated_prob,
+                    "calibration_status": calib_meta.get("calibration_status", "uncalibrated")
                 }
             )
             discovered_count += 1
 
-            # Dispatch Autonomous Telegram Alert Card
             msg = (
                 f"🤖 *AUTONOMOUS AI TRADE DISCOVERY* ({session_name})\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"

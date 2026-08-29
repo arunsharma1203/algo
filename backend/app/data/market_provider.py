@@ -59,19 +59,55 @@ def fetch_candles(ticker: str, interval: str = "15m", period: str = "60d") -> pd
 
 def fetch_live_quote(ticker: str) -> Optional[float]:
     """Fetches real-time LTP quote with Upstox or fallback."""
+    meta = get_live_quote_with_meta(ticker)
+    return meta.get("price")
+
+def get_live_quote_with_meta(ticker: str) -> Dict[str, Any]:
+    """
+    Fetches real-time LTP with full source metadata (Upstox sub-second feed vs Yahoo fallback).
+    """
+    from datetime import datetime
+    clean_ticker = ticker.replace('.NS', '').replace('.BO', '').strip().upper()
     source = get_active_data_source()
+    
     if source == 'upstox':
-        price = fetch_upstox_ltp(ticker)
-        if price is not None and price > 0:
-            return price
+        try:
+            price = fetch_upstox_ltp(clean_ticker)
+            if price is not None and price > 0:
+                return {
+                    "ticker": ticker,
+                    "price": round(float(price), 2),
+                    "source": "upstox",
+                    "source_name": "Upstox Real-Time (0ms)",
+                    "is_realtime": True,
+                    "timestamp": datetime.now().strftime("%H:%M:%S IST")
+                }
+        except Exception as e:
+            logger.warning(f"Upstox live quote failed for {ticker}: {e}. Falling back to YFinance.")
             
-    # Fallback to fast YFinance
+    # Fallback to Yahoo Finance
     try:
-        clean_ticker = ticker if ticker.endswith(('.NS', '.BO')) else f"{ticker}.NS"
-        t = yf.Ticker(clean_ticker)
+        yf_symbol = f"{clean_ticker}.NS"
+        t = yf.Ticker(yf_symbol)
         fast = t.fast_info
-        if hasattr(fast, 'last_price') and fast.last_price:
-            return float(fast.last_price)
+        if hasattr(fast, 'last_price') and fast.last_price and fast.last_price > 0:
+            return {
+                "ticker": ticker,
+                "price": round(float(fast.last_price), 2),
+                "source": "yfinance",
+                "source_name": "Yahoo Finance (15m Delay)",
+                "is_realtime": False,
+                "timestamp": datetime.now().strftime("%H:%M:%S IST")
+            }
     except Exception as e:
-        logger.warning(f"Fallback quote failed for {ticker}: {e}")
-    return None
+        logger.warning(f"Yahoo fallback quote failed for {ticker}: {e}")
+        
+    return {
+        "ticker": ticker,
+        "price": None,
+        "source": "unavailable",
+        "source_name": "Data Feed Offline",
+        "is_realtime": False,
+        "timestamp": datetime.now().strftime("%H:%M:%S IST")
+    }
+

@@ -16,6 +16,9 @@ env/
 market_data.db
 *.sqlite3
 *.db
+*.audit_backup
+backend/checkpoints/
+backend/checkpoints_test/
 
 # OS
 .DS_Store

@@ -4,43 +4,103 @@ import logging
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import brier_score_loss
+from typing import Tuple, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "models")
+MODEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models"))
 WEIGHTS_PATH = os.path.join(MODEL_DIR, "confidence_calibrator_weights.json")
-CALIBRATOR_PATH = os.path.join(MODEL_DIR, "confidence_calibrator.pkl")
 
 class ProbabilityCalibrator:
-    def __init__(self):
-        self.coef = None
-        self.intercept = None
-        self.is_fitted = False
-        self.load_or_fit()
+    """
+    Scientifically valid Probability Calibration Engine.
+    Operates via Out-Of-Fold (OOF) cross-validation predictions or verified closed trades.
+    Strictly avoids fabricating synthetic calibration curves when uncalibrated.
+    """
 
-    def load_or_fit(self):
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        # 1. First priority: Load fast, version-agnostic JSON weights (0 security risk, 0 version mismatch)
+    def __init__(self):
+        self.coef: Optional[float] = None
+        self.intercept: Optional[float] = None
+        self.is_fitted: bool = False
+        self.brier_score: Optional[float] = None
+        self.method: str = "Uncalibrated Raw Model Output"
+        self.load_weights()
+
+    def load_weights(self) -> None:
+        """Loads fitted calibration parameters from persistent JSON artifact."""
         if os.path.exists(WEIGHTS_PATH):
             try:
                 with open(WEIGHTS_PATH, "r") as f:
                     data = json.load(f)
                     self.coef = float(data["coef"])
                     self.intercept = float(data["intercept"])
+                    self.brier_score = data.get("brier_score")
+                    self.method = data.get("method", "Platt Sigmoid Scaling (Empirical OOF)")
                     if self.coef > 0.005:
                         self.is_fitted = True
-                        logger.info("Loaded Platt scaling parameters from JSON weights.")
+                        logger.info(f"Loaded valid calibration weights ({self.method}).")
                         return
             except Exception as e:
-                logger.warning(f"Could not load JSON weights: {e}")
+                logger.warning(f"Could not load calibrator JSON weights: {e}")
 
-        # 2. Fit empirical Platt Scaling from resolved trade history
-        self.fit_from_history()
+        self.is_fitted = False
 
-    def fit_from_history(self):
+    def fit_from_oof(self, oof_probs: np.ndarray, y_true: np.ndarray) -> bool:
         """
-        Fits Platt Sigmoid Scaling: LogisticRegression on historical raw scores vs real trade outcomes.
-        Extracts coefficients to JSON weights for 100% environment-agnostic, warning-free inference.
+        Fits Platt Scaling Logistic Regression on out-of-fold validation predictions.
+        Guarantees that calibration data was not seen by base models during training.
+        """
+        if len(oof_probs) < 20 or len(np.unique(y_true)) < 2:
+            logger.warning("Insufficient OOF sample size for probability calibration.")
+            return False
+
+        try:
+            X = oof_probs.reshape(-1, 1)
+            y = y_true.astype(int)
+
+            clf = LogisticRegression(C=1.0, solver='lbfgs', random_state=42)
+            clf.fit(X, y)
+
+            c = float(clf.coef_[0][0])
+            intercept = float(clf.intercept_[0])
+
+            if c > 0.01:
+                self.coef = c
+                self.intercept = intercept
+                self.is_fitted = True
+                
+                calib_probs = clf.predict_proba(X)[:, 1]
+                self.brier_score = round(float(brier_score_loss(y, calib_probs)), 4)
+                self.method = "Platt Sigmoid Scaling (Empirical OOF)"
+
+                os.makedirs(MODEL_DIR, exist_ok=True)
+                with open(WEIGHTS_PATH, "w") as f:
+                    json.dump({
+                        "coef": round(c, 6),
+                        "intercept": round(intercept, 6),
+                        "fitted_samples": len(oof_probs),
+                        "brier_score": self.brier_score,
+                        "method": self.method,
+                        "format": "platt_sigmoid_oof_v2"
+                    }, f, indent=2)
+
+                logger.info(f"Probability Calibrator successfully fitted on {len(oof_probs)} OOF samples (Brier: {self.brier_score}).")
+                return True
+            else:
+                logger.warning("Calibration slope is non-monotonic; calibration disabled to preserve raw scores.")
+                self.is_fitted = False
+                return False
+
+        except Exception as e:
+            logger.error(f"Error fitting OOF calibrator: {e}")
+            self.is_fitted = False
+            return False
+
+    def fit_from_history(self) -> bool:
+        """
+        Fits Platt Scaling on historical resolved trades recorded in SQLite.
         """
         from app.api.ml_history import evaluate_ml_history
         try:
@@ -49,95 +109,58 @@ class ProbabilityCalibrator:
         except Exception as e:
             resolved = []
 
-        if len(resolved) >= 8:
+        if len(resolved) >= 15:
             try:
                 df = pd.DataFrame(resolved)
                 df['target'] = (df['profit_pct'] > 0).astype(int)
-                
-                # Check for both classes
                 if len(df['target'].unique()) >= 2:
-                    X = df[['confidence']].values
-                    y = df['target'].values
-                    
-                    clf = LogisticRegression(C=0.5, solver='lbfgs', random_state=42)
-                    clf.fit(X, y)
-                    
-                    c = float(clf.coef_[0][0])
-                    intercept = float(clf.intercept_[0])
-                    
-                    # Enforce strict positive monotonicity
-                    if c > 0.01:
-                        self.coef = c
-                        self.intercept = intercept
-                        self.is_fitted = True
-                        
-                        # Save to clean JSON weights
-                        try:
-                            with open(WEIGHTS_PATH, "w") as f:
-                                json.dump({
-                                    "coef": round(c, 6),
-                                    "intercept": round(intercept, 6),
-                                    "fitted_trades": len(resolved),
-                                    "accuracy": float(clf.score(X, y)),
-                                    "format": "platt_sigmoid_weights_v1"
-                                }, f, indent=2)
-                        except Exception as e:
-                            logger.error(f"Error saving calibrator JSON weights: {e}")
-                            
-                        logger.info("Probability Calibrator fitted & saved as clean JSON weights.")
-                        return
-                    else:
-                        logger.info("Historical sample exhibits noisy slope; using monotonic prior sigmoid.")
+                    raw_confs = df['confidence'].values / 100.0 if df['confidence'].max() > 1.0 else df['confidence'].values
+                    return self.fit_from_oof(raw_confs, df['target'].values)
             except Exception as e:
-                logger.error(f"Failed fitting calibrator: {e}")
+                logger.warning(f"Failed fitting calibrator from history: {e}")
 
-        # Fallback prior: gentle Platt scaling mapping [40, 100] -> [45, 78] to avoid overconfidence
-        self.is_fitted = False
+        return False
 
-    def calibrate(self, raw_score: float) -> tuple[float, float, dict]:
+    def calibrate(self, raw_score: float) -> Tuple[float, float, Dict[str, Any]]:
         """
-        Transforms a raw heuristic score into a calibrated empirical probability.
+        Transforms a raw prediction probability (0-100 or 0-1) into an empirical calibrated probability.
         
         Returns:
             (calibrated_score, raw_score, calibration_metadata)
         """
-        raw_score = float(raw_score)
-        
+        raw = float(raw_score)
+        # Normalize to 0-1 for calibration formula if given as percentage 0-100
+        raw_prob = raw / 100.0 if raw > 1.0 else raw
+        raw_prob = max(0.01, min(0.99, raw_prob))
+
         if self.is_fitted and self.coef is not None and self.coef > 0.005:
             try:
-                # Analytical Platt Scaling: P(y=1|X) = 1 / (1 + exp(-(coef * X + intercept)))
-                z = self.coef * raw_score + (self.intercept if self.intercept is not None else 0.0)
-                # Clip z to prevent float overflow
+                # Platt formula: P(y=1|p) = 1 / (1 + exp(-(coef * p + intercept)))
+                z = self.coef * raw_prob + (self.intercept or 0.0)
                 z = max(-15.0, min(15.0, z))
                 prob = 1.0 / (1.0 + np.exp(-z))
-                calibrated = float(prob * 100.0)
-                calibrated = max(20.0, min(95.0, calibrated))
-                method = "Empirical Platt Scaling (Pure JSON Weights)"
+                calibrated_pct = round(float(prob * 100.0), 1)
+                status = "calibrated"
+                method = self.method
             except Exception as e:
-                calibrated = self._fallback_sigmoid(raw_score)
-                method = "Monotonic Sigmoid Prior"
+                calibrated_pct = round(raw_prob * 100.0, 1)
+                status = "uncalibrated"
+                method = "Raw Probability (Evaluation Fallback)"
         else:
-            calibrated = self._fallback_sigmoid(raw_score)
-            method = "Monotonic Sigmoid Prior (Warm-up Phase)"
+            # UNCALIBRATED: return raw probability transparently without manufacturing numbers
+            calibrated_pct = round(raw_prob * 100.0, 1)
+            status = "uncalibrated"
+            method = "Uncalibrated Raw Model Output"
 
         meta = {
-            "raw_score": round(raw_score, 1),
-            "calibrated_score": round(calibrated, 1),
-            "shrinkage_delta": round(calibrated - raw_score, 1),
+            "raw_score": round(raw_prob * 100.0, 1),
+            "calibrated_score": calibrated_pct,
+            "calibration_status": status,
             "method": method,
+            "brier_score": self.brier_score,
             "is_empirically_fitted": bool(self.is_fitted)
         }
-        
-        return round(calibrated, 1), round(raw_score, 1), meta
 
-    def _fallback_sigmoid(self, raw_score: float) -> float:
-        """
-        Monotonic soft bounded scaling function that shrinks extreme raw scores toward realistic win probabilities.
-        A raw score of 50 -> 51.5%, 75 -> 67.8%, 95 -> 77.9%, 110 -> 82.3%
-        """
-        z = (raw_score - 65.0) / 22.0
-        sigmoid = 1.0 / (1.0 + np.exp(-z))
-        calibrated = 35.0 + (sigmoid * 48.0)
-        return float(calibrated)
+        return calibrated_pct, round(raw_prob * 100.0, 1), meta
 
 calibrator = ProbabilityCalibrator()

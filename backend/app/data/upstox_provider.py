@@ -86,7 +86,7 @@ NSE_INSTRUMENT_MAP = {
 }
 
 def get_upstox_config() -> Dict[str, str]:
-    """Reads Upstox credentials from database."""
+    """Reads Upstox credentials from database (Market Read-Only & Algo Read-Trade)."""
     conn = sqlite3.connect('market_data.db', timeout=5.0)
     cur = conn.cursor()
     cur.execute("SELECT key, value FROM app_settings WHERE key LIKE 'upstox_%'")
@@ -96,13 +96,22 @@ def get_upstox_config() -> Dict[str, str]:
     cfg = {
         "api_key": "",
         "api_secret": "",
-        "access_token": "",
+        "access_token": "",      # Read-only Market Data & Analytics Token
+        "market_token": "",      # Alias for analytics token
+        "algo_token": "",        # Read + Trade Algo Execution Token
         "redirect_uri": "http://localhost:8000/api/settings/upstox/callback"
     }
     for k, v in rows:
         field = k.replace("upstox_", "")
         if field in cfg:
             cfg[field] = v or ""
+            
+    # Normalize aliases
+    if cfg["market_token"] and not cfg["access_token"]:
+        cfg["access_token"] = cfg["market_token"]
+    elif cfg["access_token"] and not cfg["market_token"]:
+        cfg["market_token"] = cfg["access_token"]
+        
     return cfg
 
 def get_instrument_key(symbol: str) -> str:
@@ -113,14 +122,15 @@ def get_instrument_key(symbol: str) -> str:
     # Fallback to direct symbol format if not in fast dictionary
     return f"NSE_EQ|{clean}"
 
-def test_upstox_connection(token: Optional[str] = None) -> Dict[str, Any]:
-    """Tests connectivity to Upstox API v2."""
+def test_upstox_connection(token: Optional[str] = None, token_type: str = "market") -> Dict[str, Any]:
+    """Tests connectivity to Upstox API v2 for Market Data or Algo Trading Token."""
     if not token:
         cfg = get_upstox_config()
-        token = cfg.get("access_token")
+        token = cfg.get("algo_token") if token_type == "algo" else cfg.get("access_token")
         
     if not token or not token.strip():
-        return {"status": "error", "message": "No Upstox Access Token provided. Please enter your token."}
+        token_label = "Algo Trading (Read+Trade)" if token_type == "algo" else "Market Data (Read-Only)"
+        return {"status": "error", "message": f"No {token_label} Token provided. Please enter your token."}
         
     headers = {
         "Accept": "application/json",
@@ -136,11 +146,13 @@ def test_upstox_connection(token: Optional[str] = None) -> Dict[str, Any]:
             user_data = data.get("data", {})
             user_name = user_data.get("user_name", "Upstox Trader")
             user_id = user_data.get("user_id", "")
+            token_role = "Algo Trading & Execution (Read+Trade)" if token_type == "algo" else "Market Data & Analytics (Read-Only)"
             return {
                 "status": "success",
-                "message": f"Connected to Upstox successfully as {user_name} ({user_id}).",
+                "message": f"Verified Upstox {token_role} as {user_name} ({user_id}).",
                 "user_name": user_name,
                 "user_id": user_id,
+                "token_type": token_type,
                 "is_active": True
             }
         else:
@@ -150,7 +162,11 @@ def test_upstox_connection(token: Optional[str] = None) -> Dict[str, Any]:
                 "is_active": False
             }
     except Exception as e:
-        return {"status": "error", "message": f"Connection failed: {str(e)}", "is_active": False}
+        return {
+            "status": "error",
+            "message": f"Connection error: {str(e)}",
+            "is_active": False
+        }
 
 def fetch_upstox_candles(ticker: str, interval: str = "15m", period: str = "60d") -> pd.DataFrame:
     """

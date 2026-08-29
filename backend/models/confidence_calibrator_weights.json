@@ -1,0 +1,8 @@
+{
+  "coef": 2.19935,
+  "intercept": -1.099606,
+  "fitted_samples": 30,
+  "brier_score": 0.1559,
+  "method": "Platt Sigmoid Scaling (Empirical OOF)",
+  "format": "platt_sigmoid_oof_v2"
+}

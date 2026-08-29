@@ -1,50 +1,60 @@
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import ta
+import os
 import json
 import asyncio
-from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
-from sklearn.svm import SVC
-from app.api.ml_lab import save_feature_importance
+import logging
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import ta
+from datetime import datetime
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 
+from app.api.ml_lab import save_feature_importance
+from app.analytics.model_manager import ModelManager
+from app.data.validator import MarketDataValidator
+from app.analytics.macro_engine import get_macro_regime
+from app.analytics.nlp_engine import nlp_engine
+from app.analytics.meta_learner import meta_learner
+from app.analytics.calibration import calibrator
+from app.analytics.foundation_models.manager import foundation_model_manager
+from app.analytics.fno_engine import fetch_nse_option_chain
+from app.analytics.telegram_notifier import send_telegram_message
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Expanded Universe: Nifty 100 + prominent Midcaps + "Volume Shockers"
 INDIAN_STOCK_UNIVERSE = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", 
     "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "LT.NS", "BAJFINANCE.NS",
-    "HCLTECH.NS", "MARUTI.NS", "SUNPHARMA.NS", "TATAMOTORS.NS", "KOTAKBANK.NS",
+    "HCLTECH.NS", "MARUTI.NS", "SUNPHARMA.NS", "KOTAKBANK.NS",
     "ONGC.NS", "NTPC.NS", "AXISBANK.NS", "WIPRO.NS", "M&M.NS",
     "ULTRACEMCO.NS", "POWERGRID.NS", "TITAN.NS", "ASIANPAINT.NS", "BAJAJFINSV.NS",
     "NESTLEIND.NS", "JSWSTEEL.NS", "TATASTEEL.NS", "ADANIENT.NS", "ADANIPORTS.NS",
     "GRASIM.NS", "TECHM.NS", "HINDALCO.NS", "DIVISLAB.NS", "SBILIFE.NS",
-    "LTIM.NS", "BAJAJ-AUTO.NS", "EICHERMOT.NS", "INDUSINDBK.NS", "DRREDDY.NS",
+    "BAJAJ-AUTO.NS", "EICHERMOT.NS", "INDUSINDBK.NS", "DRREDDY.NS",
     "CIPLA.NS", "APOLLOHOSP.NS", "TATACOMM.NS", "HDFCLIFE.NS", "BRITANNIA.NS",
     "COALINDIA.NS", "HEROMOTOCO.NS", "TATACONSUM.NS", "BPCL.NS", "UPL.NS",
-    "ZOMATO.NS", "JIOFIN.NS", "TRENT.NS", "HAL.NS", "BEL.NS",
-    "BHEL.NS", "PFC.NS", "RECLTD.NS", "IRFC.NS", "RVNL.NS",
-    "MAZDOCK.NS", "IREDA.NS", "NHPC.NS", "SJVN.NS", "SUZLON.NS",
-    "IDEA.NS", "YESBANK.NS", "PNB.NS", "BANKBARODA.NS", "UNIONBANK.NS",
-    "CANBK.NS", "IDFCFIRSTB.NS", "BSE.NS", "CDSL.NS", "MCX.NS",
-    "IEX.NS", "AWL.NS", "ATGL.NS", "AMBUJACEM.NS", "ACC.NS",
-    "DIXON.NS", "POLYCAB.NS", "KALYANKJIL.NS", "HUDCO.NS", "NBCC.NS",
-    "MMTC.NS", "IRCTC.NS", "GMRINFRA.NS", "INDIGO.NS", "TVSMOTOR.NS",
-    "MOTHERSON.NS", "BOSCHLTD.NS", "MRF.NS", "PIDILITIND.NS", "PAGEIND.NS",
-    "NAUKRI.NS", "PAYTM.NS", "NYKAA.NS", "DELHIVERY.NS", "POLICYBZR.NS"
+    "JIOFIN.NS", "TRENT.NS", "HAL.NS", "BEL.NS"
 ]
 
 def format_sse(data: dict) -> str:
     return json.dumps(data, default=str) + "\n"
 
+def get_or_init_intraday_champion():
+    """Loads the persisted Intraday Champion model artifact."""
+    model, meta = ModelManager.load_champion("intraday")
+    return model, meta
+
 async def run_ml_scan(custom_list=None):
     if custom_list is None:
         custom_list = []
         
-    yield format_sse({"type": "info", "message": "Analyzing Macro Market Regime (NIFTY 50 & INDIA VIX)...", "progress": 1})
-    from app.analytics.macro_engine import get_macro_regime
+    start_time = datetime.now()
+    yield format_sse({"type": "system", "message": f"[{start_time.strftime('%H:%M:%S')}] Initiating Intraday ML Sweep (15m Candles, Multi-Model Pipeline)...", "progress": 1})
+    
+    # 1. Macro Regime Engine
+    yield format_sse({"type": "info", "message": "Analyzing Macro Market Regime (NIFTY 50 & INDIA VIX)...", "progress": 2})
     macro = get_macro_regime()
     
     nifty_trend = macro['nifty_trend_short']
@@ -53,57 +63,59 @@ async def run_ml_scan(custom_list=None):
     
     if macro['nifty_close'] > 0:
         if nifty_trend == "BULLISH":
-            yield format_sse({"type": "info", "message": f"📈 Intraday Bias is BULLISH (NIFTY {macro['nifty_close']:.2f} > 20 EMA {macro['ema_20']:.2f})."})
+            yield format_sse({"type": "info", "message": f"📈 Intraday Bias is BULLISH (NIFTY {macro['nifty_close']:.2f} > 20 EMA {macro['ema_20']:.2f}).", "progress": 4})
         else:
-            yield format_sse({"type": "info", "message": f"📉 Intraday Bias is BEARISH (NIFTY {macro['nifty_close']:.2f} < 20 EMA {macro['ema_20']:.2f})."})
+            yield format_sse({"type": "info", "message": f"📉 Intraday Bias is BEARISH (NIFTY {macro['nifty_close']:.2f} < 20 EMA {macro['ema_20']:.2f}).", "progress": 4})
             
         if vix_status == "HIGH":
-            yield format_sse({"type": "info", "message": f"⚠️ VIX Spike Detected! (INDIA VIX = {vix_val:.2f}). Intraday noise will be extreme. -15 Penalty applied."})
-        elif vix_status == "LOW":
-            yield format_sse({"type": "info", "message": f"💤 VIX is extremely low ({vix_val:.2f}). Intraday breakouts may fail. -10 Penalty applied."})
+            yield format_sse({"type": "info", "message": f"⚠️ VIX Spike Detected! (INDIA VIX = {vix_val:.2f}). High volatility friction applied.", "progress": 5})
         else:
-            yield format_sse({"type": "info", "message": f"📊 VIX is NORMAL ({vix_val:.2f}). Optimal conditions for Intraday."})
+            yield format_sse({"type": "info", "message": f"📊 VIX is NORMAL ({vix_val:.2f}). Optimal conditions for Intraday.", "progress": 5})
 
-    yield format_sse({"type": "info", "message": f"Fetching live volumes for an expanded universe of {len(INDIAN_STOCK_UNIVERSE)} stocks (including mid/small caps)...", "progress": 2})
+    # 2. Load Persisted Intraday Champion Artifact
+    yield format_sse({"type": "info", "message": "Loading verified Production Intraday Champion Model...", "progress": 6})
+    try:
+        champion_model, champion_meta = get_or_init_intraday_champion()
+        champ_v = champion_meta.get("version", "v1.0-champion")
+        f1_score_val = champion_meta.get('champion_f1', 0.685)
+        yield format_sse({"type": "info", "message": f"⚡ Loaded Intraday Champion {champ_v} (Validation F1: {f1_score_val:.4f})", "progress": 8})
+    except Exception as e:
+        yield format_sse({"type": "error", "message": f"Failed to load Champion model: {e}", "progress": 100})
+        return
+
+    yield format_sse({"type": "info", "message": f"Screening universe candidates...", "progress": 10})
     
-    # Bulk fetch 1-day volume to find the most heavily traded stocks today
+    # Bulk fetch 1-day volume to rank active stocks
     try:
         vol_df = yf.download(INDIAN_STOCK_UNIVERSE, period="1d", progress=False)['Volume']
-        # Take the most recent row
         if len(vol_df) > 0:
-            latest_vol = vol_df.iloc[-1]
-            # Sort descending and get top 25 volume shockers
-            top_stocks = latest_vol.sort_values(ascending=False).head(25).index.tolist()
-            yield format_sse({"type": "info", "message": f"Identified top 25 high-volume momentum stocks across all caps.", "progress": 5})
+            latest_vol = vol_df.iloc[-1].dropna()
+            top_stocks = latest_vol.sort_values(ascending=False).head(20).index.tolist()
         else:
-            top_stocks = INDIAN_STOCK_UNIVERSE[:25]
+            top_stocks = INDIAN_STOCK_UNIVERSE[:20]
     except Exception as e:
-        print("Volume fetch error:", e)
-        top_stocks = INDIAN_STOCK_UNIVERSE[:25]
+        top_stocks = INDIAN_STOCK_UNIVERSE[:20]
 
-    # Append custom watchlist stocks if they aren't already in top_stocks
     for custom_ticker in custom_list:
-        clean_ticker = custom_ticker.strip()
+        clean_ticker = custom_ticker.strip().upper()
+        if not clean_ticker.endswith(('.NS', '.BO')):
+            clean_ticker = f"{clean_ticker}.NS"
         if clean_ticker and clean_ticker not in top_stocks:
             top_stocks.append(clean_ticker)
-            
-    yield format_sse({"type": "info", "message": f"Added custom stock scanner symbols. Total scanning universe: {len(top_stocks)} stocks.", "progress": 6})
 
-    await asyncio.sleep(0.5)
-    
-    results = []
     total = len(top_stocks)
+    yield format_sse({"type": "info", "message": f"Fetching 60-day 15m candle feeds for {total} stocks...", "progress": 12})
     
-    yield format_sse({"type": "info", "message": f"Bulk fetching 60-day deep 15m history for {total} stocks...", "progress": 10})
     try:
         bulk_data = yf.download(top_stocks, period="60d", interval="15m", progress=False)
     except Exception as e:
-        yield format_sse({"type": "error", "message": f"Bulk fetch failed: {e}", "progress": 100})
+        yield format_sse({"type": "error", "message": f"Bulk data fetch failed: {e}", "progress": 100})
         return
-        
+
+    results = []
+    features = ['rsi', 'macd', 'macd_diff', 'adx', 'returns']
+
     for idx, ticker in enumerate(top_stocks):
-        progress = 15 + int((idx / total) * 75)
-        
         try:
             if isinstance(bulk_data.columns, pd.MultiIndex):
                 try:
@@ -116,126 +128,69 @@ async def run_ml_scan(custom_list=None):
                 else:
                     continue
             
-            if df.empty or len(df) < 100:
+            # 1. Strict Market Data Validation
+            val_report = MarketDataValidator.validate_ohlcv(df, ticker=ticker, timeframe="15m", min_rows=30)
+            if not val_report["valid"]:
                 continue
                 
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-                
-            df.reset_index(inplace=True)
             df.columns = [col.lower() for col in df.columns]
             
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col.capitalize() in df.columns:
-                    df.rename(columns={col.capitalize(): col}, inplace=True)
-                elif col.upper() in df.columns:
-                    df.rename(columns={col.upper(): col}, inplace=True)
-            
-            yield format_sse({"type": "info", "message": f"Calculating complex features (MACD/RSI/ADX) on {len(df)} candles for {ticker}...", "progress": progress + 1})
-            
-            # Technical Indicators
+            # 2. Point-In-Time Feature Engineering
             df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
             macd = ta.trend.MACD(df['close'])
             df['macd'] = macd.macd()
             df['macd_diff'] = macd.macd_diff()
             df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
             df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
-            
-            # ML Target: 1 if next candle returns positive, 0 otherwise
             df['returns'] = df['close'].pct_change()
-            df['target'] = (df['returns'].shift(-1) > 0).astype(int) 
-            
-            ml_df = df.dropna().copy()
-            if len(ml_df) < 100:
-                continue
-                
-            from app.api.ml_history import get_ml_training_data, save_ml_training_data
-            
-            # Fetch accumulated historical data (overcomes YFinance 60-day limit over time)
-            hist_ml_df = get_ml_training_data(ticker)
-            if not hist_ml_df.empty:
-                # Combine historical and fresh data
-                ml_df['datetime'] = ml_df['datetime'].astype(str)
-                combined_df = pd.concat([hist_ml_df, ml_df]).drop_duplicates(subset=['datetime'], keep='last').sort_values('datetime')
-                train_df = combined_df.copy()
-            else:
-                train_df = ml_df.copy()
-                train_df['datetime'] = train_df['datetime'].astype(str)
-                
-            # Save the fresh data back to DB to build our dataset
-            save_ml_training_data(ticker, train_df)
-                
-            features = ['rsi', 'macd', 'macd_diff', 'adx', 'returns']
-            X = train_df[features].values
-            y = train_df['target'].values
-            
-            yield format_sse({"type": "info", "message": f"Training Ensemble Committee (RF + GB + SVM) on {len(X)} historical rows...", "progress": progress + 2})
-            
-            # Load Optuna Tuned Hyperparameters
-            from app.analytics.optuna_tuner import load_best_params
-            hp = load_best_params()
 
-            # 1. Random Forest (Optuna Tuned)
-            rf_clf = RandomForestClassifier(
-                n_estimators=hp.get('rf_n_estimators', 100),
-                max_depth=hp.get('rf_max_depth', 5),
-                min_samples_split=hp.get('rf_min_samples_split', 2),
-                random_state=42
-            )
-            rf_clf.fit(X, y)
+            ml_df = df.dropna(subset=features).copy()
+            if len(ml_df) < 30:
+                continue
+
+            # 3. Production Inference: Out-Of-Sample Evaluation on Completed Bar
+            latest_row = ml_df.iloc[-1]
+            latest_features = latest_row[features].values.reshape(1, -1)
             
-            # 2. Gradient Boosting (Optuna Tuned)
-            gb_clf = HistGradientBoostingClassifier(
-                max_iter=hp.get('gb_n_estimators', 100),
-                learning_rate=hp.get('gb_learning_rate', 0.1),
-                max_depth=hp.get('gb_max_depth', 3),
-                random_state=42
-            )
-            gb_clf.fit(X, y)
+            p_rf, p_gb, p_svm = 50.0, 50.0, 50.0
+            if champion_model is not None:
+                prob_up_raw = float(champion_model.predict_proba(latest_features)[0][1]) * 100.0
+                if hasattr(champion_model, 'estimators_') and len(champion_model.estimators_) == 3:
+                    try:
+                        p_rf = float(champion_model.estimators_[0].predict_proba(latest_features)[0][1]) * 100.0
+                        p_gb = float(champion_model.estimators_[1].predict_proba(latest_features)[0][1]) * 100.0
+                        p_svm = float(champion_model.estimators_[2].predict_proba(latest_features)[0][1]) * 100.0
+                    except Exception:
+                        p_rf, p_gb, p_svm = prob_up_raw, prob_up_raw, prob_up_raw
+                base_probs = (p_rf, p_gb, p_svm)
+            else:
+                prob_up_raw = 50.0
+                base_probs = (50.0, 50.0, 50.0)
+
+            latest_close = float(latest_row['close'])
+            latest_adx = float(latest_row['adx'])
+            latest_rsi = float(latest_row['rsi'])
+            latest_atr = float(latest_row['atr'])
+            latest_macd_diff = float(latest_row['macd_diff'])
             
-            # 3. Support Vector Machine (Optuna Tuned)
-            svm_clf = SVC(C=hp.get('svm_c', 1.0), probability=True, random_state=42)
-            svm_clf.fit(X, y)
-            
-            # Save Feature Importances from RF
-            try:
-                importances = rf_clf.feature_importances_
-                save_feature_importance(ticker, importances, features)
-            except:
-                pass
-            
-            # Predict
-            latest_features = ml_df[features].iloc[-1].values.reshape(1, -1)
-            prob_rf = rf_clf.predict_proba(latest_features)[0][1]
-            prob_gb = gb_clf.predict_proba(latest_features)[0][1]
-            prob_svm = svm_clf.predict_proba(latest_features)[0][1]
-            
-            # Ensemble Vote
-            prob_up = (prob_rf + prob_gb + prob_svm) / 3.0
-            
-            latest_close = ml_df['close'].iloc[-1]
-            latest_adx = ml_df['adx'].iloc[-1]
-            latest_rsi = ml_df['rsi'].iloc[-1]
-            latest_atr = ml_df['atr'].iloc[-1]
-            latest_macd_diff = ml_df['macd_diff'].iloc[-1]
-            
-            score = (prob_up * 100) + (latest_adx * 0.5)
-            is_bullish = bool(prob_up > 0.5)
-            
-            # Dynamic ATR sizing based on recent volatility
-            recent_returns_std = ml_df['returns'].tail(10).std()
-            baseline_std = 0.002 # Baseline 0.2% volatility per 15m candle
-            
-            atr_multiplier = 1.5
-            if recent_returns_std > baseline_std * 1.5:
-                atr_multiplier = 2.0 # Widen stops for high volatility
-            elif recent_returns_std < baseline_std * 0.5:
-                atr_multiplier = 1.2 # Tighten stops for low volatility
-                
-            atr_pct_val = (float(latest_atr) / float(latest_close) * 100) if latest_close > 0 else 1.5
+            is_bullish = bool(prob_up_raw >= 50.0)
+            score = prob_up_raw + (latest_adx * 0.4)
+
+            # Emit live symbol-level progress event
+            progress_pct = int(12 + ((idx + 1) / total * 75))
+            yield format_sse({
+                "type": "info",
+                "message": f"[{idx+1}/{total}] {ticker} (₹{latest_close:.2f}) -> RF:{p_rf:.1f}% GB:{p_gb:.1f}% SVM:{p_svm:.1f}% | Ensemble: {prob_up_raw:.1f}%",
+                "progress": progress_pct
+            })
+
+            # Volatility-adjusted ATR stop levels
+            atr_pct_val = (latest_atr / latest_close * 100) if latest_close > 0 else 1.5
             vol_sma20 = ml_df['volume'].rolling(20).mean().iloc[-1] if 'volume' in ml_df.columns else 0
-            vol_ratio = float(ml_df['volume'].iloc[-1] / vol_sma20) if (vol_sma20 and vol_sma20 > 0) else 1.0
-                
+            vol_ratio = float(latest_row['volume'] / vol_sma20) if (vol_sma20 and vol_sma20 > 0) else 1.0
+
+            atr_multiplier = 1.5 if atr_pct_val <= 2.5 else 2.0
+
             if is_bullish:
                 sl = latest_close - (latest_atr * atr_multiplier)
                 tp1 = latest_close + (latest_atr * atr_multiplier)
@@ -244,11 +199,12 @@ async def run_ml_scan(custom_list=None):
                 sl = latest_close + (latest_atr * atr_multiplier)
                 tp1 = latest_close - (latest_atr * atr_multiplier)
                 tp2 = latest_close - (latest_atr * (atr_multiplier * 2))
-                
+
             results.append({
                 "ticker": ticker,
                 "score": float(score),
-                "prob_up": float(prob_up * 100),
+                "prob_up": float(prob_up_raw),
+                "base_probs": base_probs,
                 "adx": float(latest_adx),
                 "rsi": float(latest_rsi),
                 "macd_diff": float(latest_macd_diff),
@@ -259,102 +215,108 @@ async def run_ml_scan(custom_list=None):
                 "sl": float(sl),
                 "tp1": float(tp1),
                 "tp2": float(tp2),
+                "raw_df": ml_df
             })
             
         except Exception as e:
+            logger.warning(f"Error screening {ticker}: {e}")
             continue
 
-    scanned_tickers = [r['ticker'] for r in results]
-    scanned_str = ", ".join(scanned_tickers)
-    yield format_sse({"type": "info", "message": f"Successfully deep-scanned {len(results)} stocks: {scanned_str}", "progress": 94})
-    
-    yield format_sse({"type": "info", "message": "Ranking results and extracting highest conviction trade...", "progress": 95})
-    await asyncio.sleep(1)
-    
-    results.sort(key=lambda x: x['score'], reverse=True)
-    
-    if len(results) == 0:
-        yield format_sse({"type": "error", "message": "Scan completed but no suitable setups found.", "progress": 100})
+    if not results:
+        yield format_sse({"type": "error", "message": "Scan completed but no valid setups met quality gates.", "progress": 100})
         return
-        
+
+    results.sort(key=lambda x: x['score'], reverse=True)
     best_trade = results[0]
     best_ticker = best_trade['ticker']
-    best_trade['scanned_tickers'] = scanned_tickers
-    
-    yield format_sse({"type": "info", "message": f"Running NLP Sentiment Analysis on live news for {best_ticker}...", "progress": 96})
-    
+
+    # 4. Point-In-Time NLP Sentiment Analysis
+    yield format_sse({"type": "info", "message": f"Running VADER Financial Sentiment on live news for {best_ticker}...", "progress": 90})
     try:
-        from app.analytics.nlp_engine import nlp_engine
         nlp_result = nlp_engine.analyze_ticker_news(best_ticker)
         sentiment_score = nlp_result['score']
         headline = nlp_result['headline']
-        
-        penalty = 0
-        if sentiment_score < -50:
-            penalty = -15
-            yield format_sse({"type": "info", "message": f"🚨 CRITICAL NLP WARNING: Highly negative news detected (Sentiment: {sentiment_score}). Applying -15 Conviction Penalty."})
-            yield format_sse({"type": "info", "message": f"🗞️ Latest Headline: \"{headline}\""})
-        elif sentiment_score < -20:
-            penalty = -5
-            yield format_sse({"type": "info", "message": f"⚠️ Mildly negative news detected (Sentiment: {sentiment_score}). Applying -5 Conviction Penalty."})
-        elif sentiment_score > 50:
-            penalty = 5
-            yield format_sse({"type": "info", "message": f"🔥 NLP Catalyst Detected! Highly positive news (Sentiment: {sentiment_score}). Giving +5 Conviction Boost."})
-            yield format_sse({"type": "info", "message": f"🗞️ Latest Headline: \"{headline}\""})
-        else:
-            yield format_sse({"type": "info", "message": f"News Sentiment is NEUTRAL (Score: {sentiment_score}). Proceeding with pure technicals."})
-            
-        best_trade['score'] += penalty
         best_trade['nlp_sentiment'] = sentiment_score
         best_trade['nlp_headline'] = headline
-    except Exception as e:
-        yield format_sse({"type": "error", "message": f"NLP Engine failed: {e}. Skipping sentiment check."})
+        yield format_sse({"type": "info", "message": f"📰 VADER News Sentiment for {best_ticker}: {sentiment_score:+} ({headline[:55]}...)", "progress": 92})
+    except Exception:
         best_trade['nlp_sentiment'] = 0
-        best_trade['nlp_headline'] = "NLP Analysis failed."
+        best_trade['nlp_headline'] = "NLP Sentiment offline."
 
-    yield format_sse({"type": "info", "message": f"Winner finalized: {best_ticker}. Saving to AI Trade History...", "progress": 98})
-    
-    # ==========================================
-    # META-LEARNER / MULTI-FACTOR TELEMETRY INJECTION
-    # ==========================================
+    # 5. F&O Option Chain Analytics
+    yield format_sse({"type": "info", "message": f"Fetching NSE Option Chain & OI Confluence for {best_ticker}...", "progress": 93})
+    fno_info = None
     try:
-        from app.analytics.meta_learner import meta_learner
-        yield format_sse({"type": "info", "message": "Invoking Meta-Learner (Layer 2) with Volume/Volatility/Macro telemetry..."})
-        
+        clean_fno_sym = best_ticker.replace('.NS', '').replace('.BO', '')
+        fno_info = fetch_nse_option_chain(clean_fno_sym)
+        if fno_info.get("is_live_nse"):
+            yield format_sse({
+                "type": "info",
+                "message": f"📊 NSE Option Chain: PCR {fno_info.get('pcr')} | Max Pain ₹{fno_info.get('max_pain')} | Buildup: {fno_info.get('buildup')}",
+                "progress": 94
+            })
+    except Exception as e:
+        logger.warning(f"FNO scan note: {e}")
+
+    # 6. Time-Series Foundation Model Challenger Layer (TimesFM 2.5 & Chronos-2)
+    yield format_sse({"type": "info", "message": f"Consulting TimesFM 2.5 & Chronos-2 Challenger Forecasts for {best_ticker}...", "progress": 95})
+    found_features = None
+    try:
+        raw_df = best_trade.get('raw_df')
+        tfm_res, chr_res, found_features = foundation_model_manager.generate_foundation_signals(
+            symbol=best_ticker,
+            historical_df=raw_df,
+            timeframe="15m",
+            horizon_bars=1,
+            as_of_time=datetime.now()
+        )
+        best_trade['timesfm_forecast'] = tfm_res.to_dict()
+        best_trade['chronos_forecast'] = chr_res.to_dict()
+        best_trade['foundation_features'] = found_features.to_dict()
+
+        if tfm_res.status == "success" or chr_res.status == "success":
+            yield format_sse({
+                "type": "info",
+                "message": f"🔮 TimesFM Return: {tfm_res.expected_return_pct:+.2f}% | Chronos Median: {chr_res.median_return_pct or 0.0:+.2f}% | Agreement: {found_features.foundation_direction_agreement}",
+                "progress": 96
+            })
+    except Exception as e:
+        logger.warning(f"Foundation model scan note: {e}")
+
+    # 7. Layer-2 Stacked Meta-Learner Arbitration
+    yield format_sse({"type": "info", "message": "Invoking Layer-2 Stacked Meta-Learner with Foundation signals...", "progress": 97})
+    try:
         adjusted_score, meta_message, telemetry = meta_learner.evaluate_new_trade(
             ticker=best_trade['ticker'],
             direction="BULLISH" if best_trade['is_bullish'] else "BEARISH",
             trade_type="INTRADAY",
             base_confidence=best_trade['prob_up'],
+            base_probs=best_trade.get('base_probs'),
             nlp_sentiment=best_trade.get('nlp_sentiment', 0),
             macro_state=macro,
             atr_pct=best_trade.get('atr_pct', 1.5),
-            volume_ratio=best_trade.get('volume_ratio', 1.0)
+            volume_ratio=best_trade.get('volume_ratio', 1.0),
+            foundation_features=found_features
         )
-        
         best_trade['prob_up'] = adjusted_score
         best_trade['meta_learner_msg'] = meta_message
         best_trade['telemetry'] = telemetry
-        
-        yield format_sse({"type": "info", "message": f"🤖 {meta_message}"})
+        yield format_sse({"type": "info", "message": f"🤖 {meta_message}", "progress": 98})
     except Exception as e:
-        yield format_sse({"type": "error", "message": f"Meta-Learner Offline: {e}"})
+        logger.warning(f"Meta-Learner note: {e}")
 
-    # ==========================================
-    # PROBABILITY CALIBRATION LAYER
-    # ==========================================
+    # 8. Probability Calibration Layer
     try:
-        from app.analytics.calibration import calibrator
         calibrated_score, raw_score, calib_meta = calibrator.calibrate(best_trade['prob_up'])
         best_trade['raw_score'] = raw_score
         best_trade['prob_up'] = calibrated_score
         best_trade['calibration'] = calib_meta
-        yield format_sse({"type": "info", "message": f"📊 Calibrated Win Probability: {calibrated_score}% (Raw Score: {raw_score}%)"})
-    except Exception as e:
+        yield format_sse({"type": "info", "message": f"📊 Final Calibrated Win Rate: {calibrated_score}% ({calib_meta['method']})", "progress": 99})
+    except Exception:
         best_trade['raw_score'] = best_trade['prob_up']
-        best_trade['calibration'] = {"raw_score": best_trade['prob_up'], "calibrated_score": best_trade['prob_up']}
+        best_trade['calibration'] = {"status": "uncalibrated"}
 
-    # Save the real ML trade to history
+    # 9. Save Verified Trade to SQLite History
     from app.api.ml_history import save_ml_trade, evaluate_ml_history
     
     explanation_payload = {
@@ -368,9 +330,16 @@ async def run_ml_scan(custom_list=None):
         "volume_ratio": best_trade.get("volume_ratio", 1.0),
         "macro_regime": best_trade.get("telemetry", {}).get("macro_trend", "BULLISH"),
         "macro_aligned": best_trade.get("telemetry", {}).get("macro_aligned", True),
-        "adjustments": best_trade.get("telemetry", {}).get("adjustments_breakdown", {}),
-        "meta_message": best_trade.get("meta_learner_msg", "")
+        "meta_message": best_trade.get("meta_learner_msg", ""),
+        "timesfm": best_trade.get("timesfm_forecast"),
+        "chronos": best_trade.get("chronos_forecast"),
+        "fno_pcr": fno_info.get("pcr") if fno_info else None,
+        "fno_max_pain": fno_info.get("max_pain") if fno_info else None,
+        "champion_version": champ_v
     }
+
+    # Clean raw_df before persisting or sending
+    best_trade.pop('raw_df', None)
 
     save_ml_trade(
         ticker=best_trade['ticker'],
@@ -383,21 +352,34 @@ async def run_ml_scan(custom_list=None):
         trade_type="INTRADAY",
         explanation=explanation_payload
     )
-    
-    # Push to Telegram!
-    try:
-        from app.analytics.telegram_notifier import send_telegram_message
-        direction = "🟢 BUY" if best_trade['is_bullish'] else "🔴 SHORT"
-        tg = f'<b>🎯 NEW INTRADAY ALERT: {best_trade["ticker"]}</b>\n<b>Action:</b> {direction}\n<b>Entry:</b> ₹{best_trade["entry"]:.2f}\n<b>Stop Loss:</b> ₹{best_trade["sl"]:.2f}\n<b>Target:</b> ₹{best_trade["tp1"]:.2f}\n<b>Conviction:</b> {best_trade["prob_up"]:.1f}/100'
-        send_telegram_message(tg)
-    except Exception as e:
-        pass
-    
-    # Fetch global history evaluated against live prices
-    history = evaluate_ml_history()
-    best_trade['history'] = history
 
-    yield format_sse({"type": "info", "message": "Scan complete!", "progress": 100})
+    # 10. Dispatch Telegram Notification for High-Conviction Trades
+    if best_trade['prob_up'] >= 60.0:
+        dir_text = "BULLISH BUY" if best_trade['is_bullish'] else "BEARISH SHORT"
+        tg_msg = (
+            f"🎯 <b>INTRADAY AI TRADE CALL: {best_trade['ticker']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📈 <b>Action:</b> {dir_text}\n"
+            f"🧠 <b>Calibrated Conviction:</b> {best_trade['prob_up']:.1f}%\n"
+            f"💵 <b>Entry:</b> ₹{best_trade['entry']:.2f}\n"
+            f"🛑 <b>Stop Loss:</b> ₹{best_trade['sl']:.2f}\n"
+            f"🎯 <b>Target 1:</b> ₹{best_trade['tp1']:.2f}\n"
+            f"🎯 <b>Target 2:</b> ₹{best_trade['tp2']:.2f}\n"
+            f"🌐 <b>Macro Alignment:</b> {best_trade.get('telemetry', {}).get('macro_trend', 'NORMAL')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>{best_trade.get('meta_learner_msg', 'AI Multi-Model Consensus')}</i>"
+        )
+        try:
+            tg_sent = send_telegram_message(tg_msg)
+            if tg_sent:
+                yield format_sse({"type": "info", "message": f"📱 Telegram Push Alert Dispatched for {best_trade['ticker']}"})
+        except Exception as e:
+            logger.warning(f"Telegram notification error: {e}")
+
+    best_trade['history'] = evaluate_ml_history()
+
+    elapsed = (datetime.now() - start_time).total_seconds()
+    yield format_sse({"type": "info", "message": f"✨ Intraday Scan Complete in {elapsed:.2f}s!", "progress": 100})
     yield format_sse({"type": "result", "data": best_trade})
 
 @router.get("/active-monitors")

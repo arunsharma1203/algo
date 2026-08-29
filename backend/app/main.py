@@ -36,10 +36,16 @@ except Exception as e:
     logger.error(f"Failed to load autonomous bot: {e}")
 
 # 🔄 WEEKLY RETRAINING PIPELINE
-# Runs every Sunday at 23:00 to retrain models and apply Champion vs Challenger gate
+# Runs every Sunday at 23:00 to retrain models and apply Champion vs Challenger gate for both Swing and Intraday
 try:
     from app.analytics.retrain_models import execute_retraining_pipeline
-    scheduler.add_job(execute_retraining_pipeline, 'cron', day_of_week='sun', hour=23, minute=0)
+    def scheduled_weekly_retrain():
+        logger.info("Executing scheduled Sunday retraining for SWING models...")
+        execute_retraining_pipeline(timeframe="swing")
+        logger.info("Executing scheduled Sunday retraining for INTRADAY models...")
+        execute_retraining_pipeline(timeframe="intraday")
+
+    scheduler.add_job(scheduled_weekly_retrain, 'cron', day_of_week='sun', hour=23, minute=0)
 except Exception as e:
     logger.error(f"Failed to schedule weekly retraining pipeline: {e}")
 
@@ -63,6 +69,7 @@ from app.api.swing_ml import router as swing_router
 from app.api.ml_backtest import router as ml_backtest_router
 from app.api.settings import router as settings_router
 from app.api.fno import router as fno_router
+from app.api.data_lab import router as data_lab_router
 
 app = FastAPI(title="Swing Trading AI Backend")
 
@@ -83,6 +90,7 @@ app.include_router(swing_router, prefix="/api/ml", tags=["swing_ml"])
 app.include_router(ml_backtest_router, prefix="/api/ml", tags=["ml_backtest"])
 app.include_router(settings_router, prefix="/api/settings", tags=["settings"])
 app.include_router(fno_router, prefix="/api/fno", tags=["fno"])
+app.include_router(data_lab_router, prefix="/api", tags=["data_lab"])
 
 @app.get("/")
 def read_root():

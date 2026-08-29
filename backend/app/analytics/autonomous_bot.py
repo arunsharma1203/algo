@@ -148,8 +148,8 @@ def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: f
             "points": 0,
             "detail": meta_msg
         },
-        "FinBERT NLP": {
-            "name": "FinBERT News Sentiment",
+        "VADER Financial Sentiment": {
+            "name": "VADER News Sentiment",
             "status": "BEARISH" if sentiment_score < -15 else ("BULLISH" if sentiment_score > 15 else "NEUTRAL"),
             "triggered": False,
             "points": 0,
@@ -180,8 +180,8 @@ def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: f
         if sentiment_score < -15:
             panic_level += 40
             reasons.append(f"Breaking Negative News ({sentiment_score:+} Score)")
-            model_breakdown["FinBERT NLP"]["triggered"] = True
-            model_breakdown["FinBERT NLP"]["points"] = 40
+            model_breakdown["VADER Financial Sentiment"]["triggered"] = True
+            model_breakdown["VADER Financial Sentiment"]["points"] = 40
             
     elif direction == "BEARISH":
         if nifty_trend == "BULLISH":

@@ -1,7 +1,12 @@
+import logging
+from datetime import datetime
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import yfinance as yf
+from typing import Dict, Any, Optional
 
-# Fine-tune the standard VADER lexicon to better understand Wall Street / Dalal Street terminology
+logger = logging.getLogger(__name__)
+
+# Specialized Financial Lexicon weights to supplement standard VADER
 FINANCIAL_LEXICON_UPDATES = {
     "bullish": 2.5,
     "bearish": -2.5,
@@ -31,70 +36,106 @@ FINANCIAL_LEXICON_UPDATES = {
 }
 
 class FinancialSentimentAnalyzer:
+    """
+    VADER Financial Sentiment Engine.
+    Processes live news filings with financial lexicon tuning and strict point-in-time timestamp filtering.
+    """
+
     def __init__(self):
         self.analyzer = SentimentIntensityAnalyzer()
         self.analyzer.lexicon.update(FINANCIAL_LEXICON_UPDATES)
+        self.engine_name = "VADER Financial Sentiment Engine"
 
-    def analyze_ticker_news(self, ticker: str):
+    def analyze_ticker_news(self, ticker: str, as_of_timestamp: Optional[datetime] = None) -> Dict[str, Any]:
         """
-        Fetches the latest news for a ticker from Yahoo Finance and runs NLP sentiment analysis.
-        Returns a sentiment score between -100 (Extremely Bearish) and +100 (Extremely Bullish).
+        Fetches news for a ticker and calculates point-in-time sentiment.
+        
+        CRITICAL RULE:
+        Articles published AFTER as_of_timestamp are strictly filtered out to prevent future-news leakage.
         """
+        if as_of_timestamp is None:
+            as_of_timestamp = datetime.now()
+
         try:
-            stock = yf.Ticker(ticker)
+            clean_ticker = ticker if ticker.endswith(('.NS', '.BO')) else f"{ticker}.NS"
+            stock = yf.Ticker(clean_ticker)
             news_items = stock.news
-            
+
             if not news_items or len(news_items) == 0:
-                return {"score": 0, "headline": "No recent news detected."}
-                
-            total_compound = 0
+                return {
+                    "score": 0.0,
+                    "headline": "No recent exchange news available.",
+                    "status": "unavailable",
+                    "articles_analyzed": 0
+                }
+
+            total_compound = 0.0
             best_headline = ""
-            max_intensity = -1
-            
+            max_intensity = -1.0
             base_ticker = ticker.split('.')[0].upper()
-            
             valid_news = 0
+
             for item in news_items:
-                # Yahoo Finance news items have title and summary inside 'content' or directly
+                # 1. Point-in-time filter: check publication time
+                pub_time = item.get('providerPublishTime')
+                if pub_time:
+                    try:
+                        pub_dt = datetime.fromtimestamp(pub_time)
+                        if pub_dt > as_of_timestamp:
+                            # Skip future news
+                            continue
+                    except Exception:
+                        pass
+
+                # Extract headline and body text
                 title = item.get('title', '')
                 if not title and 'content' in item:
                     title = item['content'].get('title', '')
-                    
+
                 summary = item.get('summary', '')
                 if not summary and 'content' in item:
                     summary = item['content'].get('summary', '')
-                    
+
                 text = f"{title}. {summary}"
-                
-                # STRICT FILTER: Ensure the news is ACTUALLY about this exact stock.
-                # Yahoo often bundles generic sector news or competitor news under a ticker.
+
+                # Strict entity relevance filter
                 if base_ticker not in text.upper():
                     continue
-                    
+
                 valid_news += 1
                 scores = self.analyzer.polarity_scores(text)
                 total_compound += scores['compound']
-                
-                # Keep track of the most intense headline to show the user
+
                 intensity = abs(scores['compound'])
                 if intensity > max_intensity:
                     max_intensity = intensity
                     best_headline = title
-                    
+
             if valid_news == 0:
-                return {"score": 0, "headline": "No strictly related news detected."}
+                return {
+                    "score": 0.0,
+                    "headline": "Recent filings reviewed (neutral/no relevant mentions).",
+                    "status": "neutral",
+                    "articles_analyzed": 0
+                }
+
             avg_compound = total_compound / valid_news
-            
-            # Map [-1.0, 1.0] to [-100, 100]
-            normalized_score = round(avg_compound * 100, 1)
-            
+            normalized_score = round(avg_compound * 100.0, 1)
+
             return {
                 "score": normalized_score,
-                "headline": best_headline if best_headline else "Analyzed recent exchange filings."
+                "headline": best_headline or "Analyzed verified filings.",
+                "status": "active",
+                "articles_analyzed": valid_news
             }
-            
+
         except Exception as e:
-            print(f"NLP Error for {ticker}: {e}")
-            return {"score": 0, "headline": "Failed to fetch NLP data."}
+            logger.warning(f"Sentiment analysis error for {ticker}: {e}")
+            return {
+                "score": 0.0,
+                "headline": "Sentiment feed offline.",
+                "status": "unavailable",
+                "articles_analyzed": 0
+            }
 
 nlp_engine = FinancialSentimentAnalyzer()

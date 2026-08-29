@@ -245,11 +245,14 @@ def evaluate_ml_history(force_refresh: bool = False):
                             ideal_profit_pct = ((raw_entry - current_price) / raw_entry) * 100
                             profit_pct = ((effective_entry - current_price) / effective_entry) * 100
             
-            # If Intraday and entry day is in the past, force SQ OFF
+            # If Intraday and entry occurred during an actual trading session that has since closed
             now_dt = datetime.now()
             if trade_type == 'INTRADAY' and outcome == 'OPEN':
-                if entry_time.date() < now_dt.date() or (entry_time.date() == now_dt.date() and (now_dt.hour > 15 or (now_dt.hour == 15 and now_dt.minute >= 30))):
-                    outcome = "SQUARED OFF (3:15 PM)"
+                is_entry_weekday = (entry_time.weekday() < 5)
+                is_now_weekday = (now_dt.weekday() < 5)
+                if is_entry_weekday:
+                    if entry_time.date() < now_dt.date() or (entry_time.date() == now_dt.date() and is_now_weekday and (now_dt.hour > 15 or (now_dt.hour == 15 and now_dt.minute >= 30))):
+                        outcome = "SQUARED OFF (3:15 PM)"
                     
             slippage_drag = round(ideal_profit_pct - profit_pct, 2)
             

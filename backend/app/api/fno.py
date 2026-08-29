@@ -4,12 +4,12 @@ from app.analytics.fno_engine import fetch_nse_option_chain
 router = APIRouter()
 
 @router.get("/option-chain/{symbol}")
-def get_option_chain(symbol: str = "NIFTY"):
+def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
     """
     Returns live or cached NSE Option Chain metrics:
     PCR, Max Pain Strike, Top 3 Call Walls, Top 3 Put Walls, and Buildup status.
     """
-    return fetch_nse_option_chain(symbol)
+    return fetch_nse_option_chain(symbol=symbol, expiry=expiry)
 
 @router.get("/market-pcr")
 def get_market_pcr():

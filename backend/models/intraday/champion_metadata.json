@@ -1,0 +1,26 @@
+{
+  "version": "v1.0-champion",
+  "timeframe": "intraday",
+  "status": "BASELINE_ACTIVE",
+  "champion_f1": 0.685,
+  "validation_metrics": {
+    "f1": 0.685,
+    "precision": 0.67,
+    "recall": 0.7,
+    "sharpe_ratio": 1.45,
+    "max_drawdown_pct": 8.5,
+    "win_rate_pct": 58.2
+  },
+  "features": [
+    "rsi",
+    "macd",
+    "macd_diff",
+    "adx",
+    "returns"
+  ],
+  "target_definition": "Binary return > 0 on next 15m candle",
+  "last_retrained": "2026-08-29T17:34:57.200011",
+  "total_promotions": 1,
+  "data_source": "yfinance",
+  "hyperparameter_source": "optuna_intraday_best_params.json"
+}

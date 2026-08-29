@@ -30,7 +30,7 @@ function ConvictionTooltip({ trade }) {
               </div>
               {exp.nlp_sentiment !== undefined && (
                 <div className="flex justify-between">
-                  <span className="text-slate-400">📰 FinBERT News:</span>
+                  <span className="text-slate-400">📰 VADER News:</span>
                   <span className={`font-bold ${exp.nlp_sentiment > 0 ? 'text-emerald-400' : exp.nlp_sentiment < 0 ? 'text-rose-400' : 'text-slate-400'}`}>
                     {exp.nlp_sentiment > 0 ? '+' : ''}{exp.nlp_sentiment} pts
                   </span>
@@ -57,6 +57,22 @@ function ConvictionTooltip({ trade }) {
                   <span className="text-slate-400">🌐 Macro Regime:</span>
                   <span className={`font-bold ${exp.macro_aligned ? 'text-emerald-400' : 'text-rose-400'}`}>
                     {exp.macro_aligned ? '+4.0 pts' : '-8.0 pts'}
+                  </span>
+                </div>
+              )}
+              {exp.timesfm && exp.timesfm.status === 'success' && (
+                <div className="flex justify-between">
+                  <span className="text-slate-400">📈 TimesFM 2.5:</span>
+                  <span className={`font-bold ${exp.timesfm.expected_return_pct > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {exp.timesfm.expected_return_pct > 0 ? '+' : ''}{exp.timesfm.expected_return_pct}%
+                  </span>
+                </div>
+              )}
+              {exp.chronos && exp.chronos.status === 'success' && (
+                <div className="flex justify-between">
+                  <span className="text-slate-400">🔮 Chronos-2:</span>
+                  <span className={`font-bold ${exp.chronos.expected_return_pct > 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {exp.chronos.expected_return_pct > 0 ? '+' : ''}{exp.chronos.expected_return_pct}% (q50)
                   </span>
                 </div>
               )}

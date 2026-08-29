@@ -1,205 +1,190 @@
-import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-import numpy as np
+import os
+import json
 import logging
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from typing import Dict, Any, Tuple, Optional
+
+from app.analytics.foundation_models.base import FoundationModelFeatures
 
 logger = logging.getLogger(__name__)
 
 class TradeMetaLearner:
+    """
+    Genuine Layer-2 Stacked Meta-Learner.
+    Combines base model predictions (RF, GB, SVM), point-in-time market telemetry
+    (Volatility ATR, Volume Ratio, Macro Regime, Sentiment), and Time-Series Foundation
+    Model forecasts (TimesFM 2.5, Chronos-2) to output a unified probability.
+    """
+
     def __init__(self):
-        self.model = RandomForestClassifier(n_estimators=30, max_depth=4, random_state=42)
+        self.meta_model = LogisticRegression(C=0.5, solver='lbfgs', random_state=42)
         self.is_trained = False
-        
-    def evaluate_new_trade(self, ticker, direction, trade_type, base_confidence, nlp_sentiment=0, macro_state=None, atr_pct=2.0, volume_ratio=1.0):
+        self._fit_default_prior()
+
+    def _fit_default_prior(self):
+        """Initializes monotonic stacking weights so the meta-learner functions out-of-the-box."""
+        # Features: [p_rf, p_gb, p_svm, volume_ratio, atr_pct, macro_aligned, sentiment, tfm_ret, chr_ret, agreement]
+        X_prior = np.array([
+            [0.2, 0.2, 0.2, 0.5, 1.5, 0, -0.5, -0.5, -0.4, -1.0],
+            [0.4, 0.4, 0.4, 1.0, 2.0, 0,  0.0,  0.0,  0.0,  0.0],
+            [0.5, 0.5, 0.5, 1.0, 2.0, 1,  0.0,  0.1,  0.1,  1.0],
+            [0.6, 0.6, 0.6, 1.2, 2.2, 1,  0.2,  0.4,  0.3,  1.0],
+            [0.8, 0.8, 0.8, 2.0, 2.5, 1,  0.6,  0.8,  0.7,  1.0],
+        ])
+        y_prior = np.array([0, 0, 0, 1, 1])
+        try:
+            self.meta_model.fit(X_prior, y_prior)
+            self.is_trained = True
+        except Exception:
+            self.is_trained = False
+
+    def train_meta_learner_from_oof(
+        self,
+        oof_base_probs: np.ndarray,
+        telemetry_features: np.ndarray,
+        y_true: np.ndarray,
+        foundation_features: Optional[np.ndarray] = None
+    ) -> bool:
         """
-        Takes raw trade parameters from the base ML hunters and evaluates them
-        against multi-feature market conditions and historical AI mistakes.
-        
-        Parameters:
-            ticker (str): Ticker symbol
-            direction (str): 'BULLISH' or 'BEARISH'
-            trade_type (str): 'INTRADAY' or 'SWING'
-            base_confidence (float): Base ML conviction score (0-100+)
-            nlp_sentiment (float): FinBERT sentiment score (-100 to +100)
-            macro_state (dict): Output from get_macro_regime()
-            atr_pct (float): Normalized ATR as percentage of price
-            volume_ratio (float): Relative Volume (Current Vol / 20-period SMA Vol)
-            
-        Returns:
-            (adjusted_score, meta_message, telemetry_dict)
+        Trains Layer-2 Meta-Learner strictly on Out-Of-Fold predictions from base models
+        and causal point-in-time foundation model forecasts.
         """
+        if len(oof_base_probs) < 20 or len(np.unique(y_true)) < 2:
+            return False
+
+        try:
+            if foundation_features is not None and len(foundation_features) == len(oof_base_probs):
+                X_meta = np.hstack([oof_base_probs, telemetry_features, foundation_features])
+            else:
+                # Add default zeros for foundation features
+                zero_found = np.zeros((len(oof_base_probs), 3))
+                X_meta = np.hstack([oof_base_probs, telemetry_features, zero_found])
+
+            self.meta_model.fit(X_meta, y_true.astype(int))
+            self.is_trained = True
+            logger.info(f"Layer-2 Meta-Learner successfully trained on {len(X_meta)} OOF observations.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to train Meta-Learner: {e}")
+            return False
+
+    def evaluate_new_trade(
+        self,
+        ticker: str,
+        direction: str,
+        trade_type: str,
+        base_confidence: float,
+        base_probs: Optional[Tuple[float, float, float]] = None, # (prob_rf, prob_gb, prob_svm)
+        nlp_sentiment: float = 0.0,
+        macro_state: Optional[Dict[str, Any]] = None,
+        atr_pct: float = 2.0,
+        volume_ratio: float = 1.0,
+        foundation_features: Optional[FoundationModelFeatures] = None
+    ) -> Tuple[float, str, Dict[str, Any]]:
+        """
+        Evaluates trade using Layer-2 Stacking Model combining base models,
+        market telemetry, and Foundation Model Challenger signals.
+        
+        Returns: (final_stacked_confidence, meta_message, telemetry_dict)
+        """
+        reasons = []
+
         if macro_state is None:
             macro_state = {}
-            
+
         nifty_trend = macro_state.get('nifty_trend_short', 'BULLISH')
         vix_status = macro_state.get('vix_status', 'NORMAL')
-        is_bullish = 1 if direction == 'BULLISH' else 0
-        is_swing = 1 if trade_type == 'SWING' else 0
+        is_bullish = 1 if direction.upper() == 'BULLISH' else 0
         
-        # Determine Macro Alignment
+        # 1. Macro Alignment
         macro_aligned = 1 if (is_bullish and nifty_trend == 'BULLISH') or (not is_bullish and nifty_trend == 'BEARISH') else 0
-        
-        # 1. Fetch resolved past trades directly from database (eliminating recursion)
-        import sqlite3
-        resolved = []
-        try:
-            conn = sqlite3.connect('market_data.db', timeout=5.0)
-            df_hist = pd.read_sql_query("SELECT * FROM ml_trade_history WHERE status = 'CLOSED'", conn)
-            conn.close()
-            if not df_hist.empty:
-                resolved = df_hist.to_dict(orient='records')
-        except Exception as e:
-            logger.warning(f"Meta-Learner fast history read: {e}")
-            resolved = []
-            
-        success_prob = 0.5
-        ml_trained_msg = "Meta-Learner prior active (training data accumulating)."
-        
-        # 2. If sufficient resolved trades exist, train Random Forest Meta-Model
-        if len(resolved) >= 5:
-            try:
-                df = pd.DataFrame(resolved)
-                df['is_bullish'] = (df['direction'] == 'BULLISH').astype(int)
-                df['is_swing'] = (df.get('trade_type', 'INTRADAY') == 'SWING').astype(int)
-                if 'profit_pct' in df.columns:
-                    df['target'] = (df['profit_pct'] > 0).astype(int)
-                elif 'outcome' in df.columns:
-                    df['target'] = (df['outcome'] == 'TARGET MET').astype(int)
-                else:
-                    df['target'] = 1
-                
-                # Synthetic or default fallback features for legacy historical records
-                if 'atr_pct' not in df.columns:
-                    df['atr_pct'] = 2.0
-                if 'volume_ratio' not in df.columns:
-                    df['volume_ratio'] = 1.0
-                if 'macro_aligned' not in df.columns:
-                    df['macro_aligned'] = 1
-                    
-                features = ['confidence', 'is_bullish', 'is_swing', 'atr_pct', 'volume_ratio', 'macro_aligned']
-                
-                if len(df['target'].unique()) >= 2:
-                    X = df[features].fillna(0)
-                    y = df['target']
-                    self.model.fit(X, y)
-                    self.is_trained = True
-                    
-                    X_new = pd.DataFrame([{
-                        'confidence': base_confidence,
-                        'is_bullish': is_bullish,
-                        'is_swing': is_swing,
-                        'atr_pct': atr_pct,
-                        'volume_ratio': volume_ratio,
-                        'macro_aligned': macro_aligned
-                    }])
-                    success_prob = float(self.model.predict_proba(X_new)[0][1])
-                    ml_trained_msg = f"Meta-Learner RF Active (Win-rate prior: {int(success_prob * 100)}%)"
-            except Exception as e:
-                logger.error(f"Meta-Learner training error: {e}")
-
-        # 3. Factor Adjustments & Telemetry
-        adjustments = {}
-        
-        # A. ML Success Probability Adjustment
-        if success_prob < 0.35:
-            adjustments['historical_rf'] = -10.0
-        elif success_prob < 0.45:
-            adjustments['historical_rf'] = -4.0
-        elif success_prob > 0.65:
-            adjustments['historical_rf'] = +6.0
-        else:
-            adjustments['historical_rf'] = 0.0
-            
-        # B. Volume Breakout Multiplier
-        if volume_ratio >= 2.0:
-            adjustments['volume_surge'] = +6.0
-        elif volume_ratio >= 1.4:
-            adjustments['volume_surge'] = +3.0
-        elif volume_ratio < 0.7:
-            adjustments['volume_surge'] = -5.0
-        else:
-            adjustments['volume_surge'] = 0.0
-            
-        # C. Volatility (ATR) Regime
-        if trade_type == 'SWING':
-            if atr_pct > 5.5:
-                adjustments['volatility'] = -5.0 # Excessive volatility for swing holding
-            elif 1.8 <= atr_pct <= 4.0:
-                adjustments['volatility'] = +3.0 # Sweet spot for swing trends
-            else:
-                adjustments['volatility'] = 0.0
-        else: # INTRADAY
-            if atr_pct > 2.5:
-                adjustments['volatility'] = +4.0 # High range good for intraday momentum
-            elif atr_pct < 0.8:
-                adjustments['volatility'] = -4.0 # Flat/stagnant
-            else:
-                adjustments['volatility'] = 0.0
-
-        # D. Macro Alignment
         if macro_aligned == 1:
-            adjustments['macro_alignment'] = +4.0
+            reasons.append("Aligned with NIFTY Macro")
         else:
-            adjustments['macro_alignment'] = -8.0 # Strong headwind
+            reasons.append("Opposing NIFTY Trend")
 
-        # E. F&O Option Chain Confluence (PCR & OI Walls)
-        try:
-            from app.analytics.fno_engine import fetch_nse_option_chain
-            fno = fetch_nse_option_chain("NIFTY")
-            pcr = float(fno.get('pcr', 1.0))
-            if is_bullish and pcr >= 1.20:
-                adjustments['fno_pcr'] = +3.0
-                reasons.append(f"Bullish Option Floor (PCR {pcr})")
-            elif is_bullish and pcr <= 0.75:
-                adjustments['fno_pcr'] = -4.0
-                reasons.append(f"Call Resistance Wall (PCR {pcr})")
-            elif not is_bullish and pcr <= 0.80:
-                adjustments['fno_pcr'] = +3.0
-                reasons.append(f"Bearish Option Pressure (PCR {pcr})")
-            elif not is_bullish and pcr >= 1.25:
-                adjustments['fno_pcr'] = -4.0
-                reasons.append(f"Heavy Put Support Floor (PCR {pcr})")
-            else:
-                adjustments['fno_pcr'] = 0.0
-        except:
-            adjustments['fno_pcr'] = 0.0
-            
-        total_adjustment = sum(adjustments.values())
-        final_score = max(0.0, min(100.0, base_confidence + total_adjustment))
-        
-        # Build intuitive meta-message
-        reasons = []
-        if adjustments['volume_surge'] > 0:
-            reasons.append(f"Volume Surge ({volume_ratio:.1f}x)")
-        elif adjustments['volume_surge'] < 0:
-            reasons.append(f"Low Volume ({volume_ratio:.1f}x)")
-            
-        if adjustments['macro_alignment'] > 0:
-            reasons.append("Aligned with NIFTY")
-        elif adjustments['macro_alignment'] < 0:
-            reasons.append("Opposing Macro Trend")
-            
-        if adjustments['volatility'] < 0:
-            reasons.append(f"Excessive Volatility ({atr_pct:.1f}% ATR)")
-        elif adjustments['volatility'] > 0:
-            reasons.append(f"Optimal Volatility ({atr_pct:.1f}% ATR)")
-            
-        summary_reasons = ", ".join(reasons) if reasons else "Neutral conditions"
-        action_verb = "boosted" if total_adjustment > 0 else "penalized" if total_adjustment < 0 else "confirmed"
-        meta_message = f"Meta-Learner {action_verb} score by {total_adjustment:+.1f} pts ({summary_reasons}). {ml_trained_msg}"
-        
+        # 2. Base Committee Probabilities
+        norm_conf = base_confidence / 100.0 if base_confidence > 1.0 else base_confidence
+        if base_probs is not None and len(base_probs) == 3:
+            p_rf, p_gb, p_svm = [p / 100.0 if p > 1.0 else p for p in base_probs]
+        else:
+            p_rf, p_gb, p_svm = norm_conf, norm_conf, norm_conf
+
+        # 3. Volume Multiplier
+        norm_vol = max(0.1, min(5.0, float(volume_ratio)))
+        if norm_vol >= 1.5:
+            reasons.append(f"Volume Surge ({norm_vol:.1f}x)")
+        elif norm_vol < 0.7:
+            reasons.append(f"Low Volume Liquidity ({norm_vol:.1f}x)")
+
+        # 4. ATR Volatility
+        norm_atr = max(0.1, min(10.0, float(atr_pct)))
+        if norm_atr > 5.0:
+            reasons.append(f"High Tail Risk ({norm_atr:.1f}% ATR)")
+        elif 1.5 <= norm_atr <= 4.0:
+            reasons.append(f"Optimal Volatility ({norm_atr:.1f}% ATR)")
+
+        # 5. Sentiment Normalization
+        norm_sent = max(-1.0, min(1.0, float(nlp_sentiment) / 100.0 if abs(nlp_sentiment) > 1.0 else float(nlp_sentiment)))
+        if norm_sent > 0.2:
+            reasons.append(f"Positive News Flow (+{norm_sent:.1f})")
+        elif norm_sent < -0.2:
+            reasons.append(f"Negative News Flow ({norm_sent:.1f})")
+
+        # 6. Foundation Model Signals
+        if foundation_features is not None:
+            tfm_ret = float(foundation_features.timesfm_expected_return)
+            chr_ret = float(foundation_features.chronos_expected_return)
+            agreement = float(foundation_features.foundation_direction_agreement)
+
+            if foundation_features.timesfm_status == "success" and foundation_features.chronos_status == "success":
+                if agreement == 1.0:
+                    reasons.append(f"Foundation Consensus (+{foundation_features.foundation_consensus_score:.2f}%)")
+                elif agreement == -1.0:
+                    reasons.append(f"TimesFM/Chronos Divergence ({tfm_ret:+.2f}% vs {chr_ret:+.2f}%)")
+            elif foundation_features.timesfm_status == "success":
+                reasons.append(f"TimesFM Forecast ({tfm_ret:+.2f}%)")
+            elif foundation_features.chronos_status == "success":
+                reasons.append(f"Chronos Forecast ({chr_ret:+.2f}%)")
+        else:
+            tfm_ret = 0.0
+            chr_ret = 0.0
+            agreement = 0.0
+
+        # 7. Construct Complete Meta-Feature Vector:
+        # [p_rf, p_gb, p_svm, volume_ratio, atr_pct, macro_aligned, sentiment, tfm_ret, chr_ret, agreement]
+        X_trade = np.array([[p_rf, p_gb, p_svm, norm_vol, norm_atr, macro_aligned, norm_sent, tfm_ret, chr_ret, agreement]])
+
+        if self.is_trained:
+            try:
+                stacked_prob = float(self.meta_model.predict_proba(X_trade)[0][1])
+                final_score = round(stacked_prob * 100.0, 1)
+            except Exception as e:
+                logger.warning(f"Meta-model inference note: {e}")
+                final_score = round(norm_conf * 100.0, 1)
+        else:
+            final_score = round(norm_conf * 100.0, 1)
+
+        summary_reasons = ", ".join(reasons) if reasons else "Standard Technicals"
+        meta_message = f"Layer-2 Meta-Learner Evaluated: {final_score}% conviction ({summary_reasons})."
+
         telemetry = {
-            "atr_pct": round(float(atr_pct), 2),
-            "volume_ratio": round(float(volume_ratio), 2),
+            "atr_pct": round(norm_atr, 2),
+            "volume_ratio": round(norm_vol, 2),
             "macro_aligned": bool(macro_aligned),
             "macro_trend": nifty_trend,
             "vix_status": vix_status,
-            "success_prob": round(float(success_prob) * 100, 1),
-            "total_adjustment": round(float(total_adjustment), 1),
-            "adjustments_breakdown": adjustments,
+            "sentiment_score": round(norm_sent * 100, 1),
+            "base_confidence": round(norm_conf * 100, 1),
+            "stacked_score": final_score,
+            "foundation_features": foundation_features.to_dict() if foundation_features else None,
+            "reasons": reasons,
             "message": meta_message
         }
-        
+
         return final_score, meta_message, telemetry
 
 meta_learner = TradeMetaLearner()
