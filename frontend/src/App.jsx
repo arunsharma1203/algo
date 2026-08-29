@@ -34,9 +34,10 @@ function LinkItem({ to, icon: Icon, label }) {
 function App() {
   const [activeMonitors, setActiveMonitors] = useState([]);
   const [lastScan, setLastScan] = useState(null);
+  const [dataSource, setDataSource] = useState('yfinance');
 
   useEffect(() => {
-    const fetchMonitors = async () => {
+    const fetchStatus = async () => {
       try {
         const res = await fetch('http://localhost:8000/api/ml/active-monitors');
         if (res.ok) {
@@ -44,10 +45,15 @@ function App() {
           setActiveMonitors(data);
           setLastScan(new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'}));
         }
+        const dsRes = await fetch('http://localhost:8000/api/settings/datasource');
+        if (dsRes.ok) {
+          const dsData = await dsRes.json();
+          if (dsData.source) setDataSource(dsData.source);
+        }
       } catch (err) {}
     };
-    fetchMonitors();
-    const interval = setInterval(fetchMonitors, 10000);
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -63,6 +69,14 @@ function App() {
                 <Target size={24} className="text-white transform rotate-6" />
               </div>
               <h1 className="text-xl font-black tracking-tight text-white">SWING<span className="text-indigo-400">AI</span></h1>
+            </div>
+
+            {/* Live Data Source Indicator */}
+            <div className="mx-4 mb-4 flex items-center justify-center">
+              <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center space-x-1.5 ${dataSource === 'upstox' ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-700/50' : 'bg-gray-800 text-gray-300 border border-gray-700'}`}>
+                <span className={`w-1.5 h-1.5 rounded-full ${dataSource === 'upstox' ? 'bg-emerald-400 animate-pulse' : 'bg-yellow-400'}`}></span>
+                <span>{dataSource === 'upstox' ? 'UPSTOX REALTIME (0ms)' : 'YAHOO FINANCE (15m)'}</span>
+              </span>
             </div>
             
             {/* Global Active Monitor Badge */}

@@ -52,12 +52,8 @@ def hoard_intraday_data(data_source: str = 'yfinance', api_key: str = ''):
                     df = pd.DataFrame(candles)
             
             elif data_source == 'upstox':
-                # Upstox SDK API implementation (REST)
-                headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
-                # Requires instrument mapping, using dummy for architecture completion
-                res = requests.get(f"https://api.upstox.com/v2/historical-candle/NSE_EQ|{ticker}/15minute/2026-01-01/2025-01-01", headers=headers)
-                if res.status_code != 200:
-                    raise Exception(f"Upstox API Error: {res.status_code} {res.reason} - Verify your API key.")
+                from app.data.upstox_provider import fetch_upstox_candles
+                df = fetch_upstox_candles(ticker, interval='15m', period='60d')
                     
             elif data_source == 'dhan':
                 # DhanHQ SDK API implementation (REST)
@@ -173,12 +169,8 @@ def hoard_intraday_data_stream(data_source='yfinance', api_key=''):
                     df = pd.DataFrame(candles)
             
             elif data_source == 'upstox':
-                # Upstox SDK API implementation (REST)
-                headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
-                # Requires instrument mapping, using dummy for architecture completion
-                res = requests.get(f"https://api.upstox.com/v2/historical-candle/NSE_EQ|{ticker}/15minute/2026-01-01/2025-01-01", headers=headers)
-                if res.status_code != 200:
-                    raise Exception(f"Upstox API Error: {res.status_code} {res.reason} - Verify your API key.")
+                from app.data.upstox_provider import fetch_upstox_candles
+                df = fetch_upstox_candles(ticker, interval='15m', period='60d')
                     
             elif data_source == 'dhan':
                 # DhanHQ SDK API implementation (REST)

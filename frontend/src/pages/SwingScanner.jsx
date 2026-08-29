@@ -197,18 +197,18 @@ export default function SwingScanner() {
                       <h2 className="text-2xl font-black tracking-tight">{result.ticker}</h2>
                     </div>
                     <div className="mt-1 flex items-baseline space-x-1.5">
-                      <span className="text-2xl font-light">₹{result.entry.toFixed(2)}</span>
+                      <span className="text-2xl font-light">{result.entry != null ? `₹${Number(result.entry).toFixed(2)}` : '-'}</span>
                       <span className="text-xs text-purple-200 font-medium">Entry</span>
                     </div>
                   </div>
                   <div className="bg-white/10 backdrop-blur-sm border border-white/20 px-3 py-1.5 rounded-xl text-right shadow-xs">
-                    <div className="font-black text-xl leading-none">{result.score.toFixed(1)}%</div>
+                    <div className="font-black text-xl leading-none">{result.score != null ? Number(result.score).toFixed(1) : '-'}%</div>
                     <span className="block text-[9px] font-bold text-purple-200 uppercase tracking-wider mt-0.5">
                       {result.calibration ? 'CALIBRATED' : 'CONVICTION'}
                     </span>
                     {result.raw_score !== undefined && result.raw_score !== result.score && (
                       <span className="block text-[8px] text-purple-300 font-mono">
-                        Raw: {result.raw_score.toFixed(1)}%
+                        Raw: {Number(result.raw_score).toFixed(1)}%
                       </span>
                     )}
                   </div>
@@ -219,15 +219,15 @@ export default function SwingScanner() {
               <div className="grid grid-cols-3 gap-2 p-3 bg-slate-50 border-b border-slate-100">
                 <div className="bg-white p-2 rounded-lg border border-red-100 text-center shadow-xs">
                   <span className="text-[10px] font-bold text-red-600 uppercase block">Stop Loss</span>
-                  <span className="font-mono font-bold text-xs text-red-700">₹{result.sl?.toFixed(2) || '-'}</span>
+                  <span className="font-mono font-bold text-xs text-red-700">{result.sl != null ? `₹${Number(result.sl).toFixed(2)}` : '-'}</span>
                 </div>
                 <div className="bg-white p-2 rounded-lg border border-green-100 text-center shadow-xs">
                   <span className="text-[10px] font-bold text-green-600 uppercase block">Target 1 (1:1.5)</span>
-                  <span className="font-mono font-bold text-xs text-green-700">₹{result.tp1?.toFixed(2) || '-'}</span>
+                  <span className="font-mono font-bold text-xs text-green-700">{result.tp1 != null ? `₹${Number(result.tp1).toFixed(2)}` : '-'}</span>
                 </div>
                 <div className="bg-white p-2 rounded-lg border border-emerald-100 text-center shadow-xs">
                   <span className="text-[10px] font-bold text-emerald-600 uppercase block">Target 2 (1:3.0)</span>
-                  <span className="font-mono font-bold text-xs text-emerald-700">₹{result.tp2?.toFixed(2) || '-'}</span>
+                  <span className="font-mono font-bold text-xs text-emerald-700">{result.tp2 != null ? `₹${Number(result.tp2).toFixed(2)}` : '-'}</span>
                 </div>
               </div>
 
@@ -284,14 +284,16 @@ export default function SwingScanner() {
                 const maxRisk = Number(defaultProfile.maxRiskPerTrade) || 2.0;
                 
                 const riskAmount = capital * (maxRisk / 100);
-                const riskPerShare = Math.abs(result.entry - result.sl);
+                const entryVal = Number(result.entry) || 0;
+                const slVal = Number(result.sl) || 0;
+                const riskPerShare = Math.abs(entryVal - slVal);
                 let qty = 0;
-                if (riskPerShare > 0) {
+                if (riskPerShare > 0 && entryVal > 0) {
                   qty = Math.floor(riskAmount / riskPerShare);
+                  const maxQtyByCapital = Math.floor(capital / entryVal);
+                  qty = Math.min(qty, maxQtyByCapital);
                 }
-                const maxQtyByCapital = Math.floor(capital / result.entry);
-                qty = Math.min(qty, maxQtyByCapital);
-                const capitalRequired = qty * result.entry;
+                const capitalRequired = qty * entryVal;
 
                 return (
                   <div className="px-4 py-2.5 bg-indigo-50/70 border-b border-indigo-100 flex items-center justify-between text-xs">

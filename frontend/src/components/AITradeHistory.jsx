@@ -310,34 +310,36 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                   </div>
                 </td>
                 <td className="px-6 py-4 text-right">
-                  <div className="text-gray-800 font-medium">₹{trade.entry.toFixed(2)}</div>
-                  {trade.effective_entry && (
-                    <div className="text-[10px] text-slate-400" title={`Modeled with ${trade.slippage_pct}% execution slippage`}>
-                      Eff: ₹{trade.effective_entry.toFixed(2)}
+                  <div className="text-gray-800 font-medium">{trade.entry != null ? `₹${Number(trade.entry).toFixed(2)}` : '-'}</div>
+                  {trade.effective_entry != null && (
+                    <div className="text-[10px] text-slate-400" title={`Modeled with ${trade.slippage_pct || 0.08}% execution slippage`}>
+                      Eff: ₹{Number(trade.effective_entry).toFixed(2)}
                     </div>
                   )}
                 </td>
                 <td className="px-6 py-4 text-right font-medium">
-                  <div className="text-red-500">₹{trade.sl.toFixed(2)}</div>
-                  {trade.risk_audit && trade.risk_audit.risk_level !== 'NORMAL' && (
+                  <div className="text-red-500">{trade.sl != null ? `₹${Number(trade.sl).toFixed(2)}` : '-'}</div>
+                  {trade.risk_audit && trade.risk_audit.risk_level !== 'NORMAL' && trade.risk_audit.tightened_sl != null && (
                     <button 
                       onClick={() => setSelectedAuditTrade(trade)}
                       className="mt-1 inline-flex items-center text-[10px] bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 font-bold px-1.5 py-0.5 rounded cursor-pointer transition shadow-2xs"
                       title="AI detected weakness: Click to view model audit"
                     >
                       <AlertTriangle size={10} className="mr-1 text-amber-600" />
-                      Tighten: ₹{trade.risk_audit.tightened_sl.toFixed(2)} 🔍
+                      Tighten: ₹{Number(trade.risk_audit.tightened_sl).toFixed(2)} 🔍
                     </button>
                   )}
                 </td>
-                <td className="px-6 py-4 text-right text-green-500 font-medium">₹{trade.tp1.toFixed(2)}</td>
+                <td className="px-6 py-4 text-right text-green-500 font-medium">
+                  {trade.tp1 != null ? `₹${Number(trade.tp1).toFixed(2)}` : '-'}
+                </td>
                 <td className="px-6 py-4 text-right font-mono">
-                  <span className={`font-bold ${trade.profit_pct > 0 ? 'text-green-600' : trade.profit_pct < 0 ? 'text-red-600' : 'text-gray-500'}`}>
-                    {trade.profit_pct > 0 ? '+' : ''}{trade.profit_pct?.toFixed(2)}%
+                  <span className={`font-bold ${Number(trade.profit_pct) > 0 ? 'text-green-600' : Number(trade.profit_pct) < 0 ? 'text-red-600' : 'text-gray-500'}`}>
+                    {trade.profit_pct != null ? `${Number(trade.profit_pct) > 0 ? '+' : ''}${Number(trade.profit_pct).toFixed(2)}%` : '-'}
                   </span>
-                  {trade.slippage_drag !== undefined && trade.slippage_drag !== 0 && (
+                  {trade.slippage_drag != null && trade.slippage_drag !== 0 && (
                     <span className="block text-[9px] text-slate-400" title="Slippage Friction Drag">
-                      Drag: -{Math.abs(trade.slippage_drag).toFixed(2)}%
+                      Drag: -{Math.abs(Number(trade.slippage_drag)).toFixed(2)}%
                     </span>
                   )}
                 </td>

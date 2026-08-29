@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 def send_telegram_message(message: str):
     try:
-        conn = sqlite3.connect('market_data.db')
+        conn = sqlite3.connect('market_data.db', timeout=5.0)
         cur = conn.cursor()
         cur.execute("SELECT value FROM app_settings WHERE key = 'telegram_bot_token'")
         token = cur.fetchone()
@@ -14,12 +14,12 @@ def send_telegram_message(message: str):
         chat = cur.fetchone()
         conn.close()
         
-        if not token or not chat or not token[0] or not chat[0]:
+        if not token or not chat or not str(token[0]).strip() or not str(chat[0]).strip():
             logger.info("Telegram not configured. Skipping push notification.")
             return False
             
-        bot_token = token[0]
-        chat_id = chat[0]
+        bot_token = str(token[0]).strip()
+        chat_id = str(chat[0]).strip()
         
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         payload = {

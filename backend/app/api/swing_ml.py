@@ -18,15 +18,15 @@ router = APIRouter()
 from app.api.intraday_ml import INDIAN_STOCK_UNIVERSE
 
 def format_sse(data: dict) -> str:
-    return f"{json.dumps(data)}\n"
+    return f"{json.dumps(data, default=str)}\n"
 
 def run_swing_scan(custom_tickers: list = None):
     try:
-        universe = INDIAN_STOCK_UNIVERSE.copy()
-        if custom_tickers:
-            for t in custom_tickers:
-                if t and t not in universe:
-                    universe.append(t)
+        clean_custom = [t.strip().upper() for t in (custom_tickers or []) if t and t.strip()]
+        if clean_custom:
+            universe = clean_custom
+        else:
+            universe = INDIAN_STOCK_UNIVERSE.copy()
         
         yield format_sse({"type": "system", "message": f"Initializing Swing Trade ML Pipeline for {len(universe)} symbols..."})
         yield format_sse({"type": "info", "message": "Establishing connection to historical daily data vaults...", "progress": 5})
@@ -144,8 +144,8 @@ def run_swing_scan(custom_tickers: list = None):
                 
                 ensemble.fit(X, y)
                 
-                # Get the absolute latest data point (live candle)
-                latest_data = df.iloc[-1]
+                # Get the absolute latest cleaned data point (live candle from ml_df)
+                latest_data = ml_df.iloc[-1]
                 latest_features = latest_data[features].values.reshape(1, -1)
                 
                 # Replace NaNs with 0 in live data to prevent crashes
@@ -153,38 +153,41 @@ def run_swing_scan(custom_tickers: list = None):
                 
                 # Predict
                 prob = ensemble.predict_proba(latest_features)[0]
-                bullish_prob = prob[1] * 100 
+                bullish_prob = float(prob[1] * 100)
                 
                 # Calculate Conviction Score (Max 150)
                 technical_bonus = 0
-                if latest_data['rsi'] < 40 and latest_data['macd_diff'] > 0:
+                if float(latest_data['rsi']) < 40 and float(latest_data['macd_diff']) > 0:
                     technical_bonus += 20
-                if latest_data['adx'] > 25:
+                if float(latest_data['adx']) > 25:
                     technical_bonus += 15
                     
-                score = bullish_prob + technical_bonus
+                score = float(bullish_prob + technical_bonus)
                 
                 # Record to history
                 current_price = float(latest_data['close'])
                 atr = float(latest_data['atr'])
+                if np.isnan(current_price) or current_price <= 0 or np.isnan(atr) or atr <= 0:
+                    continue
+                    
                 atr_pct_val = (atr / current_price * 100) if current_price > 0 else 2.0
                 
-                vol_sma20 = df['volume'].rolling(20).mean().iloc[-1] if 'volume' in df.columns else 0
+                vol_sma20 = ml_df['volume'].rolling(20).mean().iloc[-1] if 'volume' in ml_df.columns else 0
                 vol_ratio = float(latest_data['volume'] / vol_sma20) if (vol_sma20 and vol_sma20 > 0) else 1.0
                 
                 # Swing Trading Stop Loss (Wider: 2x ATR)
-                sl = current_price - (atr * 2)
+                sl = float(current_price - (atr * 2))
                 # Swing Target 1 (1:1.5)
-                tp1 = current_price + (atr * 3)
+                tp1 = float(current_price + (atr * 3))
                 # Swing Target 2 (1:3)
-                tp2 = current_price + (atr * 6)
+                tp2 = float(current_price + (atr * 6))
                 
                 scan_history.append({
                     "ticker": ticker,
                     "score": round(score, 1),
                     "action": "BUY" if score > 75 else "HOLD",
                     "prob": round(bullish_prob, 1),
-                    "price": current_price
+                    "price": round(current_price, 2)
                 })
                 
                 # Apply Bearish Macro Penalty

@@ -15,7 +15,7 @@ router = APIRouter()
 # Expanded Universe: Nifty 100 + prominent Midcaps + "Volume Shockers"
 INDIAN_STOCK_UNIVERSE = [
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", 
-    "SBI.NS", "BHARTIARTL.NS", "ITC.NS", "LT.NS", "BAJFINANCE.NS",
+    "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "LT.NS", "BAJFINANCE.NS",
     "HCLTECH.NS", "MARUTI.NS", "SUNPHARMA.NS", "TATAMOTORS.NS", "KOTAKBANK.NS",
     "ONGC.NS", "NTPC.NS", "AXISBANK.NS", "WIPRO.NS", "M&M.NS",
     "ULTRACEMCO.NS", "POWERGRID.NS", "TITAN.NS", "ASIANPAINT.NS", "BAJAJFINSV.NS",
@@ -37,7 +37,7 @@ INDIAN_STOCK_UNIVERSE = [
 ]
 
 def format_sse(data: dict) -> str:
-    return json.dumps(data) + "\n"
+    return json.dumps(data, default=str) + "\n"
 
 async def run_ml_scan(custom_list=None):
     if custom_list is None:
@@ -116,7 +116,7 @@ async def run_ml_scan(custom_list=None):
                 else:
                     continue
             
-            if df.empty or len(df) < 500:
+            if df.empty or len(df) < 100:
                 continue
                 
             if isinstance(df.columns, pd.MultiIndex):
