@@ -90,3 +90,23 @@ def trigger_autopilot_manual(session: str = "Manual Trigger"):
     import threading
     threading.Thread(target=run_scheduled_autopilot_sweep, args=(session,), daemon=True).start()
     return {"status": "success", "message": f"Autopilot sweep '{session}' dispatched in background."}
+
+class HeatCapConfig(BaseModel):
+    max_heat_cap_pct: float = 6.0
+
+@router.get("/portfolio-heat")
+def get_heat_cap_setting():
+    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    cur = conn.execute("SELECT value FROM app_settings WHERE key = 'portfolio_max_heat_cap'")
+    row = cur.fetchone()
+    conn.close()
+    return {"max_heat_cap_pct": float(row[0]) if row else 6.0}
+
+@router.post("/portfolio-heat")
+def save_heat_cap_setting(config: HeatCapConfig):
+    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('portfolio_max_heat_cap', ?)", (str(config.max_heat_cap_pct),))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "max_heat_cap_pct": config.max_heat_cap_pct}
+

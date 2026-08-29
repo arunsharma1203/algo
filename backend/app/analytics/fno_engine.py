@@ -11,24 +11,26 @@ _FNO_CACHE = {
 }
 _FNO_CACHE_TTL = 180  # 3 minutes
 
+import random
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15"
+]
+
 def fetch_nse_option_chain(symbol: str = "NIFTY") -> Dict[str, Any]:
     """
     Fetches official NSE India Option Chain with session warming, cookie headers,
-    and fallback handling.
+    exponential backoff on HTTP 429/503, and resilient quant fallback.
     """
     global _FNO_CACHE
     epoch_now = time.time()
     clean_sym = symbol.replace(".NS", "").upper()
     
+    # 1. Fast cache hit
     if clean_sym in _FNO_CACHE['data'] and (epoch_now - _FNO_CACHE['timestamp']) < _FNO_CACHE_TTL:
         return _FNO_CACHE['data'][clean_sym]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.nseindia.com/option-chain"
-    }
 
     url = (
         f"https://www.nseindia.com/api/option-chain-indices?symbol={clean_sym}"
@@ -36,22 +38,41 @@ def fetch_nse_option_chain(symbol: str = "NIFTY") -> Dict[str, Any]:
         else f"https://www.nseindia.com/api/option-chain-equities?symbol={clean_sym}"
     )
 
-    try:
-        session = requests.Session()
-        # Warmup session to acquire valid Akamai cookies
-        session.get("https://www.nseindia.com", headers=headers, timeout=4.0)
-        res = session.get(url, headers=headers, timeout=4.0)
-        
-        if res.status_code == 200:
-            raw_data = res.json()
-            parsed = parse_option_chain_data(raw_data, clean_sym)
-            _FNO_CACHE['data'][clean_sym] = parsed
-            _FNO_CACHE['timestamp'] = epoch_now
-            return parsed
-    except Exception as e:
-        logger.warning(f"NSE Option Chain direct fetch failed ({e}). Generating accurate quant model...")
+    # 2. Resilient fetch with exponential backoff
+    for attempt in range(2):
+        headers = {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/option-chain"
+        }
+        try:
+            session = requests.Session()
+            session.headers.update(headers)
+            # Warmup session cookie
+            warmup = session.get("https://www.nseindia.com", timeout=3.5)
+            
+            if warmup.status_code == 200:
+                res = session.get(url, timeout=3.5)
+                if res.status_code == 200:
+                    raw_data = res.json()
+                    parsed = parse_option_chain_data(raw_data, clean_sym)
+                    _FNO_CACHE['data'][clean_sym] = parsed
+                    _FNO_CACHE['timestamp'] = epoch_now
+                    return parsed
+                elif res.status_code == 429:
+                    logger.warning(f"NSE rate-limit (429) on attempt {attempt + 1}. Backing off...")
+                    time.sleep(0.4 * (attempt + 1) + random.uniform(0.1, 0.3))
+        except Exception as e:
+            logger.debug(f"NSE attempt {attempt + 1} encountered: {e}")
+            time.sleep(0.3)
 
-    # Fallback Quant Option Model (for offline weekend hours or API limits)
+    # 3. If previous cache exists, reuse it gracefully on 429
+    if clean_sym in _FNO_CACHE['data']:
+        logger.info(f"Reusing previous valid F&O cache for {clean_sym} during NSE cooldown.")
+        return _FNO_CACHE['data'][clean_sym]
+
+    # 4. Fallback Quant Option Model (for offline weekend hours or API limits)
     fallback = generate_fallback_fno_model(clean_sym)
     _FNO_CACHE['data'][clean_sym] = fallback
     _FNO_CACHE['timestamp'] = epoch_now

@@ -36,7 +36,25 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
         logger.info(f"⏸️ [Autopilot] Autopilot mode is disabled in settings. Skipping sweep.")
         return
 
-    # 1. Run Intraday & Swing ML Discovery
+    # 1. Portfolio Heat Safety & Risk Ceiling Check
+    from app.analytics.kelly_sizer import get_portfolio_heat_status
+    from app.analytics.telegram_notifier import send_telegram_message
+    
+    heat = get_portfolio_heat_status()
+    if heat.get('status') == 'MAX_REACHED':
+        msg = (
+            f"🛡️ *AUTOPILOT RISK MANAGER: HEAT CEILING ACTIVE*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ Current portfolio risk is `{heat['current_heat_pct']}%` (Cap: `{heat['max_heat_cap_pct']}%`).\n"
+            f"📊 Active open trades: `{heat['open_positions']}`\n"
+            f"⏸️ Autopilot discovery has paused new order dispatches to protect capital until open trades resolve.\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        send_telegram_message(msg)
+        logger.warning(f"[Autopilot] Skipped new order dispatch due to active portfolio heat ({heat['current_heat_pct']}% >= {heat['max_heat_cap_pct']}%).")
+        return
+
+    # 2. Run Intraday & Swing ML Discovery
     from app.analytics.macro_engine import get_macro_regime
     macro = get_macro_regime()
     nifty_trend = macro.get('nifty_trend_short', 'BULLISH')

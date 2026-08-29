@@ -1,36 +1,46 @@
 import os
-import joblib
+import json
+import logging
 import numpy as np
 import pandas as pd
-import logging
 from sklearn.linear_model import LogisticRegression
 
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "models")
+WEIGHTS_PATH = os.path.join(MODEL_DIR, "confidence_calibrator_weights.json")
 CALIBRATOR_PATH = os.path.join(MODEL_DIR, "confidence_calibrator.pkl")
 
 class ProbabilityCalibrator:
     def __init__(self):
-        self.model = None
+        self.coef = None
+        self.intercept = None
         self.is_fitted = False
         self.load_or_fit()
 
     def load_or_fit(self):
         os.makedirs(MODEL_DIR, exist_ok=True)
-        if os.path.exists(CALIBRATOR_PATH):
+        # 1. First priority: Load fast, version-agnostic JSON weights (0 security risk, 0 version mismatch)
+        if os.path.exists(WEIGHTS_PATH):
             try:
-                self.model = joblib.load(CALIBRATOR_PATH)
-                self.is_fitted = True
-                return
+                with open(WEIGHTS_PATH, "r") as f:
+                    data = json.load(f)
+                    self.coef = float(data["coef"])
+                    self.intercept = float(data["intercept"])
+                    if self.coef > 0.005:
+                        self.is_fitted = True
+                        logger.info("Loaded Platt scaling parameters from JSON weights.")
+                        return
             except Exception as e:
-                logger.warning(f"Could not load calibrator model: {e}")
+                logger.warning(f"Could not load JSON weights: {e}")
+
+        # 2. Fit empirical Platt Scaling from resolved trade history
         self.fit_from_history()
 
     def fit_from_history(self):
         """
         Fits Platt Sigmoid Scaling: LogisticRegression on historical raw scores vs real trade outcomes.
-        Guarantees strict positive monotonicity (higher raw score always gives higher calibrated probability).
+        Extracts coefficients to JSON weights for 100% environment-agnostic, warning-free inference.
         """
         from app.api.ml_history import evaluate_ml_history
         try:
@@ -52,15 +62,29 @@ class ProbabilityCalibrator:
                     clf = LogisticRegression(C=0.5, solver='lbfgs', random_state=42)
                     clf.fit(X, y)
                     
+                    c = float(clf.coef_[0][0])
+                    intercept = float(clf.intercept_[0])
+                    
                     # Enforce strict positive monotonicity
-                    if clf.coef_[0][0] > 0.01:
-                        self.model = clf
+                    if c > 0.01:
+                        self.coef = c
+                        self.intercept = intercept
                         self.is_fitted = True
+                        
+                        # Save to clean JSON weights
                         try:
-                            joblib.dump(clf, CALIBRATOR_PATH)
+                            with open(WEIGHTS_PATH, "w") as f:
+                                json.dump({
+                                    "coef": round(c, 6),
+                                    "intercept": round(intercept, 6),
+                                    "fitted_trades": len(resolved),
+                                    "accuracy": float(clf.score(X, y)),
+                                    "format": "platt_sigmoid_weights_v1"
+                                }, f, indent=2)
                         except Exception as e:
-                            pass
-                        logger.info("Probability Calibrator fitted with empirical Platt Sigmoid scaling.")
+                            logger.error(f"Error saving calibrator JSON weights: {e}")
+                            
+                        logger.info("Probability Calibrator fitted & saved as clean JSON weights.")
                         return
                     else:
                         logger.info("Historical sample exhibits noisy slope; using monotonic prior sigmoid.")
@@ -79,12 +103,16 @@ class ProbabilityCalibrator:
         """
         raw_score = float(raw_score)
         
-        if self.is_fitted and self.model is not None and getattr(self.model, 'coef_', [[0]])[0][0] > 0.01:
+        if self.is_fitted and self.coef is not None and self.coef > 0.005:
             try:
-                prob = self.model.predict_proba(np.array([[raw_score]]))[0][1]
+                # Analytical Platt Scaling: P(y=1|X) = 1 / (1 + exp(-(coef * X + intercept)))
+                z = self.coef * raw_score + (self.intercept if self.intercept is not None else 0.0)
+                # Clip z to prevent float overflow
+                z = max(-15.0, min(15.0, z))
+                prob = 1.0 / (1.0 + np.exp(-z))
                 calibrated = float(prob * 100.0)
                 calibrated = max(20.0, min(95.0, calibrated))
-                method = "Empirical Platt Scaling (Fitted on Trade History)"
+                method = "Empirical Platt Scaling (Pure JSON Weights)"
             except Exception as e:
                 calibrated = self._fallback_sigmoid(raw_score)
                 method = "Monotonic Sigmoid Prior"

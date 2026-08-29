@@ -73,12 +73,22 @@ def calculate_kelly_position_size(
         "kelly_mode": kelly_mode
     }
 
-def get_portfolio_heat_status(capital: float = 100000.0, max_heat_cap_pct: float = 6.0) -> Dict[str, Any]:
+def get_portfolio_heat_status(capital: float = 100000.0, max_heat_cap_pct: float = None) -> Dict[str, Any]:
     """
     Aggregates risk across all active open positions in ml_trade_history
     to enforce a portfolio-level total heat ceiling.
     """
     conn = sqlite3.connect('market_data.db', timeout=5.0)
+    
+    # Query user-defined heat cap if not specified
+    if max_heat_cap_pct is None:
+        try:
+            cur = conn.execute("SELECT value FROM app_settings WHERE key = 'portfolio_max_heat_cap'")
+            row = cur.fetchone()
+            max_heat_cap_pct = float(row[0]) if row else 6.0
+        except:
+            max_heat_cap_pct = 6.0
+
     try:
         df_open = pd.read_sql_query("SELECT ticker, entry, sl, direction, trade_type FROM ml_trade_history WHERE status = 'OPEN'", conn)
     except:
