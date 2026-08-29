@@ -77,8 +77,8 @@ def get_lab_stats():
         evaluated_trades = evaluate_ml_history()
         
         # Only count closed trades (not OPEN)
-        closed_trades = [t for t in evaluated_trades if t['outcome'] != 'OPEN']
-        wins = [t for t in closed_trades if t['outcome'] == 'TARGET MET']
+        closed_trades = [t for t in evaluated_trades if t.get('outcome') not in ('OPEN', None)]
+        wins = [t for t in closed_trades if t.get('outcome') == 'TARGET MET' or (t.get('profit_pct') is not None and t.get('profit_pct') > 0)]
         
         total = len(closed_trades)
         win_rate = round((len(wins) / total * 100), 1) if total > 0 else 0
