@@ -12,46 +12,11 @@ import numpy as np
 
 router = APIRouter()
 
+from app.analytics.monte_carlo import calculate_advanced_metrics, run_monte_carlo_simulation
+
 class MLBacktestRequest(BaseModel):
     ticker: str
     model_type: str # 'SWING' or 'INTRADAY'
-
-def calculate_metrics(equity_curve, trades, initial_capital=100000):
-    if not trades:
-        return {
-            "total_trades": 0, "win_rate": 0.0, "total_pnl": 0.0,
-            "max_drawdown": 0.0, "sharpe_ratio": 0.0, "final_equity": initial_capital
-        }
-        
-    winning_trades = [t for t in trades if t['pnl'] > 0]
-    win_rate = (len(winning_trades) / len(trades)) * 100
-    
-    total_pnl = sum(t['pnl'] for t in trades)
-    
-    # Drawdown
-    eq_series = pd.Series([point['equity'] for point in equity_curve])
-    cummax = eq_series.cummax()
-    drawdown = (eq_series - cummax) / cummax
-    max_drawdown = abs(drawdown.min() * 100) if not drawdown.empty else 0
-    
-    # Sharpe (approximate daily)
-    if len(eq_series) > 1:
-        daily_returns = eq_series.pct_change().dropna()
-        if daily_returns.std() != 0:
-            sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
-        else:
-            sharpe = 0
-    else:
-        sharpe = 0
-        
-    return {
-        "total_trades": len(trades),
-        "win_rate": round(win_rate, 1),
-        "total_pnl": round(total_pnl, 2),
-        "max_drawdown": round(max_drawdown, 2),
-        "sharpe_ratio": round(sharpe, 2),
-        "final_equity": round(eq_series.iloc[-1] if not eq_series.empty else initial_capital, 2)
-    }
 
 @router.post("/backtest-simulate")
 async def run_ml_backtest(req: MLBacktestRequest):
@@ -244,11 +209,13 @@ async def run_ml_backtest(req: MLBacktestRequest):
             # Update the last equity point
             equity_curve[-1]['equity'] = round(capital, 2)
             
-        metrics = calculate_metrics(equity_curve, trades)
+        metrics = calculate_advanced_metrics(trades, equity_curve, initial_capital=100000.0)
+        monte_carlo = run_monte_carlo_simulation(trades, initial_capital=100000.0, n_simulations=1000, horizon_trades=50)
         
         return {
             "status": "success",
             "metrics": metrics,
+            "monte_carlo": monte_carlo,
             "trades": trades[::-1], # Newest first
             "equity_curve": equity_curve
         }

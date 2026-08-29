@@ -55,3 +55,38 @@ async def get_telegram_config():
         "bot_token": token[0] if token else "",
         "chat_id": chat[0] if chat else ""
     }
+
+class AutopilotConfig(BaseModel):
+    enabled: bool = True
+    min_conviction: float = 70.0
+
+@router.get("/autopilot")
+async def get_autopilot_config():
+    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM app_settings WHERE key = 'autopilot_enabled'")
+    en = cur.fetchone()
+    cur.execute("SELECT value FROM app_settings WHERE key = 'autopilot_min_conviction'")
+    conv = cur.fetchone()
+    conn.close()
+    return {
+        "enabled": False if en and en[0] == 'false' else True,
+        "min_conviction": float(conv[0]) if conv else 70.0,
+        "schedule": ["09:30 IST", "11:30 IST", "13:30 IST"]
+    }
+
+@router.post("/autopilot")
+async def save_autopilot_config(config: AutopilotConfig):
+    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('autopilot_enabled', ?)", ('true' if config.enabled else 'false',))
+    conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('autopilot_min_conviction', ?)", (str(config.min_conviction),))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": f"Autopilot set to {'Enabled' if config.enabled else 'Disabled'}."}
+
+@router.post("/autopilot/trigger")
+def trigger_autopilot_manual(session: str = "Manual Trigger"):
+    from app.tasks.autopilot_scanner import run_scheduled_autopilot_sweep
+    import threading
+    threading.Thread(target=run_scheduled_autopilot_sweep, args=(session,), daemon=True).start()
+    return {"status": "success", "message": f"Autopilot sweep '{session}' dispatched in background."}

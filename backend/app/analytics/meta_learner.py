@@ -141,6 +141,28 @@ class TradeMetaLearner:
             adjustments['macro_alignment'] = +4.0
         else:
             adjustments['macro_alignment'] = -8.0 # Strong headwind
+
+        # E. F&O Option Chain Confluence (PCR & OI Walls)
+        try:
+            from app.analytics.fno_engine import fetch_nse_option_chain
+            fno = fetch_nse_option_chain("NIFTY")
+            pcr = float(fno.get('pcr', 1.0))
+            if is_bullish and pcr >= 1.20:
+                adjustments['fno_pcr'] = +3.0
+                reasons.append(f"Bullish Option Floor (PCR {pcr})")
+            elif is_bullish and pcr <= 0.75:
+                adjustments['fno_pcr'] = -4.0
+                reasons.append(f"Call Resistance Wall (PCR {pcr})")
+            elif not is_bullish and pcr <= 0.80:
+                adjustments['fno_pcr'] = +3.0
+                reasons.append(f"Bearish Option Pressure (PCR {pcr})")
+            elif not is_bullish and pcr >= 1.25:
+                adjustments['fno_pcr'] = -4.0
+                reasons.append(f"Heavy Put Support Floor (PCR {pcr})")
+            else:
+                adjustments['fno_pcr'] = 0.0
+        except:
+            adjustments['fno_pcr'] = 0.0
             
         total_adjustment = sum(adjustments.values())
         final_score = max(0.0, min(100.0, base_confidence + total_adjustment))

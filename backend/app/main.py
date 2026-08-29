@@ -43,6 +43,15 @@ try:
 except Exception as e:
     logger.error(f"Failed to schedule weekly retraining pipeline: {e}")
 
+# 🚀 AUTOPILOT SCHEDULED DISCOVERY SCANS (09:30, 11:30, 13:30 IST Mon-Fri)
+try:
+    from app.tasks.autopilot_scanner import run_scheduled_autopilot_sweep
+    scheduler.add_job(lambda: run_scheduled_autopilot_sweep("Morning Momentum"), 'cron', day_of_week='mon-fri', hour=9, minute=30, id='autopilot_0930')
+    scheduler.add_job(lambda: run_scheduled_autopilot_sweep("Mid-Day Continuation"), 'cron', day_of_week='mon-fri', hour=11, minute=30, id='autopilot_1130')
+    scheduler.add_job(lambda: run_scheduled_autopilot_sweep("Afternoon Breakout"), 'cron', day_of_week='mon-fri', hour=13, minute=30, id='autopilot_1330')
+except Exception as e:
+    logger.error(f"Failed to schedule autopilot scans: {e}")
+
 scheduler.start()
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.backtest import router as backtest_router
@@ -53,6 +62,7 @@ from app.api.broker import router as broker_router
 from app.api.swing_ml import router as swing_router
 from app.api.ml_backtest import router as ml_backtest_router
 from app.api.settings import router as settings_router
+from app.api.fno import router as fno_router
 
 app = FastAPI(title="Swing Trading AI Backend")
 
@@ -72,6 +82,7 @@ app.include_router(broker_router, prefix="/api/broker", tags=["broker"])
 app.include_router(swing_router, prefix="/api/ml", tags=["swing_ml"])
 app.include_router(ml_backtest_router, prefix="/api/ml", tags=["ml_backtest"])
 app.include_router(settings_router, prefix="/api/settings", tags=["settings"])
+app.include_router(fno_router, prefix="/api/fno", tags=["fno"])
 
 @app.get("/")
 def read_root():

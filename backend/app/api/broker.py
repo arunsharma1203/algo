@@ -59,7 +59,30 @@ async def execute_trade(req: ExecuteRequest):
         }
         
     except Exception as e:
-        logger.error(f"Broker execution failed: {e}")
-        if isinstance(e, HTTPException):
-            raise e
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Execution failed: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+class KellySizingRequest(BaseModel):
+    capital: float = 100000.0
+    entry: float
+    sl: float
+    tp1: float
+    win_prob: float = 65.0
+    kelly_mode: str = "HALF" # QUARTER, HALF, FULL
+
+@router.post("/kelly-sizing")
+def get_kelly_sizing(req: KellySizingRequest):
+    from app.analytics.kelly_sizer import calculate_kelly_position_size
+    return calculate_kelly_position_size(
+        capital=req.capital,
+        entry=req.entry,
+        sl=req.sl,
+        tp1=req.tp1,
+        win_prob=req.win_prob,
+        kelly_mode=req.kelly_mode
+    )
+
+@router.get("/portfolio-heat")
+def get_portfolio_heat(capital: float = 100000.0, max_heat: float = 6.0):
+    from app.analytics.kelly_sizer import get_portfolio_heat_status
+    return get_portfolio_heat_status(capital=capital, max_heat_cap_pct=max_heat)

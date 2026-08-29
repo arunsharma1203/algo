@@ -3,6 +3,7 @@ import { Terminal, Play, Loader, TrendingUp, AlertTriangle, Crosshair, Target, C
 import AITradeHistory from '../components/AITradeHistory';
 import MLBacktestModal from '../components/MLBacktestModal';
 import ExecutionModal from '../components/ExecutionModal';
+import FNOAnalyticsCard from '../components/FNOAnalyticsCard';
 
 export default function IntradayScanner() {
   const [logs, setLogs] = useState(() => {
@@ -346,6 +347,7 @@ export default function IntradayScanner() {
           )}
         </div>
       </div>
+      <FNOAnalyticsCard symbol={result?.ticker || "NIFTY"} />
       <AITradeHistory tradeType="INTRADAY" refreshTrigger={refreshTrigger} />
       <MLBacktestModal 
         isOpen={backtestModalOpen} 
