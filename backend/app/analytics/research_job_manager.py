@@ -864,7 +864,8 @@ class ResearchJobManager:
                     universe_name=universe_name,
                     progress_callback=portfolio_progress_callback,
                     worker_count=workers,
-                    model_factory=m_factory
+                    model_factory=m_factory,
+                    model_type=job.get("model_type", "LIGHTGBM_ALPHA")
                 )
                 results_payload = engine.run()
 

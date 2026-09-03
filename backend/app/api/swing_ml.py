@@ -81,19 +81,25 @@ def run_swing_scan(custom_tickers: list = None, universe_preset: str = "NIFTY_50
         chunks = [universe[i:i + chunk_size] for i in range(0, len(universe), chunk_size)]
         yield format_sse({"type": "system", "message": f"Bulk fetching 2 years of daily data for {len(universe)} symbols in {len(chunks)} parallel batches...", "progress": 10})
 
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         chunk_dfs = {}
         try:
             with ThreadPoolExecutor(max_workers=min(5, len(chunks))) as executor:
                 future_to_idx = {executor.submit(yf.download, chk, period="2y", interval="1d", progress=False): idx for idx, chk in enumerate(chunks)}
-                for fut in future_to_idx:
+                for fut in as_completed(future_to_idx):
                     c_idx = future_to_idx[fut]
                     chunk_dfs[c_idx] = fut.result()
+                    dl_pct = 10 + int((len(chunk_dfs) / len(chunks)) * 10)
+                    yield format_sse({
+                        "type": "info",
+                        "message": f"📥 Downloaded batch {len(chunk_dfs)}/{len(chunks)} ({len(chunks[c_idx])} symbols)...",
+                        "progress": dl_pct
+                    })
         except Exception as e:
             yield format_sse({"type": "error", "message": f"Bulk fetch failed: {str(e)}"})
             return
             
-        yield format_sse({"type": "system", "message": "Market data fetched. Commencing deep out-of-sample inference...", "progress": 15})
+        yield format_sse({"type": "system", "message": "Market data fetched. Commencing deep out-of-sample inference...", "progress": 20})
         
         best_conviction = None
         best_score = 0
@@ -101,6 +107,7 @@ def run_swing_scan(custom_tickers: list = None, universe_preset: str = "NIFTY_50
         total = len(universe)
         
         for idx, ticker in enumerate(universe):
+            progress_pct = int(20 + ((idx + 1) / total * 70))
             try:
                 c_idx = idx // chunk_size
                 bulk_data = chunk_dfs.get(c_idx)
@@ -132,12 +139,18 @@ def run_swing_scan(custom_tickers: list = None, universe_preset: str = "NIFTY_50
                 )
 
                 if not screen_result.qualified:
+                    # Emit continuous progress heartbeat every 10 tickers so progress bar never freezes
+                    if (idx + 1) % 10 == 0 or (idx + 1) == total:
+                        yield format_sse({
+                            "type": "info",
+                            "message": f"🔍 Evaluated {idx+1}/{total} symbols ({ticker} screened)...",
+                            "progress": progress_pct
+                        })
                     continue
 
-                progress_pct = int(15 + ((idx + 1) / total * 75))
                 yield format_sse({
                     "type": "info",
-                    "message": f"[{idx+1}/{total}] {ticker} (₹{screen_result.entry:.2f}) -> RF:{screen_result.base_probs[0]:.1f}% GB:{screen_result.base_probs[1]:.1f}% SVM:{screen_result.base_probs[2]:.1f}% | Ensemble: {screen_result.raw_confidence:.1f}%",
+                    "message": f"🎯 [{idx+1}/{total}] {ticker} (₹{screen_result.entry:.2f}) -> RF:{screen_result.base_probs[0]:.1f}% GB:{screen_result.base_probs[1]:.1f}% SVM:{screen_result.base_probs[2]:.1f}% | Ensemble: {screen_result.raw_confidence:.1f}%",
                     "progress": progress_pct
                 })
                     

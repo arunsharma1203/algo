@@ -178,14 +178,21 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
                 skip_enrichment=True,  # Enrichment runs only on best trade
             )
 
+            progress_pct = int(18 + ((idx + 1) / total * 70))
+
             if not screen_result.qualified:
+                if (idx + 1) % 5 == 0 or (idx + 1) == total:
+                    yield format_sse({
+                        "type": "info",
+                        "message": f"🔍 Evaluated {idx+1}/{total} active symbols ({ticker} screened)...",
+                        "progress": progress_pct
+                    })
                 continue
 
             # Emit live symbol-level progress event
-            progress_pct = int(12 + ((idx + 1) / total * 75))
             yield format_sse({
                 "type": "info",
-                "message": f"[{idx+1}/{total}] {ticker} (₹{screen_result.entry:.2f}) -> RF:{screen_result.base_probs[0]:.1f}% GB:{screen_result.base_probs[1]:.1f}% SVM:{screen_result.base_probs[2]:.1f}% | Ensemble: {screen_result.raw_confidence:.1f}%",
+                "message": f"🎯 [{idx+1}/{total}] {ticker} (₹{screen_result.entry:.2f}) -> RF:{screen_result.base_probs[0]:.1f}% GB:{screen_result.base_probs[1]:.1f}% SVM:{screen_result.base_probs[2]:.1f}% | Ensemble: {screen_result.raw_confidence:.1f}%",
                 "progress": progress_pct
             })
 

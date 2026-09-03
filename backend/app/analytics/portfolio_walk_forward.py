@@ -37,7 +37,8 @@ class MultiStockPortfolioWalkForwardEngine:
                  universe_name: str = "BENCHMARK_5",
                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
                  worker_count: int = 4,
-                 model_factory: Optional[Callable[[], Any]] = None):
+                 model_factory: Optional[Callable[[], Any]] = None,
+                 model_type: str = "LIGHTGBM_ALPHA"):
         self.tickers = [t.strip().upper() for t in tickers if t]
         self.initial_capital = float(initial_capital)
         self.capital = float(initial_capital)
@@ -50,11 +51,14 @@ class MultiStockPortfolioWalkForwardEngine:
         self.progress_callback = progress_callback
         self.worker_count = worker_count
         self.model_factory = model_factory
+        self.model_type = model_type
 
     def run(self) -> Dict[str, Any]:
         # 1. Ingest & Align Historical Data for all Universe Stocks
         stock_dfs = {}
         features = ['rsi', 'macd', 'macd_diff', 'adx', 'atr']
+        if self.model_type in ("LIGHTGBM", "LIGHTGBM_ALPHA", "ALPHA158"):
+            features.extend(['roc_5', 'roc_10', 'roc_20', 'volatility_20', 'range_ratio', 'kdj_k', 'zscore_20', 'bb_pct'])
         purge_bars = 5
 
         for ticker in self.tickers:
@@ -72,6 +76,22 @@ class MultiStockPortfolioWalkForwardEngine:
             df['returns'] = df['close'].pct_change()
             df['macro_ema'] = df['close'].ewm(span=20, adjust=False).mean()
             df['macro_bullish'] = df['close'] >= df['macro_ema']
+
+            if self.model_type in ("LIGHTGBM", "LIGHTGBM_ALPHA", "ALPHA158"):
+                df['roc_5'] = df['close'].pct_change(5)
+                df['roc_10'] = df['close'].pct_change(10)
+                df['roc_20'] = df['close'].pct_change(20)
+                df['volatility_20'] = df['returns'].rolling(20).std()
+                df['range_ratio'] = (df['high'] - df['low']) / (df['close'] + 1e-6)
+                roll_low_14 = df['low'].rolling(14).min()
+                roll_high_14 = df['high'].rolling(14).max()
+                df['kdj_k'] = (df['close'] - roll_low_14) / (roll_high_14 - roll_low_14 + 1e-6)
+                roll_mean_20 = df['close'].rolling(20).mean()
+                df['zscore_20'] = (df['close'] - roll_mean_20) / (df['close'].rolling(20).std() + 1e-6)
+                bb_std = df['close'].rolling(20).std()
+                bb_upper = roll_mean_20 + 2 * bb_std
+                bb_lower = roll_mean_20 - 2 * bb_std
+                df['bb_pct'] = (df['close'] - bb_lower) / (bb_upper - bb_lower + 1e-6)
 
             # Target: forward 5-day return > 0
             df['future_5d'] = df['close'].shift(-5)
@@ -105,6 +125,7 @@ class MultiStockPortfolioWalkForwardEngine:
         yearly_perf = {}
 
         hp = load_best_params(timeframe="swing")
+        hp["model_type"] = self.model_type
         if self.model_factory is not None:
             hp["use_fast_test_model"] = True
 
@@ -236,6 +257,9 @@ class MultiStockPortfolioWalkForwardEngine:
 
                         if self.model_factory is not None:
                             ens_split = self.model_factory()
+                        elif self.model_type in ("LIGHTGBM", "LIGHTGBM_ALPHA"):
+                            import lightgbm as lgb
+                            ens_split = lgb.LGBMClassifier(n_estimators=hp.get('lgb_n_estimators', 80), learning_rate=hp.get('lgb_learning_rate', 0.05), num_leaves=hp.get('lgb_num_leaves', 31), max_depth=hp.get('lgb_max_depth', 5), random_state=42, verbose=-1, n_jobs=1)
                         else:
                             rf_split = RandomForestClassifier(n_estimators=hp.get('rf_n_estimators', 80), max_depth=hp.get('rf_max_depth', 5), min_samples_split=hp.get('rf_min_samples_split', 2), random_state=42)
                             gb_split = GradientBoostingClassifier(n_estimators=hp.get('gb_n_estimators', 80), learning_rate=hp.get('gb_learning_rate', 0.08), max_depth=hp.get('gb_max_depth', 3), random_state=42)
@@ -251,6 +275,9 @@ class MultiStockPortfolioWalkForwardEngine:
                 # Fit Final Challenger Ensemble on entire multi-stock training slice
                 if self.model_factory is not None:
                     challenger_model = self.model_factory()
+                elif self.model_type in ("LIGHTGBM", "LIGHTGBM_ALPHA"):
+                    import lightgbm as lgb
+                    challenger_model = lgb.LGBMClassifier(n_estimators=hp.get('lgb_n_estimators', 80), learning_rate=hp.get('lgb_learning_rate', 0.05), num_leaves=hp.get('lgb_num_leaves', 31), max_depth=hp.get('lgb_max_depth', 5), random_state=42, verbose=-1, n_jobs=1)
                 else:
                     rf_full = RandomForestClassifier(n_estimators=hp.get('rf_n_estimators', 80), max_depth=hp.get('rf_max_depth', 5), min_samples_split=hp.get('rf_min_samples_split', 2), random_state=42)
                     gb_full = GradientBoostingClassifier(n_estimators=hp.get('gb_n_estimators', 80), learning_rate=hp.get('gb_learning_rate', 0.08), max_depth=hp.get('gb_max_depth', 3), random_state=42)

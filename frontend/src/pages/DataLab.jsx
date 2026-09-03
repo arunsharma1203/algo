@@ -29,6 +29,7 @@ export default function DataLab() {
   const [initialCapital, setInitialCapital] = useState(500000);
   const [maxHeatCap, setMaxHeatCap] = useState(6.0);
   const [kellyMode, setKellyMode] = useState('HALF');
+  const [modelType, setModelType] = useState('LIGHTGBM_ALPHA');
   const [submittingJob, setSubmittingJob] = useState(false);
 
   // Active Job & Job List State
@@ -571,7 +572,8 @@ export default function DataLab() {
         worker_count: parseInt(workerCount),
         initial_capital: parseFloat(initialCapital),
         max_portfolio_heat: parseFloat(maxHeatCap),
-        kelly_mode: kellyMode
+        kelly_mode: kellyMode,
+        model_type: modelType
       });
 
       if (res.data?.status === 'success') {
@@ -2272,6 +2274,18 @@ export default function DataLab() {
                   <option value="5">5 Years (2021 - 2026)</option>
                   <option value="7">7 Years (2019 - 2026)</option>
                   <option value="10">10 Years (2016 - 2026)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[10px] uppercase font-bold text-cyan-400 block mb-1">Model Architecture</label>
+                <select
+                  value={modelType}
+                  onChange={(e) => setModelType(e.target.value)}
+                  className="w-full bg-slate-950 border border-cyan-500/50 text-cyan-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-400 font-medium"
+                >
+                  <option value="LIGHTGBM_ALPHA">⚡ LightGBM + Alpha Factors (~15m)</option>
+                  <option value="VOTING_ENSEMBLE">🏛️ Legacy Ensemble (RF+GB+SVM ~25h)</option>
                 </select>
               </div>
 

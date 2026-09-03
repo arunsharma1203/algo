@@ -65,6 +65,17 @@ def _run_cv_split_worker(split_idx: int, X_train_bytes: bytes, y_train_bytes: by
         if hp.get("use_fast_test_model"):
             from sklearn.linear_model import LogisticRegression
             ens_split = LogisticRegression(random_state=42)
+        elif hp.get("model_type") in ("LIGHTGBM", "LIGHTGBM_ALPHA") or hp.get("use_lightgbm"):
+            import lightgbm as lgb
+            ens_split = lgb.LGBMClassifier(
+                n_estimators=hp.get('lgb_n_estimators', 80),
+                learning_rate=hp.get('lgb_learning_rate', 0.05),
+                num_leaves=hp.get('lgb_num_leaves', 31),
+                max_depth=hp.get('lgb_max_depth', 5),
+                random_state=42,
+                verbose=-1,
+                n_jobs=1
+            )
         else:
             from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
             from sklearn.svm import SVC
