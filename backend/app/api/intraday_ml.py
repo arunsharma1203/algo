@@ -52,7 +52,12 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
         
     start_time = datetime.now()
     clean_custom = [t.strip().upper() for t in custom_list if t and t.strip()]
-    if clean_custom:
+    if universe_preset and universe_preset.upper() == "ALL_COLLECTED":
+        from app.analytics.universe_config import get_universe
+        u_info = get_universe("ALL_COLLECTED", custom_tickers=clean_custom)
+        candidate_pool = list(u_info.get("tickers", []))
+        universe_label = f"ALL COLLECTED SOURCES ({len(candidate_pool)} stocks)"
+    elif clean_custom and (not universe_preset or universe_preset.upper() in ("CUSTOM", "WATCHLIST")):
         candidate_pool = [t if t.endswith(('.NS', '.BO')) else f"{t}.NS" for t in clean_custom]
         universe_label = "CUSTOM WATCHLIST"
     else:

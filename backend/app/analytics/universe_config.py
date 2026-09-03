@@ -86,6 +86,12 @@ UNIVERSE_PRESETS: Dict[str, Dict[str, Any]] = {
         "description": "Every equity symbol with complete historical data cached in the local database.",
         "survivorship_bias": "VARIABLE — All locally synchronized NSE assets."
     },
+    "ALL_COLLECTED": {
+        "name": "All Collected Sources (NIFTY 500 + Watchlist + Local DB)",
+        "tickers": [], # Dynamically populated from all sources
+        "description": "Comprehensive union of Nifty 500 constituents, custom watchlists, and all cached local database equities.",
+        "survivorship_bias": "MINIMAL — Maximum available Indian equity breadth."
+    },
     "CUSTOM": {
         "name": "Custom User-Selected Universe",
         "tickers": [],
@@ -127,6 +133,16 @@ def get_universe(name: str = "BENCHMARK_5", custom_tickers: Optional[List[str]] 
             "tickers": db_tickers,
             "description": "Every equity symbol with complete historical data cached in the local database.",
             "survivorship_bias": "VARIABLE — All locally synchronized NSE assets."
+        }
+    if clean_name == "ALL_COLLECTED":
+        db_tickers = get_available_db_tickers()
+        custom_clean = [t if t.endswith(('.NS', '.BO')) else f"{t}.NS" for t in (custom_tickers or []) if t]
+        merged = list(dict.fromkeys(NIFTY_500_UNIVERSE + db_tickers + list(LIVE_UNIVERSE) + custom_clean))
+        return {
+            "name": f"All Collected Sources ({len(merged)} Stocks)",
+            "tickers": merged,
+            "description": "Comprehensive union of Nifty 500 constituents, custom watchlists, and all cached local database equities.",
+            "survivorship_bias": "MINIMAL — Maximum available Indian equity breadth."
         }
     if clean_name in UNIVERSE_PRESETS:
         return UNIVERSE_PRESETS[clean_name]

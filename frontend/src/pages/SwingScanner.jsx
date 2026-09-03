@@ -52,7 +52,7 @@ export default function SwingScanner() {
 
     try {
       let url = `${API_BASE}/ml/swing-scan?universe=${selectedUniverse}`;
-      if (selectedUniverse === 'WATCHLIST') {
+      if (selectedUniverse === 'WATCHLIST' || selectedUniverse === 'ALL_COLLECTED') {
         const savedWatchlist = localStorage.getItem('watchlist');
         const customTickers = savedWatchlist ? JSON.parse(savedWatchlist).join(',') : '';
         if (customTickers) {
@@ -137,6 +137,7 @@ export default function SwingScanner() {
             disabled={scanning}
             className="bg-gray-900 border border-gray-700 text-gray-200 text-xs font-bold rounded-lg px-3 py-3 focus:outline-none focus:border-purple-500 shadow-sm"
           >
+            <option value="ALL_COLLECTED">All Collected Sources (NIFTY 500 + Watchlist + Local DB)</option>
             <option value="NIFTY_500">NIFTY 500 (500 Stocks - Broad Market)</option>
             <option value="NIFTY_50">NIFTY 50 (50 Benchmark Stocks)</option>
             <option value="WATCHLIST">My Watchlist Only</option>

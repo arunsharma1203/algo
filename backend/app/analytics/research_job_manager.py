@@ -727,10 +727,17 @@ class ResearchJobManager:
             res_type = job.get("research_type", "PORTFOLIO_WALK_FORWARD")
             universe_name = job.get("universe", "BENCHMARK_5")
             if res_type == "SINGLE_STOCK_WALK_FORWARD":
-                stock_sym = universe_name.strip().upper()
-                if not stock_sym.endswith(('.NS', '.BO')):
-                    stock_sym = f"{stock_sym}.NS"
-                tickers = [stock_sym]
+                raw_symbols = universe_name.replace(";", ",").split(",")
+                tickers = []
+                for s in raw_symbols:
+                    s_clean = s.strip().upper()
+                    if s_clean:
+                        if not s_clean.endswith(('.NS', '.BO')):
+                            s_clean = f"{s_clean}.NS"
+                        if s_clean not in tickers:
+                            tickers.append(s_clean)
+                if not tickers:
+                    tickers = ["RELIANCE.NS"]
             else:
                 u_info = get_universe(universe_name)
                 tickers = u_info.get("tickers", ["RELIANCE.NS"])

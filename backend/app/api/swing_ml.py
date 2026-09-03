@@ -34,7 +34,11 @@ def run_swing_scan(custom_tickers: list = None, universe_preset: str = "NIFTY_50
     try:
         start_time = datetime.now()
         clean_custom = [t.strip().upper() for t in (custom_tickers or []) if t and t.strip()]
-        if clean_custom:
+        if universe_preset and universe_preset.upper() == "ALL_COLLECTED":
+            from app.analytics.universe_config import get_universe
+            u_info = get_universe("ALL_COLLECTED", custom_tickers=clean_custom)
+            universe = list(u_info.get("tickers", []))
+        elif clean_custom and (not universe_preset or universe_preset.upper() in ("CUSTOM", "WATCHLIST")):
             universe = clean_custom
         else:
             from app.analytics.universe_config import get_universe

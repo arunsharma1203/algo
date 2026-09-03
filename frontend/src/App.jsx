@@ -150,13 +150,8 @@ function App() {
               <div className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-3 px-2">Market Engine</div>
               <LinkItem to="/" icon={LayoutDashboard} label="Dashboard" onClick={() => setMobileNavOpen(false)} />
               <LinkItem to="/scanner" icon={Search} label="Watchlist Scanner" onClick={() => setMobileNavOpen(false)} />
-              
-              <div className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-3 mt-6 px-2">Backtester</div>
-              <LinkItem to="/strategy/new" icon={Activity} label="Custom Strategy" onClick={() => setMobileNavOpen(false)} />
-              <LinkItem to="/strategy/library" icon={BookmarkPlus} label="Strategy Library" onClick={() => setMobileNavOpen(false)} />
-              <LinkItem to="/saved" icon={FolderOpen} label="Saved Strategies" onClick={() => setMobileNavOpen(false)} />
 
-              <div className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-3 mt-6 px-2 text-indigo-400">AI Tools</div>
+              <div className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-3 mt-6 px-2 text-indigo-400">AI Operations & Research</div>
               <LinkItem to="/ai-scan" icon={BrainCircuit} label="Intraday ML Scan" onClick={() => setMobileNavOpen(false)} />
               <LinkItem to="/swing-scan" icon={Target} label="Swing ML Scan" onClick={() => setMobileNavOpen(false)} />
               <LinkItem to="/ml-lab" icon={Network} label="AI Brain & Lab" onClick={() => setMobileNavOpen(false)} />

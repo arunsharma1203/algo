@@ -554,16 +554,18 @@ export default function DataLab() {
     setSubmittingJob(true);
     try {
       const isSingle = researchType === 'SINGLE_STOCK_WALK_FORWARD';
-      let cleanStock = singleStockSymbol.trim().toUpperCase();
-      if (cleanStock && !cleanStock.endsWith('.NS') && !cleanStock.endsWith('.BO')) {
-        cleanStock = `${cleanStock}.NS`;
+      let parsedTickers = [];
+      if (isSingle) {
+        const parts = singleStockSymbol.split(/[,;\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+        parsedTickers = parts.map(s => (s.endsWith('.NS') || s.endsWith('.BO')) ? s : `${s}.NS`);
+        if (parsedTickers.length === 0) parsedTickers = ['RELIANCE.NS'];
       }
-      const targetUniverse = isSingle ? (cleanStock || 'RELIANCE.NS') : universe;
+      const targetUniverse = isSingle ? parsedTickers.join(', ') : universe;
 
       const res = await axios.post(`${API_BASE}/data-lab/research/jobs`, {
         research_type: researchType,
         universe: targetUniverse,
-        custom_tickers: isSingle ? [targetUniverse] : undefined,
+        custom_tickers: isSingle ? parsedTickers : undefined,
         timeframe: timeframe,
         history_years: parseInt(historyYears),
         worker_count: parseInt(workerCount),
@@ -2210,11 +2212,14 @@ export default function DataLab() {
 
               {researchType === 'SINGLE_STOCK_WALK_FORWARD' ? (
                 <div>
-                  <label className="text-[10px] uppercase font-bold text-cyan-400 block mb-1">Target Single Stock (NSE)</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[10px] uppercase font-bold text-cyan-400">Target Stock(s) — Single or Comma-Separated (NSE)</label>
+                    <span className="text-[9px] text-slate-400">Multi-stock deep walk-forward</span>
+                  </div>
                   <input
                     type="text"
                     list="stocks-datalist"
-                    placeholder="e.g. MAZDOCK.NS, RELIANCE.NS, TCS.NS"
+                    placeholder="e.g. MAZDOCK, BPCL or RELIANCE.NS, TCS.NS"
                     value={singleStockSymbol}
                     onChange={(e) => setSingleStockSymbol(e.target.value.toUpperCase())}
                     className="w-full bg-slate-950 border border-cyan-500/50 text-white font-mono font-bold text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-400 shadow-sm"
