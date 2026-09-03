@@ -72,14 +72,21 @@ async def get_coverage_report(universe: str = "BENCHMARK_5"):
 
 @router.post("/sync-10y")
 async def trigger_10y_sync(req: SyncRequest):
-    """Synchronizes up to 10 years of daily OHLCV for all universe stocks."""
+    """Synchronizes up to 10 years of daily OHLCV for all universe stocks in parallel."""
+    from concurrent.futures import ThreadPoolExecutor
     u_info = get_universe(req.universe)
-    tickers = u_info["tickers"]
+    tickers = u_info.get("tickers", [])
 
     sync_results = []
-    for ticker in tickers:
-        res = HistoricalDataLayer.sync_ticker_daily_10y(ticker, force_refresh=req.force_refresh)
-        sync_results.append(res)
+    # Use bounded parallel workers to respect rate limits while avoiding HTTP timeout
+    workers = min(8, max(2, len(tickers) // 5)) if tickers else 1
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(HistoricalDataLayer.sync_ticker_daily_10y, ticker, req.force_refresh) for ticker in tickers]
+        for f in futures:
+            try:
+                sync_results.append(f.result())
+            except Exception as e:
+                sync_results.append({"status": "ERROR", "error": str(e)})
 
     return {
         "status": "success",

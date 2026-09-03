@@ -2251,9 +2251,12 @@ export default function DataLab() {
                     className="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-500"
                   >
                     <option value="BENCHMARK_5">Benchmark 5 (Heavyweights)</option>
-                    <option value="LIVE_52">Live Universe (52 Stocks)</option>
-                    <option value="RESEARCH_100">Expanded Research (100 Stocks)</option>
+                    <option value="NIFTY_50">NIFTY 50 (50 Benchmark Bluechips)</option>
+                    <option value="LIVE_52">Live Scanner Universe (52 Stocks)</option>
+                    <option value="RESEARCH_100">Expanded Research Universe (100 Stocks)</option>
+                    <option value="ALL_117">All Locally Available Equities (122 Stocks)</option>
                     <option value="NIFTY_500">NIFTY 500 (500 Stocks - Broad Market)</option>
+                    <option value="ALL_COLLECTED">All Collected Sources (NIFTY 500 + Watchlist + Local DB)</option>
                   </select>
                 </div>
               )}
@@ -2445,12 +2448,20 @@ export default function DataLab() {
               <span className="text-xs font-bold text-slate-400 uppercase">Universe:</span>
               <select
                 value={universe}
-                onChange={(e) => setUniverse(e.target.value)}
+                onChange={(e) => {
+                  const newU = e.target.value;
+                  setUniverse(newU);
+                  fetchCoverage(newU);
+                }}
                 className="bg-slate-950 border border-slate-700 text-slate-200 text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-cyan-500"
               >
                 <option value="BENCHMARK_5">Benchmark 5 (Heavyweights)</option>
-                <option value="LIVE_52">Live Universe (52 Stocks)</option>
-                <option value="RESEARCH_100">Expanded Research (100 Stocks)</option>
+                <option value="NIFTY_50">NIFTY 50 (50 Benchmark Bluechips)</option>
+                <option value="LIVE_52">Live Scanner Universe (52 Stocks)</option>
+                <option value="RESEARCH_100">Expanded Research Universe (100 Stocks)</option>
+                <option value="ALL_117">All Locally Available Equities (122 Stocks)</option>
+                <option value="NIFTY_500">NIFTY 500 (500 Stocks - Broad Market)</option>
+                <option value="ALL_COLLECTED">All Collected Sources (NIFTY 500 + Watchlist + Local DB)</option>
               </select>
             </div>
 
