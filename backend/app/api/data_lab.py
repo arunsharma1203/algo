@@ -231,16 +231,41 @@ class CreateResearchJobRequest(BaseModel):
 @router.post("/research/jobs")
 async def create_research_job(req: CreateResearchJobRequest):
     """Creates and queues a new long-running research job on Apple Silicon."""
+    from app.data.validator import MarketDataValidator
+
+    # Authoritative Ticker Safeguard Pipeline
+    tickers_to_validate = None
+    if req.research_type == "SINGLE_STOCK_WALK_FORWARD":
+        tickers_to_validate = req.custom_tickers if req.custom_tickers else req.universe
+    elif req.custom_tickers:
+        tickers_to_validate = req.custom_tickers
+
+    clean_universe = req.universe
+    clean_tickers = req.custom_tickers
+
+    if tickers_to_validate:
+        valid, validated_symbols, err_msg = MarketDataValidator.validate_research_tickers(
+            tickers_to_validate, timeframe=req.timeframe
+        )
+        if not valid:
+            raise HTTPException(status_code=400, detail=f"Ticker Validation Error: {err_msg}")
+        
+        if req.research_type == "SINGLE_STOCK_WALK_FORWARD":
+            clean_universe = ", ".join(validated_symbols)
+            clean_tickers = validated_symbols
+        else:
+            clean_tickers = validated_symbols
+
     job = research_job_manager.create_job(
         research_type=req.research_type,
-        universe=req.universe,
+        universe=clean_universe,
         timeframe=req.timeframe,
         history_years=req.history_years,
         worker_count=req.worker_count,
         initial_capital=req.initial_capital,
         max_portfolio_heat=req.max_portfolio_heat,
         kelly_mode=req.kelly_mode,
-        custom_tickers=req.custom_tickers,
+        custom_tickers=clean_tickers,
         title=req.title
     )
     return {"status": "success", "job": job}

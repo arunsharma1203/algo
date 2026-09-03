@@ -194,3 +194,82 @@ class MarketDataValidator:
             "data_source": "invalid"
         }
 
+    @classmethod
+    def validate_research_tickers(
+        cls,
+        raw_symbols: Any,
+        timeframe: str = "1d",
+        min_bars: int = 20
+    ) -> Tuple[bool, List[str], Optional[str]]:
+        """
+        Multi-stage authoritative validation pipeline for research ticker symbols:
+        1. Input normalization & syntax parsing (comma/semicolon separation)
+        2. Format & regex validation (blocks CACHE_*, TEMP_*, malformed symbols)
+        3. Authoritative local universe lookup (NIFTY 500, DB cache)
+        4. Live exchange OHLCV availability probe (fail-closed if 0 bars returned)
+        """
+        import re
+        from app.analytics.master_logger import MasterLogger
+        from app.analytics.universe_config import NIFTY_500_UNIVERSE, get_available_db_tickers, LIVE_UNIVERSE
+
+        # 1. Parse into list
+        if isinstance(raw_symbols, str):
+            parts = [s.strip() for s in raw_symbols.replace(";", ",").split(",") if s.strip()]
+        elif isinstance(raw_symbols, (list, tuple, set)):
+            parts = [str(s).strip() for s in raw_symbols if str(s).strip()]
+        else:
+            msg = f"Invalid symbols parameter type: {type(raw_symbols)}"
+            MasterLogger.log_event("DATA_GATE", "REJECTED_INVALID_TICKER", msg, severity="WARNING")
+            return False, [], msg
+
+        if not parts:
+            msg = "No ticker symbols provided."
+            MasterLogger.log_event("DATA_GATE", "REJECTED_INVALID_TICKER", msg, severity="WARNING")
+            return False, [], msg
+
+        clean_tickers: List[str] = []
+        known_universe = set(NIFTY_500_UNIVERSE) | set(get_available_db_tickers()) | set(LIVE_UNIVERSE)
+
+        for raw_sym in parts:
+            sym = raw_sym.upper()
+            
+            # Reject cache/temp leaks
+            if sym.startswith(("CACHE_", "TEMP_", "MOCK_")):
+                msg = f"Invalid/mock symbol rejected: '{sym}' cannot be used for research."
+                MasterLogger.log_event("DATA_GATE", "REJECTED_INVALID_TICKER", msg, ticker=sym, severity="WARNING")
+                return False, [], msg
+
+            # Auto-append .NS if missing
+            if not sym.endswith((".NS", ".BO")):
+                sym = f"{sym}.NS"
+
+            # Format regex check
+            if not re.match(r"^[A-Z0-9_\-&]+(\.NS|\.BO)$", sym):
+                msg = f"Malformed ticker symbol format: '{sym}' does not match exchange equity syntax."
+                MasterLogger.log_event("DATA_GATE", "REJECTED_INVALID_TICKER", msg, ticker=sym, severity="WARNING")
+                return False, [], msg
+
+            # Fast-path: verified against authoritative Indian equity universe
+            if sym in known_universe:
+                if sym not in clean_tickers:
+                    clean_tickers.append(sym)
+                continue
+
+            # Slow-path: unknown ticker — probe actual market data existence
+            try:
+                from app.data.historical_data_layer import HistoricalDataLayer
+                probe_df = HistoricalDataLayer.get_historical_ohlcv(sym, timeframe=timeframe)
+                if probe_df is None or probe_df.empty or len(probe_df) < min_bars:
+                    msg = f"Ticker '{sym}' does not exist on NSE/BSE or has insufficient trading history (found {len(probe_df) if probe_df is not None else 0} bars, minimum {min_bars} required)."
+                    MasterLogger.log_event("DATA_GATE", "REJECTED_INVALID_TICKER", msg, ticker=sym, severity="WARNING")
+                    return False, [], msg
+            except Exception as e:
+                msg = f"Exchange lookup failed for '{sym}': {e}"
+                MasterLogger.log_event("DATA_GATE", "REJECTED_INVALID_TICKER", msg, ticker=sym, severity="WARNING")
+                return False, [], msg
+
+            if sym not in clean_tickers:
+                clean_tickers.append(sym)
+
+        return True, clean_tickers, None
+

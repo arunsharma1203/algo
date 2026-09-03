@@ -201,8 +201,19 @@ class ResearchJobManager:
         if model_factory is not None:
             self._custom_model_factories[job_id] = model_factory
         
-        u_info = get_universe(universe)
-        tickers = custom_tickers if custom_tickers else u_info.get("tickers", ["RELIANCE.NS"])
+        if research_type == "SINGLE_STOCK_WALK_FORWARD" or custom_tickers:
+            from app.data.validator import MarketDataValidator
+            syms_to_check = custom_tickers if custom_tickers else universe
+            ok, clean_syms, val_err = MarketDataValidator.validate_research_tickers(syms_to_check, timeframe=timeframe)
+            if not ok:
+                raise ValueError(f"Ticker validation failed: {val_err}")
+            tickers = clean_syms
+            if research_type == "SINGLE_STOCK_WALK_FORWARD":
+                universe = ", ".join(clean_syms)
+        else:
+            u_info = get_universe(universe)
+            tickers = custom_tickers if custom_tickers else u_info.get("tickers", ["RELIANCE.NS"])
+            
         total_tasks = len(tickers)
 
         if not title:
@@ -752,11 +763,25 @@ class ResearchJobManager:
             })
             self.log_event(job_id, "LOADING_DATA", f"Verifying local 10-year OHLCV data for {len(tickers)} universe tickers...")
 
+            valid_loaded = 0
             for t in tickers:
                 if self._cancel_flags.get(job_id):
                     self.log_event(job_id, "JOB_CANCELLED", "Job cancelled during data load.")
                     return
-                HistoricalDataLayer.get_historical_ohlcv(t, timeframe="1d")
+                df_t = HistoricalDataLayer.get_historical_ohlcv(t, timeframe="1d")
+                if df_t is not None and len(df_t) >= 50:
+                    valid_loaded += 1
+
+            if valid_loaded == 0:
+                err_msg = f"Data validation failed: Zero historical trading data found for ticker(s) {tickers}. Cannot run walk-forward."
+                self._update_job_progress(job_id, {
+                    "status": ResearchJobStatus.FAILED,
+                    "current_phase": "FAILED_DATA_VALIDATION",
+                    "error_message": err_msg,
+                    "last_heartbeat_at": datetime.now().isoformat()
+                })
+                self.log_event(job_id, "JOB_FAILED", err_msg)
+                return
 
             # Phase 2: Feature Matrix Preparation
             self._update_job_progress(job_id, {

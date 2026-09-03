@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 
 import { API_BASE } from '../services/api';
+import TickerAutocomplete from '../components/TickerAutocomplete';
 
 export default function DataLab() {
   const [activeTab, setActiveTab] = useState('control_center'); // 'control_center', 'coverage_sync'
@@ -2216,33 +2217,14 @@ export default function DataLab() {
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-[10px] uppercase font-bold text-cyan-400">Target Stock(s) — Single or Comma-Separated (NSE)</label>
-                    <span className="text-[9px] text-slate-400">Multi-stock deep walk-forward</span>
+                    <span className="text-[9px] text-slate-400">Authoritative Ticker Search</span>
                   </div>
-                  <input
-                    type="text"
-                    list="stocks-datalist"
-                    placeholder="e.g. MAZDOCK, BPCL or RELIANCE.NS, TCS.NS"
+                  <TickerAutocomplete
                     value={singleStockSymbol}
-                    onChange={(e) => setSingleStockSymbol(e.target.value.toUpperCase())}
-                    className="w-full bg-slate-950 border border-cyan-500/50 text-white font-mono font-bold text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-400 shadow-sm"
+                    onChange={setSingleStockSymbol}
+                    placeholder="Search or enter: RELIANCE, TCS or BEL.NS, HAL.NS"
                   />
-                  <datalist id="stocks-datalist">
-                    <option value="MAZDOCK.NS">Mazagon Dock Shipbuilders</option>
-                    <option value="RELIANCE.NS">Reliance Industries</option>
-                    <option value="TCS.NS">Tata Consultancy Services</option>
-                    <option value="INFY.NS">Infosys</option>
-                    <option value="HDFCBANK.NS">HDFC Bank</option>
-                    <option value="ICICIBANK.NS">ICICI Bank</option>
-                    <option value="SBIN.NS">State Bank of India</option>
-                    <option value="TATAMOTORS.NS">Tata Motors</option>
-                    <option value="BEL.NS">Bharat Electronics</option>
-                    <option value="HAL.NS">Hindustan Aeronautics</option>
-                    <option value="LT.NS">Larsen &amp; Toubro</option>
-                    <option value="TRENT.NS">Trent Ltd</option>
-                    <option value="ITC.NS">ITC Limited</option>
-                    <option value="BAJFINANCE.NS">Bajaj Finance</option>
-                  </datalist>
-                  <span className="text-[10px] text-slate-500 mt-1 block">Full walk-forward optimization runs on this specific symbol.</span>
+                  <span className="text-[10px] text-slate-500 mt-1 block">Full walk-forward optimization runs on these verified symbols.</span>
                 </div>
               ) : (
                 <div>

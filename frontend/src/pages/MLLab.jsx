@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Network, Database, Target, BrainCircuit, Activity, BarChart2, ShieldCheck, Sparkles, TrendingUp, Cpu, CheckCircle, AlertTriangle, Send, Bot, Clock, BellRing } from 'lucide-react';
+import { Network, Database, Target, BrainCircuit, Activity, BarChart2, ShieldCheck, Sparkles, TrendingUp, Cpu, CheckCircle, AlertTriangle, Send, Bot, Clock, BellRing, Play, Loader, X } from 'lucide-react';
 import { API_BASE } from '../services/api';
 
 export default function MLLab() {
@@ -779,110 +779,173 @@ export default function MLLab() {
         </div>
       </div>
 
-      {/* Gated Challenger Promotion Modal */}
-      {showPromoteModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in">
-          <div className="bg-slate-900 border border-purple-500/40 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden text-slate-100 flex flex-col">
-            <div className="bg-purple-950/80 px-6 py-4 border-b border-purple-800/60 flex justify-between items-center">
-              <div>
-                <h3 className="text-lg font-black text-white flex items-center gap-2">
-                  <ShieldCheck className="text-emerald-400" size={20} />
-                  Gated Challenger Promotion Protocol
-                </h3>
-                <p className="text-xs text-purple-300 mt-0.5">
-                  Out-of-sample incremental value hurdle verification &amp; champion governance.
-                </p>
-              </div>
-              <button 
-                onClick={() => setShowPromoteModal(false)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800"
-              >
-                ✕
-              </button>
-            </div>
+      {/* Gated Challenger Review & Promotion Modal */}
+      {showPromoteModal && (() => {
+        const plusBoth = foundationBenchmark?.comparison?.plus_both || {};
+        const champBase = foundationBenchmark?.comparison?.champion || {};
+        const f1Val = typeof plusBoth.f1 === 'number' ? plusBoth.f1 : parseFloat(plusBoth.f1 || '0.1515');
+        const champF1 = typeof champBase.f1 === 'number' ? champBase.f1 : parseFloat(champBase.f1 || '0.0984');
+        const f1Gain = f1Val - champF1;
+        const sharpeVal = typeof plusBoth.sharpe === 'number' ? plusBoth.sharpe : parseFloat(plusBoth.sharpe || '0.51');
+        const champSharpe = typeof champBase.sharpe === 'number' ? champBase.sharpe : parseFloat(champBase.sharpe || '0.19');
+        const sharpeGain = sharpeVal - champSharpe;
+        const tradeCount = plusBoth.trade_count !== undefined ? plusBoth.trade_count : 19;
+        const maxDd = typeof plusBoth.max_drawdown_pct === 'number' ? plusBoth.max_drawdown_pct : parseFloat(plusBoth.max_drawdown_pct || '12.11');
 
-            <div className="p-6 space-y-5">
-              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
-                <div className="flex justify-between items-center mb-3">
-                  <span className="text-xs font-bold text-slate-300 uppercase">Target Candidate</span>
-                  <span className="text-xs font-mono font-bold bg-emerald-950 text-emerald-300 border border-emerald-700/60 px-2 py-0.5 rounded">
-                    Champion + Both (Combined Challenger)
-                  </span>
-                </div>
+        const isSampleSizePassed = tradeCount >= 30;
+        const isStatHurdlePassed = f1Gain >= 0.01 && sharpeGain >= 0.0;
+        const isRiskPassed = maxDd <= 20.0;
+        const allGatesPassed = isSampleSizePassed && isStatHurdlePassed && isRiskPassed;
 
-                <div className="grid grid-cols-3 gap-3 text-center font-mono">
-                  <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
-                    <span className="text-[10px] text-slate-400 block">F1 Score</span>
-                    <span className="text-sm font-black text-emerald-400">
-                      {foundationBenchmark?.comparison?.plus_both?.f1 || '0.1515'}
-                    </span>
-                    <span className="text-[9px] text-slate-500 block">vs {foundationBenchmark?.comparison?.champion?.f1 || '0.0984'} base</span>
-                  </div>
-                  <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
-                    <span className="text-[10px] text-slate-400 block">Sharpe Ratio</span>
-                    <span className="text-sm font-black text-indigo-400">
-                      {foundationBenchmark?.comparison?.plus_both?.sharpe || '0.51'}
-                    </span>
-                    <span className="text-[9px] text-slate-500 block">vs {foundationBenchmark?.comparison?.champion?.sharpe || '0.19'} base</span>
-                  </div>
-                  <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
-                    <span className="text-[10px] text-slate-400 block">Max Drawdown</span>
-                    <span className="text-sm font-black text-amber-400">
-                      {foundationBenchmark?.comparison?.plus_both?.max_drawdown_pct || '12.11'}%
-                    </span>
-                    <span className="text-[9px] text-slate-500 block">Controlled drag</span>
-                  </div>
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in">
+            <div className="bg-slate-900 border border-purple-500/40 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden text-slate-100 flex flex-col">
+              <div className="bg-purple-950/80 px-6 py-4 border-b border-purple-800/60 flex justify-between items-center">
+                <div>
+                  <h3 className="text-lg font-black text-white flex items-center gap-2">
+                    <ShieldCheck className="text-emerald-400" size={20} />
+                    Challenger Performance Audit &amp; Governance
+                  </h3>
+                  <p className="text-xs text-purple-300 mt-0.5">
+                    Read-only performance review &amp; multi-dimensional safety gate verification.
+                  </p>
                 </div>
+                <button 
+                  onClick={() => setShowPromoteModal(false)}
+                  className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition"
+                  title="Close Modal"
+                >
+                  <X size={18} />
+                </button>
               </div>
 
-              <div className="bg-indigo-950/30 p-4 rounded-xl border border-indigo-800/40 text-xs space-y-2">
-                <h5 className="font-bold text-indigo-300 flex items-center gap-1.5">
-                  <AlertTriangle size={14} className="text-indigo-400" />
-                  Multi-Dimensional Gate Hurdle
-                </h5>
-                <ul className="space-y-1 text-slate-300 list-disc list-inside text-[11px]">
-                  <li>Statistical Hurdle: F1 Gain must be &ge; +0.0100 (Pass: +{( (foundationBenchmark?.comparison?.plus_both?.f1 || 0.1515) - (foundationBenchmark?.comparison?.champion?.f1 || 0.0984) ).toFixed(4)})</li>
-                  <li>Risk-Adjusted Return: Sharpe ratio must be &ge; Baseline Champion (Pass)</li>
-                  <li>Safety Governance: Production model hashes and historical audits are snapshotted to versions/</li>
-                </ul>
+              <div className="p-6 space-y-5">
+                <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                  <div className="flex justify-between items-center mb-3">
+                    <span className="text-xs font-bold text-slate-300 uppercase">Target Candidate</span>
+                    <span className="text-xs font-mono font-bold bg-purple-950 text-purple-300 border border-purple-700/60 px-2.5 py-1 rounded">
+                      Combined Challenger (Plus Both)
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-2 text-center font-mono">
+                    <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                      <span className="text-[10px] text-slate-400 block">F1 Score</span>
+                      <span className="text-sm font-black text-emerald-400">
+                        {f1Val.toFixed(4)}
+                      </span>
+                      <span className="text-[9px] text-slate-500 block">vs {champF1.toFixed(4)}</span>
+                    </div>
+                    <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                      <span className="text-[10px] text-slate-400 block">Sharpe Ratio</span>
+                      <span className="text-sm font-black text-indigo-400">
+                        {sharpeVal.toFixed(2)}
+                      </span>
+                      <span className="text-[9px] text-slate-500 block">vs {champSharpe.toFixed(2)}</span>
+                    </div>
+                    <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                      <span className="text-[10px] text-slate-400 block">Sample Size</span>
+                      <span className={`text-sm font-black ${isSampleSizePassed ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {tradeCount} trades
+                      </span>
+                      <span className="text-[9px] text-slate-500 block">Min 30 req</span>
+                    </div>
+                    <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                      <span className="text-[10px] text-slate-400 block">Max DD</span>
+                      <span className="text-sm font-black text-amber-400">
+                        {maxDd.toFixed(1)}%
+                      </span>
+                      <span className="text-[9px] text-slate-500 block">Max 20% cap</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-indigo-950/30 p-4 rounded-xl border border-indigo-800/40 text-xs space-y-2">
+                  <h5 className="font-bold text-indigo-300 flex items-center gap-1.5">
+                    <AlertTriangle size={14} className="text-indigo-400" />
+                    Mandatory Multi-Dimensional Promotion Gates
+                  </h5>
+                  <ul className="space-y-1.5 text-slate-300 text-[11px]">
+                    <li className="flex items-center gap-2">
+                      <span className={isStatHurdlePassed ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                        {isStatHurdlePassed ? '✅' : '❌'}
+                      </span>
+                      <span>
+                        <strong>Statistical Hurdle:</strong> F1 Gain &ge; +0.0100 and Sharpe &ge; Baseline ({f1Gain >= 0.01 ? `Passed: +${f1Gain.toFixed(4)}` : `Failed: +${f1Gain.toFixed(4)}`})
+                      </span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className={isSampleSizePassed ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                        {isSampleSizePassed ? '✅' : '❌'}
+                      </span>
+                      <span>
+                        <strong>Sample Size Gate:</strong> Minimum 30 Out-of-Sample Trades required ({isSampleSizePassed ? `Passed: ${tradeCount}/30` : `Failed: only ${tradeCount}/30 trades completed`})
+                      </span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className={isRiskPassed ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                        {isRiskPassed ? '✅' : '❌'}
+                      </span>
+                      <span>
+                        <strong>Risk Boundary:</strong> Max Drawdown &le; 20.0% ({isRiskPassed ? `Passed: ${maxDd.toFixed(1)}%` : `Failed: ${maxDd.toFixed(1)}%`})
+                      </span>
+                    </li>
+                  </ul>
+                </div>
+
+                {promoteResult && (
+                  <div className={`p-4 rounded-xl border text-xs ${
+                    promoteResult.gates_passed 
+                      ? 'bg-emerald-950/50 border-emerald-700/60 text-emerald-200' 
+                      : 'bg-rose-950/50 border-rose-700/60 text-rose-200'
+                  }`}>
+                    <div className="font-bold text-sm mb-1">
+                      {promoteResult.gates_passed ? '✅ Promotion Validated' : '❌ Gate Rejection'}
+                    </div>
+                    <p className="text-[11px] leading-relaxed">{promoteResult.message}</p>
+                    {promoteResult.rejection_reasons && (
+                      <ul className="mt-2 space-y-0.5 list-disc list-inside text-[10px] text-rose-300">
+                        {promoteResult.rejection_reasons.map((r, i) => (
+                          <li key={i}>{r}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
               </div>
 
-              {promoteResult && (
-                <div className={`p-4 rounded-xl border text-xs ${
-                  promoteResult.gates_passed 
-                    ? 'bg-emerald-950/50 border-emerald-700/60 text-emerald-200' 
-                    : 'bg-rose-950/50 border-rose-700/60 text-rose-200'
-                }`}>
-                  <div className="font-bold text-sm mb-1">
-                    {promoteResult.gates_passed ? '✅ Promotion Validated' : '❌ Gate Rejection'}
-                  </div>
-                  <p className="text-[11px] leading-relaxed">{promoteResult.message}</p>
-                  {promoteResult.rationale && (
-                    <p className="text-[10px] mt-1.5 opacity-80 italic">"{promoteResult.rationale}"</p>
-                  )}
+              <div className="px-6 py-4 bg-slate-950 border-t border-slate-800 flex justify-between items-center">
+                <span className="text-[10px] text-slate-400">
+                  {allGatesPassed 
+                    ? 'All gates verified. Ready for human authorization.' 
+                    : 'Promotion blocked by risk gates. Review only.'}
+                </span>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setShowPromoteModal(false)}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition"
+                  >
+                    Close Review
+                  </button>
+                  <button
+                    onClick={handlePromoteChallenger}
+                    disabled={promoting}
+                    className={`px-5 py-2 rounded-lg text-xs font-bold transition shadow flex items-center gap-2 ${
+                      allGatesPassed
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                        : 'bg-rose-900/60 hover:bg-rose-900 text-rose-200 border border-rose-700/60 cursor-pointer'
+                    }`}
+                    title={allGatesPassed ? 'Authorize Challenger Promotion' : 'Test Gate Enforcement'}
+                  >
+                    {promoting ? <Loader className="animate-spin" size={14} /> : <Play size={14} />}
+                    <span>{promoting ? 'Verifying Gates...' : (allGatesPassed ? 'Authorize Promotion' : 'Validate Gate Rejection')}</span>
+                  </button>
                 </div>
-              )}
-            </div>
-
-            <div className="px-6 py-4 bg-slate-950 border-t border-slate-800 flex justify-end items-center gap-3">
-              <button
-                onClick={() => setShowPromoteModal(false)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition"
-              >
-                Close
-              </button>
-              <button
-                onClick={handlePromoteChallenger}
-                disabled={promoting}
-                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white rounded-lg text-xs font-bold transition shadow flex items-center gap-2"
-              >
-                {promoting ? <Loader className="animate-spin" size={14} /> : <Play size={14} />}
-                <span>{promoting ? 'Verifying Gates...' : 'Authorize & Validate Challenger'}</span>
-              </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
