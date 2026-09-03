@@ -88,8 +88,9 @@ class ModelManager:
             "last_retrained": datetime.now().isoformat(),
             "total_promotions": 1,
             "data_source": "yfinance",
-            "hyperparameter_source": f"optuna_{timeframe.lower()}_best_params.json"
         }
+
+    get_champion_metadata = load_champion_metadata
 
     @classmethod
     def save_champion_metadata(cls, metadata: Dict[str, Any], timeframe: str) -> None:

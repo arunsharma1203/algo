@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Play, Loader, TrendingUp, AlertTriangle, Activity, Dices, ShieldAlert, BarChart3, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 import { AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { API_BASE } from '../services/api';
 
 export default function MLBacktestModal({ isOpen, onClose, ticker, defaultType = 'SWING' }) {
   const [modelType, setModelType] = useState(defaultType);
@@ -22,7 +23,7 @@ export default function MLBacktestModal({ isOpen, onClose, ticker, defaultType =
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('http://localhost:8000/api/ml/backtest-simulate', {
+      const response = await fetch(`${API_BASE}/ml/backtest-simulate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ticker, model_type: modelType })
@@ -43,35 +44,35 @@ export default function MLBacktestModal({ isOpen, onClose, ticker, defaultType =
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/70 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-6 bg-black/70 backdrop-blur-sm">
       <div className="bg-slate-900 text-slate-100 rounded-2xl shadow-2xl w-full max-w-6xl max-h-[92vh] overflow-hidden flex flex-col border border-slate-700">
         
         {/* Header */}
-        <div className="flex justify-between items-center px-6 py-4 border-b border-slate-800 bg-slate-950/80">
+        <div className="flex justify-between items-center px-3.5 sm:px-6 py-3 sm:py-4 border-b border-slate-800 bg-slate-950/80">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-purple-950/70 border border-purple-500/40 rounded-xl text-purple-400">
-              <Activity className="w-6 h-6" />
+            <div className="p-1.5 sm:p-2 bg-purple-950/70 border border-purple-500/40 rounded-xl text-purple-400 shrink-0">
+              <Activity className="w-5 h-5 sm:w-6 sm:h-6" />
             </div>
             <div>
-              <h2 className="text-xl font-black tracking-tight text-white flex items-center gap-2">
-                Quantitative ML Backtesting & Monte Carlo Engine
+              <h2 className="text-sm sm:text-xl font-black tracking-tight text-white flex items-center gap-2">
+                Quantitative ML Backtesting &amp; Monte Carlo
               </h2>
-              <p className="text-slate-400 text-xs mt-0.5">
-                Stress-test ensemble models with multi-year data & 1,000 bootstrap simulations
+              <p className="text-slate-400 text-[10px] sm:text-xs mt-0.5">
+                Stress-test ensemble models with multi-year data &amp; 1,000 bootstrap simulations
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors">
-            <X className="w-6 h-6" />
+          <button onClick={onClose} className="p-1.5 sm:p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors shrink-0">
+            <X className="w-5 h-5 sm:w-6 sm:h-6" />
           </button>
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-6 bg-slate-900 space-y-6">
+        <div className="flex-1 overflow-y-auto p-3.5 sm:p-6 bg-slate-900 space-y-4 sm:space-y-6">
           
           {/* Controls Bar */}
-          <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800 shadow-sm flex flex-wrap items-end gap-4">
-            <div className="flex-1 min-w-[180px]">
+          <div className="bg-slate-950/60 p-3 sm:p-4 rounded-xl border border-slate-800 shadow-sm flex flex-wrap items-end gap-3 sm:gap-4">
+            <div className="flex-1 min-w-[140px] sm:min-w-[180px]">
               <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Selected Asset</label>
               <input 
                 type="text" 
@@ -81,7 +82,7 @@ export default function MLBacktestModal({ isOpen, onClose, ticker, defaultType =
               />
             </div>
             
-            <div className="flex-1 min-w-[220px]">
+            <div className="flex-1 min-w-[180px] sm:min-w-[220px]">
               <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Strategy / Horizon</label>
               <select 
                 value={modelType} 
@@ -96,7 +97,7 @@ export default function MLBacktestModal({ isOpen, onClose, ticker, defaultType =
             <button 
               onClick={runSimulation}
               disabled={loading}
-              className={`px-6 py-2 rounded-lg font-bold text-sm flex items-center gap-2 text-white shadow-lg transition-all ${
+              className={`w-full sm:w-auto px-6 py-2 rounded-lg font-bold text-sm flex items-center justify-center gap-2 text-white shadow-lg transition-all ${
                 loading ? 'bg-purple-600/50 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-500 hover:shadow-purple-500/20 active:scale-95'
               }`}
             >
@@ -106,9 +107,9 @@ export default function MLBacktestModal({ isOpen, onClose, ticker, defaultType =
           </div>
 
           {error && (
-            <div className="bg-rose-950/50 border border-rose-800 text-rose-300 p-4 rounded-xl flex items-start gap-3">
+            <div className="bg-rose-950/50 border border-rose-800 text-rose-300 p-3 sm:p-4 rounded-xl flex items-start gap-3 text-xs sm:text-sm">
               <AlertTriangle className="w-5 h-5 flex-shrink-0 mt-0.5 text-rose-400" />
-              <p className="text-sm font-medium">{error}</p>
+              <p className="font-medium">{error}</p>
             </div>
           )}
 
@@ -117,33 +118,33 @@ export default function MLBacktestModal({ isOpen, onClose, ticker, defaultType =
             <div className="space-y-6">
               
               {/* Tab Navigation */}
-              <div className="flex gap-2 border-b border-slate-800 pb-2">
+              <div className="flex overflow-x-auto whitespace-nowrap gap-2 border-b border-slate-800 pb-2 max-w-full">
                 <button
                   onClick={() => setActiveTab('EQUITY')}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-sm transition-all ${
+                  className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg font-bold text-xs sm:text-sm transition-all shrink-0 ${
                     activeTab === 'EQUITY' 
                       ? 'bg-purple-950/80 text-purple-300 border border-purple-500/40' 
                       : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
                   }`}
                 >
                   <BarChart3 className="w-4 h-4" />
-                  Equity Curve & Performance KPIs
+                  Equity Curve &amp; KPIs
                 </button>
                 <button
                   onClick={() => setActiveTab('MONTE_CARLO')}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-sm transition-all ${
+                  className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg font-bold text-xs sm:text-sm transition-all shrink-0 ${
                     activeTab === 'MONTE_CARLO' 
                       ? 'bg-purple-950/80 text-purple-300 border border-purple-500/40' 
                       : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
                   }`}
                 >
                   <Dices className="w-4 h-4 text-emerald-400" />
-                  Monte Carlo (1,000 Bootstrap Paths)
+                  Monte Carlo (1,000 Paths)
                 </button>
               </div>
 
               {/* Comprehensive KPI Metric Grid */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 sm:gap-3">
                 <MetricBox title="Win Rate" value={`${results.metrics.win_rate}%`} color={results.metrics.win_rate >= 50 ? 'text-emerald-400' : 'text-amber-400'} />
                 <MetricBox title="Net PnL" value={`₹${results.metrics.total_pnl.toLocaleString('en-IN')}`} color={results.metrics.total_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'} />
                 <MetricBox title="Profit Factor" value={results.metrics.profit_factor} color={results.metrics.profit_factor >= 1.5 ? 'text-emerald-400' : 'text-slate-200'} />

@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 import sqlite3
+from app.data.historical_data_layer import get_db_path
 
 router = APIRouter()
 
@@ -10,7 +11,7 @@ class TelegramConfig(BaseModel):
 
 @router.post("/telegram")
 async def save_telegram_config(config: TelegramConfig):
-    conn = sqlite3.connect('market_data.db')
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('telegram_bot_token', ?)", (config.bot_token,))
     conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('telegram_chat_id', ?)", (config.chat_id,))
     conn.commit()
@@ -44,7 +45,7 @@ async def test_telegram_config(config: TelegramConfig):
 
 @router.get("/telegram")
 async def get_telegram_config():
-    conn = sqlite3.connect('market_data.db')
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     cur = conn.cursor()
     cur.execute("SELECT value FROM app_settings WHERE key = 'telegram_bot_token'")
     token = cur.fetchone()
@@ -62,7 +63,7 @@ class AutopilotConfig(BaseModel):
 
 @router.get("/autopilot")
 async def get_autopilot_config():
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     cur = conn.cursor()
     cur.execute("SELECT value FROM app_settings WHERE key = 'autopilot_enabled'")
     en = cur.fetchone()
@@ -77,7 +78,7 @@ async def get_autopilot_config():
 
 @router.post("/autopilot")
 async def save_autopilot_config(config: AutopilotConfig):
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('autopilot_enabled', ?)", ('true' if config.enabled else 'false',))
     conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('autopilot_min_conviction', ?)", (str(config.min_conviction),))
     conn.commit()
@@ -96,7 +97,7 @@ class HeatCapConfig(BaseModel):
 
 @router.get("/portfolio-heat")
 def get_heat_cap_setting():
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     cur = conn.execute("SELECT value FROM app_settings WHERE key = 'portfolio_max_heat_cap'")
     row = cur.fetchone()
     conn.close()
@@ -104,7 +105,7 @@ def get_heat_cap_setting():
 
 @router.post("/portfolio-heat")
 def save_heat_cap_setting(config: HeatCapConfig):
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('portfolio_max_heat_cap', ?)", (str(config.max_heat_cap_pct),))
     conn.commit()
     conn.close()
@@ -119,7 +120,7 @@ class SimulationConfig(BaseModel):
 
 @router.get("/simulation")
 def get_simulation_mode():
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     cur = conn.cursor()
     cur.execute("SELECT value FROM app_settings WHERE key = 'simulation_mode'")
     row = cur.fetchone()
@@ -130,7 +131,7 @@ def get_simulation_mode():
 
 @router.post("/simulation")
 def save_simulation_mode(config: SimulationConfig):
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     conn.execute(
         "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('simulation_mode', ?)",
         ('true' if config.simulation_mode else 'false',)
@@ -162,8 +163,9 @@ class UpstoxConfig(BaseModel):
 
 @router.get("/datasource")
 def get_datasource_setting():
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)")
     cur.execute("SELECT value FROM app_settings WHERE key = 'market_data_source'")
     row = cur.fetchone()
     cur.execute("SELECT value FROM app_settings WHERE key = 'upstox_access_token'")
@@ -189,7 +191,7 @@ def save_datasource_setting(config: DataSourceConfig):
     if chosen_source not in ('yfinance', 'upstox'):
         chosen_source = 'yfinance'
         
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('market_data_source', ?)", (chosen_source,))
     conn.commit()
     conn.close()
@@ -214,7 +216,7 @@ def get_upstox_settings():
 
 @router.post("/upstox")
 def save_upstox_settings(config: UpstoxConfig):
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     if config.api_key:
         conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_api_key', ?)", (config.api_key.strip(),))
     if config.api_secret:
@@ -251,7 +253,7 @@ def test_upstox_api(config: UpstoxConfig):
     # If market data connection was verified successfully, automatically switch active data source to Upstox
     if result.get("status") == "success" and test_type == "market":
         try:
-            conn = sqlite3.connect('market_data.db', timeout=5.0)
+            conn = sqlite3.connect(get_db_path(), timeout=5.0)
             conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('market_data_source', 'upstox')")
             if token_to_test:
                 conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_access_token', ?)", (token_to_test.strip(),))
@@ -321,7 +323,7 @@ def upstox_oauth_callback(code: str = ""):
             user_name = token_data.get("user_name", "Upstox User")
             
             if access_token:
-                conn = sqlite3.connect('market_data.db', timeout=5.0)
+                conn = sqlite3.connect(get_db_path(), timeout=5.0)
                 conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_access_token', ?)", (access_token,))
                 conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('market_data_source', 'upstox')")
                 conn.commit()

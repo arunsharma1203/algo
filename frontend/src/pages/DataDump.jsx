@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Database, HardDrive, FileText, Clock, Table } from 'lucide-react';
 import axios from 'axios';
+import { API_BASE } from '../services/api';
 
 export default function DataDump() {
   const [stats, setStats] = useState(null);
@@ -15,7 +16,7 @@ export default function DataDump() {
     if (!reportTicker) return;
     setReportLoading(true);
     try {
-      const res = await axios.get(`http://localhost:8000/api/ml/report/${reportTicker}`);
+      const res = await axios.get(`${API_BASE}/ml/report/${reportTicker}`);
       if (res.data.status === 'success') {
         setReportData(res.data.data);
       } else {
@@ -31,7 +32,7 @@ export default function DataDump() {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const response = await axios.get('http://localhost:8000/api/market/dump-stats');
+        const response = await axios.get(`${API_BASE}/market/dump-stats`);
         setStats(response.data);
       } catch (err) {
         setError("Failed to fetch database dump statistics.");
@@ -43,13 +44,13 @@ export default function DataDump() {
   }, []);
 
   return (
-    <div className="max-w-6xl mx-auto">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-800 flex items-center">
-          <Database className="text-blue-600 mr-3" size={32} />
+    <div className="max-w-6xl mx-auto max-w-full">
+      <div className="mb-6 sm:mb-8">
+        <h1 className="text-2xl sm:text-3xl font-bold text-gray-800 flex items-center">
+          <Database className="text-blue-600 mr-2 sm:mr-3 shrink-0" size={28} />
           Local Database Dump
         </h1>
-        <p className="text-gray-500 mt-2">
+        <p className="text-gray-500 mt-2 text-xs sm:text-sm max-w-3xl">
           View raw statistics and data blocks securely cached in your local SQLite engine. This fool-proof cache powers all your backtests and AI scans without duplicate network calls.
         </p>
       </div>
@@ -61,50 +62,50 @@ export default function DataDump() {
       )}
 
       {error && (
-        <div className="bg-red-50 text-red-600 p-4 rounded-lg border border-red-200">
+        <div className="bg-red-50 text-red-600 p-4 rounded-lg border border-red-200 text-sm">
           {error}
         </div>
       )}
 
       {stats && stats.status === "success" && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-center">
-              <p className="text-sm text-gray-500 font-bold uppercase tracking-wider mb-2 flex items-center">
-                <HardDrive size={16} className="mr-2" /> Cache Size
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6">
+            <div className="bg-white p-5 sm:p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-center">
+              <p className="text-xs sm:text-sm text-gray-500 font-bold uppercase tracking-wider mb-2 flex items-center">
+                <HardDrive size={16} className="mr-2 shrink-0" /> Cache Size
               </p>
-              <p className="text-3xl font-black text-gray-800">{stats.db_size_mb} <span className="text-lg text-gray-500 font-normal">MB</span></p>
+              <p className="text-2xl sm:text-3xl font-black text-gray-800">{stats.db_size_mb} <span className="text-base text-gray-500 font-normal">MB</span></p>
             </div>
             
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-center">
-              <p className="text-sm text-gray-500 font-bold uppercase tracking-wider mb-2 flex items-center">
-                <Table size={16} className="mr-2 text-indigo-500" /> OHLCV Rows
+            <div className="bg-white p-5 sm:p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-center">
+              <p className="text-xs sm:text-sm text-gray-500 font-bold uppercase tracking-wider mb-2 flex items-center">
+                <Table size={16} className="mr-2 text-indigo-500 shrink-0" /> OHLCV Rows
               </p>
-              <p className="text-3xl font-black text-gray-800">{stats.total_rows.toLocaleString()}</p>
+              <p className="text-2xl sm:text-3xl font-black text-gray-800">{stats.total_rows.toLocaleString()}</p>
             </div>
 
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-purple-100 flex flex-col justify-center relative overflow-hidden">
+            <div className="bg-white p-5 sm:p-6 rounded-xl shadow-sm border border-purple-100 flex flex-col justify-center relative overflow-hidden">
               <div className="absolute top-0 right-0 p-3 opacity-10">
                 <Database size={64} className="text-purple-600" />
               </div>
-              <p className="text-sm text-purple-600 font-bold uppercase tracking-wider mb-2 z-10 flex items-center">
-                <Database size={16} className="mr-2" /> AI Memory Rows
+              <p className="text-xs sm:text-sm text-purple-600 font-bold uppercase tracking-wider mb-2 z-10 flex items-center">
+                <Database size={16} className="mr-2 shrink-0" /> AI Memory Rows
               </p>
-              <p className="text-3xl font-black text-purple-900 z-10">{stats.ml_training_rows?.toLocaleString()}</p>
+              <p className="text-2xl sm:text-3xl font-black text-purple-900 z-10">{stats.ml_training_rows?.toLocaleString()}</p>
             </div>
 
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-pink-100 flex flex-col justify-center relative overflow-hidden">
-              <p className="text-sm text-pink-600 font-bold uppercase tracking-wider mb-2 z-10">
+            <div className="bg-white p-5 sm:p-6 rounded-xl shadow-sm border border-pink-100 flex flex-col justify-center relative overflow-hidden">
+              <p className="text-xs sm:text-sm text-pink-600 font-bold uppercase tracking-wider mb-2 z-10">
                 AI Trades Logged
               </p>
-              <p className="text-3xl font-black text-pink-900 z-10">{stats.ml_trade_count}</p>
+              <p className="text-2xl sm:text-3xl font-black text-pink-900 z-10">{stats.ml_trade_count}</p>
             </div>
           </div>
 
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
-              <h3 className="font-bold text-gray-800 flex items-center">
-                <FileText size={18} className="mr-2 text-blue-500" />
+            <div className="px-4 sm:px-6 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
+              <h3 className="font-bold text-gray-800 flex items-center text-sm sm:text-base">
+                <FileText size={18} className="mr-2 text-blue-500 shrink-0" />
                 Cached Tickers Overview
               </h3>
               <span className="text-xs font-bold bg-blue-100 text-blue-800 px-3 py-1 rounded-full">
@@ -141,9 +142,9 @@ export default function DataDump() {
           </div>
 
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden mt-6">
-            <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex items-center">
-              <h3 className="font-bold text-gray-800 flex items-center">
-                <Clock size={18} className="mr-2 text-indigo-500" />
+            <div className="px-4 sm:px-6 py-4 border-b border-gray-100 bg-gray-50 flex items-center">
+              <h3 className="font-bold text-gray-800 flex items-center text-sm sm:text-base">
+                <Clock size={18} className="mr-2 text-indigo-500 shrink-0" />
                 Foolproof Block Fetch Log (Recent 100)
               </h3>
             </div>
@@ -181,22 +182,22 @@ export default function DataDump() {
       )}
 
       {/* ML Training Data Report */}
-      <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 mt-8">
-        <div className="flex justify-between items-end mb-6">
+      <div className="bg-white p-4 sm:p-6 rounded-xl shadow-sm border border-gray-200 mt-8">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4 mb-6">
           <div>
-            <h2 className="text-xl font-bold text-gray-800 flex items-center">
-              <Table className="mr-2 text-indigo-500" size={24} />
+            <h2 className="text-lg sm:text-xl font-bold text-gray-800 flex items-center">
+              <Table className="mr-2 text-indigo-500 shrink-0" size={22} />
               AI Training Data Inspector
             </h2>
-            <p className="text-sm text-gray-500 mt-1">Audit the exact 15-minute candles, sources, and technicals hoarded by the background worker.</p>
+            <p className="text-xs sm:text-sm text-gray-500 mt-1">Audit the exact 15-minute candles, sources, and technicals hoarded by the background worker.</p>
           </div>
-          <div className="flex space-x-2">
+          <div className="flex w-full sm:w-auto space-x-2">
             <input 
               type="text" 
               value={reportTicker}
               onChange={e => setReportTicker(e.target.value.toUpperCase())}
               placeholder="e.g. TCS.NS"
-              className="border border-gray-300 rounded p-2 text-sm font-bold w-36"
+              className="border border-gray-300 rounded p-2 text-sm font-bold flex-1 sm:w-36"
             />
             <button 
               onClick={fetchReport}

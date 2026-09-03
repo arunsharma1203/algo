@@ -75,10 +75,14 @@ def calculate_kelly_position_size(
 
 def get_portfolio_heat_status(capital: float = 100000.0, max_heat_cap_pct: float = None) -> Dict[str, Any]:
     """
-    Aggregates risk across all active open positions in ml_trade_history
+    Aggregates risk across genuine portfolio positions (PAPER_POSITION, LIVE_POSITION)
     to enforce a portfolio-level total heat ceiling.
+    
+    Scanner recommendations (NOT_A_POSITION) are tracked but contribute 0% heat.
+    Research and forward simulation are in separate tables and never contribute.
     """
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    from app.data.historical_data_layer import get_db_path
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     
     # Query user-defined heat cap if not specified
     if max_heat_cap_pct is None:
@@ -90,36 +94,67 @@ def get_portfolio_heat_status(capital: float = 100000.0, max_heat_cap_pct: float
             max_heat_cap_pct = 6.0
 
     try:
-        df_open = pd.read_sql_query("SELECT ticker, entry, sl, direction, trade_type FROM ml_trade_history WHERE status = 'OPEN'", conn)
+        # GENUINE POSITIONS: only PAPER_POSITION and LIVE_POSITION contribute to heat
+        df_positions = pd.read_sql_query(
+            "SELECT ticker, entry, sl, direction, trade_type, source, position_type "
+            "FROM ml_trade_history "
+            "WHERE status = 'OPEN' AND position_type IN ('PAPER_POSITION', 'LIVE_POSITION')",
+            conn
+        )
     except:
-        df_open = pd.DataFrame()
+        df_positions = pd.DataFrame()
+
+    try:
+        # VIRTUAL RECOMMENDATIONS: tracked but 0% heat contribution
+        virtual_counts = pd.read_sql_query(
+            "SELECT source, COUNT(*) as cnt "
+            "FROM ml_trade_history "
+            "WHERE status = 'OPEN' AND position_type = 'NOT_A_POSITION' "
+            "GROUP BY source",
+            conn
+        )
+    except:
+        virtual_counts = pd.DataFrame()
+    
     conn.close()
 
-    if df_open.empty:
-        return {
-            "open_positions": 0,
-            "total_risk_amount": 0.0,
-            "current_heat_pct": 0.0,
-            "max_heat_cap_pct": max_heat_cap_pct,
-            "remaining_heat_pct": max_heat_cap_pct,
-            "status": "NORMAL",
-            "message": "All portfolio risk capacity available."
-        }
+    # Parse virtual recommendation breakdown
+    manual_recs = 0
+    autopilot_recs = 0
+    other_recs = 0
+    if not virtual_counts.empty:
+        for _, row in virtual_counts.iterrows():
+            src = str(row.get('source', '')).upper()
+            cnt = int(row.get('cnt', 0))
+            if src in ('MANUAL', 'SCANNER'):
+                manual_recs += cnt
+            elif src == 'AUTOPILOT':
+                autopilot_recs += cnt
+            else:
+                other_recs += cnt
 
-    total_risk = 0.0
-    for _, row in df_open.iterrows():
-        entry = float(row.get('entry', 0.0))
-        sl = float(row.get('sl', 0.0))
-        risk_per_trade = abs(entry - sl)
-        total_risk += risk_per_trade
+    total_virtual = manual_recs + autopilot_recs + other_recs
 
-    # Approximate assuming standard 1-unit lot allocation
-    heat_pct = round((len(df_open) * 1.5), 1)  # ~1.5% per open trade
+    if df_positions.empty:
+        actual_positions = 0
+        total_risk = 0.0
+        heat_pct = 0.0
+    else:
+        actual_positions = len(df_positions)
+        total_risk = 0.0
+        for _, row in df_positions.iterrows():
+            entry = float(row.get('entry', 0.0))
+            sl = float(row.get('sl', 0.0))
+            risk_per_trade = abs(entry - sl)
+            total_risk += risk_per_trade
+        # ~1.5% per genuine open position
+        heat_pct = round((actual_positions * 1.5), 1)
+
     remaining_heat = max(0.0, round(max_heat_cap_pct - heat_pct, 1))
 
     if heat_pct >= max_heat_cap_pct:
         status = "MAX_REACHED"
-        msg = f"Maximum Portfolio Heat ({max_heat_cap_pct}%) reached across {len(df_open)} open positions. De-risk before adding new exposure."
+        msg = f"Maximum Portfolio Heat ({max_heat_cap_pct}%) reached across {actual_positions} genuine positions. De-risk before adding new exposure."
     elif heat_pct >= (max_heat_cap_pct * 0.75):
         status = "WARNING"
         msg = f"Approaching Portfolio Risk Cap ({heat_pct}% / {max_heat_cap_pct}%)."
@@ -127,12 +162,21 @@ def get_portfolio_heat_status(capital: float = 100000.0, max_heat_cap_pct: float
         status = "NORMAL"
         msg = f"Healthy portfolio risk allocation ({heat_pct}% / {max_heat_cap_pct}%)."
 
+    discovery_status = "BLOCKED" if status == "MAX_REACHED" else "ENABLED"
+
     return {
-        "open_positions": len(df_open),
+        "open_positions": actual_positions,
+        "actual_positions": actual_positions,
+        "virtual_recommendations": total_virtual,
+        "manual_recommendations": manual_recs,
+        "autopilot_recommendations": autopilot_recs,
         "total_risk_amount": round(total_risk, 2),
         "current_heat_pct": heat_pct,
         "max_heat_cap_pct": max_heat_cap_pct,
         "remaining_heat_pct": remaining_heat,
         "status": status,
-        "message": msg
+        "message": msg,
+        "discovery_status": discovery_status,
+        "block_reason": msg if status == "MAX_REACHED" else None
     }
+

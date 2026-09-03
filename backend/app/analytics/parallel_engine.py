@@ -6,6 +6,7 @@ import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field, asdict
+import numpy as np
 
 # Ensure sub-process inherits correct backend path
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -32,6 +33,86 @@ class ResearchConfig:
     checkpoint_dir: str = "backend/checkpoints"
     enable_checkpointing: bool = True
     cpu_limit_pct: float = 75.0
+
+def _run_cv_split_worker(split_idx: int, X_train_bytes: bytes, y_train_bytes: bytes,
+                         shape_x: tuple, dtype_x: str,
+                         train_idx: List[int], val_idx: List[int],
+                         hp: Dict[str, Any], cycle_idx: int = 1) -> Dict[str, Any]:
+    """
+    Self-contained worker process function executing one cross-validation fold (RF + GB + SVC).
+    Runs with OMP_NUM_THREADS=1 in isolated worker memory.
+    """
+    pid = os.getpid()
+    t0 = time.time()
+    
+    try:
+        X_train = np.frombuffer(X_train_bytes, dtype=dtype_x).reshape(shape_x)
+        y_train = np.frombuffer(y_train_bytes, dtype=int)
+        
+        X_t, X_v = X_train[train_idx], X_train[val_idx]
+        y_t, y_v = y_train[train_idx], y_train[val_idx]
+        
+        if len(np.unique(y_t)) < 2 or len(np.unique(y_v)) < 2:
+            return {
+                "split_idx": split_idx,
+                "pid": pid,
+                "status": "SKIPPED",
+                "oof_y_val": [],
+                "oof_preds_proba": [],
+                "runtime_seconds": round(time.time() - t0, 3)
+            }
+        
+        if hp.get("use_fast_test_model"):
+            from sklearn.linear_model import LogisticRegression
+            ens_split = LogisticRegression(random_state=42)
+        else:
+            from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+            from sklearn.svm import SVC
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.pipeline import make_pipeline
+            
+            rf_split = RandomForestClassifier(
+                n_estimators=hp.get('rf_n_estimators', 80),
+                max_depth=hp.get('rf_max_depth', 5),
+                min_samples_split=hp.get('rf_min_samples_split', 2),
+                random_state=42
+            )
+            gb_split = GradientBoostingClassifier(
+                n_estimators=hp.get('gb_n_estimators', 80),
+                learning_rate=hp.get('gb_learning_rate', 0.08),
+                max_depth=hp.get('gb_max_depth', 3),
+                random_state=42
+            )
+            svm_split = make_pipeline(StandardScaler(), SVC(C=hp.get('svm_c', 1.0), probability=True, random_state=42))
+            
+            ens_split = VotingClassifier(
+                estimators=[('rf', rf_split), ('gb', gb_split), ('svm', svm_split)],
+                voting='soft'
+            )
+
+        ens_split.fit(X_t, y_t)
+        
+        probs_split = ens_split.predict_proba(X_v)[:, 1]
+        
+        return {
+            "split_idx": split_idx,
+            "pid": pid,
+            "status": "SUCCESS",
+            "oof_y_val": y_v.tolist(),
+            "oof_preds_proba": probs_split.tolist(),
+            "train_samples": len(X_t),
+            "val_samples": len(X_v),
+            "runtime_seconds": round(time.time() - t0, 3)
+        }
+    except Exception as e:
+        logger.error(f"CV split worker {split_idx} failed: {e}")
+        return {
+            "split_idx": split_idx,
+            "pid": pid,
+            "status": "FAILED",
+            "error": str(e),
+            "runtime_seconds": round(time.time() - t0, 3)
+        }
 
 def _run_ticker_walk_forward_worker(ticker: str, initial_capital: float = 100000.0,
                                    model_type: str = "SWING") -> Dict[str, Any]:
@@ -190,3 +271,42 @@ class ParallelWalkForwardOrchestrator:
             "results": results
         }
 
+    def test_worker_pool_initialization(self, worker_count: int = 4) -> Dict[str, Any]:
+        """
+        Lightweight diagnostic test proving worker_count workers are genuinely created,
+        execute isolated tasks in separate OS processes, and return results to master process.
+        Does NOT execute ML training or modify databases.
+        """
+        start_t = time.time()
+        results = []
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            initializer=_worker_init,
+            initargs=(self.config.ml_threads_per_worker,)
+        ) as executor:
+            futures = [executor.submit(_run_trivial_worker_task, i) for i in range(worker_count)]
+            for f in as_completed(futures):
+                results.append(f.result())
+
+        pids = set(r["pid"] for r in results)
+        return {
+            "status": "SUCCESS",
+            "requested_workers": worker_count,
+            "tasks_completed": len(results),
+            "unique_worker_pids": len(pids),
+            "worker_details": results,
+            "runtime_seconds": round(time.time() - start_t, 4)
+        }
+
+def _run_trivial_worker_task(task_id: int) -> Dict[str, Any]:
+    """
+    Lightweight diagnostic worker function executing in worker process.
+    Returns worker PID, OS info, and timestamp without ML computations.
+    """
+    return {
+        "task_id": task_id,
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "timestamp": time.time(),
+        "status": "SUCCESS"
+    }

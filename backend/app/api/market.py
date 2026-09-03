@@ -45,8 +45,9 @@ async def search_tickers(q: str):
 def get_dump_stats():
     import sqlite3
     import os
+    from app.data.database import get_db_path
     
-    db_path = 'market_data.db'
+    db_path = get_db_path()
     if not os.path.exists(db_path):
         return {"status": "empty", "message": "Cache database not found."}
         
@@ -199,7 +200,8 @@ async def get_latest_data(ticker: str):
 async def clear_cache(ticker: str):
     import sqlite3
     import os
-    db_path = 'market_data.db'
+    from app.data.database import get_db_path
+    db_path = get_db_path()
     if os.path.exists(db_path):
         conn = sqlite3.connect(db_path)
         conn.execute("DELETE FROM ohlcv WHERE ticker = ?", (ticker,))

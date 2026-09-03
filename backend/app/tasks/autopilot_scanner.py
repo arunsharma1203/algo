@@ -3,23 +3,23 @@ import sqlite3
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import ta
 from datetime import datetime
 from typing import Optional
 
 from app.data.validator import MarketDataValidator
 from app.analytics.model_manager import ModelManager
-from app.analytics.calibration import calibrator
 from app.analytics.macro_engine import get_macro_regime
 from app.analytics.kelly_sizer import get_portfolio_heat_status
 from app.api.ml_history import save_ml_trade
+from app.analytics.decision_engine import evaluate_ticker
 
 logger = logging.getLogger(__name__)
 
 def is_autopilot_enabled() -> bool:
     """Checks if Autopilot Scanning is enabled in app_settings table."""
     try:
-        conn = sqlite3.connect('market_data.db', timeout=5.0)
+        from app.data.historical_data_layer import get_db_path
+        conn = sqlite3.connect(get_db_path(), timeout=5.0)
         cur = conn.execute("SELECT value FROM app_settings WHERE key = 'autopilot_enabled'")
         row = cur.fetchone()
         conn.close()
@@ -29,12 +29,15 @@ def is_autopilot_enabled() -> bool:
     except:
         return True
 
+_LAST_HEAT_ALERT_TIME = 0.0
+HEAT_ALERT_COOLDOWN = 14400.0  # 4 hours cooldown to prevent spamming
+
 def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
     """
-    Autonomous Discovery Scanner executed at 09:30, 11:30, and 13:30 IST.
-    Uses verified production Intraday Champion model to scan high-volume leaders.
-    Strictly fails closed without trading if data or model validation fails.
+    Executes an autonomous market scan across priority universe using
+    the AUTHORITATIVE shared decision engine (same brain as manual scans).
     """
+    global _LAST_HEAT_ALERT_TIME
     from app.analytics.autonomous_bot import is_market_open, log_alert
     
     now = datetime.now()
@@ -56,26 +59,31 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
 
     heat = get_portfolio_heat_status()
     if heat.get('status') == 'MAX_REACHED':
-        msg = (
-            f"🛡️ *AUTOPILOT RISK MANAGER: HEAT CEILING ACTIVE*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚠️ Current portfolio risk is `{heat['current_heat_pct']}%` (Cap: `{heat['max_heat_cap_pct']}%`).\n"
-            f"📊 Active open trades: `{heat['open_positions']}`\n"
-            f"⏸️ Autopilot discovery has paused new order dispatches to protect capital.\n"
-            f"━━━━━━━━━━━━━━━━━━━━"
-        )
-        send_telegram_message(msg)
+        now_epoch = time.time()
+        if (now_epoch - _LAST_HEAT_ALERT_TIME) >= HEAT_ALERT_COOLDOWN:
+            _LAST_HEAT_ALERT_TIME = now_epoch
+            msg = (
+                f"🛡️ <b>AUTOPILOT RISK MANAGER: HEAT CEILING ACTIVE</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚠️ Current portfolio risk is <code>{heat['current_heat_pct']}%</code> (Cap: <code>{heat['max_heat_cap_pct']}%</code>).\n"
+                f"📊 Genuine positions: <code>{heat.get('actual_positions', 0)}</code>\n"
+                f"📋 Virtual recommendations: <code>{heat.get('virtual_recommendations', 0)}</code>\n"
+                f"⏸️ Autopilot discovery has paused new order dispatches to protect capital.\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
+            )
+            send_telegram_message(msg)
         logger.warning(f"[Autopilot] Skipped order dispatch due to active portfolio heat ({heat['current_heat_pct']}% >= {heat['max_heat_cap_pct']}%).")
         return
 
-    # 2. Load Persisted Intraday Champion Model Artifact
-    champion_model, champion_meta = ModelManager.load_champion("intraday")
-    if champion_model is None:
-        logger.error("[Autopilot] No active Intraday Champion model found. Aborting sweep safely.")
+    # 2. Load Persisted Champion Ensemble
+    champion_model = ModelManager.load_champion('intraday')
+    champion_meta = ModelManager.get_champion_metadata('intraday')
+    if not champion_model:
+        logger.error("[Autopilot] Aborting sweep: Champion intraday model could not be loaded.")
         return
 
+    # 3. Pre-fetch Macro State (shared across all tickers)
     macro = get_macro_regime()
-    nifty_trend = macro.get('nifty_trend_short', 'BULLISH')
     
     priority_tickers = [
         "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
@@ -84,103 +92,144 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
         "BAJFINANCE.NS", "JSWSTEEL.NS", "TATASTEEL.NS", "POWERGRID.NS", "NTPC.NS"
     ]
     
-    features = ['rsi', 'macd', 'macd_diff', 'adx', 'returns']
+    try:
+        from app.analytics.master_logger import MasterLogger
+        MasterLogger.log_event(
+            "SCAN_AUTONOMOUS", "SWEEP_STARTED",
+            f"Autopilot starting scheduled sweep '{session_name}' ({len(priority_tickers)} priority symbols)",
+            universe="AUTOPILOT_POOL"
+        )
+    except Exception:
+        pass
+
+    scanned_count = 0
+    data_valid_count = 0
+    conviction_qualified_count = 0
+    macro_aligned_count = 0
     discovered_count = 0
+    ticker_errors = []
 
     for ticker in priority_tickers:
+        scanned_count += 1
         try:
-            df = yf.download(ticker, period="60d", interval="15m", progress=False)
-            if df.empty:
+            # Wrap per-ticker download so one bad ticker (e.g. TATAMOTORS.NS) doesn't kill the sweep
+            try:
+                df = yf.download(ticker, period="60d", interval="15m", progress=False)
+            except Exception as dl_err:
+                ticker_errors.append((ticker, f"Download error: {dl_err}"))
+                logger.warning(f"[Autopilot] Data acquisition failed for {ticker}: {dl_err}")
                 continue
 
-            # Validate structural data quality
-            val_report = MarketDataValidator.validate_ohlcv(df, ticker=ticker, timeframe="15m", min_rows=50)
-            if not val_report["valid"]:
+            if df is None or df.empty or len(df) < 30:
+                ticker_errors.append((ticker, "Empty or insufficient OHLCV candles"))
+                logger.debug(f"[Autopilot] Insufficient data for {ticker}")
                 continue
 
-            df.columns = [col.lower() for col in df.columns]
-            
-            # Technical Indicators
-            df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-            macd = ta.trend.MACD(df['close'])
-            df['macd'] = macd.macd()
-            df['macd_diff'] = macd.macd_diff()
-            df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
-            df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
-            df['returns'] = df['close'].pct_change()
-            
-            ml_df = df.dropna(subset=features).copy()
-            if len(ml_df) < 50:
-                continue
+            data_valid_count += 1
 
-            latest_row = ml_df.iloc[-1]
-            latest_features = latest_row[features].values.reshape(1, -1)
-            
-            # Predict using Persisted Champion
-            raw_prob = float(champion_model.predict_proba(latest_features)[0][1]) * 100.0
-            calibrated_prob, _, calib_meta = calibrator.calibrate(raw_prob)
-            
-            current_price = float(latest_row['close'])
-            atr = float(latest_row['atr'])
-            
-            # Filter for High-Conviction Setups (Calibrated >= 70% for Long, <= 30% for Short)
-            if calibrated_prob >= 70.0:
-                is_bullish = True
-                direction = "BULLISH"
-                sl = round(current_price - (1.5 * atr), 2)
-                tp1 = round(current_price + (2.5 * atr), 2)
-                tp2 = round(current_price + (4.0 * atr), 2)
-            elif calibrated_prob <= 30.0:
-                is_bullish = False
-                direction = "BEARISH"
-                sl = round(current_price + (1.5 * atr), 2)
-                tp1 = round(current_price - (2.5 * atr), 2)
-                tp2 = round(current_price - (4.0 * atr), 2)
-                calibrated_prob = round(100.0 - calibrated_prob, 1)
-            else:
-                continue
-
-            # Macro Alignment Gate
-            if (direction == "BULLISH" and nifty_trend == "BEARISH") or (direction == "BEARISH" and nifty_trend == "BULLISH"):
-                continue
-
-            # Save trade to database
-            save_ml_trade(
+            # ── Use SHARED DECISION ENGINE (same brain as manual) ──────────
+            result = evaluate_ticker(
                 ticker=ticker,
-                is_bullish=is_bullish,
-                entry=current_price,
-                sl=sl,
-                tp1=tp1,
-                tp2=tp2,
-                confidence=calibrated_prob,
+                df=df,
+                champion_model=champion_model,
+                champion_meta=champion_meta,
                 trade_type='INTRADAY',
-                explanation={
-                    "source": f"Autopilot {session_name}",
-                    "macro_nifty": nifty_trend,
-                    "calibrated_win_rate": calibrated_prob,
-                    "calibration_status": calib_meta.get("calibration_status", "uncalibrated")
-                }
+                source='AUTOPILOT',
+                macro_state=macro,
+                qualification_threshold=0.0,
+                skip_enrichment=False,
             )
+
+            if not result.qualified:
+                continue
+
+            # ── Autopilot Conviction Gate (≥70% for Long, ≤30% for Short) ──
+            if result.is_bullish and result.confidence < 70.0:
+                continue
+            if not result.is_bullish and result.confidence > 30.0:
+                continue
+            
+            conviction_qualified_count += 1
+
+            # For bearish, flip the confidence display
+            display_confidence = result.confidence
+            if not result.is_bullish:
+                display_confidence = round(100.0 - result.confidence, 1)
+
+            # ── Macro Alignment Gate ───────────────────────────────────────
+            nifty_trend = macro.get('nifty_trend_short', 'BULLISH')
+            if (result.direction == "BULLISH" and nifty_trend == "BEARISH") or \
+               (result.direction == "BEARISH" and nifty_trend == "BULLISH"):
+                continue
+
+            macro_aligned_count += 1
+
+            # ── Save as NOT_A_POSITION recommendation ─────────────────────
+            was_saved = save_ml_trade(
+                ticker=ticker,
+                is_bullish=result.is_bullish,
+                entry=result.entry,
+                sl=result.sl,
+                tp1=result.tp1,
+                tp2=result.tp2,
+                confidence=display_confidence,
+                trade_type='INTRADAY',
+                explanation=result.explanation,
+                source='AUTOPILOT',
+                position_type='NOT_A_POSITION'
+            )
+
+            if not was_saved:
+                logger.info(f"[Autopilot] Duplicate signal for {ticker} — skipping Telegram.")
+                continue
+
             discovered_count += 1
 
             msg = (
-                f"🤖 *AUTONOMOUS AI TRADE DISCOVERY* ({session_name})\n"
+                f"🤖 <b>AUTONOMOUS AI TRADE DISCOVERY</b> ({session_name})\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"🎯 *Ticker:* `{ticker}` ({direction})\n"
-                f"🧠 *AI Calibrated Win Rate:* `{calibrated_prob:.1f}%`\n"
-                f"💵 *Entry:* `₹{current_price:.2f}`\n"
-                f"🛑 *Stop Loss:* `₹{sl:.2f}`\n"
-                f"🎯 *Target 1:* `₹{tp1:.2f}` (Risk:Reward ~ 1:1.7)\n"
-                f"🎯 *Target 2:* `₹{tp2:.2f}`\n"
-                f"📊 *NIFTY Macro:* `{nifty_trend}` Alignment Confirmed\n"
+                f"🎯 <b>Ticker:</b> <code>{ticker}</code> ({result.direction})\n"
+                f"🧠 <b>AI Calibrated Win Rate:</b> <code>{display_confidence:.1f}%</code>\n"
+                f"💵 <b>Entry (LTP):</b> <code>₹{result.entry:.2f}</code>\n"
+                f"🛑 <b>Stop Loss:</b> <code>₹{result.sl:.2f}</code>\n"
+                f"🎯 <b>Target 1:</b> <code>₹{result.tp1:.2f}</code>\n"
+                f"🎯 <b>Target 2:</b> <code>₹{result.tp2:.2f}</code>\n"
+                f"📊 <b>NIFTY Macro:</b> <code>{nifty_trend}</code> Alignment Confirmed\n"
+                f"📡 <b>Pipeline:</b> RF✓ GB✓ SVC✓ Meta✓ Cal✓"
+                f" NLP:{'✓' if result.pipeline_components.get('nlp_vader') is True else '✗'}"
+                f" FM:{'✓' if result.pipeline_components.get('timesfm') is True else '✗'}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"⚡ _Discovered automatically by Antigravity Autopilot Engine._"
+                f"⚡ <i>Discovered by Autopilot — same AI brain as manual scan.</i>"
             )
             send_telegram_message(msg)
-            log_alert("INFO", ticker, f"Autopilot discovered {direction} setup ({calibrated_prob:.1f}% confidence).")
-            logger.info(f"✅ [Autopilot] Auto-dispatched {ticker} ({direction}) with {calibrated_prob:.1f}% conviction.")
+            log_alert("INFO", ticker, f"Autopilot discovered {result.direction} setup ({display_confidence:.1f}% confidence).")
+            logger.info(f"✅ [Autopilot] Auto-dispatched {ticker} ({result.direction}) with {display_confidence:.1f}% conviction.")
             
         except Exception as e:
+            ticker_errors.append((ticker, str(e)))
             logger.error(f"[Autopilot] Error evaluating {ticker}: {e}")
 
-    logger.info(f"✨ [Autopilot] {session_name} sweep completed. Discovered {discovered_count} high-conviction trades.")
+    logger.info(
+        f"✨ [Autopilot] {session_name} sweep completed. "
+        f"Scanned: {scanned_count} | Valid Data: {data_valid_count} | "
+        f"Conviction ≥70%: {conviction_qualified_count} | Macro-Aligned: {macro_aligned_count} | "
+        f"Dispatched: {discovered_count} | Errors: {len(ticker_errors)}"
+    )
+
+    try:
+        from app.analytics.master_logger import MasterLogger
+        MasterLogger.log_event(
+            "SCAN_AUTONOMOUS", "SWEEP_COMPLETED",
+            f"Autopilot {session_name} sweep completed. Scanned: {scanned_count}, Qualified: {conviction_qualified_count}, Dispatched: {discovered_count}",
+            universe="AUTOPILOT_POOL",
+            details={
+                "session": session_name,
+                "scanned": scanned_count,
+                "valid_data": data_valid_count,
+                "qualified": conviction_qualified_count,
+                "dispatched": discovered_count,
+                "errors": len(ticker_errors)
+            }
+        )
+    except Exception:
+        pass

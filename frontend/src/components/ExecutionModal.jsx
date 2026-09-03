@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, ShieldAlert, Zap, Calculator, Flame, ShieldCheck, Lock, Unlock, RefreshCw } from 'lucide-react';
 import axios from 'axios';
+import { API_BASE } from '../services/api';
 
 export default function ExecutionModal({ trade, onClose, onSuccess }) {
   // Load global profile config
@@ -32,7 +33,7 @@ export default function ExecutionModal({ trade, onClose, onSuccess }) {
 
   // 1. Fetch live portfolio heat
   useEffect(() => {
-    axios.get(`http://localhost:8000/api/broker/portfolio-heat?capital=${capital}`)
+    axios.get(`${API_BASE}/broker/portfolio-heat?capital=${capital}`)
       .then(res => setPortfolioHeat(res.data))
       .catch(() => {});
   }, [capital]);
@@ -40,7 +41,7 @@ export default function ExecutionModal({ trade, onClose, onSuccess }) {
   // 2. Fetch live real-time quote from Upstox / market provider
   const fetchRealtimeQuote = () => {
     setFetchingQuote(true);
-    axios.get(`http://localhost:8000/api/broker/live-quote?ticker=${trade.ticker}`)
+    axios.get(`${API_BASE}/broker/live-quote?ticker=${trade.ticker}`)
       .then(res => setLiveQuote(res.data))
       .catch(e => console.warn("Live quote fetch error:", e))
       .finally(() => setFetchingQuote(false));
@@ -100,7 +101,7 @@ export default function ExecutionModal({ trade, onClose, onSuccess }) {
     setLoading(true);
     setError(null);
     try {
-      const response = await axios.post('http://localhost:8000/api/broker/execute', {
+      const response = await axios.post(`${API_BASE}/broker/execute`, {
         api_token: apiToken,
         ticker: trade.ticker,
         action: trade.action || (trade.direction === 'BEARISH' ? 'SELL' : 'BUY'),
@@ -123,22 +124,22 @@ export default function ExecutionModal({ trade, onClose, onSuccess }) {
   const action = trade.action || (trade.direction === 'BEARISH' ? 'SELL' : 'BUY');
 
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-slate-900 text-slate-100 rounded-2xl max-w-lg w-full shadow-2xl overflow-hidden border border-slate-700 flex flex-col">
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
+      <div className="bg-slate-900 text-slate-100 rounded-2xl max-w-lg w-full max-h-[90vh] shadow-2xl overflow-hidden border border-slate-700 flex flex-col">
         
         {/* Header */}
         <div className={`p-4 flex justify-between items-center ${action === 'BUY' ? 'bg-emerald-600' : 'bg-rose-600'}`}>
-          <h2 className="text-lg font-black text-white flex items-center gap-2">
-            <Zap size={20} className="fill-current" /> 
+          <h2 className="text-base sm:text-lg font-black text-white flex items-center gap-2 truncate">
+            <Zap size={18} className="fill-current shrink-0" /> 
             1-Click Order Execution: {trade.ticker}
           </h2>
-          <button onClick={onClose} className="text-white/80 hover:text-white p-1 rounded-lg hover:bg-black/20">
+          <button onClick={onClose} className="text-white/80 hover:text-white p-1 rounded-lg hover:bg-black/20 shrink-0">
             <X size={20} />
           </button>
         </div>
         
         {/* Environment & Live Feed Status Bar */}
-        <div className={`px-4 py-2.5 flex items-center justify-between border-b ${
+        <div className={`px-3 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 border-b ${
           execMode === 'SIMULATION' ? 'bg-indigo-950/60 border-indigo-800/50 text-indigo-300' : 'bg-amber-950/60 border-amber-800/50 text-amber-300'
         }`}>
           <div className="flex items-center gap-2 text-xs font-semibold">
@@ -162,7 +163,7 @@ export default function ExecutionModal({ trade, onClose, onSuccess }) {
           </div>
         </div>
 
-        <div className="p-5 space-y-4 overflow-y-auto max-h-[75vh]">
+        <div className="p-3 sm:p-5 space-y-4 overflow-y-auto max-h-[75vh]">
           
           {/* Live Price Verification Banner */}
           <div className="bg-slate-950/80 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
@@ -356,11 +357,11 @@ export default function ExecutionModal({ trade, onClose, onSuccess }) {
           )}
 
           {/* Action Buttons */}
-          <div className="flex gap-3 pt-2">
+          <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 pt-2">
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 py-2.5 rounded-xl border border-slate-700 font-bold text-xs text-slate-400 hover:bg-slate-800 hover:text-white transition-all"
+              className="w-full sm:flex-1 py-2.5 rounded-xl border border-slate-700 font-bold text-xs text-slate-400 hover:bg-slate-800 hover:text-white transition-all"
             >
               Cancel
             </button>
@@ -368,7 +369,7 @@ export default function ExecutionModal({ trade, onClose, onSuccess }) {
               type="button"
               onClick={handleExecute}
               disabled={loading || (execMode === 'LIVE' && !safeguardUnlocked)}
-              className={`flex-1 py-2.5 rounded-xl font-bold text-xs text-white shadow-lg transition-all flex items-center justify-center gap-2 ${
+              className={`w-full sm:flex-1 py-2.5 rounded-xl font-bold text-xs text-white shadow-lg transition-all flex items-center justify-center gap-2 ${
                 execMode === 'SIMULATION'
                   ? 'bg-emerald-600 hover:bg-emerald-500 active:scale-95'
                   : safeguardUnlocked

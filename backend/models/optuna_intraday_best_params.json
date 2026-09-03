@@ -1,0 +1,16 @@
+{
+  "status": "SUCCESS",
+  "timeframe": "intraday",
+  "rf_n_estimators": 50,
+  "rf_max_depth": 7,
+  "rf_min_samples_split": 5,
+  "gb_n_estimators": 100,
+  "gb_learning_rate": 0.1266,
+  "gb_max_depth": 3,
+  "svm_c": 2.428,
+  "best_f1_score": 0.2896,
+  "best_accuracy": 0.2896,
+  "n_trials": 10,
+  "last_tuned": "2026-08-30T16:16:05.600352",
+  "validation_method": "TimeSeriesSplit(n_splits=4, walk_forward=True)"
+}

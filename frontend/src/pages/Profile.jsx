@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User, Key, Shield, HardDrive, DollarSign, Activity, DatabaseZap, Zap, CheckCircle, AlertCircle, ExternalLink, Globe, Copy, Check, Info, X } from 'lucide-react';
 import axios from 'axios';
+import { API_BASE } from '../services/api';
 
 export default function Profile() {
   const [telegram, setTelegram] = useState({ bot_token: '', chat_id: '' });
@@ -9,7 +10,7 @@ export default function Profile() {
     api_secret: '',
     market_token: '',  // Read-only market data / analytics token
     algo_token: '',    // Read + Trade algo execution token
-    redirect_uri: 'http://localhost:8000/api/settings/upstox/callback'
+    redirect_uri: `${API_BASE}/settings/upstox/callback`
   });
   const [upstoxMarketStatus, setUpstoxMarketStatus] = useState(null);
   const [upstoxAlgoStatus, setUpstoxAlgoStatus] = useState(null);
@@ -39,7 +40,7 @@ export default function Profile() {
 
   useEffect(() => {
     // 1. Fetch Telegram Config from backend
-    fetch('http://localhost:8000/api/settings/telegram')
+    fetch(`${API_BASE}/settings/telegram`)
       .then(res => res.json())
       .then(data => {
         if (data.bot_token || data.chat_id) {
@@ -49,7 +50,7 @@ export default function Profile() {
       .catch(e => console.error("Telegram fetch error:", e));
 
     // 2. Fetch Upstox Settings & Token from backend
-    fetch('http://localhost:8000/api/settings/upstox')
+    fetch(`${API_BASE}/settings/upstox`)
       .then(res => res.json())
       .then(data => {
         setUpstox(prev => ({
@@ -63,7 +64,7 @@ export default function Profile() {
       .catch(e => console.error("Upstox fetch error:", e));
 
     // 3. Fetch Active Data Source
-    fetch('http://localhost:8000/api/settings/datasource')
+    fetch(`${API_BASE}/settings/datasource`)
       .then(res => res.json())
       .then(data => {
         if (data.source) {
@@ -73,7 +74,7 @@ export default function Profile() {
       .catch(e => console.error("DataSource fetch error:", e));
 
     // 4. Fetch Global Simulation Mode from backend
-    fetch('http://localhost:8000/api/settings/simulation')
+    fetch(`${API_BASE}/settings/simulation`)
       .then(res => res.json())
       .then(data => {
         if (typeof data.simulation_mode === 'boolean') {
@@ -117,7 +118,7 @@ export default function Profile() {
     
     // Persist to backend database
     try {
-      await fetch('http://localhost:8000/api/settings/simulation', {
+      await fetch(`${API_BASE}/settings/simulation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ simulation_mode: isSimulation })
@@ -130,7 +131,7 @@ export default function Profile() {
   const handleDataSourceChange = async (newSource) => {
     setProfile(p => ({ ...p, dataSource: newSource }));
     try {
-      await fetch('http://localhost:8000/api/settings/datasource', {
+      await fetch(`${API_BASE}/settings/datasource`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: newSource })
@@ -143,7 +144,7 @@ export default function Profile() {
   const handleTestTelegram = async () => {
     setTestStatus('Testing...');
     try {
-      const response = await fetch('http://localhost:8000/api/settings/telegram/test', {
+      const response = await fetch(`${API_BASE}/settings/telegram/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(telegram)
@@ -165,13 +166,13 @@ export default function Profile() {
     setUpstoxMarketStatus(null);
     try {
       // First save the upstox configuration
-      await fetch('http://localhost:8000/api/settings/upstox', {
+      await fetch(`${API_BASE}/settings/upstox`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(upstox)
       });
 
-      const response = await fetch('http://localhost:8000/api/settings/upstox/test', {
+      const response = await fetch(`${API_BASE}/settings/upstox/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...upstox, test_type: 'market' })
@@ -195,13 +196,13 @@ export default function Profile() {
     setUpstoxAlgoStatus(null);
     try {
       // Save configuration
-      await fetch('http://localhost:8000/api/settings/upstox', {
+      await fetch(`${API_BASE}/settings/upstox`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(upstox)
       });
 
-      const response = await fetch('http://localhost:8000/api/settings/upstox/test', {
+      const response = await fetch(`${API_BASE}/settings/upstox/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...upstox, test_type: 'algo' })
@@ -219,7 +220,7 @@ export default function Profile() {
     setIpModalOpen(true);
     setIpLoading(true);
     try {
-      const res = await fetch('http://localhost:8000/api/settings/my-ip');
+      const res = await fetch(`${API_BASE}/settings/my-ip`);
       if (res.ok) {
         const data = await res.json();
         setIpData(data);
@@ -240,13 +241,13 @@ export default function Profile() {
 
   const handleGenerateAuthUrl = async () => {
     // Save current API key first
-    await fetch('http://localhost:8000/api/settings/upstox', {
+    await fetch(`${API_BASE}/settings/upstox`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(upstox)
     });
 
-    const res = await fetch('http://localhost:8000/api/settings/upstox/auth-url');
+    const res = await fetch(`${API_BASE}/settings/upstox/auth-url`);
     const data = await res.json();
     if (data.status === 'success' && data.auth_url) {
       window.open(data.auth_url, '_blank');
@@ -260,7 +261,7 @@ export default function Profile() {
     localStorage.setItem('indmoney_api_token', profile.apiKey);
 
     // Save Simulation Mode
-    await fetch('http://localhost:8000/api/settings/simulation', {
+    await fetch(`${API_BASE}/settings/simulation`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ simulation_mode: profile.simulationMode })
@@ -268,7 +269,7 @@ export default function Profile() {
 
     // Save Telegram config to backend
     if (telegram.bot_token || telegram.chat_id) {
-      await fetch('http://localhost:8000/api/settings/telegram', {
+      await fetch(`${API_BASE}/settings/telegram`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(telegram)
@@ -276,14 +277,14 @@ export default function Profile() {
     }
 
     // Save Upstox config to backend
-    await fetch('http://localhost:8000/api/settings/upstox', {
+    await fetch(`${API_BASE}/settings/upstox`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(upstox)
     }).catch(e => console.error(e));
 
     // Save Data Source setting to backend
-    await fetch('http://localhost:8000/api/settings/datasource', {
+    await fetch(`${API_BASE}/settings/datasource`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source: profile.dataSource || 'yfinance' })
@@ -294,16 +295,16 @@ export default function Profile() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto pb-10">
-      <div className="mb-8 flex justify-between items-end">
+    <div className="max-w-4xl mx-auto pb-10 max-w-full">
+      <div className="mb-6 sm:mb-8 flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
         <div>
-          <h1 className="text-3xl font-black text-gray-900 tracking-tight">System Settings & Profile</h1>
-          <p className="text-gray-500 mt-2 font-medium">Manage your execution environment, API keys, data providers, and risk parameters.</p>
+          <h1 className="text-2xl sm:text-3xl font-black text-gray-900 tracking-tight">System Settings &amp; Profile</h1>
+          <p className="text-gray-500 mt-2 font-medium text-xs sm:text-sm">Manage your execution environment, API keys, data providers, and risk parameters.</p>
         </div>
         
         <button 
           onClick={handleSave}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-8 rounded-lg shadow-md transition transform hover:scale-105 cursor-pointer"
+          className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 sm:px-8 rounded-lg shadow-md transition transform hover:scale-105 cursor-pointer text-sm shrink-0"
         >
           {savedMessage ? '✅ Settings Saved!' : 'Save All Changes'}
         </button>

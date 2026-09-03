@@ -8,9 +8,9 @@
   "gb_learning_rate": 0.1266,
   "gb_max_depth": 3,
   "svm_c": 2.428,
-  "best_f1_score": 0.0769,
-  "best_accuracy": 0.0769,
+  "best_f1_score": 0.0764,
+  "best_accuracy": 0.0764,
   "n_trials": 10,
-  "last_tuned": "2026-08-29T17:14:21.519714",
+  "last_tuned": "2026-08-30T16:13:36.731809",
   "validation_method": "TimeSeriesSplit(n_splits=4, walk_forward=True)"
 }

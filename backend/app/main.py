@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from apscheduler.schedulers.background import BackgroundScheduler
 import logging
+from datetime import datetime
+from typing import Optional, List, Dict, Any
 from app.tasks.hoarder import hoard_intraday_data
 
 # Set up logging for scheduler
@@ -10,55 +12,99 @@ logger = logging.getLogger(__name__)
 # Enable SQLite Write-Ahead Logging (WAL) for concurrent read/writes
 def init_db_wal():
     import sqlite3
+    from app.data.historical_data_layer import get_db_path
     try:
-        conn = sqlite3.connect('market_data.db', timeout=30.0)
+        conn = sqlite3.connect(get_db_path(), timeout=30.0)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.commit()
         conn.close()
-        logger.info("SQLite WAL (Write-Ahead Logging) Mode Enabled.")
+        logger.info("SQLite WAL (Write-Ahead Logging) Mode Enabled on canonical database.")
     except Exception as e:
         logger.warning(f"Could not enable WAL mode: {e}")
 
 init_db_wal()
 
-# Initialize APScheduler
-scheduler = BackgroundScheduler()
-# Run hoarding job every day at 16:00 IST (approximate if server is in IST)
-scheduler.add_job(hoard_intraday_data, 'cron', hour=16, minute=0)
+import threading
 
-# 🤖 AUTONOMOUS BOT: Active Trade Manager
-# Runs every 5 minutes to cross-reference open trades against all 4 ML models
-try:
-    from app.analytics.autonomous_bot import active_trade_tracker
-    scheduler.add_job(active_trade_tracker, 'interval', minutes=5)
-except Exception as e:
-    logger.error(f"Failed to load autonomous bot: {e}")
+# ── SCHEDULER SINGLETON & LIFECYCLE MANAGEMENT ────────────────────────
+_SCHEDULER_LOCK = threading.Lock()
+_SCHEDULER_INSTANCE = None
 
-# 🔄 WEEKLY RETRAINING PIPELINE
-# Runs every Sunday at 23:00 to retrain models and apply Champion vs Challenger gate for both Swing and Intraday
-try:
-    from app.analytics.retrain_models import execute_retraining_pipeline
-    def scheduled_weekly_retrain():
-        logger.info("Executing scheduled Sunday retraining for SWING models...")
-        execute_retraining_pipeline(timeframe="swing")
-        logger.info("Executing scheduled Sunday retraining for INTRADAY models...")
-        execute_retraining_pipeline(timeframe="intraday")
+def get_or_create_scheduler() -> BackgroundScheduler:
+    """Thread-safe singleton guaranteeing exactly one scheduler instance."""
+    global _SCHEDULER_INSTANCE
+    with _SCHEDULER_LOCK:
+        if _SCHEDULER_INSTANCE is None:
+            _SCHEDULER_INSTANCE = BackgroundScheduler(daemon=True)
+            
+            # 1. Data Hoarder: Daily 16:00 IST
+            _SCHEDULER_INSTANCE.add_job(
+                hoard_intraday_data, 'cron', hour=16, minute=0,
+                id='data_hoarder_1600', replace_existing=True
+            )
 
-    scheduler.add_job(scheduled_weekly_retrain, 'cron', day_of_week='sun', hour=23, minute=0)
-except Exception as e:
-    logger.error(f"Failed to schedule weekly retraining pipeline: {e}")
+            # 2. AI Guard Babysitter: Every 5 minutes during market hours
+            try:
+                from app.analytics.autonomous_bot import active_trade_tracker
+                _SCHEDULER_INSTANCE.add_job(
+                    active_trade_tracker, 'interval', minutes=5,
+                    id='active_trade_tracker_5m', replace_existing=True
+                )
+            except Exception as e:
+                logger.error(f"Failed to register active_trade_tracker: {e}")
 
-# 🚀 AUTOPILOT SCHEDULED DISCOVERY SCANS (09:30, 11:30, 13:30 IST Mon-Fri)
-try:
-    from app.tasks.autopilot_scanner import run_scheduled_autopilot_sweep
-    scheduler.add_job(lambda: run_scheduled_autopilot_sweep("Morning Momentum"), 'cron', day_of_week='mon-fri', hour=9, minute=30, id='autopilot_0930')
-    scheduler.add_job(lambda: run_scheduled_autopilot_sweep("Mid-Day Continuation"), 'cron', day_of_week='mon-fri', hour=11, minute=30, id='autopilot_1130')
-    scheduler.add_job(lambda: run_scheduled_autopilot_sweep("Afternoon Breakout"), 'cron', day_of_week='mon-fri', hour=13, minute=30, id='autopilot_1330')
-except Exception as e:
-    logger.error(f"Failed to schedule autopilot scans: {e}")
+            # 3. Weekly Sunday Retraining: 23:00 IST
+            try:
+                from app.analytics.retrain_models import execute_retraining_pipeline
+                def scheduled_weekly_retrain():
+                    logger.info("Executing scheduled Sunday retraining for SWING models...")
+                    execute_retraining_pipeline(timeframe="swing")
+                    logger.info("Executing scheduled Sunday retraining for INTRADAY models...")
+                    execute_retraining_pipeline(timeframe="intraday")
 
-scheduler.start()
+                _SCHEDULER_INSTANCE.add_job(
+                    scheduled_weekly_retrain, 'cron', day_of_week='sun', hour=23, minute=0,
+                    id='weekly_retrain_sun', replace_existing=True
+                )
+            except Exception as e:
+                logger.error(f"Failed to register weekly retraining: {e}")
+
+            # 4. Autopilot Scheduled Discovery Scans (09:30, 11:30, 13:30 IST Mon-Fri)
+            try:
+                from app.tasks.autopilot_scanner import run_scheduled_autopilot_sweep
+                _SCHEDULER_INSTANCE.add_job(
+                    lambda: run_scheduled_autopilot_sweep("Morning Momentum"),
+                    'cron', day_of_week='mon-fri', hour=9, minute=30,
+                    id='autopilot_0930', replace_existing=True
+                )
+                _SCHEDULER_INSTANCE.add_job(
+                    lambda: run_scheduled_autopilot_sweep("Mid-Day Continuation"),
+                    'cron', day_of_week='mon-fri', hour=11, minute=30,
+                    id='autopilot_1130', replace_existing=True
+                )
+                _SCHEDULER_INSTANCE.add_job(
+                    lambda: run_scheduled_autopilot_sweep("Afternoon Breakout"),
+                    'cron', day_of_week='mon-fri', hour=13, minute=30,
+                    id='autopilot_1330', replace_existing=True
+                )
+            except Exception as e:
+                logger.error(f"Failed to register autopilot sweeps: {e}")
+
+            # 5. Research Orchestrator & Auto-Lab
+            try:
+                from app.analytics.research_orchestrator import research_orchestrator
+                research_orchestrator.register_scheduled_jobs(_SCHEDULER_INSTANCE)
+                research_orchestrator.start_orchestrator_daemon()
+            except Exception as e:
+                logger.error(f"Failed to initialize research orchestrator daemon: {e}")
+
+            logger.info("✅ APScheduler initialized with unique job IDs and duplicate protection.")
+
+        return _SCHEDULER_INSTANCE
+
+scheduler = get_or_create_scheduler()
+
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.backtest import router as backtest_router
 from app.api.market import router as market_router
@@ -72,6 +118,93 @@ from app.api.fno import router as fno_router
 from app.api.data_lab import router as data_lab_router
 
 app = FastAPI(title="Swing Trading AI Backend")
+
+@app.on_event("startup")
+def on_startup():
+    sched = get_or_create_scheduler()
+    if not sched.running:
+        sched.start()
+        logger.info("🚀 APScheduler background worker started.")
+
+@app.on_event("shutdown")
+def on_shutdown():
+    sched = get_or_create_scheduler()
+    if sched.running:
+        sched.shutdown(wait=False)
+        logger.info("🛑 APScheduler stopped gracefully.")
+
+@app.get("/api/scheduler/status")
+def get_scheduler_status():
+    """Operational status of the autonomous background scheduler."""
+    sched = get_or_create_scheduler()
+    jobs = []
+    for job in sched.get_jobs():
+        jobs.append({
+            "id": job.id,
+            "name": job.name,
+            "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
+            "trigger": str(job.trigger)
+        })
+    return {
+        "status": "RUNNING" if sched.running else "STOPPED",
+        "running": sched.running,
+        "backend_status": "ONLINE",
+        "job_count": len(jobs),
+        "jobs": jobs,
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/api/system/audit-log")
+def get_system_audit_log(
+    category: Optional[str] = None,
+    event_type: Optional[str] = None,
+    ticker: Optional[str] = None,
+    severity: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    from app.analytics.master_logger import MasterLogger
+    events = MasterLogger.get_events(
+        category=category,
+        event_type=event_type,
+        ticker=ticker,
+        severity=severity,
+        limit=limit,
+        offset=offset
+    )
+    return {"status": "success", "count": len(events), "events": events}
+
+@app.post("/api/system/pipeline-test")
+def run_pipeline_test():
+    """
+    Executes a safe, non-contaminating end-to-end synthetic pipeline diagnostic using TESTSTOCK.NS.
+    Validates all 11 stages: Ingestion, Validation, Models, Meta-Learner, Calibration,
+    Decision Gate, Risk Isolation, and Master Logger without mutating real market or broker state.
+    """
+    from app.analytics.synthetic_pipeline_tester import SyntheticPipelineTester
+    return SyntheticPipelineTester.run_diagnostic()
+
+@app.get("/api/market/universes")
+def get_market_universes():
+    """
+    Returns all authoritative universe presets and their configurations.
+    Used by Intraday Scanner, Swing Scanner, DataLab, and Research orchestrators.
+    """
+    from app.analytics.universe_config import UNIVERSE_PRESETS, get_available_db_tickers
+    db_tickers = get_available_db_tickers()
+    presets = {}
+    for k, v in UNIVERSE_PRESETS.items():
+        count = len(v.get("tickers", []))
+        if k == "ALL_117":
+            count = len(db_tickers)
+        presets[k] = {
+            "id": k,
+            "name": v.get("name"),
+            "count": count,
+            "description": v.get("description"),
+            "survivorship_bias": v.get("survivorship_bias")
+        }
+    return {"status": "success", "universes": presets, "all_db_symbols": db_tickers}
 
 app.add_middleware(
     CORSMiddleware,

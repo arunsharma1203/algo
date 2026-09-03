@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { History, CheckCircle, XCircle, Clock, AlertTriangle, ShieldAlert, ShieldCheck, ArrowRight, X, Info, Activity } from 'lucide-react';
 import axios from 'axios';
+import { API_BASE } from '../services/api';
 
 function ConvictionTooltip({ trade }) {
   const exp = trade.explanation;
@@ -102,17 +103,17 @@ function AITradeRiskAuditModal({ trade, onClose }) {
   const models = audit.model_breakdown || {};
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4 animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-3 sm:p-4 animate-fade-in">
       <div className="bg-slate-900 border border-slate-700 text-white rounded-2xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-800 flex justify-between items-center bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900">
+        <div className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-800 flex justify-between items-center bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900">
           <div className="flex items-center space-x-3">
-            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shadow-inner ${audit.risk_level === 'CRITICAL' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'}`}>
+            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shadow-inner shrink-0 ${audit.risk_level === 'CRITICAL' ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'}`}>
               {audit.risk_level === 'CRITICAL' ? <ShieldAlert size={20} /> : <AlertTriangle size={20} />}
             </div>
             <div>
-              <div className="flex items-center space-x-2">
-                <h3 className="font-bold text-lg text-white tracking-tight">{trade.ticker}</h3>
+              <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                <h3 className="font-bold text-base sm:text-lg text-white tracking-tight">{trade.ticker}</h3>
                 <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${trade.direction === 'BULLISH' ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' : 'bg-rose-950 text-rose-300 border border-rose-700'}`}>
                   {trade.direction}
                 </span>
@@ -120,16 +121,16 @@ function AITradeRiskAuditModal({ trade, onClose }) {
                   {trade.trade_type || 'SWING'}
                 </span>
               </div>
-              <p className="text-xs text-slate-400 mt-0.5">Live AI Risk &amp; Model Responsibility Audit</p>
+              <p className="text-[10px] sm:text-xs text-slate-400 mt-0.5">Live AI Risk &amp; Model Responsibility Audit</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer">
+          <button onClick={onClose} className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition cursor-pointer shrink-0">
             <X size={20} />
           </button>
         </div>
 
         {/* Scrollable Body */}
-        <div className="p-6 overflow-y-auto space-y-5">
+        <div className="p-4 sm:p-6 overflow-y-auto space-y-4 sm:space-y-5">
           {/* Threat Meter */}
           <div className="bg-slate-850 p-4 rounded-xl border border-slate-800">
             <div className="flex justify-between items-center mb-2">
@@ -245,7 +246,8 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
   useEffect(() => {
     const fetchHistory = async () => {
       try {
-        const res = await axios.get('http://localhost:8000/api/ml/history');
+        const url = refreshTrigger > 0 ? `${API_BASE}/ml/history?force_refresh=true` : `${API_BASE}/ml/history`;
+        const res = await axios.get(url);
         setHistory(res.data || []);
       } catch (e) {
         console.error(e);
@@ -304,13 +306,13 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                   <ConvictionTooltip trade={trade} />
                 </td>
                 <td className="px-6 py-4 text-center">
-                  <div className="flex justify-center space-x-1" title={new Date(trade.timestamp).getTime() > new Date('2024-08-28T00:00:00').getTime() ? "All 4 Deep Learning Models Active (Hunters, FinBERT, Meta-Learner, Macro)" : "Legacy Single-Model Trade"}>
+                  <div className="flex justify-center space-x-1" title={new Date(trade.timestamp).getTime() > new Date('2024-08-28T00:00:00').getTime() ? "All 4 AI Systems Active (Ensemble, VADER Sentiment, Meta-Learner, Macro)" : "Legacy Single-Model Trade"}>
                     {/* Hunter ML */}
-                    <span className="w-4 h-4 rounded-full bg-blue-500 flex items-center justify-center text-[8px] text-white font-bold" title="Hunter ML">H</span>
+                    <span className="w-4 h-4 rounded-full bg-blue-500 flex items-center justify-center text-[8px] text-white font-bold" title="Hunter Ensemble (RF+GB+SVC)">H</span>
                     {new Date(trade.timestamp).getTime() > new Date('2026-08-28T00:00:00').getTime() ? (
                       <>
-                        {/* NLP FinBERT */}
-                        <span className="w-4 h-4 rounded-full bg-purple-500 flex items-center justify-center text-[8px] text-white font-bold" title="FinBERT NLP">N</span>
+                        {/* VADER News Sentiment */}
+                        <span className="w-4 h-4 rounded-full bg-purple-500 flex items-center justify-center text-[8px] text-white font-bold" title="VADER Financial Sentiment">V</span>
                         {/* Meta-Learner */}
                         <span className="w-4 h-4 rounded-full bg-orange-500 flex items-center justify-center text-[8px] text-white font-bold" title="Layer-2 Meta-Learner">M</span>
                         {/* Macro Regime */}
@@ -318,7 +320,7 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                       </>
                     ) : (
                       <>
-                        <span className="w-4 h-4 rounded-full bg-gray-200 flex items-center justify-center text-[8px] text-gray-400 font-bold" title="Offline">N</span>
+                        <span className="w-4 h-4 rounded-full bg-gray-200 flex items-center justify-center text-[8px] text-gray-400 font-bold" title="Offline">V</span>
                         <span className="w-4 h-4 rounded-full bg-gray-200 flex items-center justify-center text-[8px] text-gray-400 font-bold" title="Offline">M</span>
                         <span className="w-4 h-4 rounded-full bg-gray-200 flex items-center justify-center text-[8px] text-gray-400 font-bold" title="Offline">R</span>
                       </>
@@ -327,6 +329,12 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                 </td>
                 <td className="px-6 py-4 text-right">
                   <div className="text-gray-800 font-medium">{trade.entry != null ? `₹${Number(trade.entry).toFixed(2)}` : '-'}</div>
+                  {trade.current_price != null && (
+                    <div className="text-[11px] text-indigo-600 font-bold flex items-center justify-end" title={trade.price_source ? `LTP Source: ${trade.price_source} ${trade.price_timestamp || ''}` : 'Current Market Price'}>
+                      <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${trade.price_is_fresh ? 'bg-emerald-500' : 'bg-slate-400'}`}></span>
+                      LTP: ₹{Number(trade.current_price).toFixed(2)}
+                    </div>
+                  )}
                   {trade.effective_entry != null && (
                     <div className="text-[10px] text-slate-400" title={`Modeled with ${trade.slippage_pct || 0.08}% execution slippage`}>
                       Eff: ₹{Number(trade.effective_entry).toFixed(2)}
@@ -335,14 +343,14 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                 </td>
                 <td className="px-6 py-4 text-right font-medium">
                   <div className="text-red-500">{trade.sl != null ? `₹${Number(trade.sl).toFixed(2)}` : '-'}</div>
-                  {trade.risk_audit && trade.risk_audit.risk_level !== 'NORMAL' && trade.risk_audit.tightened_sl != null && (
+                  {trade.tightened_sl != null && trade.risk_level !== 'NORMAL' && (
                     <button 
                       onClick={() => setSelectedAuditTrade(trade)}
                       className="mt-1 inline-flex items-center text-[10px] bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 font-bold px-1.5 py-0.5 rounded cursor-pointer transition shadow-2xs"
                       title="AI detected weakness: Click to view model audit"
                     >
                       <AlertTriangle size={10} className="mr-1 text-amber-600" />
-                      Tighten: ₹{Number(trade.risk_audit.tightened_sl).toFixed(2)} 🔍
+                      Tighten: ₹{Number(trade.tightened_sl).toFixed(2)} 🔍
                     </button>
                   )}
                 </td>
@@ -360,7 +368,11 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                   )}
                 </td>
                 <td className="px-6 py-4 text-center">
-                  {trade.outcome === 'TARGET MET' ? (
+                  {trade.status === 'INVALIDATED' || trade.outcome === 'SWING_CASH_SHORT_DISALLOWED' ? (
+                    <span className="bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full text-[10px] font-bold border border-slate-300 flex items-center justify-center w-max mx-auto" title="Cash equity swing shorts disallowed">
+                      CASH SHORT DISALLOWED
+                    </span>
+                  ) : trade.outcome === 'TARGET MET' ? (
                     <span className="bg-green-100 text-green-800 px-3 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto">
                       <CheckCircle size={14} className="mr-1" /> TARGET HIT
                     </span>
@@ -370,27 +382,31 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                     </span>
                   ) : trade.outcome === 'SQUARED OFF (3:15 PM)' ? (
                     <span className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto">
-                      <CheckCircle size={14} className="mr-1" /> SQ OFF
+                      <CheckCircle size={14} className="mr-1" /> SQ OFF (3:15)
                     </span>
-                  ) : trade.risk_audit && trade.risk_audit.risk_level === 'CRITICAL' ? (
+                  ) : trade.outcome === 'SWING_HORIZON_REACHED' ? (
+                    <span className="bg-purple-100 text-purple-800 px-2.5 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto" title="5 trading days elapsed">
+                      <Clock size={14} className="mr-1" /> 5D HORIZON EXPIRED
+                    </span>
+                  ) : trade.risk_level === 'CRITICAL' ? (
                     <button 
                       onClick={() => setSelectedAuditTrade(trade)}
                       className="bg-rose-100 hover:bg-rose-200 text-rose-800 border border-rose-300 px-2.5 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto cursor-pointer transition shadow-xs animate-pulse"
                       title="Click to view detailed model breakdown and exit advisory"
                     >
-                      <ShieldAlert size={14} className="mr-1 text-rose-600" /> EARLY EXIT 🔍
+                      <ShieldAlert size={14} className="mr-1 text-rose-600" /> EARLY EXIT ADVISORY 🔍
                     </button>
-                  ) : trade.risk_audit && trade.risk_audit.risk_level === 'WARNING' ? (
+                  ) : trade.risk_level === 'WARNING' ? (
                     <button 
                       onClick={() => setSelectedAuditTrade(trade)}
                       className="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-2.5 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto cursor-pointer transition shadow-xs"
                       title="Click to view detailed model breakdown and stop loss advisory"
                     >
-                      <AlertTriangle size={14} className="mr-1 text-amber-600" /> AI WARNING 🔍
+                      <AlertTriangle size={14} className="mr-1 text-amber-600" /> TIGHTEN SL 🔍
                     </button>
                   ) : (
-                    <span className="bg-yellow-100 text-yellow-800 px-3 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto">
-                      <Clock size={14} className="mr-1" /> ACTIVE
+                    <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-3 py-1 rounded-full text-xs font-bold flex items-center justify-center w-max mx-auto">
+                      <Clock size={14} className="mr-1 text-emerald-500" /> ACTIVE
                     </span>
                   )}
                 </td>

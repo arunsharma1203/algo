@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Activity, TrendingUp, TrendingDown, Clock } from 'lucide-react';
-import { getLatestData } from '../services/api';
+import { getLatestData, API_BASE } from '../services/api';
 import TickerSearch from '../components/TickerSearch';
 import { useLiveIndicator } from '../context/LiveIndicatorContext';
 
@@ -33,13 +33,13 @@ export default function Dashboard() {
     // Fetch Autonomous Bot Alerts
     const fetchAlerts = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/ml/alerts');
+        const response = await fetch(`${API_BASE}/ml/alerts`);
         if (response.ok) {
           const data = await response.json();
           setAlerts(data);
         }
         
-        const monitorRes = await fetch('http://localhost:8000/api/ml/active-monitors');
+        const monitorRes = await fetch(`${API_BASE}/ml/active-monitors`);
         if (monitorRes.ok) {
           setActiveMonitors(await monitorRes.json());
         }
@@ -79,10 +79,10 @@ export default function Dashboard() {
   };
 
   return (
-    <div>
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-3xl font-bold text-gray-800">Dashboard</h1>
-        <div className="w-80">
+    <div className="max-w-full">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+        <h1 className="text-2xl sm:text-3xl font-bold text-gray-800">Dashboard</h1>
+        <div className="w-full sm:w-80">
           <TickerSearch 
             value={tickerInput} 
             onChange={setTickerInput} 
@@ -92,14 +92,16 @@ export default function Dashboard() {
       </div>
       
       {recentSearches.length > 0 && (
-        <div className="flex items-center space-x-2 mb-6 text-sm">
-          <Clock size={16} className="text-gray-500" />
-          <span className="text-gray-500">Recent:</span>
+        <div className="flex flex-wrap items-center gap-2 mb-6 text-sm">
+          <div className="flex items-center space-x-1 text-gray-500">
+            <Clock size={16} />
+            <span>Recent:</span>
+          </div>
           {recentSearches.map(ticker => (
             <button 
               key={ticker} 
               onClick={() => { setTickerInput(ticker); fetchMarketData(ticker); }}
-              className="px-2 py-1 bg-gray-200 hover:bg-gray-300 rounded text-gray-700 transition"
+              className="px-2 py-1 bg-gray-200 hover:bg-gray-300 rounded text-gray-700 transition text-xs"
             >
               {ticker}
             </button>
@@ -108,30 +110,32 @@ export default function Dashboard() {
       )}
       
       {error && (
-        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6 text-sm">
           {error}
         </div>
       )}
       
       {/* Autonomous Bot Alert Feed */}
       <div className="mb-8">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold text-gray-800 flex items-center">
-            <Activity className="mr-2 text-indigo-500 animate-pulse" /> Autonomous Trade Manager (Live)
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 mb-4">
+          <h2 className="text-lg sm:text-xl font-bold text-gray-800 flex items-center">
+            <Activity className="mr-2 text-indigo-500 animate-pulse shrink-0" /> Autonomous Trade Manager (Live)
           </h2>
-          {activeMonitors.length > 0 && (
-            <div className="flex space-x-2">
-              {activeMonitors.map((m, i) => (
-                <span key={i} className="text-xs font-bold bg-gray-100 text-gray-600 px-2 py-1 rounded border border-gray-200">
-                  <span className={m.direction === 'BULLISH' ? 'text-green-600' : 'text-red-600'}>●</span> {m.ticker.replace('.NS', '')}
-                </span>
-              ))}
-            </div>
-          )}
-          <span className="text-xs font-bold bg-green-100 text-green-700 px-2 py-1 rounded animate-pulse flex items-center">
-            <span className="w-2 h-2 rounded-full bg-green-500 mr-2"></span>
-            Monitoring Active Calls
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {activeMonitors.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {activeMonitors.map((m, i) => (
+                  <span key={i} className="text-xs font-bold bg-gray-100 text-gray-600 px-2 py-0.5 rounded border border-gray-200">
+                    <span className={m.direction === 'BULLISH' ? 'text-green-600' : 'text-red-600'}>●</span> {m.ticker.replace('.NS', '')}
+                  </span>
+                ))}
+              </div>
+            )}
+            <span className="text-xs font-bold bg-green-100 text-green-700 px-2 py-1 rounded flex items-center shrink-0">
+              <span className="w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse"></span>
+              Active
+            </span>
+          </div>
         </div>
         
         {alerts && alerts.length > 0 ? (
@@ -159,7 +163,7 @@ export default function Dashboard() {
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 mb-8">
         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-100 hover:shadow-md transition">
           <div className="flex justify-between items-start">
             <div>

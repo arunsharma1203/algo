@@ -87,7 +87,8 @@ NSE_INSTRUMENT_MAP = {
 
 def get_upstox_config() -> Dict[str, str]:
     """Reads Upstox credentials from database (Market Read-Only & Algo Read-Trade)."""
-    conn = sqlite3.connect('market_data.db', timeout=5.0)
+    from app.data.historical_data_layer import get_db_path
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
     cur = conn.cursor()
     cur.execute("SELECT key, value FROM app_settings WHERE key LIKE 'upstox_%'")
     rows = cur.fetchall()

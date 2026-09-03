@@ -1,6 +1,8 @@
 import axios from 'axios';
 
-const API_URL = 'http://localhost:8000/api';
+const getHost = () => (typeof window !== 'undefined' && window.location.hostname) ? window.location.hostname : 'localhost';
+export const API_URL = `http://${getHost()}:8000/api`;
+export const API_BASE = API_URL;
 
 export const runBacktest = async (data) => {
     try {

@@ -4,13 +4,14 @@ import pandas as pd
 import yfinance as yf
 from typing import Dict, Any, Optional
 from app.data.upstox_provider import fetch_upstox_candles, fetch_upstox_ltp, test_upstox_connection
+from app.data.historical_data_layer import get_db_path
 
 logger = logging.getLogger(__name__)
 
 def get_active_data_source() -> str:
     """Reads configured market data source from SQLite."""
     try:
-        conn = sqlite3.connect('market_data.db', timeout=5.0)
+        conn = sqlite3.connect(get_db_path(), timeout=5.0)
         cur = conn.cursor()
         cur.execute("SELECT value FROM app_settings WHERE key = 'market_data_source'")
         row = cur.fetchone()

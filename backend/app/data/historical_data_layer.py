@@ -15,15 +15,7 @@ logger = logging.getLogger(__name__)
 # Global in-memory cache for point-in-time technical features
 _FEATURE_CACHE: Dict[str, pd.DataFrame] = {}
 
-def get_db_path() -> str:
-    """Resolves correct path to market_data.db whether running from root or backend/."""
-    if os.path.exists("backend/market_data.db"):
-        return "backend/market_data.db"
-    elif os.path.exists("market_data.db"):
-        return "market_data.db"
-    elif os.path.exists("../market_data.db"):
-        return "../market_data.db"
-    return "backend/market_data.db"
+from app.data.database import get_db_path, get_connection, get_readonly_connection, is_canonical_path
 
 class HistoricalDataLayer:
     """

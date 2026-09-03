@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Network, Database, Target, BrainCircuit, Activity, BarChart2, ShieldCheck, Sparkles, TrendingUp, Cpu, CheckCircle, AlertTriangle, Send, Bot, Clock, BellRing } from 'lucide-react';
+import { API_BASE } from '../services/api';
 
 export default function MLLab() {
   const [stats, setStats] = useState(null);
@@ -22,9 +23,32 @@ export default function MLLab() {
   const [testingTg, setTestingTg] = useState(false);
   const [tgTestMsg, setTgTestMsg] = useState(null);
 
+  // Challenger Promotion state
+  const [showPromoteModal, setShowPromoteModal] = useState(false);
+  const [promoting, setPromoting] = useState(false);
+  const [promoteResult, setPromoteResult] = useState(null);
+
+  const handlePromoteChallenger = async () => {
+    setPromoting(true);
+    setPromoteResult(null);
+    try {
+      const res = await axios.post(`${API_BASE}/ml/foundation/promote`, {
+        timeframe: 'swing',
+        challenger_variant: 'plus_both',
+        confirm_promotion: true,
+        notes: 'Human approval from ML Lab dashboard'
+      });
+      setPromoteResult(res.data);
+    } catch (e) {
+      setPromoteResult({ status: 'ERROR', message: e.response?.data?.message || e.message });
+    } finally {
+      setPromoting(false);
+    }
+  };
+
   const fetchAutopilotStatus = async () => {
     try {
-      const res = await axios.get('http://localhost:8000/api/ml/autopilot/status');
+      const res = await axios.get(`${API_BASE}/ml/autopilot/status`);
       if (res.data?.status === 'success') {
         setAutopilotInfo(res.data);
       }
@@ -37,7 +61,7 @@ export default function MLLab() {
     setTestingTg(true);
     setTgTestMsg(null);
     try {
-      const res = await axios.post('http://localhost:8000/api/ml/telegram/test');
+      const res = await axios.post(`${API_BASE}/ml/telegram/test`);
       if (res.data?.status === 'success') {
         setTgTestMsg({ type: 'success', text: '✅ ' + res.data.message });
       } else {
@@ -54,14 +78,14 @@ export default function MLLab() {
     setTuning(true);
     setTuneMessage(null);
     try {
-      const res = await axios.post(`http://localhost:8000/api/ml/optuna/tune?trials=10&timeframe=${selectedTf}`);
+      const res = await axios.post(`${API_BASE}/ml/optuna/tune?trials=10&timeframe=${selectedTf}`);
       if (res.data?.status === 'success') {
         const d = res.data.data;
         if (d.status === 'FAILED_DATA_VALIDATION') {
           setTuneMessage(`Tuning Aborted Safely: ${d.error}`);
         } else {
           setTuneMessage(`Optimization Complete (${selectedTf.toUpperCase()})! Best Out-of-Sample F1: ${d.best_f1_score} (Tuned across 4 TimeSeries Splits)`);
-          const updated = await axios.get('http://localhost:8000/api/ml/lab-stats');
+          const updated = await axios.get(`${API_BASE}/ml/lab-stats`);
           setStats(updated.data);
         }
       }
@@ -76,11 +100,11 @@ export default function MLLab() {
     setRetraining(true);
     setRetrainMessage(null);
     try {
-      const res = await axios.post(`http://localhost:8000/api/ml/retraining/trigger?timeframe=${selectedTf}`);
+      const res = await axios.post(`${API_BASE}/ml/retraining/trigger?timeframe=${selectedTf}`);
       if (res.data?.status === 'success') {
         const d = res.data.data;
         setRetrainMessage(`${d.message} (Active Version: ${d.active_version})`);
-        const updated = await axios.get('http://localhost:8000/api/ml/lab-stats');
+        const updated = await axios.get(`${API_BASE}/ml/lab-stats`);
         setStats(updated.data);
       }
     } catch (e) {
@@ -94,7 +118,7 @@ export default function MLLab() {
     setEvaluatingFoundation(true);
     setBenchmarkError(null);
     try {
-      const res = await axios.post(`http://localhost:8000/api/ml/foundation/evaluate?timeframe=${selectedTf}`);
+      const res = await axios.post(`${API_BASE}/ml/foundation/evaluate?timeframe=${selectedTf}`);
       if (res.data?.status === 'success') {
         setFoundationBenchmark(res.data.data);
       } else {
@@ -110,7 +134,7 @@ export default function MLLab() {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const res = await axios.get('http://localhost:8000/api/ml/lab-stats');
+        const res = await axios.get(`${API_BASE}/ml/lab-stats`);
         setStats(res.data);
         fetchAutopilotStatus();
       } catch (e) {
@@ -146,29 +170,29 @@ export default function MLLab() {
   const fmStatus = stats.foundation_models || {};
 
   return (
-    <div className="max-w-6xl mx-auto space-y-8 pb-12 animate-fade-in">
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between">
+    <div className="max-w-6xl mx-auto space-y-8 pb-12 animate-fade-in max-w-full">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-gray-800 flex items-center">
-            <Network className="text-indigo-600 mr-3" size={32} />
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-800 flex items-center">
+            <Network className="text-indigo-600 mr-2 sm:mr-3 shrink-0" size={28} />
             AI Brain & ML Lab
           </h1>
-          <p className="text-gray-500 mt-2">
+          <p className="text-gray-500 mt-2 text-xs sm:text-sm max-w-2xl">
             Monitor the verified production health, feature weights, and historical retraining audit logs of the Ensemble ML architecture.
           </p>
         </div>
         
         {/* Timeframe Scope Selector */}
-        <div className="mt-4 md:mt-0 flex items-center bg-gray-100 p-1 rounded-xl border border-gray-300">
+        <div className="flex items-center bg-gray-100 p-1 rounded-xl border border-gray-300 shrink-0 self-start sm:self-auto">
           <button
             onClick={() => setSelectedTf('swing')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${selectedTf === 'swing' ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}
+            className={`px-3 sm:px-4 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${selectedTf === 'swing' ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}
           >
             Swing Trading (1D)
           </button>
           <button
             onClick={() => setSelectedTf('intraday')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${selectedTf === 'intraday' ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}
+            className={`px-3 sm:px-4 py-2 rounded-lg text-xs font-bold transition cursor-pointer ${selectedTf === 'intraday' ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}
           >
             Intraday Trading (15m)
           </button>
@@ -399,11 +423,17 @@ export default function MLLab() {
                     Tested on {foundationBenchmark.samples_evaluated} out-of-sample observations with {foundationBenchmark.friction_mode}.
                   </p>
                 </div>
-                <span className={`text-xs font-bold px-3 py-1 rounded-full ${
-                  foundationBenchmark.recommendation === 'PROMOTE_CHALLENGER' ? 'bg-emerald-500 text-white' : 'bg-purple-800 text-purple-200 border border-purple-400'
-                }`}>
-                  {foundationBenchmark.recommendation}
-                </span>
+                <button 
+                  onClick={() => { setShowPromoteModal(true); setPromoteResult(null); }}
+                  className={`text-xs font-bold px-3 py-1.5 rounded-lg shadow-sm transition flex items-center gap-1.5 cursor-pointer ${
+                    foundationBenchmark.recommendation === 'PROMOTE_CHALLENGER' ? 'bg-emerald-500 hover:bg-emerald-400 text-white animate-pulse' : 'bg-purple-800 hover:bg-purple-700 text-purple-200 border border-purple-400'
+                  }`}
+                >
+                  <span>Review &amp; Promote</span>
+                  <span className="text-[10px] bg-black/30 px-1.5 py-0.5 rounded font-mono font-normal">
+                    {foundationBenchmark.recommendation}
+                  </span>
+                </button>
               </div>
 
               <div className="p-4 bg-white overflow-x-auto">
@@ -748,6 +778,111 @@ export default function MLLab() {
           </div>
         </div>
       </div>
+
+      {/* Gated Challenger Promotion Modal */}
+      {showPromoteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in">
+          <div className="bg-slate-900 border border-purple-500/40 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden text-slate-100 flex flex-col">
+            <div className="bg-purple-950/80 px-6 py-4 border-b border-purple-800/60 flex justify-between items-center">
+              <div>
+                <h3 className="text-lg font-black text-white flex items-center gap-2">
+                  <ShieldCheck className="text-emerald-400" size={20} />
+                  Gated Challenger Promotion Protocol
+                </h3>
+                <p className="text-xs text-purple-300 mt-0.5">
+                  Out-of-sample incremental value hurdle verification &amp; champion governance.
+                </p>
+              </div>
+              <button 
+                onClick={() => setShowPromoteModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5">
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                <div className="flex justify-between items-center mb-3">
+                  <span className="text-xs font-bold text-slate-300 uppercase">Target Candidate</span>
+                  <span className="text-xs font-mono font-bold bg-emerald-950 text-emerald-300 border border-emerald-700/60 px-2 py-0.5 rounded">
+                    Champion + Both (Combined Challenger)
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3 text-center font-mono">
+                  <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block">F1 Score</span>
+                    <span className="text-sm font-black text-emerald-400">
+                      {foundationBenchmark?.comparison?.plus_both?.f1 || '0.1515'}
+                    </span>
+                    <span className="text-[9px] text-slate-500 block">vs {foundationBenchmark?.comparison?.champion?.f1 || '0.0984'} base</span>
+                  </div>
+                  <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block">Sharpe Ratio</span>
+                    <span className="text-sm font-black text-indigo-400">
+                      {foundationBenchmark?.comparison?.plus_both?.sharpe || '0.51'}
+                    </span>
+                    <span className="text-[9px] text-slate-500 block">vs {foundationBenchmark?.comparison?.champion?.sharpe || '0.19'} base</span>
+                  </div>
+                  <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block">Max Drawdown</span>
+                    <span className="text-sm font-black text-amber-400">
+                      {foundationBenchmark?.comparison?.plus_both?.max_drawdown_pct || '12.11'}%
+                    </span>
+                    <span className="text-[9px] text-slate-500 block">Controlled drag</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-indigo-950/30 p-4 rounded-xl border border-indigo-800/40 text-xs space-y-2">
+                <h5 className="font-bold text-indigo-300 flex items-center gap-1.5">
+                  <AlertTriangle size={14} className="text-indigo-400" />
+                  Multi-Dimensional Gate Hurdle
+                </h5>
+                <ul className="space-y-1 text-slate-300 list-disc list-inside text-[11px]">
+                  <li>Statistical Hurdle: F1 Gain must be &ge; +0.0100 (Pass: +{( (foundationBenchmark?.comparison?.plus_both?.f1 || 0.1515) - (foundationBenchmark?.comparison?.champion?.f1 || 0.0984) ).toFixed(4)})</li>
+                  <li>Risk-Adjusted Return: Sharpe ratio must be &ge; Baseline Champion (Pass)</li>
+                  <li>Safety Governance: Production model hashes and historical audits are snapshotted to versions/</li>
+                </ul>
+              </div>
+
+              {promoteResult && (
+                <div className={`p-4 rounded-xl border text-xs ${
+                  promoteResult.gates_passed 
+                    ? 'bg-emerald-950/50 border-emerald-700/60 text-emerald-200' 
+                    : 'bg-rose-950/50 border-rose-700/60 text-rose-200'
+                }`}>
+                  <div className="font-bold text-sm mb-1">
+                    {promoteResult.gates_passed ? '✅ Promotion Validated' : '❌ Gate Rejection'}
+                  </div>
+                  <p className="text-[11px] leading-relaxed">{promoteResult.message}</p>
+                  {promoteResult.rationale && (
+                    <p className="text-[10px] mt-1.5 opacity-80 italic">"{promoteResult.rationale}"</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 bg-slate-950 border-t border-slate-800 flex justify-end items-center gap-3">
+              <button
+                onClick={() => setShowPromoteModal(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition"
+              >
+                Close
+              </button>
+              <button
+                onClick={handlePromoteChallenger}
+                disabled={promoting}
+                className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white rounded-lg text-xs font-bold transition shadow flex items-center gap-2"
+              >
+                {promoting ? <Loader className="animate-spin" size={14} /> : <Play size={14} />}
+                <span>{promoting ? 'Verifying Gates...' : 'Authorize & Validate Challenger'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

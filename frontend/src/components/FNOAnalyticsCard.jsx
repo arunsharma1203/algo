@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Layers, ArrowUpRight, ArrowDownRight, RefreshCw, Calendar } from 'lucide-react';
 import axios from 'axios';
+import { API_BASE } from '../services/api';
 
 export default function FNOAnalyticsCard({ symbol = "NIFTY" }) {
   const [fnoData, setFnoData] = useState(null);
@@ -11,8 +12,8 @@ export default function FNOAnalyticsCard({ symbol = "NIFTY" }) {
     setLoading(true);
     const cleanSym = symbol.replace('.NS', '').replace('.BO', '').toUpperCase();
     const url = expiryToFetch 
-      ? `http://localhost:8000/api/fno/option-chain/${cleanSym}?expiry=${expiryToFetch}`
-      : `http://localhost:8000/api/fno/option-chain/${cleanSym}`;
+      ? `${API_BASE}/fno/option-chain/${cleanSym}?expiry=${expiryToFetch}`
+      : `${API_BASE}/fno/option-chain/${cleanSym}`;
 
     axios.get(url)
       .then(res => {

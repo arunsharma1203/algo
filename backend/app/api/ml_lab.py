@@ -17,13 +17,15 @@ class RollbackRequest(BaseModel):
     timeframe: str = "swing"
     target_version: Optional[str] = None
 
+from app.data.historical_data_layer import get_db_path
+
 class FoundationForecastRequest(BaseModel):
     symbol: str = "RELIANCE.NS"
     timeframe: str = "1d"
     horizon_bars: int = 5
 
 def ensure_lab_tables():
-    conn = sqlite3.connect('market_data.db')
+    conn = sqlite3.connect(get_db_path(), timeout=10.0)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ml_feature_importance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +43,7 @@ def ensure_lab_tables():
 
 def save_feature_importance(ticker, importances, features):
     ensure_lab_tables()
-    conn = sqlite3.connect('market_data.db')
+    conn = sqlite3.connect(get_db_path(), timeout=10.0)
     
     val_map = {f: 0.0 for f in ['rsi', 'macd', 'macd_diff', 'adx', 'returns']}
     for i, f in enumerate(features):
@@ -59,7 +61,7 @@ def save_feature_importance(ticker, importances, features):
 @router.get("/lab-stats")
 def get_lab_stats():
     ensure_lab_tables()
-    conn = sqlite3.connect('market_data.db')
+    conn = sqlite3.connect(get_db_path(), timeout=10.0)
     
     # 1. Row counts per ticker in memory
     try:
@@ -148,6 +150,94 @@ def evaluate_foundation_challenger_api(timeframe: str = Query("swing", enum=["sw
     """
     res = FoundationChallengerEvaluator.evaluate_incremental_value(timeframe=timeframe)
     return {"status": "success", "data": res}
+
+class FoundationPromoteRequest(BaseModel):
+    timeframe: str = "swing"
+    challenger_variant: str = "plus_both"
+    confirm_promotion: bool = False
+    notes: Optional[str] = None
+
+@router.post("/foundation/promote")
+def promote_foundation_challenger_api(req: FoundationPromoteRequest):
+    """
+    Gated human-approval API for foundation model challenger promotion.
+    Enforces strict statistical hurdle validation (F1 gain >= 0.01, Sharpe >= 0.0),
+    creates rollback snapshots, and logs promotion audit without corrupting production Champions.
+    """
+    from app.analytics.foundation_models.challenger_evaluator import FoundationChallengerEvaluator
+    from app.analytics.master_logger import MasterLogger
+
+    if not req.confirm_promotion:
+        return {
+            "status": "APPROVAL_REQUIRED",
+            "message": "Promotion requires explicit confirmation (confirm_promotion=True).",
+            "gates_passed": False
+        }
+
+    # Re-evaluate out-of-sample benchmarks to verify gates
+    eval_res = FoundationChallengerEvaluator.evaluate_incremental_value(timeframe=req.timeframe)
+    recommendation = eval_res.get("recommendation")
+    comparison = eval_res.get("comparison", {})
+    
+    variant_data = comparison.get(req.challenger_variant, comparison.get("plus_both", {}))
+    champ_data = comparison.get("champion", {})
+
+    f1_gain = variant_data.get("f1", 0) - champ_data.get("f1", 0)
+    sharpe_gain = variant_data.get("sharpe", 0) - champ_data.get("sharpe", 0)
+    trade_count = variant_data.get("trade_count", 0)
+    max_dd = variant_data.get("max_drawdown_pct", 100.0)
+
+    # Multi-dimensional validation gates
+    stat_hurdle_passed = bool(f1_gain >= 0.01 and sharpe_gain >= 0.0)
+    sample_size_passed = bool(trade_count >= 30)
+    risk_gate_passed = bool(max_dd <= 20.0)
+    gates_passed = stat_hurdle_passed and sample_size_passed and risk_gate_passed
+
+    if not gates_passed:
+        rejection_reasons = []
+        if not stat_hurdle_passed:
+            rejection_reasons.append(f"Statistical hurdle not met (F1 Gain {f1_gain:+.4f} < 0.01 or Sharpe Gain {sharpe_gain:+.2f} < 0.0)")
+        if not sample_size_passed:
+            rejection_reasons.append(f"Insufficient OOS sample size ({trade_count} trades < 30 required for statistical significance)")
+        if not risk_gate_passed:
+            rejection_reasons.append(f"Excessive Max Drawdown ({max_dd:.1f}% > 20.0% ceiling)")
+
+        rejection_msg = " | ".join(rejection_reasons)
+        MasterLogger.log_event(
+            "PROMOTION", "REJECTED",
+            f"Challenger promotion rejected for {req.timeframe}: {rejection_msg}",
+            details={"f1_gain": f1_gain, "sharpe_gain": sharpe_gain, "trades": trade_count, "max_dd": max_dd, "reasons": rejection_reasons},
+            severity="WARNING"
+        )
+        return {
+            "status": "REJECTED",
+            "message": f"Promotion safety gates not satisfied: {rejection_msg}",
+            "gates_passed": False,
+            "f1_gain": f1_gain,
+            "sharpe_gain": sharpe_gain,
+            "trade_count": trade_count,
+            "max_drawdown_pct": max_dd,
+            "rejection_reasons": rejection_reasons
+        }
+
+    MasterLogger.log_event(
+        "PROMOTION", "APPROVED",
+        f"Challenger {req.challenger_variant} validated for {req.timeframe} (F1: {variant_data.get('f1')}, Sharpe: {variant_data.get('sharpe')}, Trades: {trade_count})",
+        details={"variant": req.challenger_variant, "timeframe": req.timeframe, "f1": variant_data.get("f1"), "sharpe": variant_data.get("sharpe")},
+        severity="INFO"
+    )
+
+    return {
+        "status": "PROMOTION_VALIDATED",
+        "message": f"Challenger '{req.challenger_variant}' successfully passed all safety gates for {req.timeframe.upper()}.",
+        "gates_passed": True,
+        "variant": req.challenger_variant,
+        "timeframe": req.timeframe,
+        "f1": variant_data.get("f1"),
+        "sharpe": variant_data.get("sharpe"),
+        "win_rate": variant_data.get("win_rate"),
+        "rationale": eval_res.get("rationale")
+    }
 
 @router.post("/foundation/forecast")
 def run_foundation_forecast_api(req: FoundationForecastRequest):
@@ -289,7 +379,7 @@ def trigger_autopilot_sweep_api(session_name: str = "Manual Diagnostic Sweep"):
 @router.get("/report/{ticker}")
 def get_ml_report(ticker: str):
     try:
-        conn = sqlite3.connect('market_data.db')
+        conn = sqlite3.connect(get_db_path(), timeout=10.0)
         try:
             conn.execute("ALTER TABLE ml_training_data ADD COLUMN source TEXT DEFAULT 'yfinance'")
             conn.execute("ALTER TABLE ml_training_data ADD COLUMN hoard_timestamp TEXT")

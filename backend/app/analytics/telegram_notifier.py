@@ -5,16 +5,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def get_db_path() -> str:
-    """Resolves authoritative market_data.db file path."""
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    backend_db = os.path.join(base_dir, "market_data.db")
-    if os.path.exists(backend_db):
-        return backend_db
-    root_db = os.path.abspath(os.path.join(base_dir, "..", "market_data.db"))
-    if os.path.exists(root_db):
-        return root_db
-    return backend_db
+from app.data.database import get_db_path
 
 def send_telegram_message(message: str) -> bool:
     """
@@ -48,10 +39,25 @@ def send_telegram_message(message: str) -> bool:
         response = requests.post(url, json=payload, timeout=5)
         if response.status_code == 200:
             logger.info("Telegram push notification sent successfully.")
+            try:
+                from app.analytics.master_logger import MasterLogger
+                MasterLogger.log_event("TELEGRAM", "DELIVERED", "Telegram message delivered via Telegram Bot API", severity="INFO")
+            except Exception:
+                pass
             return True
         else:
             logger.error(f"Telegram API Error: {response.text}")
+            try:
+                from app.analytics.master_logger import MasterLogger
+                MasterLogger.log_event("TELEGRAM", "API_ERROR", f"Telegram API Error {response.status_code}: {response.text[:100]}", severity="ERROR")
+            except Exception:
+                pass
             return False
     except Exception as e:
         logger.error(f"Failed to send Telegram message: {e}")
+        try:
+            from app.analytics.master_logger import MasterLogger
+            MasterLogger.log_event("TELEGRAM", "NETWORK_FAILURE", f"Telegram network failure: {e}", severity="ERROR")
+        except Exception:
+            pass
         return False

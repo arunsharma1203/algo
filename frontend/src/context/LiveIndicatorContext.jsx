@@ -1,4 +1,5 @@
 import React, { createContext, useState, useContext, useCallback } from 'react';
+import { API_BASE } from '../services/api';
 
 const LiveIndicatorContext = createContext();
 
@@ -20,7 +21,7 @@ export function LiveIndicatorProvider({ children }) {
     if (!ticker) return;
     setIsFetching(true);
     try {
-      await fetch(`http://localhost:8000/api/market/clear-cache/${ticker}`, { method: 'POST' });
+      await fetch(`${API_BASE}/market/clear-cache/${ticker}`, { method: 'POST' });
       // Reload the page to trigger fresh data fetch
       window.location.reload();
     } catch (err) {

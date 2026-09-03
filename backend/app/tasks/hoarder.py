@@ -16,6 +16,16 @@ def hoard_intraday_data(data_source: str = 'yfinance', api_key: str = ''):
     logger.info("Starting background intraday data hoarder job...")
     start_time = time.time()
     
+    try:
+        from app.analytics.master_logger import MasterLogger
+        MasterLogger.log_event(
+            "SCHEDULER", "HOARDER_STARTED",
+            f"Hoarder started 15m candle sync for {len(INDIAN_STOCK_UNIVERSE)} symbols ({data_source})",
+            universe="NIFTY_500"
+        )
+    except Exception:
+        pass
+
     success_count = 0
     fail_count = 0
     
@@ -114,6 +124,17 @@ def hoard_intraday_data(data_source: str = 'yfinance', api_key: str = ''):
             
     elapsed = round(time.time() - start_time, 2)
     logger.info(f"Hoarding complete. Success: {success_count}, Failed: {fail_count}, Time: {elapsed}s")
+
+    try:
+        from app.analytics.master_logger import MasterLogger
+        MasterLogger.log_event(
+            "SCHEDULER", "HOARDER_COMPLETED",
+            f"Hoarder finished sync in {elapsed}s. Success: {success_count}, Failed: {fail_count}",
+            universe="NIFTY_500",
+            details={"elapsed_s": elapsed, "success": success_count, "failed": fail_count}
+        )
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

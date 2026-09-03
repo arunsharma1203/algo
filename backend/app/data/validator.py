@@ -59,7 +59,7 @@ class MarketDataValidator:
         working_df = df.copy()
         if isinstance(working_df.columns, pd.MultiIndex):
             working_df.columns = working_df.columns.get_level_values(0)
-        working_df.columns = [str(c).lower() for c in working_df.columns]
+        working_df.columns = [c[0].lower() if isinstance(c, tuple) else str(c).lower() for c in working_df.columns]
 
         # 2. Required Columns Check
         missing_cols = [col for col in cls.REQUIRED_OHLCV_COLUMNS if col not in working_df.columns]

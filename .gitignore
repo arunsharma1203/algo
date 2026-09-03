@@ -16,7 +16,12 @@ env/
 market_data.db
 *.sqlite3
 *.db
-*.audit_backup
+*.db*
+*.db.*
+*-wal
+*-shm
+*.audit_backup*
+backend/results/
 backend/checkpoints/
 backend/checkpoints_test/
 

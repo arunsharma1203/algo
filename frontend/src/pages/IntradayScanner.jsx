@@ -4,6 +4,7 @@ import AITradeHistory from '../components/AITradeHistory';
 import MLBacktestModal from '../components/MLBacktestModal';
 import ExecutionModal from '../components/ExecutionModal';
 import FNOAnalyticsCard from '../components/FNOAnalyticsCard';
+import { API_BASE } from '../services/api';
 
 export default function IntradayScanner() {
   const [logs, setLogs] = useState(() => {
@@ -26,6 +27,7 @@ export default function IntradayScanner() {
   const [backtestModalOpen, setBacktestModalOpen] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [execTradeData, setExecTradeData] = useState(null);
+  const [selectedUniverse, setSelectedUniverse] = useState('NIFTY_500');
 
   const terminalContainerRef = useRef(null);
 
@@ -49,9 +51,14 @@ export default function IntradayScanner() {
     setResult(null);
 
     try {
-      const savedWatchlist = localStorage.getItem('watchlist');
-      const customTickers = savedWatchlist ? JSON.parse(savedWatchlist).join(',') : '';
-      const url = customTickers ? `http://localhost:8000/api/ml/intraday-scan?custom_tickers=${customTickers}` : 'http://localhost:8000/api/ml/intraday-scan';
+      let url = `${API_BASE}/ml/intraday-scan?universe=${selectedUniverse}`;
+      if (selectedUniverse === 'WATCHLIST') {
+        const savedWatchlist = localStorage.getItem('watchlist');
+        const customTickers = savedWatchlist ? JSON.parse(savedWatchlist).join(',') : '';
+        if (customTickers) {
+          url += `&custom_tickers=${customTickers}`;
+        }
+      }
       const response = await fetch(url);
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
@@ -100,7 +107,7 @@ export default function IntradayScanner() {
   };
 
   return (
-    <div className="max-w-6xl mx-auto pb-10">
+    <div className="max-w-6xl mx-auto pb-10 max-w-full">
       {execModalOpen && execTradeData && (
         <ExecutionModal 
           trade={execTradeData}
@@ -112,36 +119,48 @@ export default function IntradayScanner() {
         />
       )}
 
-      <div className="mb-8 flex justify-between items-end">
+      <div className="mb-6 sm:mb-8 flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
         <div>
-          <h1 className="text-3xl font-black text-gray-900 tracking-tight flex items-center">
-            <TrendingUp className="text-purple-600 mr-3" size={32} />
+          <h1 className="text-2xl sm:text-3xl font-black text-gray-900 tracking-tight flex items-center">
+            <TrendingUp className="text-purple-600 mr-2 sm:mr-3 shrink-0" size={28} />
             Intraday Trade ML Scanner
           </h1>
-          <p className="text-gray-500 mt-2 font-medium max-w-2xl">
+          <p className="text-gray-500 mt-2 font-medium max-w-2xl text-xs sm:text-sm">
             Intraday algorithmic sweeping. The AI predicts momentum breakouts for the current trading session.
           </p>
         </div>
         
-        <button 
-          onClick={startScan}
-          disabled={scanning}
-          className={`flex items-center font-bold py-3 px-8 rounded-lg shadow-md transition transform hover:scale-105 ${scanning ? 'bg-gray-400 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700 text-white'}`}
-        >
-          {scanning ? (
-            <><Loader className="animate-spin mr-2" size={20} /> Sweeping Market...</>
-          ) : (
-            <><Play className="mr-2" size={20} /> Initiate AI Scan</>
-          )}
-        </button>
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
+          <select
+            value={selectedUniverse}
+            onChange={(e) => setSelectedUniverse(e.target.value)}
+            disabled={scanning}
+            className="bg-gray-900 border border-gray-700 text-gray-200 text-xs font-bold rounded-lg px-3 py-3 focus:outline-none focus:border-purple-500 shadow-sm"
+          >
+            <option value="NIFTY_500">NIFTY 500 (500 Stocks - Broad Market)</option>
+            <option value="NIFTY_50">NIFTY 50 (50 Benchmark Stocks)</option>
+            <option value="WATCHLIST">My Watchlist Only</option>
+          </select>
+          <button 
+            onClick={startScan}
+            disabled={scanning}
+            className={`flex items-center justify-center font-bold py-3 px-6 sm:px-8 rounded-lg shadow-md transition transform hover:scale-105 shrink-0 w-full sm:w-auto text-sm ${scanning ? 'bg-gray-400 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700 text-white'}`}
+          >
+            {scanning ? (
+              <><Loader className="animate-spin mr-2" size={18} /> Sweeping Market...</>
+            ) : (
+              <><Play className="mr-2" size={18} /> Initiate AI Scan</>
+            )}
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 sm:gap-8">
         <div className="lg:col-span-2 space-y-6">
           <div className="bg-gray-900 rounded-xl overflow-hidden shadow-2xl border border-gray-800">
             <div className="bg-gray-950 px-4 py-2 border-b border-gray-800 flex justify-between items-center">
               <div className="flex items-center">
-                <Terminal size={14} className="text-gray-500 mr-2" />
+                <Terminal size={14} className="text-gray-500 mr-2 shrink-0" />
                 <span className="text-xs text-gray-500 font-mono">ensemble_intraday_node_01</span>
               </div>
               <div className="flex space-x-1.5">
@@ -153,7 +172,7 @@ export default function IntradayScanner() {
             
             <div 
               ref={terminalContainerRef}
-              className="p-5 h-96 overflow-y-auto font-mono text-sm flex flex-col space-y-1"
+              className="p-4 sm:p-5 h-80 sm:h-96 overflow-y-auto font-mono text-xs sm:text-sm flex flex-col space-y-1 break-all"
             >
               {logs.length === 0 && (
                 <div className="text-gray-600 text-center mt-20">
@@ -187,18 +206,25 @@ export default function IntradayScanner() {
           {result ? (
             <div className="bg-white rounded-xl shadow-md border border-gray-200 overflow-hidden sticky top-8">
               {/* Compact Header */}
-              <div className="px-5 py-4 text-white bg-gradient-to-r from-purple-700 via-indigo-700 to-indigo-800">
+              <div className={`px-5 py-4 text-white ${result.is_bullish !== false ? 'bg-gradient-to-r from-purple-700 via-indigo-700 to-indigo-800' : 'bg-gradient-to-r from-red-600 via-rose-700 to-red-800'}`}>
                 <div className="flex justify-between items-center">
                   <div>
                     <div className="flex items-center space-x-2">
                       <span className="bg-white/20 px-2 py-0.5 rounded text-[10px] font-black tracking-wider uppercase">
-                        INTRADAY BUY
+                        {result.is_bullish !== false ? 'INTRADAY BUY' : 'INTRADAY SHORT'}
                       </span>
                       <h2 className="text-2xl font-black tracking-tight">{result.ticker}</h2>
                     </div>
-                    <div className="mt-1 flex items-baseline space-x-1.5">
-                      <span className="text-2xl font-light">{result.entry != null ? `₹${Number(result.entry).toFixed(2)}` : '-'}</span>
-                      <span className="text-xs text-purple-200 font-medium">Entry</span>
+                    <div className="mt-1 flex items-baseline space-x-2">
+                      <span className="text-2xl font-black">{result.entry != null ? `₹${Number(result.entry).toFixed(2)}` : '-'}</span>
+                      <span className="text-xs text-purple-200 font-medium">
+                        {result.price_is_fresh ? '● Live LTP' : 'Reference Entry'}
+                      </span>
+                      {result.model_candle_close != null && (
+                        <span className="text-[10px] text-purple-300 font-mono">
+                          (Candle: ₹{Number(result.model_candle_close).toFixed(2)})
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="bg-white/10 backdrop-blur-sm border border-white/20 px-3 py-1.5 rounded-xl text-right shadow-xs">
@@ -341,9 +367,9 @@ export default function IntradayScanner() {
                <div className="bg-purple-100 p-4 rounded-full mb-4">
                  <TrendingUp className="text-purple-600" size={32} />
                </div>
-               <h3 className="text-gray-800 font-bold mb-2">Awaiting Swing Setup</h3>
+               <h3 className="text-gray-800 font-bold mb-2">Awaiting Intraday Setup</h3>
                <p className="text-gray-500 text-sm">
-                 Run the scanner to discover high-probability swing trades for the upcoming week.
+                 Run the scanner to discover high-probability intraday momentum trades for the current market session.
                </p>
              </div>
           )}

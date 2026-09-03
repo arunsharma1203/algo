@@ -1,11 +1,13 @@
 import sqlite3
 import json
+import math
 import pandas as pd
 import yfinance as yf
 from datetime import datetime
+from app.data.historical_data_layer import get_db_path
 
 def ensure_ml_table():
-    conn = sqlite3.connect('market_data.db', timeout=30.0)
+    conn = sqlite3.connect(get_db_path(), timeout=30.0)
     for col, col_type in [
         ('trade_type', "TEXT DEFAULT 'INTRADAY'"),
         ('status', "TEXT DEFAULT 'OPEN'"),
@@ -16,7 +18,20 @@ def ensure_ml_table():
         ('slippage_drag', "REAL"),
         ('ideal_profit_pct', "REAL"),
         ('exit_price', "REAL"),
-        ('exit_time', "TEXT")
+        ('exit_time', "TEXT"),
+        ('source', "TEXT DEFAULT 'MANUAL'"),
+        ('position_type', "TEXT DEFAULT 'NOT_A_POSITION'"),
+        ('tightened_sl', "REAL"),
+        ('ai_guard_action', "TEXT"),
+        ('risk_level', "TEXT DEFAULT 'NORMAL'"),
+        ('risk_reasons', "TEXT"),
+        ('risk_updated_at', "TEXT"),
+        ('current_price', "REAL"),
+        ('reference_price', "REAL"),
+        ('model_candle_close', "REAL"),
+        ('price_source', "TEXT"),
+        ('price_timestamp', "TEXT"),
+        ('price_is_fresh', "INTEGER DEFAULT 0")
     ]:
         try:
             conn.execute(f"ALTER TABLE ml_trade_history ADD COLUMN {col} {col_type}")
@@ -43,20 +58,88 @@ def ensure_ml_table():
             slippage_drag REAL,
             ideal_profit_pct REAL,
             exit_price REAL,
-            exit_time TEXT
+            exit_time TEXT,
+            source TEXT DEFAULT 'MANUAL',
+            position_type TEXT DEFAULT 'NOT_A_POSITION',
+            tightened_sl REAL,
+            ai_guard_action TEXT,
+            risk_level TEXT DEFAULT 'NORMAL',
+            risk_reasons TEXT,
+            risk_updated_at TEXT,
+            current_price REAL,
+            reference_price REAL,
+            model_candle_close REAL,
+            price_source TEXT,
+            price_timestamp TEXT,
+            price_is_fresh INTEGER DEFAULT 0
         )
     """)
     conn.commit()
     conn.close()
 
-def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_type='INTRADAY', explanation=None):
+def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_type='INTRADAY', explanation=None, source='MANUAL', position_type='NOT_A_POSITION'):
+    """
+    Persists a trade recommendation or position to ml_trade_history.
+    
+    Args:
+        source: WHO created this record. 'MANUAL' (manual scan), 'AUTOPILOT', or 'BROKER'.
+        position_type: WHAT this record represents. 'NOT_A_POSITION' (tracked recommendation), 
+                       'PAPER_POSITION' (paper position), or 'LIVE_POSITION' (broker-executed).
+    
+    Returns:
+        True if record was saved, False if deduplicated (skipped) or disallowed.
+    """
+    # ── HARD FAIL-SAFE: STRICT TICKER VALIDATION GATE ────────────────
+    clean_ticker = str(ticker).strip().upper()
+    is_system_test = (clean_ticker == "TESTSTOCK.NS" or source == "SYSTEM_TEST" or position_type == "SYSTEM_TEST")
+    
+    if not is_system_test:
+        if clean_ticker.startswith(("CACHE_", "TEMP_", "DUMMY_", "MOCK_")) or "CACHE" in clean_ticker:
+            import logging
+            logging.getLogger(__name__).error(f"[save_ml_trade] Blocked malformed/cache ticker '{ticker}'. Ticker cannot enter ml_trade_history.")
+            try:
+                from app.analytics.master_logger import MasterLogger
+                MasterLogger.log_event("DATA_GATE", "REJECTED_MALFORMED_TICKER", f"Blocked malformed/cache ticker: {ticker}", ticker=ticker, severity="ERROR")
+            except Exception:
+                pass
+            return False
+
+        import re
+        if not re.match(r"^[A-Z0-9_\-]{1,20}(\.(NS|BO))?$", clean_ticker):
+            import logging
+            logging.getLogger(__name__).error(f"[save_ml_trade] Invalid ticker format '{ticker}'.")
+            return False
+
+    # ── HARD FAIL-SAFE: CASH-EQUITY SWING SHORT BAN ──────────────────
+    if trade_type == 'SWING' and not is_bullish:
+        import logging
+        logging.getLogger(__name__).warning(f"[save_ml_trade] Refusing to persist BEARISH SWING trade for {ticker}. Cash shorts disallowed.")
+        return False
+
     ensure_ml_table()
-    conn = sqlite3.connect('market_data.db', timeout=30.0)
+    conn = sqlite3.connect(get_db_path(), timeout=30.0)
     direction = "BULLISH" if is_bullish else "BEARISH"
     now = datetime.now()
     timestamp = now.isoformat()
 
     explanation_str = json.dumps(explanation) if explanation is not None else None
+    ref_price = float(entry)
+    m_close = float(entry)
+    p_source = "Market Feed"
+    p_ts = now.strftime("%H:%M:%S IST")
+    p_fresh = 0
+
+    if isinstance(explanation, dict):
+        if "reference_price" in explanation:
+            ref_price = float(explanation["reference_price"])
+        if "model_candle_close" in explanation:
+            m_close = float(explanation["model_candle_close"])
+        if "price_source" in explanation:
+            p_source = str(explanation["price_source"])
+        if "price_timestamp" in explanation:
+            p_ts = str(explanation["price_timestamp"])
+        if "price_is_fresh" in explanation:
+            p_fresh = 1 if explanation["price_is_fresh"] else 0
 
     # DEDUPLICATION LOGIC:
     cur = conn.execute("""
@@ -77,14 +160,29 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
             
         if last_time.date() == now.date() and abs(last_confidence - float(confidence)) < 0.001:
             conn.close()
-            return
+            return False
 
     conn.execute("""
-        INSERT INTO ml_trade_history (timestamp, ticker, direction, entry, sl, tp1, tp2, confidence, trade_type, status, outcome, explanation)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'OPEN', ?)
-    """, (timestamp, ticker, direction, float(entry), float(sl), float(tp1), float(tp2), float(confidence), trade_type, explanation_str))
+        INSERT INTO ml_trade_history (
+            timestamp, ticker, direction, entry, sl, tp1, tp2, confidence,
+            trade_type, status, outcome, explanation, source, position_type,
+            reference_price, model_candle_close, price_source, price_timestamp, price_is_fresh
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        timestamp, ticker, direction, float(entry), float(sl), float(tp1), float(tp2),
+        float(confidence), trade_type, explanation_str, source, position_type,
+        ref_price, m_close, p_source, p_ts, p_fresh
+    ))
     conn.commit()
     conn.close()
+
+    # Bust evaluation cache immediately so newly saved trades appear instantly
+    global _EVAL_CACHE
+    _EVAL_CACHE['data'] = None
+    _EVAL_CACHE['timestamp'] = 0
+
+    return True
 
 _EVAL_CACHE = {
     'data': None,
@@ -109,7 +207,7 @@ def evaluate_ml_history(force_refresh: bool = False):
         return _EVAL_CACHE['data']
 
     ensure_ml_table()
-    conn = sqlite3.connect('market_data.db', timeout=30.0)
+    conn = sqlite3.connect(get_db_path(), timeout=30.0)
     df_trades = pd.read_sql_query("SELECT * FROM ml_trade_history ORDER BY id DESC", conn)
     conn.close()
     
@@ -171,7 +269,49 @@ def evaluate_ml_history(force_refresh: bool = False):
         slippage_pct = 0.08 if trade_type == 'INTRADAY' else 0.12
         effective_entry = raw_entry * (1 + slippage_pct / 100.0) if direction == "BULLISH" else raw_entry * (1 - slippage_pct / 100.0)
         
-        # 2. Check if this trade is already finalized in the database
+        explanation_data = None
+        if 'explanation' in row and pd.notna(row['explanation']) and row['explanation']:
+            try:
+                explanation_data = json.loads(row['explanation'])
+            except:
+                explanation_data = None
+
+        # 2. Check if this trade is invalidated (e.g. historical cash swing short)
+        if row.get('status') == 'INVALIDATED':
+            outcome = row.get('outcome') or 'SWING_CASH_SHORT_DISALLOWED'
+            results.append({
+                "id": trade_id,
+                "timestamp": entry_time_str[:16].replace("T", " "),
+                "ticker": ticker,
+                "direction": direction,
+                "entry": raw_entry,
+                "effective_entry": round(effective_entry, 2),
+                "slippage_pct": slippage_pct,
+                "slippage_drag": 0.0,
+                "ideal_profit_pct": 0.0,
+                "sl": sl,
+                "tp1": tp1,
+                "confidence": row['confidence'],
+                "outcome": outcome,
+                "status": "INVALIDATED",
+                "profit_pct": 0.0,
+                "trade_type": trade_type,
+                "explanation": explanation_data,
+                "risk_audit": None,
+                "current_price": raw_entry,
+                "reference_price": float(row.get('reference_price', raw_entry) or raw_entry),
+                "price_source": row.get('price_source', 'Candle Close') if pd.notna(row.get('price_source')) else 'Candle Close',
+                "price_timestamp": row.get('price_timestamp', '') if pd.notna(row.get('price_timestamp')) else '',
+                "price_is_fresh": bool(row.get('price_is_fresh', False)) if pd.notna(row.get('price_is_fresh')) else False,
+                "source": row.get('source', 'MANUAL') if pd.notna(row.get('source')) else 'MANUAL',
+                "position_type": row.get('position_type', 'NOT_A_POSITION') if pd.notna(row.get('position_type')) else 'NOT_A_POSITION',
+                "tightened_sl": None,
+                "ai_guard_action": None,
+                "risk_level": "NORMAL"
+            })
+            continue
+
+        # 3. Check if this trade is already finalized in the database
         saved_outcome = row.get('outcome')
         if row.get('status') == 'CLOSED' and pd.notna(saved_outcome) and saved_outcome not in ('OPEN', None):
             outcome = saved_outcome
@@ -245,14 +385,31 @@ def evaluate_ml_history(force_refresh: bool = False):
                             ideal_profit_pct = ((raw_entry - current_price) / raw_entry) * 100
                             profit_pct = ((effective_entry - current_price) / effective_entry) * 100
             
-            # If Intraday and entry occurred during an actual trading session that has since closed
             now_dt = datetime.now()
+            # If Intraday and entry occurred during an actual trading session that has since closed
             if trade_type == 'INTRADAY' and outcome == 'OPEN':
                 is_entry_weekday = (entry_time.weekday() < 5)
                 is_now_weekday = (now_dt.weekday() < 5)
                 if is_entry_weekday:
                     if entry_time.date() < now_dt.date() or (entry_time.date() == now_dt.date() and is_now_weekday and (now_dt.hour > 15 or (now_dt.hour == 15 and now_dt.minute >= 30))):
                         outcome = "SQUARED OFF (3:15 PM)"
+
+            # ── SWING 5-TRADING-DAY HORIZON EXPIRATION ───────────────────
+            # Swing trades that remain unresolved after 5 trading days are closed
+            if trade_type == 'SWING' and outcome == 'OPEN':
+                try:
+                    trading_days_elapsed = int(np.busday_count(entry_time.date(), now_dt.date()))
+                except Exception:
+                    trading_days_elapsed = max(0, (now_dt.date() - entry_time.date()).days * 5 // 7)
+
+                if trading_days_elapsed >= 5:
+                    outcome = "SWING_HORIZON_REACHED"
+                    if direction == "BULLISH":
+                        ideal_profit_pct = ((current_price - raw_entry) / raw_entry) * 100
+                        profit_pct = ((current_price - effective_entry) / effective_entry) * 100
+                    else:
+                        ideal_profit_pct = ((raw_entry - current_price) / raw_entry) * 100
+                        profit_pct = ((effective_entry - current_price) / effective_entry) * 100
                     
             slippage_drag = round(ideal_profit_pct - profit_pct, 2)
             
@@ -295,30 +452,85 @@ def evaluate_ml_history(force_refresh: bool = False):
             except:
                 explanation_data = None
 
+        tightened_sl_val = row.get('tightened_sl') if 'tightened_sl' in row and pd.notna(row['tightened_sl']) else None
+        if risk_audit_data and risk_audit_data.get('tightened_sl'):
+            tightened_sl_val = risk_audit_data.get('tightened_sl')
+
+        ai_guard_action_val = row.get('ai_guard_action') if 'ai_guard_action' in row and pd.notna(row['ai_guard_action']) else None
+        if risk_audit_data:
+            r_level = risk_audit_data.get('risk_level', 'NORMAL')
+            ai_guard_action_val = "EXIT_ADVISORY" if r_level == "CRITICAL" else ("TIGHTEN_SL" if r_level == "WARNING" else "MAINTAIN")
+
+        current_risk_level = risk_audit_data.get('risk_level', 'NORMAL') if risk_audit_data else (row.get('risk_level') if 'risk_level' in row and pd.notna(row['risk_level']) else 'NORMAL')
+
+        def _clean_float(val, default=0.0):
+            if val is None or pd.isna(val):
+                return default
+            try:
+                f = float(val)
+                if math.isnan(f) or math.isinf(f):
+                    return default
+                return f
+            except:
+                return default
+
+        def _clean_optional_float(val, ndigits=2):
+            if val is None or pd.isna(val):
+                return None
+            try:
+                f = float(val)
+                if math.isnan(f) or math.isinf(f):
+                    return None
+                return round(f, ndigits)
+            except:
+                return None
+
+        clean_raw_entry = _clean_float(raw_entry, 0.0)
+        clean_eff_entry = _clean_float(effective_entry, clean_raw_entry)
+        clean_ref_price = _clean_float(row.get('reference_price'), clean_raw_entry)
+        clean_curr_price = _clean_float(current_price, clean_raw_entry)
+        clean_profit_pct = _clean_float(profit_pct, 0.0)
+        clean_ideal_profit = _clean_float(ideal_profit_pct, 0.0)
+        clean_slippage_drag = _clean_float(slippage_drag, 0.0)
+        clean_slippage_pct = _clean_float(slippage_pct, 0.0)
+        clean_conf = _clean_float(row.get('confidence'), 0.0)
+
         results.append({
             "id": trade_id,
             "timestamp": entry_time_str[:16].replace("T", " "),
             "ticker": ticker,
             "direction": direction,
-            "entry": raw_entry,
-            "effective_entry": round(effective_entry, 2),
-            "slippage_pct": slippage_pct,
-            "slippage_drag": round(slippage_drag, 2),
-            "ideal_profit_pct": round(ideal_profit_pct, 2),
-            "sl": sl,
-            "tp1": tp1,
-            "confidence": row['confidence'],
+            "entry": clean_raw_entry,
+            "effective_entry": round(clean_eff_entry, 2),
+            "slippage_pct": clean_slippage_pct,
+            "slippage_drag": round(clean_slippage_drag, 2),
+            "ideal_profit_pct": round(clean_ideal_profit, 2),
+            "sl": _clean_float(sl, 0.0),
+            "tp1": _clean_float(tp1, 0.0),
+            "tp2": _clean_optional_float(row.get('tp2')),
+            "confidence": clean_conf,
             "outcome": outcome,
-            "profit_pct": round(profit_pct, 2),
+            "status": 'CLOSED' if outcome != 'OPEN' else 'OPEN',
+            "profit_pct": round(clean_profit_pct, 2),
             "trade_type": trade_type,
             "explanation": explanation_data,
-            "risk_audit": risk_audit_data
+            "risk_audit": risk_audit_data,
+            "current_price": round(clean_curr_price, 2),
+            "reference_price": round(clean_ref_price, 2),
+            "price_source": str(row.get('price_source', 'Candle Close')) if pd.notna(row.get('price_source')) else 'Candle Close',
+            "price_timestamp": str(row.get('price_timestamp', '')) if pd.notna(row.get('price_timestamp')) else '',
+            "price_is_fresh": bool(row.get('price_is_fresh', False)) if pd.notna(row.get('price_is_fresh')) else False,
+            "source": str(row.get('source', 'MANUAL')) if pd.notna(row.get('source')) else 'MANUAL',
+            "position_type": str(row.get('position_type', 'NOT_A_POSITION')) if pd.notna(row.get('position_type')) else 'NOT_A_POSITION',
+            "tightened_sl": _clean_optional_float(tightened_sl_val),
+            "ai_guard_action": ai_guard_action_val,
+            "risk_level": current_risk_level
         })
 
     # 3. Persist finalized trades into SQLite in a single atomic batch
     if finalized_updates:
         try:
-            batch_conn = sqlite3.connect('market_data.db', timeout=15.0)
+            batch_conn = sqlite3.connect(get_db_path(), timeout=15.0)
             batch_conn.executemany("""
                 UPDATE ml_trade_history 
                 SET outcome = ?, profit_pct = ?, effective_entry = ?, slippage_drag = ?, ideal_profit_pct = ?, status = ?
@@ -329,14 +541,24 @@ def evaluate_ml_history(force_refresh: bool = False):
         except Exception as e:
             logger.warning(f"Batch outcome persistence error: {e}")
 
-    _EVAL_CACHE['data'] = results
+    # Recursive sanitizer to guarantee zero NaN / Inf reach JSON serializer
+    def _sanitize(obj):
+        if isinstance(obj, float):
+            return 0.0 if (math.isnan(obj) or math.isinf(obj)) else obj
+        elif isinstance(obj, dict):
+            return {k: _sanitize(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [_sanitize(x) for x in obj]
+        return obj
+
+    clean_results = _sanitize(results)
+    _EVAL_CACHE['data'] = clean_results
     _EVAL_CACHE['timestamp'] = time_module.time()
-    return results
+    return clean_results
 
 
 def save_ml_training_data(ticker, df):
-    import sqlite3
-    conn = sqlite3.connect('market_data.db')
+    conn = sqlite3.connect(get_db_path(), timeout=15.0)
     try:
         conn.execute("ALTER TABLE ml_trade_history ADD COLUMN trade_type TEXT DEFAULT 'INTRADAY'")
     except:
@@ -394,9 +616,7 @@ def save_ml_training_data(ticker, df):
     conn.close()
 
 def get_ml_training_data(ticker):
-    import sqlite3
-    import pandas as pd
-    conn = sqlite3.connect('market_data.db')
+    conn = sqlite3.connect(get_db_path(), timeout=15.0)
     try:
         conn.execute("ALTER TABLE ml_trade_history ADD COLUMN trade_type TEXT DEFAULT 'INTRADAY'")
     except:

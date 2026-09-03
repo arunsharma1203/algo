@@ -40,7 +40,8 @@ async def execute_trade(req: ExecuteRequest):
     """
     try:
         # 1. Verify System Simulation Mode in Database
-        conn = sqlite3.connect('market_data.db', timeout=5.0)
+        from app.data.historical_data_layer import get_db_path
+        conn = sqlite3.connect(get_db_path(), timeout=5.0)
         cur = conn.cursor()
         cur.execute("SELECT value FROM app_settings WHERE key = 'simulation_mode'")
         sim_row = cur.fetchone()
@@ -147,3 +148,113 @@ def get_kelly_sizing(req: KellySizingRequest):
 def get_portfolio_heat(capital: float = 100000.0, max_heat: float = 6.0):
     from app.analytics.kelly_sizer import get_portfolio_heat_status
     return get_portfolio_heat_status(capital=capital, max_heat_cap_pct=max_heat)
+
+
+@router.get("/risk-integrity")
+def get_risk_integrity():
+    """
+    Portfolio Risk Integrity card — detailed breakdown of genuine positions
+    vs virtual recommendations. Used by the Health Center and frontend.
+    """
+    from app.analytics.kelly_sizer import get_portfolio_heat_status
+    heat = get_portfolio_heat_status()
+    return {
+        "live_positions": 0,  # No broker execution active yet
+        "paper_positions": heat.get("actual_positions", 0),
+        "manual_recommendations": heat.get("manual_recommendations", 0),
+        "autopilot_recommendations": heat.get("autopilot_recommendations", 0),
+        "virtual_recommendations": heat.get("virtual_recommendations", 0),
+        "live_heat_pct": heat.get("current_heat_pct", 0.0),
+        "heat_ceiling_pct": heat.get("max_heat_cap_pct", 6.0),
+        "remaining_heat_pct": heat.get("remaining_heat_pct", 6.0),
+        "discovery_status": heat.get("discovery_status", "ENABLED"),
+        "block_reason": heat.get("block_reason"),
+        "status": heat.get("status", "NORMAL"),
+    }
+
+
+@router.get("/stale-records")
+def get_stale_records():
+    """
+    Preview non-position OPEN records that could be reconciled.
+    
+    These are scanner recommendations (NOT_A_POSITION) that are still OPEN.
+    They contribute 0% heat but may be stale if the market has moved past them.
+    
+    This endpoint does NOT modify anything — it is purely informational.
+    """
+    import sqlite3
+    from app.data.historical_data_layer import get_db_path
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
+    try:
+        cur = conn.execute("""
+            SELECT id, timestamp, ticker, direction, entry, sl, tp1, tp2,
+                   confidence, trade_type, source, position_type, status
+            FROM ml_trade_history
+            WHERE status = 'OPEN' AND position_type = 'NOT_A_POSITION'
+            ORDER BY id DESC
+        """)
+        columns = [col[0] for col in cur.description]
+        records = [dict(zip(columns, row)) for row in cur.fetchall()]
+    except Exception:
+        records = []
+    conn.close()
+    return {"stale_records": records, "count": len(records)}
+
+
+class ReconcileRequest(BaseModel):
+    record_ids: list = []
+    reconcile_all: bool = False
+
+@router.post("/reconcile-stale-records")
+def reconcile_stale_records(req: ReconcileRequest):
+    """
+    Safely reconcile non-position OPEN records.
+    
+    Reconciliation sets status='RECONCILED' and outcome='RECONCILED'.
+    It does NOT delete records — they remain fully queryable for historical analysis.
+    
+    Safety constraints:
+    - NEVER touches LIVE_POSITION or PAPER_POSITION records
+    - NEVER places broker orders
+    - NEVER sends Telegram
+    - NEVER deletes rows
+    - Records remain in the database with all fields preserved
+    """
+    import sqlite3
+    from app.data.historical_data_layer import get_db_path
+    conn = sqlite3.connect(get_db_path(), timeout=10.0)
+    
+    try:
+        if req.reconcile_all:
+            cur = conn.execute("""
+                UPDATE ml_trade_history
+                SET status = 'RECONCILED', outcome = 'RECONCILED'
+                WHERE status = 'OPEN' AND position_type = 'NOT_A_POSITION'
+            """)
+        elif req.record_ids:
+            placeholders = ','.join(['?' for _ in req.record_ids])
+            cur = conn.execute(f"""
+                UPDATE ml_trade_history
+                SET status = 'RECONCILED', outcome = 'RECONCILED'
+                WHERE id IN ({placeholders})
+                  AND status = 'OPEN'
+                  AND position_type = 'NOT_A_POSITION'
+            """, req.record_ids)
+        else:
+            conn.close()
+            return {"status": "error", "message": "Provide record_ids or set reconcile_all=true"}
+        
+        affected = cur.rowcount
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    conn.close()
+    return {
+        "status": "success",
+        "reconciled_count": affected,
+        "message": f"Reconciled {affected} non-position records. Records preserved for historical analysis."
+    }
+

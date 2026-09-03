@@ -15,11 +15,12 @@ from sklearn.metrics import f1_score, precision_score, recall_score, brier_score
 from app.analytics.optuna_tuner import load_best_params, prepare_benchmark_dataset
 from app.analytics.model_manager import ModelManager
 from app.data.validator import DataValidationError
+from app.data.historical_data_layer import get_db_path
 
 logger = logging.getLogger(__name__)
 
 def ensure_retrain_table():
-    conn = sqlite3.connect('market_data.db', timeout=15.0)
+    conn = sqlite3.connect(get_db_path(), timeout=15.0)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ml_retraining_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +62,7 @@ def save_champion_metadata(meta: dict, timeframe: str = "swing") -> None:
 
 def get_retraining_history(timeframe: str = "swing", limit: int = 15) -> list:
     ensure_retrain_table()
-    conn = sqlite3.connect('market_data.db', timeout=15.0)
+    conn = sqlite3.connect(get_db_path(), timeout=15.0)
     try:
         cur = conn.execute("""
             SELECT id, timestamp, timeframe, version, status, champion_f1, challenger_f1, champion_sharpe, challenger_sharpe, samples_trained, message 
@@ -164,7 +165,7 @@ def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
         logger.error(error_msg)
         
         # Log failure to SQLite and preserve current Champion
-        conn = sqlite3.connect('market_data.db', timeout=15.0)
+        conn = sqlite3.connect(get_db_path(), timeout=15.0)
         conn.execute("""
             INSERT INTO ml_retraining_log (timestamp, timeframe, version, status, champion_f1, challenger_f1, samples_trained, message)
             VALUES (?, ?, ?, 'FAILED_DATA_VALIDATION', 0.0, 0.0, 0, ?)
@@ -296,7 +297,7 @@ def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
         )
 
     # 6. Immutable SQLite Audit Log
-    conn = sqlite3.connect('market_data.db', timeout=15.0)
+    conn = sqlite3.connect(get_db_path(), timeout=15.0)
     conn.execute("""
         INSERT INTO ml_retraining_log (timestamp, timeframe, version, status, champion_f1, challenger_f1, champion_sharpe, challenger_sharpe, samples_trained, message)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

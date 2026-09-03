@@ -30,13 +30,20 @@ def get_or_init_swing_champion():
     model, meta = ModelManager.load_champion("swing")
     return model, meta
 
-def run_swing_scan(custom_tickers: list = None):
+def run_swing_scan(custom_tickers: list = None, universe_preset: str = "NIFTY_500"):
     try:
         start_time = datetime.now()
         clean_custom = [t.strip().upper() for t in (custom_tickers or []) if t and t.strip()]
-        universe = clean_custom if clean_custom else INDIAN_STOCK_UNIVERSE[:25].copy()
+        if clean_custom:
+            universe = clean_custom
+        else:
+            from app.analytics.universe_config import get_universe
+            u_info = get_universe(universe_preset or "NIFTY_500")
+            universe = list(u_info.get("tickers", []))
+            if not universe:
+                universe = INDIAN_STOCK_UNIVERSE[:50].copy()
         
-        yield format_sse({"type": "system", "message": f"[{start_time.strftime('%H:%M:%S')}] Initializing Swing Trade ML Pipeline for {len(universe)} symbols..."})
+        yield format_sse({"type": "system", "message": f"[{start_time.strftime('%H:%M:%S')}] Initializing Swing Trade ML Pipeline for {len(universe)} symbols ({universe_preset or 'CUSTOM'})..."})
         yield format_sse({"type": "info", "message": "Analyzing Macro Market Regime (NIFTY 50 & INDIA VIX)...", "progress": 3})
         
         macro = get_macro_regime()
@@ -66,138 +73,105 @@ def run_swing_scan(custom_tickers: list = None):
             yield format_sse({"type": "error", "message": f"Failed to load Swing Champion model: {e}"})
             return
 
-        yield format_sse({"type": "system", "message": f"Bulk fetching 2 years of daily data for {len(universe)} symbols...", "progress": 10})
+        chunk_size = 100
+        chunks = [universe[i:i + chunk_size] for i in range(0, len(universe), chunk_size)]
+        yield format_sse({"type": "system", "message": f"Bulk fetching 2 years of daily data for {len(universe)} symbols in {len(chunks)} parallel batches...", "progress": 10})
+
+        from concurrent.futures import ThreadPoolExecutor
+        chunk_dfs = {}
         try:
-            bulk_data = yf.download(universe, period="2y", interval="1d", progress=False)
+            with ThreadPoolExecutor(max_workers=min(5, len(chunks))) as executor:
+                future_to_idx = {executor.submit(yf.download, chk, period="2y", interval="1d", progress=False): idx for idx, chk in enumerate(chunks)}
+                for fut in future_to_idx:
+                    c_idx = future_to_idx[fut]
+                    chunk_dfs[c_idx] = fut.result()
         except Exception as e:
             yield format_sse({"type": "error", "message": f"Bulk fetch failed: {str(e)}"})
             return
             
-        yield format_sse({"type": "system", "message": "Data fetched successfully. Commencing out-of-sample inference...", "progress": 12})
+        yield format_sse({"type": "system", "message": "Market data fetched. Commencing deep out-of-sample inference...", "progress": 15})
         
         best_conviction = None
         best_score = 0
         scan_history = []
         total = len(universe)
-        features = ['rsi', 'macd', 'macd_diff', 'adx', 'atr']
         
         for idx, ticker in enumerate(universe):
             try:
+                c_idx = idx // chunk_size
+                bulk_data = chunk_dfs.get(c_idx)
+                if bulk_data is None:
+                    continue
+
                 if isinstance(bulk_data.columns, pd.MultiIndex):
                     try:
                         df = bulk_data.xs(ticker, level=1, axis=1).copy()
                     except KeyError:
                         continue
                 else:
-                    if len(universe) == 1:
+                    if len(chunks[c_idx]) == 1:
                         df = bulk_data.copy()
                     else:
                         continue
-                        
-                # 1. Strict Market Data Validation
-                val_report = MarketDataValidator.validate_ohlcv(df, ticker=ticker, timeframe="1d", min_rows=60)
-                if not val_report["valid"]:
+                
+                # Use SHARED DECISION ENGINE for screening (skip enrichment for speed)
+                from app.analytics.decision_engine import evaluate_ticker
+                screen_result = evaluate_ticker(
+                    ticker=ticker,
+                    df=df,
+                    champion_model=champion_model,
+                    champion_meta=champion_meta,
+                    trade_type="SWING",
+                    source="MANUAL",
+                    macro_state=macro,
+                    skip_enrichment=True,
+                )
+
+                if not screen_result.qualified:
                     continue
 
-                df = df.dropna(how='all')
-                df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
-                df.columns = [col.lower() for col in df.columns]
-                
-                # 2. Point-In-Time Feature Engineering
-                df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
-                macd = ta.trend.MACD(df['close'])
-                df['macd'] = macd.macd()
-                df['macd_diff'] = macd.macd_diff()
-                df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
-                df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
-                
-                ml_df = df.dropna(subset=features).copy()
-                if len(ml_df) < 60:
-                    continue
-
-                # 3. Production Inference: Out-Of-Sample Evaluation on Completed Bar
-                latest_data = ml_df.iloc[-1]
-                latest_features = latest_data[features].values.reshape(1, -1)
-                latest_features = np.nan_to_num(latest_features)
-
-                p_rf, p_gb, p_svm = 50.0, 50.0, 50.0
-                if champion_model is not None:
-                    prob = champion_model.predict_proba(latest_features)[0]
-                    bullish_prob = float(prob[1] * 100.0)
-                    if hasattr(champion_model, 'estimators_') and len(champion_model.estimators_) == 3:
-                        try:
-                            p_rf = float(champion_model.estimators_[0].predict_proba(latest_features)[0][1]) * 100.0
-                            p_gb = float(champion_model.estimators_[1].predict_proba(latest_features)[0][1]) * 100.0
-                            p_svm = float(champion_model.estimators_[2].predict_proba(latest_features)[0][1]) * 100.0
-                        except Exception:
-                            p_rf, p_gb, p_svm = bullish_prob, bullish_prob, bullish_prob
-                    base_probs = (p_rf, p_gb, p_svm)
-                else:
-                    bullish_prob = 50.0
-                    base_probs = (50.0, 50.0, 50.0)
-
-                technical_bonus = 0
-                if float(latest_data['rsi']) < 40 and float(latest_data['macd_diff']) > 0:
-                    technical_bonus += 15
-                if float(latest_data['adx']) > 25:
-                    technical_bonus += 10
-                    
-                score = float(bullish_prob + technical_bonus)
-                
-                current_price = float(latest_data['close'])
-                atr = float(latest_data['atr'])
-                if np.isnan(current_price) or current_price <= 0 or np.isnan(atr) or atr <= 0:
-                    continue
-
-                progress_pct = int(12 + ((idx + 1) / total * 75))
+                progress_pct = int(15 + ((idx + 1) / total * 75))
                 yield format_sse({
                     "type": "info",
-                    "message": f"[{idx+1}/{total}] {ticker} (₹{current_price:.2f}) -> RF:{p_rf:.1f}% GB:{p_gb:.1f}% SVM:{p_svm:.1f}% | Ensemble: {bullish_prob:.1f}%",
+                    "message": f"[{idx+1}/{total}] {ticker} (₹{screen_result.entry:.2f}) -> RF:{screen_result.base_probs[0]:.1f}% GB:{screen_result.base_probs[1]:.1f}% SVM:{screen_result.base_probs[2]:.1f}% | Ensemble: {screen_result.raw_confidence:.1f}%",
                     "progress": progress_pct
                 })
                     
-                atr_pct_val = (atr / current_price * 100) if current_price > 0 else 2.0
-                vol_sma20 = ml_df['volume'].rolling(20).mean().iloc[-1] if 'volume' in ml_df.columns else 0
-                vol_ratio = float(latest_data['volume'] / vol_sma20) if (vol_sma20 and vol_sma20 > 0) else 1.0
-                
-                # Swing Trading Stop Loss (2x ATR) and Targets (1:1.5, 1:3)
-                sl = float(current_price - (atr * 2))
-                tp1 = float(current_price + (atr * 3))
-                tp2 = float(current_price + (atr * 6))
-                
                 scan_history.append({
                     "ticker": ticker,
-                    "score": round(score, 1),
-                    "action": "BUY" if score > 70 else "HOLD",
-                    "prob": round(bullish_prob, 1),
-                    "price": round(current_price, 2)
+                    "score": round(screen_result.score, 1),
+                    "action": "BUY" if screen_result.score > 70 else "HOLD",
+                    "prob": round(screen_result.raw_confidence, 1),
+                    "price": round(screen_result.entry, 2)
                 })
                 
+                # Apply macro penalty for ranking
+                effective_score = screen_result.score
                 if regime == "BEARISH":
-                    score -= 15
+                    effective_score -= 15
                     
-                if score > best_score:
-                    best_score = score
+                if effective_score > best_score:
+                    best_score = effective_score
                     best_conviction = {
                         "ticker": ticker,
                         "action": "BUY",
-                        "is_bullish": True,
-                        "score": score,
-                        "prob": bullish_prob,
-                        "base_probs": base_probs,
-                        "entry": current_price,
-                        "sl": sl,
-                        "tp1": tp1,
-                        "tp2": tp2,
-                        "atr_pct": round(atr_pct_val, 2),
-                        "volume_ratio": round(vol_ratio, 2),
-                        "rsi": float(latest_data['rsi']),
-                        "macd_diff": float(latest_data['macd_diff']),
-                        "adx": float(latest_data['adx']),
-                        "raw_df": ml_df,
+                        "is_bullish": screen_result.is_bullish,
+                        "score": screen_result.score,
+                        "prob": screen_result.raw_confidence,
+                        "base_probs": screen_result.base_probs,
+                        "entry": screen_result.entry,
+                        "sl": screen_result.sl,
+                        "tp1": screen_result.tp1,
+                        "tp2": screen_result.tp2,
+                        "atr_pct": screen_result.atr_pct,
+                        "volume_ratio": screen_result.volume_ratio,
+                        "rsi": screen_result.rsi,
+                        "macd_diff": screen_result.macd_diff,
+                        "adx": screen_result.adx,
+                        "raw_df": df,
                         "timestamp": datetime.now().isoformat()
                     }
-                    yield format_sse({"type": "info", "message": f"🔥 New high conviction swing setup found: {ticker} (Score: {score:.1f})"})
+                    yield format_sse({"type": "info", "message": f"🔥 New high conviction swing setup found: {ticker} (Score: {screen_result.score:.1f})"})
                 
             except Exception as e:
                 logger.warning(f"Error screening swing candidate {ticker}: {e}")
@@ -206,105 +180,94 @@ def run_swing_scan(custom_tickers: list = None):
         yield format_sse({"type": "system", "message": "Swing Market Sweep Complete. Finalizing arbitration...", "progress": 90})
         
         if best_conviction:
-            # 4. Point-In-Time NLP Sentiment Analysis
-            yield format_sse({"type": "info", "message": f"Running VADER Financial Sentiment on live news for {best_conviction['ticker']}...", "progress": 92})
-            try:
-                nlp_result = nlp_engine.analyze_ticker_news(best_conviction['ticker'])
-                sentiment_score = nlp_result['score']
-                headline = nlp_result['headline']
-                best_conviction['nlp_sentiment'] = sentiment_score
-                best_conviction['nlp_headline'] = headline
-            except Exception:
-                best_conviction['nlp_sentiment'] = 0
-                best_conviction['nlp_headline'] = "NLP Sentiment offline."
-
-            # 5. Time-Series Foundation Model Challenger Layer (TimesFM 2.5 & Chronos-2)
-            yield format_sse({"type": "info", "message": f"Consulting TimesFM 2.5 & Chronos-2 Challenger Forecasts for {best_conviction['ticker']}...", "progress": 95})
-            found_features = None
-            try:
-                raw_df = best_conviction.get('raw_df')
-                tfm_res, chr_res, found_features = foundation_model_manager.generate_foundation_signals(
-                    symbol=best_conviction['ticker'],
-                    historical_df=raw_df,
-                    timeframe="1d",
-                    horizon_bars=5,
-                    as_of_time=datetime.now()
-                )
-                best_conviction['timesfm_forecast'] = tfm_res.to_dict()
-                best_conviction['chronos_forecast'] = chr_res.to_dict()
-                best_conviction['foundation_features'] = found_features.to_dict()
-            except Exception as e:
-                logger.warning(f"Foundation model swing scan note: {e}")
-
-            # 6. Layer-2 Stacked Meta-Learner Arbitration
-            yield format_sse({"type": "info", "message": "Invoking Layer-2 Stacked Meta-Learner with Foundation signals...", "progress": 97})
-            try:
-                adjusted_score, meta_message, telemetry = meta_learner.evaluate_new_trade(
-                    ticker=best_conviction['ticker'],
-                    direction="BULLISH" if best_conviction['is_bullish'] else "BEARISH",
-                    trade_type="SWING",
-                    base_confidence=best_conviction['score'],
-                    base_probs=best_conviction.get('base_probs'),
-                    nlp_sentiment=best_conviction.get('nlp_sentiment', 0),
-                    macro_state=macro,
-                    atr_pct=best_conviction.get('atr_pct', 2.0),
-                    volume_ratio=best_conviction.get('volume_ratio', 1.0),
-                    foundation_features=found_features
-                )
-                best_conviction['score'] = adjusted_score
-                best_conviction['meta_learner_msg'] = meta_message
-                best_conviction['telemetry'] = telemetry
-                yield format_sse({"type": "info", "message": f"🤖 {meta_message}", "progress": 98})
-            except Exception as e:
-                logger.warning(f"Meta-Learner warning: {e}")
-
-            # 7. Probability Calibration Layer
-            try:
-                calibrated_score, raw_score, calib_meta = calibrator.calibrate(best_conviction['score'])
-                best_conviction['raw_score'] = raw_score
-                best_conviction['score'] = calibrated_score
-                best_conviction['calibration'] = calib_meta
-                yield format_sse({"type": "info", "message": f"📊 Final Calibrated Win Rate: {calibrated_score}% ({calib_meta['method']})", "progress": 99})
-            except Exception:
-                best_conviction['raw_score'] = best_conviction['score']
-                best_conviction['calibration'] = {"status": "uncalibrated"}
-
-            # 8. Save Verified Trade to SQLite History
-            from app.api.ml_history import save_ml_trade
+            # ── Full enrichment on BEST TRADE using SHARED DECISION ENGINE ──
+            yield format_sse({"type": "info", "message": f"Running full AI pipeline on best candidate {best_conviction['ticker']}...", "progress": 92})
             
-            explanation_payload = {
-                "base_score": round(float(best_conviction.get("prob", 70.0)), 1),
-                "raw_score": best_conviction.get("raw_score", best_conviction['score']),
-                "calibrated_score": best_conviction['score'],
-                "calibration_meta": best_conviction.get("calibration", {}),
-                "nlp_sentiment": best_conviction.get("nlp_sentiment", 0),
-                "nlp_headline": best_conviction.get("nlp_headline", ""),
-                "atr_pct": best_conviction.get("atr_pct", 2.0),
-                "volume_ratio": best_conviction.get("volume_ratio", 1.0),
-                "macro_regime": best_conviction.get("telemetry", {}).get("macro_trend", "BULLISH"),
-                "macro_aligned": best_conviction.get("telemetry", {}).get("macro_aligned", True),
-                "meta_message": best_conviction.get("meta_learner_msg", ""),
-                "timesfm": best_conviction.get("timesfm_forecast"),
-                "chronos": best_conviction.get("chronos_forecast"),
-                "champion_version": champ_v
-            }
+            from app.analytics.decision_engine import evaluate_ticker
+            final_result = evaluate_ticker(
+                ticker=best_conviction['ticker'],
+                df=best_conviction['raw_df'],
+                champion_model=champion_model,
+                champion_meta=champion_meta,
+                trade_type="SWING",
+                source="MANUAL",
+                macro_state=macro,
+                skip_enrichment=False,  # Full pipeline
+            )
+
+            # Report enrichment results
+            pc = final_result.pipeline_components
+            if pc.get('nlp_vader') is True:
+                yield format_sse({"type": "info", "message": f"📰 VADER Sentiment: {final_result.nlp_sentiment:+}", "progress": 93})
+            if pc.get('timesfm') is True or pc.get('chronos') is True:
+                yield format_sse({"type": "info", "message": f"🔮 Foundation Models (TimesFM: {pc.get('timesfm')}, Chronos: {pc.get('chronos')})", "progress": 95})
+            if pc.get('meta_learner') is True:
+                yield format_sse({"type": "info", "message": f"🤖 {final_result.meta_learner_msg}", "progress": 97})
+            if pc.get('calibration') is True:
+                yield format_sse({"type": "info", "message": f"📊 Final Calibrated Win Rate: {final_result.confidence:.1f}%", "progress": 99})
+
+            # Merge into best_conviction for frontend compatibility
+            best_conviction['score'] = final_result.confidence
+            best_conviction['is_bullish'] = final_result.is_bullish
+            best_conviction['direction'] = "BULLISH"
+            best_conviction['meta_learner_msg'] = final_result.meta_learner_msg
+            best_conviction['telemetry'] = final_result.telemetry
+            best_conviction['calibration'] = final_result.calibration
+            best_conviction['nlp_sentiment'] = final_result.nlp_sentiment
+            best_conviction['nlp_headline'] = final_result.nlp_headline
+            best_conviction['entry'] = final_result.entry
+            best_conviction['reference_price'] = final_result.reference_price
+            best_conviction['model_candle_close'] = final_result.model_candle_close
+            best_conviction['price_source'] = final_result.price_source
+            best_conviction['price_timestamp'] = final_result.price_timestamp
+            best_conviction['price_is_fresh'] = final_result.price_is_fresh
+            best_conviction['sl'] = final_result.sl
+            best_conviction['tp1'] = final_result.tp1
+            best_conviction['tp2'] = final_result.tp2
+            best_conviction['pipeline_components'] = final_result.pipeline_components
+            if final_result.timesfm_forecast:
+                best_conviction['timesfm_forecast'] = final_result.timesfm_forecast
+            if final_result.chronos_forecast:
+                best_conviction['chronos_forecast'] = final_result.chronos_forecast
 
             best_conviction.pop('raw_df', None)
 
-            save_ml_trade(
-                ticker=best_conviction['ticker'],
-                is_bullish=best_conviction['is_bullish'],
-                entry=best_conviction['entry'],
-                sl=best_conviction['sl'],
-                tp1=best_conviction['tp1'],
-                tp2=best_conviction['tp2'],
-                confidence=best_conviction['score'],
-                trade_type="SWING",
-                explanation=explanation_payload
-            )
+            # Save as NOT_A_POSITION recommendation ONLY if genuinely qualified and bullish
+            from app.api.ml_history import save_ml_trade
 
-            # 9. Dispatch Telegram Notification for High-Conviction Trades
-            if best_conviction['score'] >= 60.0:
+            was_saved = False
+            if final_result.qualified and final_result.is_bullish:
+                was_saved = save_ml_trade(
+                    ticker=best_conviction['ticker'],
+                    is_bullish=True,
+                    entry=best_conviction['entry'],
+                    sl=best_conviction['sl'],
+                    tp1=best_conviction['tp1'],
+                    tp2=best_conviction['tp2'],
+                    confidence=best_conviction['score'],
+                    trade_type="SWING",
+                    explanation=final_result.explanation,
+                    source='MANUAL',
+                    position_type='NOT_A_POSITION'
+                )
+            if was_saved:
+                yield format_sse({"type": "info", "message": f"💾 Saved new Swing recommendation for {best_conviction['ticker']} to Trade History"})
+                try:
+                    from app.analytics.master_logger import MasterLogger
+                    MasterLogger.log_event("SCAN_MANUAL", "PERSISTED", f"Saved Swing recommendation for {best_conviction['ticker']}", ticker=best_conviction['ticker'], details=best_conviction)
+                except Exception:
+                    pass
+            else:
+                yield format_sse({"type": "info", "message": f"ℹ️ Identical recommendation for {best_conviction['ticker']} already logged today (deduplicated - record preserved)"})
+                try:
+                    from app.analytics.master_logger import MasterLogger
+                    MasterLogger.log_event("SCAN_MANUAL", "DEDUPLICATED", f"Swing recommendation for {best_conviction['ticker']} deduplicated", ticker=best_conviction['ticker'])
+                except Exception:
+                    pass
+
+            # Telegram — only if saved (not deduped) and above threshold
+            if was_saved and best_conviction['score'] >= 60.0:
+                dir_text = "BULLISH BUY" if best_conviction.get('is_bullish', True) else "BEARISH SHORT"
                 tg_msg = (
                     f"🔥 <b>SWING TRADE SETUP DISCOVERED: {best_conviction['ticker']}</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -315,28 +278,60 @@ def run_swing_scan(custom_tickers: list = None):
                     f"🎯 <b>Target 1:</b> ₹{best_conviction['tp1']:.2f}\n"
                     f"🎯 <b>Target 2:</b> ₹{best_conviction['tp2']:.2f}\n"
                     f"🌐 <b>Macro Bias:</b> {regime}\n"
+                    f"📡 <b>Source:</b> MANUAL SCAN\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"<i>{best_conviction.get('meta_learner_msg', 'AI Multi-Model Consensus')}</i>"
                 )
                 try:
-                    send_telegram_message(tg_msg)
+                    tg_sent = send_telegram_message(tg_msg)
+                    if tg_sent:
+                        yield format_sse({"type": "info", "message": f"📱 Telegram Push Alert Dispatched for {best_conviction['ticker']}"})
+                        try:
+                            from app.analytics.master_logger import MasterLogger
+                            MasterLogger.log_event("TELEGRAM", "DISPATCHED", f"Telegram alert sent for Swing {best_conviction['ticker']}", ticker=best_conviction['ticker'])
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.warning(f"Telegram alert warning: {e}")
+            else:
+                if not was_saved:
+                    reason = "Trade call already broadcasted today (duplicate suppressed)"
+                else:
+                    reason = f"Calibrated score ({best_conviction['score']:.1f}%) below 60.0% alert gate"
+                yield format_sse({"type": "info", "message": f"ℹ️ Telegram alert suppressed: {reason}"})
+                try:
+                    from app.analytics.master_logger import MasterLogger
+                    MasterLogger.log_event("TELEGRAM", "SUPPRESSED", f"Telegram alert suppressed for Swing {best_conviction['ticker']}: {reason}", ticker=best_conviction['ticker'])
+                except Exception:
+                    pass
 
+            best_conviction['telegram_sent'] = bool(was_saved and best_conviction['score'] >= 60.0)
+            best_conviction['was_saved'] = was_saved
             scan_history = sorted(scan_history, key=lambda x: x['score'], reverse=True)
             best_conviction['history'] = scan_history
             
             elapsed = (datetime.now() - start_time).total_seconds()
+            try:
+                from app.analytics.master_logger import MasterLogger
+                MasterLogger.log_event("SCAN_MANUAL", "COMPLETED", f"Swing scan completed in {elapsed:.2f}s", ticker=best_conviction.get('ticker'), details={"elapsed": elapsed, "top_ticker": best_conviction.get('ticker')})
+            except Exception:
+                pass
+
             yield format_sse({"type": "system", "message": f"Scan Complete in {elapsed:.2f}s! Trade parameters loaded into execution module.", "progress": 100})
             yield format_sse({"type": "result", "data": best_conviction})
         else:
-            yield format_sse({"type": "error", "message": "No high probability swing trade setups found meeting safety gates.", "progress": 100})
+            try:
+                from app.analytics.master_logger import MasterLogger
+                MasterLogger.log_event("SCAN_MANUAL", "NO_CANDIDATES", f"Swing scan finished: No bullish candidates passed the cash-equity swing safety gate across {len(universe)} stocks", severity="WARNING")
+            except Exception:
+                pass
+            yield format_sse({"type": "error", "message": f"No high probability swing trade setups found meeting safety gates (All {len(universe)} symbols evaluated; candidates with bearish outlook disqualified by cash-equity LONG-only gate).", "progress": 100})
             
     except Exception as e:
         logger.error(f"Swing Scanner Error: {e}")
         yield format_sse({"type": "error", "message": f"Fatal Swing Scanner Error: {str(e)}", "progress": 100})
 
 @router.get("/swing-scan")
-def trigger_swing_scan(custom_tickers: str = None):
+def trigger_swing_scan(custom_tickers: str = None, universe: str = "NIFTY_500"):
     tickers = custom_tickers.split(',') if custom_tickers else None
-    return StreamingResponse(run_swing_scan(tickers), media_type="text/event-stream")
+    return StreamingResponse(run_swing_scan(tickers, universe_preset=universe), media_type="text/event-stream")

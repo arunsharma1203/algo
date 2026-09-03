@@ -164,43 +164,42 @@ def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: f
         }
     }
 
+    def _safe_set_breakdown(key: str, triggered: bool, points: int):
+        if key in model_breakdown:
+            model_breakdown[key]["triggered"] = triggered
+            model_breakdown[key]["points"] = points
+
     if direction == "BULLISH":
         if nifty_trend == "BEARISH":
             panic_level += 30
             reasons.append("NIFTY Short-Term Trend Collapsed")
-            model_breakdown["Macro Regime"]["triggered"] = True
-            model_breakdown["Macro Regime"]["points"] = 30
+            _safe_set_breakdown("Macro Regime", True, 30)
             
         if vix_status == "HIGH":
             panic_level += 40
             reasons.append(f"India VIX Spiking Panic ({vix_close:.1f})")
-            model_breakdown["India VIX"]["triggered"] = True
-            model_breakdown["India VIX"]["points"] = 40
+            _safe_set_breakdown("India VIX", True, 40)
             
         if sentiment_score < -15:
             panic_level += 40
             reasons.append(f"Breaking Negative News ({sentiment_score:+} Score)")
-            model_breakdown["VADER Financial Sentiment"]["triggered"] = True
-            model_breakdown["VADER Financial Sentiment"]["points"] = 40
+            _safe_set_breakdown("VADER Financial Sentiment", True, 40)
             
     elif direction == "BEARISH":
         if nifty_trend == "BULLISH":
             panic_level += 30
             reasons.append("NIFTY Broad Rally (Headwind)")
-            model_breakdown["Macro Regime"]["triggered"] = True
-            model_breakdown["Macro Regime"]["points"] = 30
+            _safe_set_breakdown("Macro Regime", True, 30)
             
         if sentiment_score > 15:
             panic_level += 40
             reasons.append(f"Positive News Surge ({sentiment_score:+} Score)")
-            model_breakdown["FinBERT NLP"]["triggered"] = True
-            model_breakdown["FinBERT NLP"]["points"] = 40
+            _safe_set_breakdown("VADER Financial Sentiment", True, 40)
 
     if meta_veto:
         panic_level += 35
         reasons.append("Layer-2 Meta-Learner Veto Triggered")
-        model_breakdown["Layer-2 Meta-Learner"]["triggered"] = True
-        model_breakdown["Layer-2 Meta-Learner"]["points"] = 35
+        _safe_set_breakdown("Layer-2 Meta-Learner", True, 35)
 
     # Determine Risk Level
     if panic_level >= 70:
@@ -233,7 +232,8 @@ def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: f
     }
 
 def log_alert(level: str, ticker: str, message: str, audit_data: dict = None):
-    conn = sqlite3.connect('market_data.db', timeout=30.0)
+    from app.data.historical_data_layer import get_db_path
+    conn = sqlite3.connect(get_db_path(), timeout=30.0)
     conn.execute(
         "INSERT INTO ml_alerts (timestamp, level, ticker, message) VALUES (?, ?, ?, ?)",
         (datetime.now().isoformat(), level, ticker, message)
@@ -300,10 +300,40 @@ def active_trade_tracker(force_run: bool = False):
     now_epoch = time_module.time()
     
     for trade in open_trades:
-        trade_key = f"{trade.get('id', trade.get('ticker'))}_{trade.get('timestamp')}"
+        trade_id = trade.get('id')
+        trade_key = f"{trade_id or trade.get('ticker')}_{trade.get('timestamp')}"
         audit = evaluate_single_trade_risk(trade, macro=macro)
         risk_level = audit.get('risk_level', 'NORMAL')
         ticker = trade['ticker']
+        tightened_sl = audit.get('tightened_sl')
+        action = "EXIT_ADVISORY" if risk_level == "CRITICAL" else ("TIGHTEN_SL" if risk_level == "WARNING" else "MAINTAIN")
+
+        # ── PERSIST AI GUARD DEFENSIVE ACTION TO SQLite ──────────────
+        if trade_id:
+            try:
+                from app.data.historical_data_layer import get_db_path
+                import json
+                conn = sqlite3.connect(get_db_path(), timeout=10.0)
+                conn.execute("""
+                    UPDATE ml_trade_history 
+                    SET tightened_sl = ?,
+                        ai_guard_action = ?,
+                        risk_level = ?,
+                        risk_reasons = ?,
+                        risk_updated_at = ?
+                    WHERE id = ?
+                """, (
+                    tightened_sl if risk_level != 'NORMAL' else None,
+                    action,
+                    risk_level,
+                    json.dumps(audit.get('reasons', [])),
+                    datetime.now().isoformat(),
+                    trade_id
+                ))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                logger.error(f"Failed to persist AI Guard risk state for trade {trade_id}: {e}")
         
         if risk_level in ['WARNING', 'CRITICAL']:
             # Check Alert Deduplication & Cooldown Cache
@@ -326,8 +356,22 @@ def active_trade_tracker(force_run: bool = False):
                 msg = f"EARLY EXIT TRIGGERED. Consensus: {reasons_str}. Secure capital immediately."
             else:
                 msg = f"AI detected market weakness: {reasons_str}. Move SL to ₹{audit['tightened_sl']:.2f}."
-                
+
             log_alert(risk_level, ticker, msg, audit_data=audit)
+            
+            try:
+                from app.analytics.master_logger import MasterLogger
+                event_type = "EMERGENCY_EXIT" if risk_level == "CRITICAL" else "SL_TIGHTENED"
+                MasterLogger.log_event(
+                    category="AI_GUARD",
+                    event_type=event_type,
+                    message=f"{ticker}: {msg}",
+                    ticker=ticker,
+                    severity=risk_level,
+                    details=audit
+                )
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     active_trade_tracker(force_run=True)

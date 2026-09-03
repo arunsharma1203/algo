@@ -2,11 +2,10 @@ import yfinance as yf
 import pandas as pd
 import sqlite3
 from datetime import datetime
-
-CACHE_DB = 'market_data.db'
+from app.data.database import get_db_path
 
 def get_db_connection():
-    conn = sqlite3.connect(CACHE_DB)
+    conn = sqlite3.connect(get_db_path())
     # The actual market data
     conn.execute('''
         CREATE TABLE IF NOT EXISTS ohlcv (
