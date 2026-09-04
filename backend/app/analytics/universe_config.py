@@ -48,6 +48,15 @@ if os.path.exists(NIFTY_500_JSON_PATH):
 else:
     NIFTY_500_UNIVERSE = list(RESEARCH_100_UNIVERSE)
 
+# 5b. Autopilot Priority Universe (20 High-Volume Liquid Equities)
+# INTENTIONALLY A SMALLER OPERATIONAL POOL FOR HIGH-FREQUENCY AUTONOMOUS EXECUTION
+AUTOPILOT_PRIORITY_20_UNIVERSE = [
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
+    "BHARTIARTL.NS", "SBIN.NS", "ITC.NS", "LT.NS", "KOTAKBANK.NS",
+    "TATAMOTORS.NS", "AXISBANK.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS",
+    "BAJFINANCE.NS", "JSWSTEEL.NS", "TATASTEEL.NS", "POWERGRID.NS", "NTPC.NS"
+]
+
 # 6. Preset Definitions
 UNIVERSE_PRESETS: Dict[str, Dict[str, Any]] = {
     "NIFTY_500": {
@@ -61,6 +70,12 @@ UNIVERSE_PRESETS: Dict[str, Dict[str, Any]] = {
         "tickers": BENCHMARK_5_UNIVERSE,
         "description": "The 5 primary sector heavyweights used for automated Champion model training and Optuna tuning.",
         "survivorship_bias": "MODERATE — Uses current top 5 market leaders."
+    },
+    "AUTOPILOT_PRIORITY_20": {
+        "name": "Autopilot Priority Universe (20 Stocks)",
+        "tickers": AUTOPILOT_PRIORITY_20_UNIVERSE,
+        "description": "Intentionally smaller operational universe for high-frequency autonomous execution without API rate-limit bottlenecks.",
+        "survivorship_bias": "MODERATE — Top 20 mega-caps by liquidity and market cap."
     },
     "NIFTY_50": {
         "name": "NIFTY 50 Bluechips (50 Stocks)",
@@ -81,9 +96,9 @@ UNIVERSE_PRESETS: Dict[str, Dict[str, Any]] = {
         "survivorship_bias": "MODERATE-HIGH — Retrospective selection of current 100 liquid stocks."
     },
     "ALL_117": {
-        "name": "All Locally Available Equities (117 Stocks)",
+        "name": "All Locally Available Equities (Dynamic Local DB - Legacy Alias)",
         "tickers": [], # Dynamically populated from database
-        "description": "Every equity symbol with complete historical data cached in the local database.",
+        "description": "Legacy alias for ALL_COLLECTED. Every equity symbol with complete historical data cached in the local database.",
         "survivorship_bias": "VARIABLE — All locally synchronized NSE assets."
     },
     "ALL_COLLECTED": {
@@ -129,9 +144,9 @@ def get_universe(name: str = "BENCHMARK_5", custom_tickers: Optional[List[str]] 
     if clean_name == "ALL_117":
         db_tickers = get_available_db_tickers()
         return {
-            "name": f"All Locally Available Equities ({len(db_tickers)} Stocks)",
+            "name": f"All Locally Available Equities ({len(db_tickers)} Stocks - Legacy Alias)",
             "tickers": db_tickers,
-            "description": "Every equity symbol with complete historical data cached in the local database.",
+            "description": "Legacy alias for ALL_COLLECTED. Every equity symbol with complete historical data cached in the local database.",
             "survivorship_bias": "VARIABLE — All locally synchronized NSE assets."
         }
     if clean_name == "ALL_COLLECTED":
@@ -146,16 +161,16 @@ def get_universe(name: str = "BENCHMARK_5", custom_tickers: Optional[List[str]] 
         }
     if clean_name in UNIVERSE_PRESETS:
         return UNIVERSE_PRESETS[clean_name]
-    return UNIVERSE_PRESETS["BENCHMARK_5"]
+    return UNIVERSE_PRESETS["NIFTY_500"]
 
-def get_universe_coverage(name: str = "BENCHMARK_5", custom_tickers: Optional[List[str]] = None) -> Dict[str, Any]:
+def get_universe_coverage(name: str = "NIFTY_500", custom_tickers: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     Computes local database coverage for a universe or custom ticker list.
     Returns configured count, available count, missing count, coverage pct, and lists.
     """
     u_info = get_universe(name, custom_tickers=custom_tickers)
     configured_tickers = custom_tickers if (name.upper() == "CUSTOM" and custom_tickers) else u_info.get("tickers", [])
-    if not configured_tickers and name.upper() == "ALL_117":
+    if not configured_tickers and name.upper() in ("ALL_117", "ALL_COLLECTED"):
         configured_tickers = get_available_db_tickers()
 
     db_tickers_set = set(get_available_db_tickers())
@@ -179,7 +194,7 @@ def resolve_universe_tickers(universe_name: str = "NIFTY_500", custom_tickers: O
     """
     Authoritative universe resolution engine for the entire platform.
     Used across Intraday, Swing, Research, Walk-Forward, and Autopilot sweeps.
-    Supports NIFTY_500, NIFTY_50, BENCHMARK_5, LIVE_52, RESEARCH_100, ALL_117, CUSTOM, and SINGLE_STOCK.
+    Supports NIFTY_500, NIFTY_50, BENCHMARK_5, AUTOPILOT_PRIORITY_20, LIVE_52, RESEARCH_100, ALL_COLLECTED, ALL_117, CUSTOM, and SINGLE_STOCK.
     """
     clean_name = universe_name.strip().upper() if universe_name else "NIFTY_500"
     
@@ -191,12 +206,12 @@ def resolve_universe_tickers(universe_name: str = "NIFTY_500", custom_tickers: O
         return [clean_stock]
         
     if clean_name == "CUSTOM" and custom_tickers:
-        return [t.strip().upper() if t.endswith(('.NS', '.BO')) else f"{t.strip().upper()}.NS" for t in custom_tickers if t]
+        return [clean_t if clean_t.endswith(('.NS', '.BO')) else f"{clean_t}.NS" for clean_t in [t.strip().upper() for t in custom_tickers if t]]
         
     u_info = get_universe(clean_name, custom_tickers=custom_tickers)
     tickers = u_info.get("tickers", [])
-    if not tickers and clean_name == "ALL_117":
+    if not tickers and clean_name in ("ALL_117", "ALL_COLLECTED"):
         tickers = get_available_db_tickers()
-    return tickers if tickers else list(LIVE_UNIVERSE)
+    return tickers if tickers else list(NIFTY_500_UNIVERSE)
 
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
 import sqlite3
 from typing import Optional
@@ -149,9 +149,22 @@ def evaluate_foundation_challenger_api(timeframe: str = Query("swing", enum=["sw
     Baseline Champion vs Baseline+TimesFM vs Baseline+Chronos vs Combined Challenger.
     """
     res = FoundationChallengerEvaluator.evaluate_incremental_value(timeframe=timeframe)
+    if isinstance(res, dict):
+        res["challenger_type"] = "FOUNDATION_MODEL_CHALLENGER"
+        res["challenger_id"] = f"fnd_challenger_timesfm_chronos_{timeframe}"
+        res["source_research_job_id"] = None
+        res["model_type"] = "VOTING_ENSEMBLE_PLUS_FOUNDATION"
+        res["engine_version"] = "v1.0-foundation-evaluator"
+        res["feature_version"] = "timesfm_chronos_v1"
+        res["universe"] = "BENCHMARK_5"
+        res["evaluation_type"] = "OUT_OF_SAMPLE_BENCHMARK_SPLIT"
+        res["fingerprint"] = f"fnd_timesfm_chronos_bench5_{timeframe}"
     return {"status": "success", "data": res}
 
 class FoundationPromoteRequest(BaseModel):
+    challenger_type: str
+    challenger_id: str
+    evaluation_id: Optional[str] = None
     timeframe: str = "swing"
     challenger_variant: str = "plus_both"
     confirm_promotion: bool = False
@@ -161,30 +174,92 @@ class FoundationPromoteRequest(BaseModel):
 def promote_foundation_challenger_api(req: FoundationPromoteRequest):
     """
     Gated human-approval API for foundation model challenger promotion.
-    Enforces strict statistical hurdle validation (F1 gain >= 0.01, Sharpe >= 0.0),
+    Enforces strict statistical hurdle validation (F1 gain >= 0.01, Sharpe >= 0.0, trades >= 30),
     creates rollback snapshots, and logs promotion audit without corrupting production Champions.
+    Strictly isolated to FOUNDATION_MODEL_CHALLENGER. Requires atomic evaluation_id.
     """
     from app.analytics.foundation_models.challenger_evaluator import FoundationChallengerEvaluator
     from app.analytics.master_logger import MasterLogger
+
+    # Phase 12 Guardrail: Strict Challenger Type & ID Validation
+    if not req.challenger_type:
+        raise HTTPException(status_code=400, detail="Missing required field: challenger_type")
+    if req.challenger_type != "FOUNDATION_MODEL_CHALLENGER":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Challenger type mismatch: Expected 'FOUNDATION_MODEL_CHALLENGER' but received '{req.challenger_type}'."
+        )
+    if req.challenger_id and (req.challenger_id.startswith("res_") or req.challenger_id.startswith("prc_")):
+        raise HTTPException(
+            status_code=409,
+            detail="Cross-system routing violation: Cannot evaluate or promote Portfolio Research Challenger via Foundation Model endpoint. Use /api/data-lab/research/challenger/promote."
+        )
+
+    identity_metadata = {
+        "challenger_type": "FOUNDATION_MODEL_CHALLENGER",
+        "challenger_id": req.challenger_id or "fnd_challenger_timesfm_chronos",
+        "evaluation_id": req.evaluation_id,
+        "source_research_job_id": None,
+        "model_type": "VOTING_ENSEMBLE_PLUS_FOUNDATION",
+        "engine_version": "v1.0-foundation-evaluator",
+        "feature_version": "timesfm_chronos_v1",
+        "universe": "BENCHMARK_5",
+        "data_start": "2024-09-03",
+        "data_end": "2026-09-03",
+        "evaluation_type": "OUT_OF_SAMPLE_BENCHMARK_SPLIT",
+        "fingerprint": f"fnd_timesfm_chronos_bench5_{req.timeframe}"
+    }
 
     if not req.confirm_promotion:
         return {
             "status": "APPROVAL_REQUIRED",
             "message": "Promotion requires explicit confirmation (confirm_promotion=True).",
-            "gates_passed": False
+            "gates_passed": False,
+            **identity_metadata
         }
 
-    # Re-evaluate out-of-sample benchmarks to verify gates
-    eval_res = FoundationChallengerEvaluator.evaluate_incremental_value(timeframe=req.timeframe)
-    recommendation = eval_res.get("recommendation")
+    # Same-Run Provenance: Require atomic evaluation_id
+    if not req.evaluation_id:
+        rejection_reasons = ["EVALUATION_INTEGRITY_UNVERIFIED: Missing evaluation_id. Promotion requires an atomic evaluation snapshot."]
+        MasterLogger.log_event(
+            "PROMOTION", "REJECTED",
+            f"Foundation Challenger promotion rejected: Missing evaluation_id",
+            details={"reasons": rejection_reasons},
+            severity="WARNING"
+        )
+        return {
+            "status": "NOT_ELIGIBLE",
+            "message": "EVALUATION_INTEGRITY_UNVERIFIED: evaluation_id is required to verify promotion gates.",
+            "gates_passed": False,
+            "rejection_reasons": rejection_reasons,
+            **identity_metadata
+        }
+
+    eval_res = FoundationChallengerEvaluator.get_evaluation(req.evaluation_id)
+    if not eval_res:
+        rejection_reasons = [f"EVALUATION_INTEGRITY_UNVERIFIED: Evaluation ID '{req.evaluation_id}' was not found in evaluation registry."]
+        MasterLogger.log_event(
+            "PROMOTION", "REJECTED",
+            f"Foundation Challenger promotion rejected: Unknown evaluation_id {req.evaluation_id}",
+            details={"reasons": rejection_reasons},
+            severity="WARNING"
+        )
+        return {
+            "status": "NOT_ELIGIBLE",
+            "message": f"EVALUATION_INTEGRITY_UNVERIFIED: Evaluation '{req.evaluation_id}' not found.",
+            "gates_passed": False,
+            "rejection_reasons": rejection_reasons,
+            **identity_metadata
+        }
+
+    # Extract metrics from atomic evaluation snapshot
     comparison = eval_res.get("comparison", {})
-    
     variant_data = comparison.get(req.challenger_variant, comparison.get("plus_both", {}))
     champ_data = comparison.get("champion", {})
 
     f1_gain = variant_data.get("f1", 0) - champ_data.get("f1", 0)
     sharpe_gain = variant_data.get("sharpe", 0) - champ_data.get("sharpe", 0)
-    trade_count = variant_data.get("trade_count", 0)
+    trade_count = variant_data.get("completed_trade_count", variant_data.get("trade_count", 0))
     max_dd = variant_data.get("max_drawdown_pct", 100.0)
 
     # Multi-dimensional validation gates
@@ -205,7 +280,7 @@ def promote_foundation_challenger_api(req: FoundationPromoteRequest):
         rejection_msg = " | ".join(rejection_reasons)
         MasterLogger.log_event(
             "PROMOTION", "REJECTED",
-            f"Challenger promotion rejected for {req.timeframe}: {rejection_msg}",
+            f"Foundation Challenger promotion rejected for {req.timeframe}: {rejection_msg}",
             details={"f1_gain": f1_gain, "sharpe_gain": sharpe_gain, "trades": trade_count, "max_dd": max_dd, "reasons": rejection_reasons},
             severity="WARNING"
         )
@@ -216,27 +291,33 @@ def promote_foundation_challenger_api(req: FoundationPromoteRequest):
             "f1_gain": f1_gain,
             "sharpe_gain": sharpe_gain,
             "trade_count": trade_count,
+            "required_trade_count": 30,
             "max_drawdown_pct": max_dd,
-            "rejection_reasons": rejection_reasons
+            "required_max_drawdown_pct": 20.0,
+            "rejection_reasons": rejection_reasons,
+            **identity_metadata
         }
 
     MasterLogger.log_event(
         "PROMOTION", "APPROVED",
-        f"Challenger {req.challenger_variant} validated for {req.timeframe} (F1: {variant_data.get('f1')}, Sharpe: {variant_data.get('sharpe')}, Trades: {trade_count})",
+        f"Foundation Challenger {req.challenger_variant} validated for {req.timeframe} (F1: {variant_data.get('f1')}, Sharpe: {variant_data.get('sharpe')}, Trades: {trade_count})",
         details={"variant": req.challenger_variant, "timeframe": req.timeframe, "f1": variant_data.get("f1"), "sharpe": variant_data.get("sharpe")},
         severity="INFO"
     )
 
     return {
         "status": "PROMOTION_VALIDATED",
-        "message": f"Challenger '{req.challenger_variant}' successfully passed all safety gates for {req.timeframe.upper()}.",
+        "message": f"Foundation Challenger '{req.challenger_variant}' successfully passed all safety gates for {req.timeframe.upper()}.",
         "gates_passed": True,
         "variant": req.challenger_variant,
         "timeframe": req.timeframe,
         "f1": variant_data.get("f1"),
         "sharpe": variant_data.get("sharpe"),
         "win_rate": variant_data.get("win_rate"),
-        "rationale": eval_res.get("rationale")
+        "trade_count": trade_count,
+        "required_trade_count": 30,
+        "rationale": eval_res.get("rationale"),
+        **identity_metadata
     }
 
 @router.post("/foundation/forecast")

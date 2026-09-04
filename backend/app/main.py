@@ -38,11 +38,24 @@ def get_or_create_scheduler() -> BackgroundScheduler:
         if _SCHEDULER_INSTANCE is None:
             _SCHEDULER_INSTANCE = BackgroundScheduler(daemon=True)
             
-            # 1. Data Hoarder: Daily 16:00 IST
+            # 1. Data Hoarder: Daily 16:00 IST (Broad 15m intraday sync)
             _SCHEDULER_INSTANCE.add_job(
                 hoard_intraday_data, 'cron', hour=16, minute=0,
+                kwargs={'universe': 'NIFTY_500'},
                 id='data_hoarder_1600', replace_existing=True
             )
+
+            # 1b. Broad Daily OHLCV Ingestion: Daily 16:15 IST Mon-Fri
+            try:
+                from app.data.historical_data_layer import HistoricalDataLayer
+                _SCHEDULER_INSTANCE.add_job(
+                    HistoricalDataLayer.sync_universe_daily, 'cron',
+                    day_of_week='mon-fri', hour=16, minute=15,
+                    kwargs={'universe': 'NIFTY_500'},
+                    id='daily_ohlcv_sync_1615', replace_existing=True
+                )
+            except Exception as e:
+                logger.error(f"Failed to register broad daily OHLCV sync: {e}")
 
             # 2. AI Guard Babysitter: Every 5 minutes during market hours
             try:
@@ -99,6 +112,17 @@ def get_or_create_scheduler() -> BackgroundScheduler:
             except Exception as e:
                 logger.error(f"Failed to initialize research orchestrator daemon: {e}")
 
+            # 6. Daily Dashboard Market Intelligence Report (09:30 IST Mon-Fri)
+            try:
+                from app.analytics.dashboard_telegram_scheduler import execute_daily_dashboard_telegram_job
+                _SCHEDULER_INSTANCE.add_job(
+                    execute_daily_dashboard_telegram_job,
+                    'cron', day_of_week='mon-fri', hour=9, minute=30,
+                    id='daily_dashboard_report_0930', replace_existing=True
+                )
+            except Exception as e:
+                logger.error(f"Failed to register daily dashboard report job: {e}")
+
             logger.info("✅ APScheduler initialized with unique job IDs and duplicate protection.")
 
         return _SCHEDULER_INSTANCE
@@ -116,11 +140,16 @@ from app.api.ml_backtest import router as ml_backtest_router
 from app.api.settings import router as settings_router
 from app.api.fno import router as fno_router
 from app.api.data_lab import router as data_lab_router
+from app.api.dashboard_intelligence import router as dashboard_router
 
 app = FastAPI(title="Swing Trading AI Backend")
 
 @app.on_event("startup")
 def on_startup():
+    from app.analytics.process_lifecycle_manager import ProcessLifecycleManager
+    ProcessLifecycleManager.register_shutdown_handlers()
+    ProcessLifecycleManager.cleanup_orphaned_python_workers()
+
     sched = get_or_create_scheduler()
     if not sched.running:
         sched.start()
@@ -128,6 +157,9 @@ def on_startup():
 
 @app.on_event("shutdown")
 def on_shutdown():
+    from app.analytics.process_lifecycle_manager import ProcessLifecycleManager
+    ProcessLifecycleManager.terminate_all_pools()
+
     sched = get_or_create_scheduler()
     if sched.running:
         sched.shutdown(wait=False)
@@ -195,7 +227,7 @@ def get_market_universes():
     presets = {}
     for k, v in UNIVERSE_PRESETS.items():
         count = len(v.get("tickers", []))
-        if k == "ALL_117":
+        if k in ("ALL_117", "ALL_COLLECTED"):
             count = len(db_tickers)
         presets[k] = {
             "id": k,
@@ -224,6 +256,7 @@ app.include_router(ml_backtest_router, prefix="/api/ml", tags=["ml_backtest"])
 app.include_router(settings_router, prefix="/api/settings", tags=["settings"])
 app.include_router(fno_router, prefix="/api/fno", tags=["fno"])
 app.include_router(data_lab_router, prefix="/api", tags=["data_lab"])
+app.include_router(dashboard_router, prefix="/api/dashboard", tags=["dashboard"])
 
 @app.get("/")
 def read_root():
@@ -235,9 +268,19 @@ from app.tasks.hoarder import hoard_intraday_data_stream
 from pydantic import BaseModel
 
 class HoarderRequest(BaseModel):
+    universe: str = 'NIFTY_500'
+    custom_tickers: Optional[List[str]] = None
     data_source: str = 'yfinance'
     api_key: str = ''
 
 @app.post("/api/hoarder/trigger")
 def trigger_hoarder(req: HoarderRequest):
-    return StreamingResponse(hoard_intraday_data_stream(req.data_source, req.api_key), media_type="text/event-stream")
+    return StreamingResponse(
+        hoard_intraday_data_stream(
+            universe=req.universe,
+            custom_tickers=req.custom_tickers,
+            data_source=req.data_source,
+            api_key=req.api_key
+        ),
+        media_type="text/event-stream"
+    )

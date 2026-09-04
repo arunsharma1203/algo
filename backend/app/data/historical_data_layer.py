@@ -383,3 +383,91 @@ class HistoricalDataLayer:
             }
         finally:
             conn.close()
+
+    @classmethod
+    def sync_universe_daily(
+        cls,
+        universe: str = "NIFTY_500",
+        custom_tickers: Optional[List[str]] = None,
+        max_workers: int = 4,
+        batch_size: int = 25,
+        force_refresh: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Safely synchronizes daily OHLCV data for the broad universe (e.g. NIFTY 500) into SQLite.
+        Pure market data ingestion only. Does not trigger research, training, or trades.
+        """
+        import time as time_mod
+        from app.analytics.universe_config import resolve_universe_tickers
+        from app.analytics.master_logger import MasterLogger
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        cls.init_schema()
+        tickers = resolve_universe_tickers(universe, custom_tickers=custom_tickers)
+        total_requested = len(tickers)
+        start_time = datetime.now()
+
+        MasterLogger.log_event(
+            "DATA_INGESTION", "DATA_INGESTION_STARTED",
+            f"Starting daily OHLCV sync for universe '{universe}' ({total_requested} symbols, batch_size={batch_size})",
+            details={"universe": universe, "requested_count": total_requested}
+        )
+
+        successful_tickers = []
+        failed_tickers = {}
+        rows_synced_total = 0
+
+        for i in range(0, total_requested, batch_size):
+            batch = tickers[i:i + batch_size]
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_ticker = {
+                    executor.submit(cls.sync_ticker_daily_10y, ticker, force_refresh): ticker
+                    for ticker in batch
+                }
+                for future in as_completed(future_to_ticker):
+                    t = future_to_ticker[future]
+                    try:
+                        res = future.result()
+                        if res.get("status") in ("SYNCED", "UP_TO_DATE"):
+                            successful_tickers.append(t)
+                            rows_synced_total += res.get("rows_synced", 0)
+                        else:
+                            failed_tickers[t] = res.get("error", res.get("status", "FAILED"))
+                    except Exception as e:
+                        failed_tickers[t] = str(e)
+            time_mod.sleep(0.2)
+
+        end_time = datetime.now()
+        success_count = len(successful_tickers)
+        failure_count = len(failed_tickers)
+        coverage_pct = round((success_count / total_requested * 100.0), 2) if total_requested > 0 else 0.0
+
+        event_type = "DATA_INGESTION_COMPLETED" if failure_count == 0 else "DATA_INGESTION_PARTIAL"
+        MasterLogger.log_event(
+            "DATA_INGESTION", event_type,
+            f"Daily OHLCV sync finished: {success_count}/{total_requested} successful ({coverage_pct}% coverage, {failure_count} failed)",
+            details={
+                "universe": universe,
+                "requested_count": total_requested,
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "coverage_percent": coverage_pct,
+                "total_rows_synced": rows_synced_total,
+                "failed_tickers": failed_tickers
+            }
+        )
+
+        return {
+            "universe": universe,
+            "requested_count": total_requested,
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "coverage_percent": coverage_pct,
+            "total_rows_synced": rows_synced_total,
+            "start_date": start_time.isoformat(),
+            "end_date": end_time.isoformat(),
+            "source": "yfinance",
+            "timestamp": end_time.isoformat(),
+            "failed_tickers": failed_tickers
+        }
+

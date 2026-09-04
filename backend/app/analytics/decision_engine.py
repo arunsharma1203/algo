@@ -87,6 +87,7 @@ class QualificationResult:
     adx: float = 0.0
     macd_diff: float = 0.0
     score: float = 0.0
+    is_alertable: bool = False
 
 
 # ─── Intraday features ────────────────────────────────────────────────
@@ -412,11 +413,14 @@ def evaluate_ticker(
             technical_bonus += 10
         score_val = float(calibrated_score + technical_bonus)
 
+    is_alert = bool(qualified and calibrated_score >= 60.0)
+
     # Build explanation payload
     explanation_payload = {
         "base_score": round(float(prob_up_raw), 1),
         "raw_score": round(float(adjusted_score), 1),
         "calibrated_score": round(float(calibrated_score), 1),
+        "is_alertable": is_alert,
         "calibration_meta": calib_meta,
         "nlp_sentiment": nlp_sentiment,
         "nlp_headline": nlp_headline,
@@ -448,7 +452,7 @@ def evaluate_ticker(
             event_type="QUALIFIED",
             message=f"{ticker} qualified with {calibrated_score:.1f}% confidence ({direction})",
             ticker=ticker,
-            details={"confidence": calibrated_score, "trade_type": trade_type, "entry": entry_price, "source": source}
+            details={"confidence": calibrated_score, "trade_type": trade_type, "entry": entry_price, "source": source, "is_alertable": is_alert}
         )
     except Exception:
         pass
@@ -490,6 +494,7 @@ def evaluate_ticker(
         adx=latest_adx,
         macd_diff=latest_macd_diff,
         score=score_val,
+        is_alertable=is_alert,
     )
 
 

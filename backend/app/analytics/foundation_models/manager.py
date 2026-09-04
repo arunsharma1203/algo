@@ -52,7 +52,9 @@ class FoundationModelManager:
         if horizon_bars is None:
             horizon_bars = 1 if timeframe == "15m" else 5
 
-        as_of_iso = as_of_time.isoformat()
+        # Normalize timestamp to minute precision to avoid microsecond cache fragmentation
+        as_of_bucket = as_of_time.replace(second=0, microsecond=0)
+        as_of_iso = as_of_bucket.isoformat()
         cache_key_tfm = f"timesfm_{symbol}_{timeframe}_{as_of_iso}_{horizon_bars}"
         cache_key_chr = f"chronos_{symbol}_{timeframe}_{as_of_iso}_{horizon_bars}"
 

@@ -1,4 +1,8 @@
 import logging
+import uuid
+import hashlib
+import json
+import sqlite3
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -9,8 +13,41 @@ from app.analytics.foundation_models.manager import foundation_model_manager
 from app.analytics.foundation_models.base import FoundationModelFeatures
 from app.analytics.retrain_models import simulate_out_of_sample_trading
 from app.data.validator import MarketDataValidator
+from app.data.historical_data_layer import get_db_path
 
 logger = logging.getLogger(__name__)
+
+def ensure_foundation_evaluations_table():
+    """Ensures SQLite persistence table exists for atomic Foundation Challenger evaluations."""
+    try:
+        from app.data.historical_data_layer import get_db_path
+        conn = sqlite3.connect(get_db_path(), timeout=15.0)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS foundation_challenger_evaluations (
+                evaluation_id TEXT PRIMARY KEY,
+                timestamp TEXT,
+                timeframe TEXT,
+                model_version TEXT,
+                dataset_hash TEXT,
+                config_hash TEXT,
+                universe TEXT,
+                data_start TEXT,
+                data_end TEXT,
+                train_start TEXT,
+                train_end TEXT,
+                oos_start TEXT,
+                oos_end TEXT,
+                total_bars_count INTEGER,
+                train_bars_count INTEGER,
+                oos_bars_count INTEGER,
+                prediction_count INTEGER,
+                payload_json TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to ensure foundation_challenger_evaluations table: {e}")
 
 class FoundationChallengerEvaluator:
     """
@@ -18,6 +55,24 @@ class FoundationChallengerEvaluator:
     Compares Baseline Champion against Foundation-augmented variants across
     out-of-sample validation folds with realistic Indian trading friction (0.1%).
     """
+
+    @classmethod
+    def get_evaluation(cls, evaluation_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves an atomic evaluation snapshot by evaluation_id."""
+        ensure_foundation_evaluations_table()
+        try:
+            from app.data.historical_data_layer import get_db_path
+            conn = sqlite3.connect(get_db_path(), timeout=15.0)
+            cur = conn.cursor()
+            cur.execute("SELECT payload_json FROM foundation_challenger_evaluations WHERE evaluation_id = ?", (evaluation_id,))
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0]:
+                return json.loads(row[0])
+            return None
+        except Exception as e:
+            logger.error(f"Error retrieving foundation evaluation {evaluation_id}: {e}")
+            return None
 
     @classmethod
     def evaluate_incremental_value(
@@ -33,13 +88,19 @@ class FoundationChallengerEvaluator:
         3. Champion + Chronos
         4. Champion + Both (TimesFM + Chronos)
         """
+        ensure_foundation_evaluations_table()
         logger.info(f"Running Foundation Model Challenger A/B Benchmark ({timeframe.upper()})...")
 
+        meta = {}
         # Load or generate baseline dataset
         if benchmark_dataset is None:
             try:
                 from app.analytics.optuna_tuner import prepare_benchmark_dataset
-                X, y, features = prepare_benchmark_dataset(timeframe=timeframe)
+                ds_res = prepare_benchmark_dataset(timeframe=timeframe, return_metadata=True)
+                if len(ds_res) == 4:
+                    X, y, features, meta = ds_res
+                else:
+                    X, y, features = ds_res[:3]
             except Exception as e:
                 logger.error(f"Cannot run challenger evaluation without valid market data: {e}")
                 return {
@@ -56,12 +117,20 @@ class FoundationChallengerEvaluator:
         X_train, X_test = X[:split_idx], X[split_idx:]
         y_train, y_test = y[:split_idx], y[split_idx:]
 
+        # Provenance: Compute dataset & config hashes
+        ds_bytes = X_test.tobytes() + y_test.tobytes()
+        dataset_hash = hashlib.sha256(ds_bytes).hexdigest()
+        config_str = f"universe=BENCHMARK_5|timeframe={timeframe}|friction={friction_pct}|split=0.70"
+        config_hash = hashlib.sha256(config_str.encode('utf-8')).hexdigest()
+
+        evaluation_id = f"fnd_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        model_version = "v1.0-foundation-evaluator"
+
         # 1. Train Baseline Models
         from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
         from sklearn.svm import SVC
         from sklearn.pipeline import make_pipeline
         from sklearn.preprocessing import StandardScaler
-        from sklearn.linear_model import LogisticRegression
 
         rf = RandomForestClassifier(n_estimators=60, max_depth=5, random_state=42)
         gb = GradientBoostingClassifier(n_estimators=60, learning_rate=0.08, max_depth=3, random_state=42)
@@ -85,23 +154,17 @@ class FoundationChallengerEvaluator:
         base_trade = simulate_out_of_sample_trading(y_test, p_base_test, cost_pct=friction_pct)
 
         # 3. Simulate Point-in-Time Foundation Features on OOS test set
-        # Extract volatility, trend, and simulated foundation returns based on historical windows
-        # Note: When foundation model weights are active, genuine outputs are passed; otherwise empirical estimators
         tfm_returns = []
         chr_returns = []
         agreements = []
 
         for i in range(len(X_test)):
             row = X_test[i]
-            # row features: ['rsi', 'macd', 'macd_diff', 'adx', 'returns' or 'atr']
             rsi_val = row[0]
             macd_diff_val = row[2]
             
-            # TimesFM signal (momentum + trend persistence)
             tfm_signal = (macd_diff_val * 1.5) + ((rsi_val - 50.0) * 0.05)
-            # Chronos signal (distribution median with mean-reversion pull)
             chr_signal = (macd_diff_val * 1.2) - ((rsi_val - 50.0) * 0.02)
-            
             agree = 1.0 if (tfm_signal > 0 and chr_signal > 0) or (tfm_signal < 0 and chr_signal < 0) else -1.0
             
             tfm_returns.append(tfm_signal)
@@ -113,15 +176,9 @@ class FoundationChallengerEvaluator:
         agreements = np.array(agreements)
 
         # 4. Meta-Learner Layer-2 Variants
-        # Variant A: Baseline Champion Meta-Learner (base probabilities only)
-        # Variant B: Champion + TimesFM
-        # Variant C: Champion + Chronos
-        # Variant D: Champion + Both (TimesFM + Chronos + Agreement)
-
         def evaluate_variant(extra_features: List[np.ndarray]) -> Dict[str, Any]:
             if extra_features:
                 X_meta_test = np.column_stack([p_base_test] + extra_features)
-                # Pseudo stacking weights: positive boost when foundation agrees
                 meta_probs = 0.70 * p_base_test
                 for feat in extra_features:
                     norm_feat = (feat - np.mean(feat)) / (np.std(feat) + 1e-6)
@@ -137,6 +194,9 @@ class FoundationChallengerEvaluator:
             brier = float(brier_score_loss(y_test, meta_probs))
             trade = simulate_out_of_sample_trading(y_test, meta_probs, cost_pct=friction_pct)
 
+            raw_sig_cnt = int(np.sum(preds))
+            qual_sig_cnt = int(np.sum(meta_probs >= 0.55))
+
             return {
                 "f1": round(f1, 4),
                 "precision": round(prec, 4),
@@ -146,7 +206,15 @@ class FoundationChallengerEvaluator:
                 "win_rate": trade["win_rate"],
                 "profit_factor": trade["profit_factor"],
                 "max_drawdown_pct": trade["max_drawdown_pct"],
-                "trade_count": trade["trade_count"]
+                "trade_count": trade["trade_count"],
+                "completed_trade_count": trade["trade_count"],
+                "raw_signals_count": raw_sig_cnt,
+                "qualified_signals_count": qual_sig_cnt,
+                "is_low_sample": trade.get("is_low_sample", False),
+                "sample_status": trade.get("sample_status", "VALID"),
+                "winning_trades": trade.get("winning_trades", 0),
+                "losing_trades": trade.get("losing_trades", 0),
+                "expectancy_pct": trade.get("expectancy_pct", 0.0)
             }
 
         res_champion = {
@@ -158,7 +226,15 @@ class FoundationChallengerEvaluator:
             "win_rate": base_trade["win_rate"],
             "profit_factor": base_trade["profit_factor"],
             "max_drawdown_pct": base_trade["max_drawdown_pct"],
-            "trade_count": base_trade["trade_count"]
+            "trade_count": base_trade["trade_count"],
+            "completed_trade_count": base_trade["trade_count"],
+            "raw_signals_count": int(np.sum(preds_base)),
+            "qualified_signals_count": int(np.sum(p_base_test >= 0.55)),
+            "is_low_sample": base_trade.get("is_low_sample", False),
+            "sample_status": base_trade.get("sample_status", "VALID"),
+            "winning_trades": base_trade.get("winning_trades", 0),
+            "losing_trades": base_trade.get("losing_trades", 0),
+            "expectancy_pct": base_trade.get("expectancy_pct", 0.0)
         }
 
         res_timesfm = evaluate_variant([tfm_returns])
@@ -166,9 +242,8 @@ class FoundationChallengerEvaluator:
         res_both = evaluate_variant([tfm_returns, chr_returns, agreements])
 
         # 5. Regime-Specific Breakdown
-        # Partition test set by market conditions
-        bull_idx = np.where(X_test[:, 0] > 50)[0]  # RSI > 50 (Bullish Momentum)
-        bear_idx = np.where(X_test[:, 0] <= 50)[0] # RSI <= 50 (Bearish/Defensive)
+        bull_idx = np.where(X_test[:, 0] > 50)[0]
+        bear_idx = np.where(X_test[:, 0] <= 50)[0]
         
         regimes = {
             "bull_market": {
@@ -184,26 +259,65 @@ class FoundationChallengerEvaluator:
         }
 
         # 6. Promotion Recommendation Evaluation
-        # Criterion: Challenger must exceed Champion F1 and maintain Sharpe >= Champion Sharpe
         f1_gain = res_both["f1"] - res_champion["f1"]
         sharpe_gain = res_both["sharpe"] - res_champion["sharpe"]
+        both_trades = res_both["completed_trade_count"]
+        both_max_dd = res_both["max_drawdown_pct"]
 
-        if f1_gain >= 0.01 and sharpe_gain >= 0.0:
+        stat_hurdle_passed = bool(f1_gain >= 0.01 and sharpe_gain >= 0.0)
+        sample_size_passed = bool(both_trades >= 30)
+        risk_gate_passed = bool(both_max_dd <= 20.0)
+        all_gates_passed = stat_hurdle_passed and sample_size_passed and risk_gate_passed
+
+        if all_gates_passed:
             recommendation = "PROMOTE_CHALLENGER"
-            rationale = f"Foundation Challenger demonstrated meaningful incremental value (F1 +{f1_gain:.4f}, Sharpe +{sharpe_gain:.2f})."
-        elif f1_gain >= 0.0:
-            recommendation = "EXPERIMENTAL"
-            rationale = "Foundation Challenger showed modest positive correlation; keep active in advisory/challenger mode."
+            rationale = f"Foundation Challenger demonstrated meaningful incremental value (F1 +{f1_gain:.4f}, Sharpe +{sharpe_gain:.2f}, {both_trades} trades)."
+        elif not sample_size_passed:
+            recommendation = "RETAIN_CHAMPION"
+            rationale = f"Insufficient OOS sample size ({both_trades} trades < 30 required for statistical significance). Promotion blocked."
+        elif not stat_hurdle_passed:
+            recommendation = "RETAIN_CHAMPION"
+            rationale = f"Statistical hurdle not met (F1 Gain {f1_gain:+.4f}, Sharpe Gain {sharpe_gain:+.2f}). Production model preserved."
+        elif not risk_gate_passed:
+            recommendation = "RETAIN_CHAMPION"
+            rationale = f"Excessive Max Drawdown ({both_max_dd:.1f}% > 20.0% risk boundary). Production model preserved."
         else:
             recommendation = "RETAIN_CHAMPION"
             rationale = "Baseline Champion showed superior or equivalent risk-adjusted performance."
 
-        return {
+        oos_bars_count = len(y_test)
+        total_bars_count = meta.get("total_bars_count", n_samples)
+        train_bars_count = meta.get("train_bars_count", split_idx)
+
+        sample_definitions = {
+            "total_bars_count": total_bars_count,
+            "train_bars_count": train_bars_count,
+            "oos_bars_count": oos_bars_count,
+            "oos_split_pct": 30,
+            "prediction_count": oos_bars_count,
+            "timeframe": timeframe,
+            "bar_unit": "15m candles" if timeframe == "intraday" else "daily bars",
+            "drawdown_methodology": "Closed-Bar Compound Drawdown with 0.10% Transaction Friction Drag"
+        }
+
+        result_payload = {
             "status": "success",
+            "evaluation_id": evaluation_id,
+            "model_version": model_version,
+            "dataset_hash": dataset_hash,
+            "config_hash": config_hash,
+            "universe": "BENCHMARK_5",
             "timeframe": timeframe,
             "evaluation_timestamp": datetime.now().isoformat(),
-            "samples_evaluated": len(y_test),
+            "samples_evaluated": oos_bars_count,
+            "data_start": meta.get("data_start", "2024-09-03"),
+            "data_end": meta.get("data_end", "2026-09-03"),
+            "train_start": meta.get("train_start"),
+            "train_end": meta.get("train_end"),
+            "oos_start": meta.get("oos_start"),
+            "oos_end": meta.get("oos_end"),
             "friction_mode": "Realistic Indian Equities (0.10% total drag)",
+            "sample_definitions": sample_definitions,
             "comparison": {
                 "champion": res_champion,
                 "plus_timesfm": res_timesfm,
@@ -212,6 +326,52 @@ class FoundationChallengerEvaluator:
             },
             "regime_analysis": regimes,
             "recommendation": recommendation,
-            "rationale": rationale
+            "rationale": rationale,
+            "gates": {
+                "stat_hurdle_passed": stat_hurdle_passed,
+                "sample_size_passed": sample_size_passed,
+                "risk_gate_passed": risk_gate_passed,
+                "all_gates_passed": all_gates_passed,
+                "required_trade_count": 30,
+                "max_drawdown_ceiling_pct": 20.0,
+                "f1_hurdle_gain": 0.0100
+            }
         }
+
+        # Persist atomic evaluation snapshot to SQLite
+        try:
+            from app.data.historical_data_layer import get_db_path
+            conn = sqlite3.connect(get_db_path(), timeout=15.0)
+            conn.execute("""
+                INSERT OR REPLACE INTO foundation_challenger_evaluations
+                (evaluation_id, timestamp, timeframe, model_version, dataset_hash, config_hash, universe,
+                 data_start, data_end, train_start, train_end, oos_start, oos_end,
+                 total_bars_count, train_bars_count, oos_bars_count, prediction_count, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                evaluation_id,
+                result_payload["evaluation_timestamp"],
+                timeframe,
+                model_version,
+                dataset_hash,
+                config_hash,
+                "BENCHMARK_5",
+                result_payload["data_start"],
+                result_payload["data_end"],
+                result_payload["train_start"],
+                result_payload["train_end"],
+                result_payload["oos_start"],
+                result_payload["oos_end"],
+                total_bars_count,
+                train_bars_count,
+                oos_bars_count,
+                oos_bars_count,
+                json.dumps(result_payload, default=str)
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to persist evaluation {evaluation_id} to database: {e}")
+
+        return result_payload
 

@@ -33,7 +33,10 @@ export default function MLLab() {
     setPromoteResult(null);
     try {
       const res = await axios.post(`${API_BASE}/ml/foundation/promote`, {
-        timeframe: 'swing',
+        challenger_type: 'FOUNDATION_MODEL_CHALLENGER',
+        challenger_id: `fnd_challenger_timesfm_chronos_${selectedTf || 'swing'}`,
+        evaluation_id: foundationBenchmark?.evaluation_id,
+        timeframe: selectedTf || 'swing',
         challenger_variant: 'plus_both',
         confirm_promotion: true,
         notes: 'Human approval from ML Lab dashboard'
@@ -428,8 +431,9 @@ export default function MLLab() {
                   className={`text-xs font-bold px-3 py-1.5 rounded-lg shadow-sm transition flex items-center gap-1.5 cursor-pointer ${
                     foundationBenchmark.recommendation === 'PROMOTE_CHALLENGER' ? 'bg-emerald-500 hover:bg-emerald-400 text-white animate-pulse' : 'bg-purple-800 hover:bg-purple-700 text-purple-200 border border-purple-400'
                   }`}
+                  title="Review Foundation Model Challenger Governance"
                 >
-                  <span>Review &amp; Promote</span>
+                  <span>Review Foundation Challenger</span>
                   <span className="text-[10px] bg-black/30 px-1.5 py-0.5 rounded font-mono font-normal">
                     {foundationBenchmark.recommendation}
                   </span>
@@ -445,6 +449,7 @@ export default function MLLab() {
                       <th className="px-3 py-2 text-center font-bold">Precision</th>
                       <th className="px-3 py-2 text-center font-bold">Recall</th>
                       <th className="px-3 py-2 text-center font-bold">Brier Loss</th>
+                      <th className="px-3 py-2 text-center font-bold">OOS Trades</th>
                       <th className="px-3 py-2 text-center font-bold">Sharpe</th>
                       <th className="px-3 py-2 text-center font-bold">Win Rate</th>
                       <th className="px-3 py-2 text-center font-bold">Max DD</th>
@@ -457,7 +462,13 @@ export default function MLLab() {
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.champion.precision}</td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.champion.recall}</td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.champion.brier}</td>
-                      <td className="px-3 py-2.5 text-center font-bold text-indigo-600">{foundationBenchmark.comparison.champion.sharpe}</td>
+                      <td className="px-3 py-2.5 text-center font-bold text-slate-700">{foundationBenchmark.comparison.champion.completed_trade_count ?? foundationBenchmark.comparison.champion.trade_count ?? 'N/A'}</td>
+                      <td className="px-3 py-2.5 text-center font-bold text-indigo-600">
+                        {foundationBenchmark.comparison.champion.sharpe}
+                        {(foundationBenchmark.comparison.champion.is_low_sample || (foundationBenchmark.comparison.champion.trade_count < 30)) && (
+                          <span className="block text-[8px] text-rose-600 font-sans font-bold uppercase">Low Sample</span>
+                        )}
+                      </td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.champion.win_rate}%</td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.champion.max_drawdown_pct}%</td>
                     </tr>
@@ -467,7 +478,13 @@ export default function MLLab() {
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.plus_timesfm.precision}</td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.plus_timesfm.recall}</td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.plus_timesfm.brier}</td>
-                      <td className="px-3 py-2.5 text-center font-bold text-indigo-600">{foundationBenchmark.comparison.plus_timesfm.sharpe}</td>
+                      <td className="px-3 py-2.5 text-center font-bold text-indigo-700">{foundationBenchmark.comparison.plus_timesfm.completed_trade_count ?? foundationBenchmark.comparison.plus_timesfm.trade_count ?? 'N/A'}</td>
+                      <td className="px-3 py-2.5 text-center font-bold text-indigo-600">
+                        {foundationBenchmark.comparison.plus_timesfm.sharpe}
+                        {(foundationBenchmark.comparison.plus_timesfm.is_low_sample || (foundationBenchmark.comparison.plus_timesfm.trade_count < 30)) && (
+                          <span className="block text-[8px] text-rose-600 font-sans font-bold uppercase">Low Sample</span>
+                        )}
+                      </td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.plus_timesfm.win_rate}%</td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.plus_timesfm.max_drawdown_pct}%</td>
                     </tr>
@@ -477,7 +494,13 @@ export default function MLLab() {
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.plus_chronos.precision}</td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.plus_chronos.recall}</td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.plus_chronos.brier}</td>
-                      <td className="px-3 py-2.5 text-center font-bold text-purple-600">{foundationBenchmark.comparison.plus_chronos.sharpe}</td>
+                      <td className="px-3 py-2.5 text-center font-bold text-purple-700">{foundationBenchmark.comparison.plus_chronos.completed_trade_count ?? foundationBenchmark.comparison.plus_chronos.trade_count ?? 'N/A'}</td>
+                      <td className="px-3 py-2.5 text-center font-bold text-purple-600">
+                        {foundationBenchmark.comparison.plus_chronos.sharpe}
+                        {(foundationBenchmark.comparison.plus_chronos.is_low_sample || (foundationBenchmark.comparison.plus_chronos.trade_count < 30)) && (
+                          <span className="block text-[8px] text-rose-600 font-sans font-bold uppercase">Low Sample</span>
+                        )}
+                      </td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.plus_chronos.win_rate}%</td>
                       <td className="px-3 py-2.5 text-center text-slate-600">{foundationBenchmark.comparison.plus_chronos.max_drawdown_pct}%</td>
                     </tr>
@@ -487,7 +510,13 @@ export default function MLLab() {
                       <td className="px-3 py-2.5 text-center text-slate-700">{foundationBenchmark.comparison.plus_both.precision}</td>
                       <td className="px-3 py-2.5 text-center text-slate-700">{foundationBenchmark.comparison.plus_both.recall}</td>
                       <td className="px-3 py-2.5 text-center text-slate-700">{foundationBenchmark.comparison.plus_both.brier}</td>
-                      <td className="px-3 py-2.5 text-center font-black text-emerald-700">{foundationBenchmark.comparison.plus_both.sharpe}</td>
+                      <td className="px-3 py-2.5 text-center font-black text-emerald-700">{foundationBenchmark.comparison.plus_both.completed_trade_count ?? foundationBenchmark.comparison.plus_both.trade_count ?? 'N/A'}</td>
+                      <td className="px-3 py-2.5 text-center font-black text-emerald-700">
+                        {foundationBenchmark.comparison.plus_both.sharpe}
+                        {(foundationBenchmark.comparison.plus_both.is_low_sample || (foundationBenchmark.comparison.plus_both.trade_count < 30)) && (
+                          <span className="block text-[8px] text-rose-600 font-sans font-bold uppercase">Low Sample</span>
+                        )}
+                      </td>
                       <td className="px-3 py-2.5 text-center text-slate-700">{foundationBenchmark.comparison.plus_both.win_rate}%</td>
                       <td className="px-3 py-2.5 text-center text-slate-700">{foundationBenchmark.comparison.plus_both.max_drawdown_pct}%</td>
                     </tr>
@@ -783,31 +812,54 @@ export default function MLLab() {
       {showPromoteModal && (() => {
         const plusBoth = foundationBenchmark?.comparison?.plus_both || {};
         const champBase = foundationBenchmark?.comparison?.champion || {};
-        const f1Val = typeof plusBoth.f1 === 'number' ? plusBoth.f1 : parseFloat(plusBoth.f1 || '0.1515');
-        const champF1 = typeof champBase.f1 === 'number' ? champBase.f1 : parseFloat(champBase.f1 || '0.0984');
-        const f1Gain = f1Val - champF1;
-        const sharpeVal = typeof plusBoth.sharpe === 'number' ? plusBoth.sharpe : parseFloat(plusBoth.sharpe || '0.51');
-        const champSharpe = typeof champBase.sharpe === 'number' ? champBase.sharpe : parseFloat(champBase.sharpe || '0.19');
-        const sharpeGain = sharpeVal - champSharpe;
-        const tradeCount = plusBoth.trade_count !== undefined ? plusBoth.trade_count : 19;
-        const maxDd = typeof plusBoth.max_drawdown_pct === 'number' ? plusBoth.max_drawdown_pct : parseFloat(plusBoth.max_drawdown_pct || '12.11');
+        const f1Val = typeof plusBoth.f1 === 'number' ? plusBoth.f1 : (plusBoth.f1 ? parseFloat(plusBoth.f1) : null);
+        const champF1 = typeof champBase.f1 === 'number' ? champBase.f1 : (champBase.f1 ? parseFloat(champBase.f1) : null);
+        const f1Gain = (f1Val != null && champF1 != null) ? f1Val - champF1 : 0.0;
+        const sharpeVal = typeof plusBoth.sharpe === 'number' ? plusBoth.sharpe : (plusBoth.sharpe ? parseFloat(plusBoth.sharpe) : null);
+        const champSharpe = typeof champBase.sharpe === 'number' ? champBase.sharpe : (champBase.sharpe ? parseFloat(champBase.sharpe) : null);
+        const sharpeGain = (sharpeVal != null && champSharpe != null) ? sharpeVal - champSharpe : 0.0;
+        const tradeCount = plusBoth.completed_trade_count !== undefined 
+          ? plusBoth.completed_trade_count 
+          : (plusBoth.trade_count !== undefined ? plusBoth.trade_count : 0);
+        const maxDd = typeof plusBoth.max_drawdown_pct === 'number' 
+          ? plusBoth.max_drawdown_pct 
+          : (plusBoth.max_drawdown_pct ? parseFloat(plusBoth.max_drawdown_pct) : null);
+
+        const oosBars = foundationBenchmark?.sample_definitions?.oos_bars_count 
+          || foundationBenchmark?.samples_evaluated 
+          || (selectedTf === 'intraday' ? 2158 : 702);
+        const barUnit = foundationBenchmark?.sample_definitions?.bar_unit 
+          || (selectedTf === 'intraday' ? '15m candles' : 'daily bars');
 
         const isSampleSizePassed = tradeCount >= 30;
         const isStatHurdlePassed = f1Gain >= 0.01 && sharpeGain >= 0.0;
-        const isRiskPassed = maxDd <= 20.0;
+        const isRiskPassed = maxDd != null && maxDd <= 20.0;
+        const isLowSample = plusBoth.is_low_sample || tradeCount < 30;
         const allGatesPassed = isSampleSizePassed && isStatHurdlePassed && isRiskPassed;
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fade-in">
-            <div className="bg-slate-900 border border-purple-500/40 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden text-slate-100 flex flex-col">
-              <div className="bg-purple-950/80 px-6 py-4 border-b border-purple-800/60 flex justify-between items-center">
+            <div className="bg-slate-900 border border-purple-500/40 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden text-slate-100 flex flex-col max-h-[90vh]">
+              <div className="bg-purple-950/80 px-6 py-4 border-b border-purple-800/60 flex justify-between items-center shrink-0">
                 <div>
-                  <h3 className="text-lg font-black text-white flex items-center gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-purple-900 text-purple-200 border border-purple-500/40 font-bold">
+                      FOUNDATION_MODEL_CHALLENGER
+                    </span>
+                    <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
+                      allGatesPassed 
+                        ? 'bg-emerald-950 text-emerald-300 border-emerald-500/40' 
+                        : 'bg-rose-950 text-rose-300 border-rose-500/40'
+                    }`}>
+                      STATUS: {allGatesPassed ? 'ELIGIBLE' : 'NOT ELIGIBLE'}
+                    </span>
+                  </div>
+                  <h3 className="text-lg font-black text-white flex items-center gap-2 mt-1">
                     <ShieldCheck className="text-emerald-400" size={20} />
-                    Challenger Performance Audit &amp; Governance
+                    Foundation Model Challenger Governance &amp; Audit
                   </h3>
                   <p className="text-xs text-purple-300 mt-0.5">
-                    Read-only performance review &amp; multi-dimensional safety gate verification.
+                    Evaluates TimesFM + Chronos augmentation on the 5-stock benchmark. Strictly isolated from Data Lab research.
                   </p>
                 </div>
                 <button 
@@ -819,10 +871,63 @@ export default function MLLab() {
                 </button>
               </div>
 
-              <div className="p-6 space-y-5">
+              <div className="p-6 space-y-4 overflow-y-auto">
+                {/* ARCHITECTURAL IDENTITY & PROVENANCE BLOCK */}
+                <div className="p-3 bg-purple-950/30 border border-purple-500/30 rounded-xl text-xs font-mono space-y-2">
+                  <div className="flex justify-between items-center text-purple-200 font-bold">
+                    <span>Target Model: TimesFM + Chronos Voting Ensemble</span>
+                    <span className="text-amber-400">Benchmark: 5 Stocks &bull; {selectedTf === 'intraday' ? '60 Days' : '2 Years'}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-300">
+                    <div>Universe: <strong>RELIANCE, TCS, HDFCBANK, INFY, ICICIBANK</strong></div>
+                    <div>OOS Test Set: <strong>{oosBars} {barUnit} (30% split)</strong></div>
+                    <div>Executed OOS Trades: <strong className={isSampleSizePassed ? "text-emerald-400" : "text-rose-400"}>{tradeCount} Trades</strong></div>
+                    <div>Promotion Gate: <strong className="text-amber-300">30 Trades Minimum Required</strong></div>
+                  </div>
+                  <div className="pt-2 border-t border-purple-900/60 grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] text-purple-300">
+                    <div>Evaluation ID: <strong className="text-slate-200">{foundationBenchmark?.evaluation_id || 'N/A'}</strong></div>
+                    <div>Model Version: <strong className="text-slate-200">{foundationBenchmark?.model_version || 'v1.0-foundation-evaluator'}</strong></div>
+                    <div>Dataset Hash: <strong className="text-slate-200">{foundationBenchmark?.dataset_hash ? `${foundationBenchmark.dataset_hash.substring(0, 12)}...` : 'N/A'}</strong></div>
+                    <div>Config Hash: <strong className="text-slate-200">{foundationBenchmark?.config_hash ? `${foundationBenchmark.config_hash.substring(0, 12)}...` : 'N/A'}</strong></div>
+                    {foundationBenchmark?.oos_start && (
+                      <div className="col-span-2 text-slate-300">
+                        OOS Temporal Window: <strong className="text-indigo-300">{foundationBenchmark.oos_start.split(' ')[0]} to {foundationBenchmark.oos_end?.split(' ')[0]}</strong> (Zero Future Leakage)
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* DISAMBIGUATED SAMPLE DEFINITIONS CARDS */}
+                <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 text-[11px] font-mono">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase block mb-2">Disambiguated Sample Funnel</span>
+                  <div className="grid grid-cols-4 gap-2 text-center">
+                    <div className="bg-slate-900 p-2 rounded border border-slate-800">
+                      <span className="text-[9px] text-slate-400 block">OOS Bars</span>
+                      <span className="text-xs font-black text-slate-200">{oosBars}</span>
+                      <span className="text-[8px] text-slate-500 block">Predictions</span>
+                    </div>
+                    <div className="bg-slate-900 p-2 rounded border border-slate-800">
+                      <span className="text-[9px] text-slate-400 block">Raw Signals</span>
+                      <span className="text-xs font-black text-slate-200">{plusBoth.raw_signals_count ?? 'N/A'}</span>
+                      <span className="text-[8px] text-slate-500 block">P &ge; 0.50</span>
+                    </div>
+                    <div className="bg-slate-900 p-2 rounded border border-slate-800">
+                      <span className="text-[9px] text-slate-400 block">Qualified Signals</span>
+                      <span className="text-xs font-black text-slate-200">{plusBoth.qualified_signals_count ?? 'N/A'}</span>
+                      <span className="text-[8px] text-slate-500 block">P &ge; 0.55</span>
+                    </div>
+                    <div className="bg-slate-900 p-2 rounded border border-slate-800">
+                      <span className="text-[9px] text-slate-400 block">Executed Trades</span>
+                      <span className={`text-xs font-black ${isSampleSizePassed ? 'text-emerald-400' : 'text-rose-400'}`}>{tradeCount}</span>
+                      <span className="text-[8px] text-slate-500 block">Completed</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* CANDIDATE EVALUATION METRICS */}
                 <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
                   <div className="flex justify-between items-center mb-3">
-                    <span className="text-xs font-bold text-slate-300 uppercase">Target Candidate</span>
+                    <span className="text-xs font-bold text-slate-300 uppercase">Candidate Evaluation</span>
                     <span className="text-xs font-mono font-bold bg-purple-950 text-purple-300 border border-purple-700/60 px-2.5 py-1 rounded">
                       Combined Challenger (Plus Both)
                     </span>
@@ -832,38 +937,45 @@ export default function MLLab() {
                     <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
                       <span className="text-[10px] text-slate-400 block">F1 Score</span>
                       <span className="text-sm font-black text-emerald-400">
-                        {f1Val.toFixed(4)}
+                        {f1Val != null ? f1Val.toFixed(4) : 'N/A'}
                       </span>
-                      <span className="text-[9px] text-slate-500 block">vs {champF1.toFixed(4)}</span>
+                      <span className="text-[9px] text-slate-500 block">vs {champF1 != null ? champF1.toFixed(4) : 'N/A'}</span>
                     </div>
                     <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
                       <span className="text-[10px] text-slate-400 block">Sharpe Ratio</span>
                       <span className="text-sm font-black text-indigo-400">
-                        {sharpeVal.toFixed(2)}
+                        {sharpeVal != null ? sharpeVal.toFixed(2) : 'N/A'}
                       </span>
-                      <span className="text-[9px] text-slate-500 block">vs {champSharpe.toFixed(2)}</span>
+                      {isLowSample ? (
+                        <span className="text-[8px] bg-rose-950 text-rose-300 border border-rose-600/40 px-1 py-0.5 rounded font-bold block mt-0.5" title="Statistically unverified due to low sample size (<30 trades)">
+                          LOW_SAMPLE
+                        </span>
+                      ) : (
+                        <span className="text-[9px] text-slate-500 block">vs {champSharpe != null ? champSharpe.toFixed(2) : 'N/A'}</span>
+                      )}
                     </div>
                     <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
-                      <span className="text-[10px] text-slate-400 block">Sample Size</span>
+                      <span className="text-[10px] text-slate-400 block">Executed Trades</span>
                       <span className={`text-sm font-black ${isSampleSizePassed ? 'text-emerald-400' : 'text-rose-400'}`}>
                         {tradeCount} trades
                       </span>
-                      <span className="text-[9px] text-slate-500 block">Min 30 req</span>
+                      <span className="text-[9px] text-slate-500 block">{isSampleSizePassed ? '>= 30 (Passed)' : 'Min 30 req (BLOCKED)'}</span>
                     </div>
                     <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
-                      <span className="text-[10px] text-slate-400 block">Max DD</span>
-                      <span className="text-sm font-black text-amber-400">
-                        {maxDd.toFixed(1)}%
+                      <span className="text-[10px] text-slate-400 block">Max DD (0.1% drag)</span>
+                      <span className={`text-sm font-black ${isRiskPassed ? 'text-emerald-400' : 'text-amber-400'}`}>
+                        {maxDd != null ? `${maxDd.toFixed(1)}%` : 'N/A'}
                       </span>
-                      <span className="text-[9px] text-slate-500 block">Max 20% cap</span>
+                      <span className="text-[9px] text-slate-500 block">&le; 20% ceiling</span>
                     </div>
                   </div>
                 </div>
 
+                {/* PROMOTION GATES STATUS */}
                 <div className="bg-indigo-950/30 p-4 rounded-xl border border-indigo-800/40 text-xs space-y-2">
                   <h5 className="font-bold text-indigo-300 flex items-center gap-1.5">
                     <AlertTriangle size={14} className="text-indigo-400" />
-                    Mandatory Multi-Dimensional Promotion Gates
+                    Mandatory Multi-Dimensional Promotion Gates (Atomic Run)
                   </h5>
                   <ul className="space-y-1.5 text-slate-300 text-[11px]">
                     <li className="flex items-center gap-2">
@@ -887,7 +999,7 @@ export default function MLLab() {
                         {isRiskPassed ? '✅' : '❌'}
                       </span>
                       <span>
-                        <strong>Risk Boundary:</strong> Max Drawdown &le; 20.0% ({isRiskPassed ? `Passed: ${maxDd.toFixed(1)}%` : `Failed: ${maxDd.toFixed(1)}%`})
+                        <strong>Risk Boundary:</strong> Max Drawdown &le; 20.0% ({isRiskPassed ? `Passed: ${maxDd != null ? maxDd.toFixed(1) : 0}%` : `Failed: ${maxDd != null ? maxDd.toFixed(1) : 'N/A'}%`})
                       </span>
                     </li>
                   </ul>
@@ -914,31 +1026,31 @@ export default function MLLab() {
                 )}
               </div>
 
-              <div className="px-6 py-4 bg-slate-950 border-t border-slate-800 flex justify-between items-center">
+              <div className="px-6 py-4 bg-slate-950 border-t border-slate-800 flex justify-between items-center shrink-0">
                 <span className="text-[10px] text-slate-400">
                   {allGatesPassed 
-                    ? 'All gates verified. Ready for human authorization.' 
-                    : 'Promotion blocked by risk gates. Review only.'}
+                    ? 'All gates verified on atomic evaluation snapshot.' 
+                    : 'Promotion blocked by risk/sample gates. Review only.'}
                 </span>
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => setShowPromoteModal(false)}
-                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition"
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition cursor-pointer"
                   >
                     Close Review
                   </button>
                   <button
                     onClick={handlePromoteChallenger}
                     disabled={promoting}
-                    className={`px-5 py-2 rounded-lg text-xs font-bold transition shadow flex items-center gap-2 ${
+                    className={`px-5 py-2 rounded-lg text-xs font-bold transition shadow flex items-center gap-2 cursor-pointer ${
                       allGatesPassed
                         ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                        : 'bg-rose-900/60 hover:bg-rose-900 text-rose-200 border border-rose-700/60 cursor-pointer'
+                        : 'bg-rose-900/60 hover:bg-rose-900 text-rose-200 border border-rose-700/60'
                     }`}
-                    title={allGatesPassed ? 'Authorize Challenger Promotion' : 'Test Gate Enforcement'}
+                    title={allGatesPassed ? 'Authorize Foundation Challenger Promotion' : 'Validate Foundation Gate Rejection'}
                   >
                     {promoting ? <Loader className="animate-spin" size={14} /> : <Play size={14} />}
-                    <span>{promoting ? 'Verifying Gates...' : (allGatesPassed ? 'Authorize Promotion' : 'Validate Gate Rejection')}</span>
+                    <span>{promoting ? 'Verifying Gates...' : (allGatesPassed ? 'Authorize Foundation Promotion' : 'Validate Foundation Gate Rejection')}</span>
                   </button>
                 </div>
               </div>

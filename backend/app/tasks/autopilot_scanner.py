@@ -32,7 +32,7 @@ def is_autopilot_enabled() -> bool:
 _LAST_HEAT_ALERT_TIME = 0.0
 HEAT_ALERT_COOLDOWN = 14400.0  # 4 hours cooldown to prevent spamming
 
-def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
+def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", universe: str = "AUTOPILOT_PRIORITY_20"):
     """
     Executes an autonomous market scan across priority universe using
     the AUTHORITATIVE shared decision engine (same brain as manual scans).
@@ -41,7 +41,7 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
     from app.analytics.autonomous_bot import is_market_open, log_alert
     
     now = datetime.now()
-    logger.info(f"⏰ [Autopilot] Executing {session_name} scheduled sweep at {now.strftime('%H:%M:%S')} IST...")
+    logger.info(f"⏰ [Autopilot] Executing {session_name} scheduled sweep ({universe}) at {now.strftime('%H:%M:%S')} IST...")
     
     if not is_market_open():
         logger.info(f"⏸️ [Autopilot] Market is closed. Skipping {session_name} sweep.")
@@ -85,19 +85,15 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
     # 3. Pre-fetch Macro State (shared across all tickers)
     macro = get_macro_regime()
     
-    priority_tickers = [
-        "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
-        "BHARTIARTL.NS", "SBIN.NS", "ITC.NS", "LT.NS", "KOTAKBANK.NS",
-        "TATAMOTORS.NS", "AXISBANK.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS",
-        "BAJFINANCE.NS", "JSWSTEEL.NS", "TATASTEEL.NS", "POWERGRID.NS", "NTPC.NS"
-    ]
+    from app.analytics.universe_config import resolve_universe_tickers
+    priority_tickers = resolve_universe_tickers(universe)
     
     try:
         from app.analytics.master_logger import MasterLogger
         MasterLogger.log_event(
             "SCAN_AUTONOMOUS", "SWEEP_STARTED",
-            f"Autopilot starting scheduled sweep '{session_name}' ({len(priority_tickers)} priority symbols)",
-            universe="AUTOPILOT_POOL"
+            f"Autopilot starting scheduled sweep '{session_name}' ({len(priority_tickers)} priority symbols, universe={universe})",
+            universe=universe
         )
     except Exception:
         pass
@@ -221,7 +217,7 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum"):
         MasterLogger.log_event(
             "SCAN_AUTONOMOUS", "SWEEP_COMPLETED",
             f"Autopilot {session_name} sweep completed. Scanned: {scanned_count}, Qualified: {conviction_qualified_count}, Dispatched: {discovered_count}",
-            universe="AUTOPILOT_POOL",
+            universe=universe,
             details={
                 "session": session_name,
                 "scanned": scanned_count,

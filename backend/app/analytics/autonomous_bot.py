@@ -291,8 +291,23 @@ def active_trade_tracker(force_run: bool = False):
         logger.error(f"Tracker failed to evaluate history: {e}")
         return
         
-    open_trades = [t for t in history if t['outcome'] == 'OPEN']
-    
+    # Filter ONLY genuine positions (PAPER_POSITION or LIVE_POSITION)
+    # Virtual recommendations (NOT_A_POSITION) must NEVER enter active position monitoring or risk tightening
+    all_open = [t for t in history if t.get('outcome') == 'OPEN']
+    open_trades = [t for t in all_open if t.get('position_type') in ('PAPER_POSITION', 'LIVE_POSITION')]
+    virtual_count = len(all_open) - len(open_trades)
+
+    if virtual_count > 0:
+        try:
+            from app.analytics.master_logger import MasterLogger
+            MasterLogger.log_event(
+                "AI_GUARD", "POSITION_TRACKING_SKIPPED_VIRTUAL",
+                f"Skipped active position monitoring for {virtual_count} virtual recommendations (NOT_A_POSITION)",
+                details={"virtual_count": virtual_count, "active_position_count": len(open_trades)}
+            )
+        except Exception:
+            pass
+
     if not open_trades:
         return
         

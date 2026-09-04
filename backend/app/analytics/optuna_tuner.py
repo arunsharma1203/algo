@@ -91,7 +91,7 @@ def save_best_params(params: dict, timeframe: str = "swing") -> None:
         with open(os.path.join(MODEL_DIR, "optuna_best_params.json"), 'w') as f:
             json.dump(params, f, indent=2)
 
-def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None) -> tuple[np.ndarray, np.ndarray, list]:
+def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, return_metadata: bool = False) -> tuple:
     """
     Downloads real multi-year data from benchmark Nifty constituents and constructs point-in-time features.
     
@@ -185,6 +185,28 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None) ->
     y = combined['target'].values.astype(int)
 
     logger.info(f"Validated Benchmark Dataset ready ({timeframe}): {len(X)} samples across {len(stock_dfs)} tickers.")
+    
+    if return_metadata:
+        n_samples = len(combined)
+        split_idx = int(n_samples * 0.70)
+        train_df = combined.iloc[:split_idx]
+        test_df = combined.iloc[split_idx:]
+        meta = {
+            "timeframe": timeframe,
+            "tickers": tickers,
+            "total_bars_count": n_samples,
+            "train_bars_count": len(train_df),
+            "oos_bars_count": len(test_df),
+            "data_start": str(combined['datetime'].min()),
+            "data_end": str(combined['datetime'].max()),
+            "train_start": str(train_df['datetime'].min()) if len(train_df) > 0 else None,
+            "train_end": str(train_df['datetime'].max()) if len(train_df) > 0 else None,
+            "oos_start": str(test_df['datetime'].min()) if len(test_df) > 0 else None,
+            "oos_end": str(test_df['datetime'].max()) if len(test_df) > 0 else None,
+            "features": features_list
+        }
+        return X, y, features_list, meta
+
     return X, y, features_list
 
 def run_optuna_tuning_swing(n_trials: int = 10) -> dict:

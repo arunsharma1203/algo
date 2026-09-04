@@ -333,7 +333,7 @@ class ForwardSimulationEngine:
         self,
         title: str = "Forward Simulation Session",
         timeframe: str = "1d",
-        universe: str = "LIVE_52",
+        universe: str = "NIFTY_500",
         initial_capital: float = 500000.0,
         max_portfolio_heat: float = 6.0,
         max_single_risk_pct: float = 2.0,
@@ -1417,6 +1417,17 @@ class ForwardSimulationEngine:
             }
         )
 
+        try:
+            from app.analytics.master_logger import MasterLogger
+            MasterLogger.log_event(
+                "MARKET_SWEEP", "MARKET_SWEEP_STARTED",
+                f"Forward Simulation sweep {sweep_id} started for universe {u_name} ({configured_count} symbols)",
+                universe=u_name,
+                details={"sweep_id": sweep_id, "session_id": session_id, "configured": configured_count}
+            )
+        except Exception:
+            pass
+
         champion_model, _ = ModelManager.load_champion("swing" if timeframe == "1d" else "intraday")
         macro_state = get_macro_regime()
 
@@ -1744,6 +1755,24 @@ class ForwardSimulationEngine:
                     "is_live_observation": is_live_obs
                 }
             )
+
+            try:
+                from app.analytics.master_logger import MasterLogger
+                MasterLogger.log_event(
+                    "MARKET_SWEEP", "MARKET_SWEEP_COMPLETED",
+                    f"Forward Simulation sweep {sweep_id} finished in {duration}s. Evaluated: {evaluated_symbols}, Accepted: {accepted_trades}, Rejected: {rejected_candidates}",
+                    universe=u_name,
+                    details={
+                        "sweep_id": sweep_id,
+                        "session_id": session_id,
+                        "evaluated": evaluated_symbols,
+                        "accepted": accepted_trades,
+                        "rejected": rejected_candidates,
+                        "duration_s": duration
+                    }
+                )
+            except Exception:
+                pass
 
         if session_id in self._active_sweeps:
             self._active_sweeps[session_id]["status"] = final_status

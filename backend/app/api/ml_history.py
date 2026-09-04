@@ -141,25 +141,45 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
         if "price_is_fresh" in explanation:
             p_fresh = 1 if explanation["price_is_fresh"] else 0
 
-    # DEDUPLICATION LOGIC:
+    # DETERMINISTIC DEDUPLICATION LOGIC:
+    # Check if an active OPEN setup or recommendation already exists for this (ticker, trade_type, direction)
     cur = conn.execute("""
-        SELECT timestamp, confidence FROM ml_trade_history 
-        WHERE ticker = ? AND trade_type = ? AND direction = ?
+        SELECT id, timestamp, confidence FROM ml_trade_history 
+        WHERE ticker = ? AND trade_type = ? AND direction = ? AND (status = 'OPEN' OR outcome = 'OPEN')
         ORDER BY id DESC LIMIT 1
     """, (ticker, trade_type, direction))
     
     last_trade = cur.fetchone()
     if last_trade:
         import pandas as pd
-        last_time_str = last_trade[0]
-        last_confidence = last_trade[1]
+        trade_id, last_time_str, last_confidence = last_trade[0], last_trade[1], last_trade[2]
         try:
             last_time = datetime.fromisoformat(last_time_str)
-        except:
+        except Exception:
             last_time = pd.to_datetime(last_time_str)
             
-        if last_time.date() == now.date() and abs(last_confidence - float(confidence)) < 0.001:
+        # If an active setup exists on the same calendar day:
+        if last_time.date() == now.date():
+            # Update the existing active setup with latest confidence and pricing metadata without creating duplicate rows
+            conn.execute("""
+                UPDATE ml_trade_history
+                SET confidence = ?, explanation = ?, reference_price = ?, model_candle_close = ?,
+                    price_source = ?, price_timestamp = ?, price_is_fresh = ?
+                WHERE id = ?
+            """, (float(confidence), explanation_str, ref_price, m_close, p_source, p_ts, p_fresh, trade_id))
+            conn.commit()
             conn.close()
+
+            try:
+                from app.analytics.master_logger import MasterLogger
+                MasterLogger.log_event(
+                    "ML_HISTORY", "DUPLICATE_SUPPRESSED",
+                    f"Suppressed duplicate OPEN setup for {ticker} ({trade_type} {direction}). Updated active setup #{trade_id} (confidence: {last_confidence:.1f}% -> {float(confidence):.1f}%).",
+                    ticker=ticker,
+                    details={"ticker": ticker, "trade_type": trade_type, "direction": direction, "trade_id": trade_id, "prev_conf": last_confidence, "new_conf": float(confidence)}
+                )
+            except Exception:
+                pass
             return False
 
     conn.execute("""
@@ -188,13 +208,13 @@ _EVAL_CACHE = {
     'data': None,
     'timestamp': 0
 }
-_EVAL_CACHE_TTL = 15  # 15 seconds cache
+_EVAL_CACHE_TTL = 60  # 60 seconds cache
 
 _MARKET_DATA_CACHE = {
     'data': {},
     'timestamp': 0
 }
-_MARKET_DATA_TTL = 300  # 5 minutes cache
+_MARKET_DATA_TTL = 600  # 10 minutes cache
 
 def evaluate_ml_history(force_refresh: bool = False):
     """
@@ -207,7 +227,8 @@ def evaluate_ml_history(force_refresh: bool = False):
         return _EVAL_CACHE['data']
 
     ensure_ml_table()
-    conn = sqlite3.connect(get_db_path(), timeout=30.0)
+    conn = sqlite3.connect(get_db_path(), timeout=10.0)
+    conn.execute("PRAGMA busy_timeout = 10000;")
     df_trades = pd.read_sql_query("SELECT * FROM ml_trade_history ORDER BY id DESC", conn)
     conn.close()
     
@@ -220,33 +241,79 @@ def evaluate_ml_history(force_refresh: bool = False):
     from app.analytics.macro_engine import get_macro_regime
     macro = get_macro_regime()
     
-    # 1. Identify which tickers need fresh candle data (unfinalized trades)
-    unresolved_df = df_trades[df_trades['outcome'].isna() | (df_trades['outcome'] == 'OPEN') | (df_trades['status'] != 'CLOSED')]
-    unresolved_tickers = unresolved_df['ticker'].unique().tolist() if not unresolved_df.empty else []
+    # 1. Identify which tickers need fresh candle data (unfinalized OPEN trades only)
+    is_unresolved = (df_trades['status'] == 'OPEN') & (df_trades['outcome'].isna() | (df_trades['outcome'] == '') | (df_trades['outcome'] == 'OPEN'))
+    unresolved_df = df_trades[is_unresolved]
+    raw_tickers = unresolved_df['ticker'].unique().tolist() if not unresolved_df.empty else []
+    
+    # Strictly sanitize tickers to prevent downloading test artifacts or malformed symbols
+    unresolved_tickers = [
+        t for t in raw_tickers 
+        if isinstance(t, str) and not t.startswith(("CACHE_", "TEMP_", "DUMMY_", "MOCK_")) and "." in t
+    ]
     
     market_data = {}
     if unresolved_tickers:
-        # Check in-memory market data cache first
-        if (epoch_now - _MARKET_DATA_CACHE['timestamp']) < _MARKET_DATA_TTL and all(t in _MARKET_DATA_CACHE['data'] for t in unresolved_tickers):
-            market_data = _MARKET_DATA_CACHE['data']
-        else:
-            try:
-                hist = yf.download(unresolved_tickers, period="60d", interval="15m", progress=False, timeout=8)
-                if len(unresolved_tickers) == 1:
-                    market_data[unresolved_tickers[0]] = hist
-                else:
-                    for ticker in unresolved_tickers:
-                        if ticker in hist['Close']:
+        # Expire cache if TTL reached
+        if (epoch_now - _MARKET_DATA_CACHE['timestamp']) > _MARKET_DATA_TTL:
+            _MARKET_DATA_CACHE['data'].clear()
+
+        needed_tickers = [t for t in unresolved_tickers if t not in _MARKET_DATA_CACHE['data']]
+        if needed_tickers:
+            # Check local historical data layer first before hitting external network
+            from app.data.historical_data_layer import HistoricalDataLayer
+            # Map ticker to its trade types in unresolved_df
+            ticker_trade_types = {}
+            for _, u_row in unresolved_df.iterrows():
+                tkr = u_row['ticker']
+                ttype = u_row.get('trade_type', 'INTRADAY')
+                ticker_trade_types.setdefault(tkr, set()).add(ttype)
+
+            for t in needed_tickers:
+                types = ticker_trade_types.get(t, {'INTRADAY'})
+                try:
+                    # If ticker only has SWING trades, route to authoritative daily OHLCV storage
+                    if types == {'SWING'}:
+                        df_local = HistoricalDataLayer.get_historical_ohlcv(t, timeframe="1d")
+                        if df_local is not None and not df_local.empty and len(df_local) >= 10:
                             df_tick = pd.DataFrame({
-                                'High': hist['High'][ticker],
-                                'Low': hist['Low'][ticker],
-                                'Close': hist['Close'][ticker]
-                            })
-                            market_data[ticker] = df_tick
-                _MARKET_DATA_CACHE['data'].update(market_data)
-                _MARKET_DATA_CACHE['timestamp'] = epoch_now
-            except Exception as e:
-                logger.warning(f"yfinance batch download warning: {e}")
+                                'High': df_local['high'],
+                                'Low': df_local['low'],
+                                'Close': df_local['close']
+                            }, index=df_local.index)
+                            _MARKET_DATA_CACHE['data'][t] = df_tick
+                            continue
+                    
+                    # For INTRADAY trades, mark for 15m candle retrieval
+                    still_needed.append(t)
+                except Exception:
+                    still_needed.append(t)
+
+            if still_needed:
+                try:
+                    hist = yf.download(still_needed, period="60d", interval="15m", progress=False, timeout=4)
+                    if len(still_needed) == 1:
+                        _MARKET_DATA_CACHE['data'][still_needed[0]] = hist
+                    else:
+                        for ticker in still_needed:
+                            if hasattr(hist, 'columns') and 'Close' in hist and ticker in hist['Close']:
+                                df_tick = pd.DataFrame({
+                                    'High': hist['High'][ticker],
+                                    'Low': hist['Low'][ticker],
+                                    'Close': hist['Close'][ticker]
+                                })
+                                _MARKET_DATA_CACHE['data'][ticker] = df_tick
+                            else:
+                                _MARKET_DATA_CACHE['data'][ticker] = pd.DataFrame()
+                except Exception as e:
+                    logger.warning(f"yfinance batch download warning: {e}")
+                    for ticker in still_needed:
+                        if ticker not in _MARKET_DATA_CACHE['data']:
+                            _MARKET_DATA_CACHE['data'][ticker] = pd.DataFrame()
+
+            _MARKET_DATA_CACHE['timestamp'] = epoch_now
+
+        market_data = _MARKET_DATA_CACHE['data']
 
     results = []
     finalized_updates = []

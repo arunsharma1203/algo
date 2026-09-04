@@ -20,6 +20,22 @@ class MarketDataValidator:
     REQUIRED_OHLCV_COLUMNS = ['open', 'high', 'low', 'close', 'volume']
 
     @classmethod
+    def normalize_ticker(cls, ticker: str) -> str:
+        """
+        Canonical ticker normalizer.
+        Enforces uppercase, strips whitespace, and ensures canonical exchange suffix (.NS).
+        Preserves special index symbols (^NSEI, ^INDIAVIX).
+        """
+        if not ticker or not isinstance(ticker, str):
+            return ""
+        t = ticker.strip().upper()
+        if t.startswith("^"):
+            return t
+        if t.endswith((".NS", ".BO")):
+            return t
+        return f"{t}.NS"
+
+    @classmethod
     def validate_ohlcv(
         cls,
         df: pd.DataFrame,

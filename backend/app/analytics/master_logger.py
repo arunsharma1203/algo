@@ -13,9 +13,12 @@ class MasterLogger:
     Records structured events for manual scans, autonomous sweeps, model inferences,
     Telegram dispatches, research lifecycles, and risk events into SQLite.
     """
+    _table_initialized = False
 
     @classmethod
     def _ensure_table(cls, conn: sqlite3.Connection):
+        if cls._table_initialized:
+            return
         conn.execute("""
             CREATE TABLE IF NOT EXISTS app_master_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,6 +35,7 @@ class MasterLogger:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ame_timestamp ON app_master_events(timestamp);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ame_category ON app_master_events(category);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ame_ticker ON app_master_events(ticker);")
+        cls._table_initialized = True
 
     @classmethod
     def log_event(
@@ -49,9 +53,11 @@ class MasterLogger:
         Categories: 'SCAN_MANUAL', 'SCAN_AUTONOMOUS', 'DECISION_ENGINE', 'TELEGRAM',
                     'RESEARCH', 'SCHEDULER', 'AI_GUARD', 'PROMOTION'
         """
+        conn = None
         try:
             db_path = get_db_path()
             conn = sqlite3.connect(db_path, timeout=10.0)
+            conn.execute("PRAGMA busy_timeout = 10000;")
             cls._ensure_table(conn)
             
             now_iso = datetime.now().isoformat()
@@ -63,7 +69,6 @@ class MasterLogger:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (now_iso, category, event_type, ticker, universe, message, details_str, severity))
             conn.commit()
-            conn.close()
             
             log_fn = getattr(logger, severity.lower(), logger.info)
             log_fn(f"[{category}:{event_type}] {message} {f'({ticker})' if ticker else ''}")
@@ -71,6 +76,12 @@ class MasterLogger:
         except Exception as e:
             logger.error(f"[MasterLogger] Failed to write event: {e}")
             return False
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     @classmethod
     def get_events(
@@ -83,9 +94,11 @@ class MasterLogger:
         offset: int = 0
     ) -> List[Dict[str, Any]]:
         """Queries master audit events with flexible filtering."""
+        conn = None
         try:
             db_path = get_db_path()
             conn = sqlite3.connect(db_path, timeout=10.0)
+            conn.execute("PRAGMA busy_timeout = 10000;")
             conn.row_factory = sqlite3.Row
             cls._ensure_table(conn)
             
@@ -118,9 +131,14 @@ class MasterLogger:
                     except Exception:
                         ev["details"] = ev["details_json"]
                 events.append(ev)
-            conn.close()
             return events
         except Exception as e:
             logger.error(f"[MasterLogger] Query failed: {e}")
             return []
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 

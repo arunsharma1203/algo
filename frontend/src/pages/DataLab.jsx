@@ -5,11 +5,13 @@ import {
   AlertTriangle, CheckCircle, TrendingUp, Cpu, Compass, Sliders, Play, 
   Pause, Square, Eye, Trash2, Clock, CheckCircle2, XCircle, Terminal, 
   ChevronRight, Server, Zap, ArrowRight, CornerDownRight, Gauge,
-  FileText, Send, Wrench
+  FileText, Send, Wrench, RotateCcw
 } from 'lucide-react';
 
 import { API_BASE } from '../services/api';
 import TickerAutocomplete from '../components/TickerAutocomplete';
+import ResearchReportModal from '../components/ResearchReportModal';
+import ErrorBoundary from '../components/ErrorBoundary';
 
 export default function DataLab() {
   const [activeTab, setActiveTab] = useState('control_center'); // 'control_center', 'coverage_sync'
@@ -32,6 +34,8 @@ export default function DataLab() {
   const [kellyMode, setKellyMode] = useState('HALF');
   const [modelType, setModelType] = useState('LIGHTGBM_ALPHA');
   const [submittingJob, setSubmittingJob] = useState(false);
+  const [cacheHitJob, setCacheHitJob] = useState(null);
+  const [hoarding, setHoarding] = useState(false);
 
   // Active Job & Job List State
   const [activeJob, setActiveJob] = useState(null);
@@ -45,6 +49,9 @@ export default function DataLab() {
   const prevEventsLengthRef = useRef(0);
   const eventSourceRef = useRef(null);
   const eventLogEndRef = useRef(null);
+  const isFetchingJobsRef = useRef(false);
+  const fetchJobSeqRef = useRef(0);
+  const previousActiveJobIdRef = useRef(null);
 
   // Forward Simulation state
   const [fsimSessions, setFsimSessions] = useState([]);
@@ -409,20 +416,49 @@ export default function DataLab() {
   };
 
   const fetchJobs = async () => {
+    if (isFetchingJobsRef.current) return;
+    isFetchingJobsRef.current = true;
+    const seq = ++fetchJobSeqRef.current;
     try {
       const res = await axios.get(`${API_BASE}/data-lab/research/jobs`);
-      const jobs = res.data?.jobs || [];
+      if (seq !== fetchJobSeqRef.current) return; // Discard outdated out-of-order response
+
+      const rawJobs = res.data?.jobs || [];
+      // Persisted backend status is authoritative: COMPLETED jobs must unconditionally show 100.0%
+      const jobs = rawJobs.map(j => {
+        if (j && j.status === 'COMPLETED') {
+          return { ...j, progress_percent: 100.0, current_phase: 'COMPLETED' };
+        }
+        return j;
+      });
       setJobList(jobs);
       
       const running = jobs.find(j => j.status === 'RUNNING' || j.status === 'PAUSED');
       if (running) {
         setActiveJob(running);
+        previousActiveJobIdRef.current = running.job_id;
         fetchEvents(running.job_id);
       } else {
+        // If an active job was previously running and has just finished:
+        if (previousActiveJobIdRef.current) {
+          const finished = jobs.find(j => j.job_id === previousActiveJobIdRef.current);
+          if (finished && finished.status === 'COMPLETED') {
+            handleViewResults(finished.job_id);
+          }
+          previousActiveJobIdRef.current = null;
+        }
         setActiveJob(null);
+
+        // Terminal state reached: cleanup active telemetry SSE
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
       }
     } catch (e) {
       console.warn("Fetch jobs error:", e);
+    } finally {
+      isFetchingJobsRef.current = false;
     }
   };
 
@@ -552,8 +588,10 @@ export default function DataLab() {
   }, [jobEvents]);
 
   // Start new research job
-  const handleStartResearch = async () => {
+  const handleStartResearch = async (forceRerun = false) => {
+    const isForce = forceRerun === true;
     setSubmittingJob(true);
+    setCacheHitJob(null);
     try {
       const isSingle = researchType === 'SINGLE_STOCK_WALK_FORWARD';
       let parsedTickers = [];
@@ -574,10 +612,30 @@ export default function DataLab() {
         initial_capital: parseFloat(initialCapital),
         max_portfolio_heat: parseFloat(maxHeatCap),
         kelly_mode: kellyMode,
-        model_type: modelType
+        model_type: modelType,
+        force_rerun: isForce
       });
 
-      if (res.data?.status === 'success') {
+      if (res.data?.status === 'EXISTING_RESEARCH_FOUND') {
+        setCacheHitJob(res.data.job);
+        fetchJobs();
+      } else if (res.data?.status === 'success') {
+        if (!eventSourceRef.current) {
+          try {
+            const sse = new EventSource(`${API_BASE}/data-lab/research/events`);
+            eventSourceRef.current = sse;
+            sse.onmessage = (event) => {
+              try {
+                if (!event.data || event.data.startsWith(':')) return;
+                const payload = JSON.parse(event.data);
+                setJobEvents(prev => [...prev.slice(-99), payload]);
+                fetchJobs();
+              } catch (err) {}
+            };
+          } catch (err) {
+            console.warn("SSE reconnect note:", err);
+          }
+        }
         fetchJobs();
       }
     } catch (e) {
@@ -657,6 +715,30 @@ export default function DataLab() {
       setSyncMessage({ type: 'error', text: `❌ Network error: ${e.message}` });
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const handleSync15MHoarder = async () => {
+    setHoarding(true);
+    setSyncMessage(null);
+    try {
+      const res = await axios.post(`${API_BASE}/data-lab/sync-15m-hoarder`, {
+        universe: universe,
+        data_source: 'yfinance'
+      });
+      if (res.data?.status === 'COMPLETED') {
+        setSyncMessage({
+          type: 'success',
+          text: `✅ Data Hoarder synced ${res.data.success_count}/${res.data.total_requested} stocks in ${res.data.elapsed_seconds}s (Failures: ${res.data.fail_count}).`
+        });
+        fetchCoverage(universe);
+      } else {
+        setSyncMessage({ type: 'error', text: '❌ Data Hoarder failed.' });
+      }
+    } catch (e) {
+      setSyncMessage({ type: 'error', text: `❌ Hoarder error: ${e.response?.data?.detail || e.message}` });
+    } finally {
+      setHoarding(false);
     }
   };
 
@@ -1989,9 +2071,22 @@ export default function DataLab() {
           {/* ACTIVE RESEARCH LIVE DASHBOARD CARD (If Job is Running or Paused) */}
           {activeJob && (
             <div className="bg-slate-900 border-2 border-cyan-500/40 rounded-xl p-6 shadow-2xl relative overflow-hidden">
-              <div className="absolute top-0 right-0 px-4 py-1.5 bg-cyan-950/90 border-b border-l border-cyan-500/30 text-cyan-400 text-xs font-mono font-bold rounded-bl-lg flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
-                RUNNING IN DAEMON (JOB: {activeJob.job_id})
+              <div className={`absolute top-0 right-0 px-4 py-1.5 ${
+                activeJob.status === 'COMPLETED' ? 'bg-emerald-950/90 border-b border-l border-emerald-500/30 text-emerald-400' :
+                activeJob.status === 'CANCELLED' ? 'bg-amber-950/90 border-b border-l border-amber-500/30 text-amber-400' :
+                activeJob.status === 'FAILED' ? 'bg-rose-950/90 border-b border-l border-rose-500/30 text-rose-400' :
+                'bg-cyan-950/90 border-b border-l border-cyan-500/30 text-cyan-400'
+              } text-xs font-mono font-bold rounded-bl-lg flex items-center gap-2`}>
+                <span className={`w-2 h-2 rounded-full ${
+                  activeJob.status === 'COMPLETED' ? 'bg-emerald-400' :
+                  activeJob.status === 'CANCELLED' ? 'bg-amber-400' :
+                  activeJob.status === 'FAILED' ? 'bg-rose-400' :
+                  'bg-cyan-400 animate-ping'
+                }`}></span>
+                {activeJob.status === 'COMPLETED' ? `COMPLETED 100% (JOB: ${activeJob.job_id})` :
+                 activeJob.status === 'CANCELLED' ? `CANCELLED (JOB: ${activeJob.job_id})` :
+                 activeJob.status === 'FAILED' ? `FAILED (JOB: ${activeJob.job_id})` :
+                 `RUNNING IN DAEMON (JOB: ${activeJob.job_id})`}
               </div>
 
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mt-2">
@@ -2011,28 +2106,51 @@ export default function DataLab() {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {activeJob.status === 'RUNNING' ? (
+                  {activeJob.status === 'COMPLETED' ? (
                     <button
-                      onClick={() => handlePauseJob(activeJob.job_id)}
-                      className="px-3 py-1.5 bg-amber-600/80 hover:bg-amber-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition"
+                      onClick={() => handleViewResults(activeJob.job_id)}
+                      className="px-3 py-1.5 bg-emerald-600/80 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition shadow-lg"
                     >
-                      <Pause className="w-3.5 h-3.5" /> Pause
+                      <Award className="w-3.5 h-3.5" /> View Results
                     </button>
+                  ) : activeJob.status === 'RUNNING' ? (
+                    <>
+                      <button
+                        onClick={() => handlePauseJob(activeJob.job_id)}
+                        className="px-3 py-1.5 bg-amber-600/80 hover:bg-amber-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition"
+                      >
+                        <Pause className="w-3.5 h-3.5" /> Pause
+                      </button>
+                      <button
+                        onClick={() => handleCancelJob(activeJob.job_id)}
+                        className="px-3 py-1.5 bg-rose-600/80 hover:bg-rose-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition"
+                      >
+                        <Square className="w-3.5 h-3.5" /> Cancel
+                      </button>
+                    </>
+                  ) : activeJob.status === 'PAUSED' ? (
+                    <>
+                      <button
+                        onClick={() => handleResumeJob(activeJob.job_id)}
+                        className="px-3 py-1.5 bg-emerald-600/80 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition"
+                      >
+                        <Play className="w-3.5 h-3.5" /> Resume
+                      </button>
+                      <button
+                        onClick={() => handleCancelJob(activeJob.job_id)}
+                        className="px-3 py-1.5 bg-rose-600/80 hover:bg-rose-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition"
+                      >
+                        <Square className="w-3.5 h-3.5" /> Cancel
+                      </button>
+                    </>
                   ) : (
                     <button
-                      onClick={() => handleResumeJob(activeJob.job_id)}
-                      className="px-3 py-1.5 bg-emerald-600/80 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition"
+                      onClick={() => handleViewResults(activeJob.job_id)}
+                      className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition"
                     >
-                      <Play className="w-3.5 h-3.5" /> Resume
+                      View Details
                     </button>
                   )}
-
-                  <button
-                    onClick={() => handleCancelJob(activeJob.job_id)}
-                    className="px-3 py-1.5 bg-rose-600/80 hover:bg-rose-500 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 transition"
-                  >
-                    <Square className="w-3.5 h-3.5" /> Cancel
-                  </button>
                 </div>
               </div>
 
@@ -2041,18 +2159,23 @@ export default function DataLab() {
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-slate-400 font-bold">Overall Progress</span>
                   <span className="text-cyan-400 font-mono font-bold text-sm">
-                    {activeJob.progress_percent ? `${activeJob.progress_percent.toFixed(1)}%` : '0.0%'}
+                    {activeJob.status === 'COMPLETED' ? '100.0%' : (activeJob.progress_percent !== undefined && activeJob.progress_percent !== null ? `${Number(activeJob.progress_percent).toFixed(1)}%` : '0.0%')}
                   </span>
                 </div>
                 <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden border border-slate-800 p-0.5">
                   <div 
-                    className="bg-gradient-to-r from-cyan-500 via-blue-500 to-emerald-400 h-full rounded-full transition-all duration-500 shadow-sm"
-                    style={{ width: `${Math.max(3, Math.min(100, activeJob.progress_percent || 0))}%` }}
+                    className={`h-full rounded-full transition-all duration-500 shadow-sm ${
+                      activeJob.status === 'COMPLETED' ? 'bg-emerald-500' :
+                      activeJob.status === 'CANCELLED' ? 'bg-amber-500' :
+                      activeJob.status === 'FAILED' ? 'bg-rose-500' :
+                      'bg-gradient-to-r from-cyan-500 via-blue-500 to-emerald-400'
+                    }`}
+                    style={{ width: `${activeJob.status === 'COMPLETED' ? 100 : Math.max(3, Math.min(100, Number(activeJob.progress_percent) || 0))}%` }}
                   ></div>
                 </div>
                 <div className="flex justify-between items-center text-[11px] text-slate-500 font-mono">
                   <span>Elapsed: {formatSeconds(activeJob.elapsed_seconds)}</span>
-                  <span>Estimated Remaining: {formatSeconds(activeJob.estimated_remaining_seconds)}</span>
+                  <span>Estimated Remaining: {activeJob.status === 'COMPLETED' ? '0s' : formatSeconds(activeJob.estimated_remaining_seconds)}</span>
                 </div>
               </div>
 
@@ -2110,9 +2233,11 @@ export default function DataLab() {
                   </div>
                 </div>
                 <div className="bg-slate-950 border border-slate-800/80 rounded-lg p-3">
-                  <span className="text-[10px] uppercase font-bold text-slate-500 block">Active Ticker</span>
+                  <span className="text-[10px] uppercase font-bold text-slate-500 block">
+                    {activeJob.status === 'COMPLETED' ? "Target Universe" : "Active Ticker"}
+                  </span>
                   <div className="text-base font-bold text-purple-400 mt-1 truncate">
-                    {activeJob.current_symbol || "ALL"}
+                    {activeJob.current_symbol || activeJob.universe || "ALL"}
                   </div>
                 </div>
               </div>
@@ -2235,10 +2360,11 @@ export default function DataLab() {
                     className="w-full bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-500"
                   >
                     <option value="BENCHMARK_5">Benchmark 5 (Heavyweights)</option>
+                    <option value="AUTOPILOT_PRIORITY_20">Autopilot Priority Pool (20 Stocks)</option>
                     <option value="NIFTY_50">NIFTY 50 (50 Benchmark Bluechips)</option>
                     <option value="LIVE_52">Live Scanner Universe (52 Stocks)</option>
                     <option value="RESEARCH_100">Expanded Research Universe (100 Stocks)</option>
-                    <option value="ALL_117">All Locally Available Equities (122 Stocks)</option>
+                    <option value="ALL_117">All Locally Available Equities (Dynamic Local DB)</option>
                     <option value="NIFTY_500">NIFTY 500 (500 Stocks - Broad Market)</option>
                     <option value="ALL_COLLECTED">All Collected Sources (NIFTY 500 + Watchlist + Local DB)</option>
                   </select>
@@ -2320,7 +2446,7 @@ export default function DataLab() {
 
               <div className="flex items-end">
                 <button
-                  onClick={handleStartResearch}
+                  onClick={() => handleStartResearch(false)}
                   disabled={submittingJob}
                   className="w-full py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold text-xs rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-cyan-900/40 transition disabled:opacity-50"
                 >
@@ -2330,6 +2456,41 @@ export default function DataLab() {
               </div>
             </div>
           </div>
+
+          {/* CACHE HIT BANNER (If duplicate completed research was found) */}
+          {cacheHitJob && (
+            <div className="p-4 rounded-xl bg-gradient-to-r from-cyan-950/80 to-blue-950/80 border border-cyan-500/50 shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-cyan-400 font-bold text-sm">
+                  <CheckCircle2 className="w-4 h-4" />
+                  Identical Completed Research Found! (Duplicate Recomputation Skipped)
+                </div>
+                <div className="text-xs text-slate-300 mt-1">
+                  Job <span className="font-mono text-cyan-300 font-bold">{cacheHitJob.job_id}</span> ({cacheHitJob.title}) was completed on {cacheHitJob.completed_at ? new Date(cacheHitJob.completed_at).toLocaleString() : 'recently'}.
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setSelectedJobId(cacheHitJob.job_id);
+                    setCacheHitJob(null);
+                  }}
+                  className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold rounded-lg shadow transition flex items-center gap-1.5"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  Open Existing Report
+                </button>
+                <button
+                  onClick={() => handleStartResearch(true)}
+                  disabled={submittingJob}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium rounded-lg border border-slate-700 transition flex items-center gap-1.5"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Force New Run
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* JOB QUEUE (If queued jobs exist) */}
           {queuedJobs.length > 0 && (
@@ -2373,6 +2534,7 @@ export default function DataLab() {
                     <th className="py-2.5 px-4">Type</th>
                     <th className="py-2.5 px-4">Universe</th>
                     <th className="py-2.5 px-4">Status</th>
+                    <th className="py-2.5 px-4">Progress</th>
                     <th className="py-2.5 px-4">Elapsed</th>
                     <th className="py-2.5 px-4">Trades</th>
                     <th className="py-2.5 px-4">Net P&L</th>
@@ -2383,7 +2545,7 @@ export default function DataLab() {
                 <tbody className="divide-y divide-slate-800/60 font-mono">
                   {pastJobs.length === 0 ? (
                     <tr>
-                      <td colSpan="9" className="py-6 text-center text-slate-500">
+                      <td colSpan="10" className="py-6 text-center text-slate-500">
                         No previous research runs found. Launch your first research job above.
                       </td>
                     </tr>
@@ -2401,6 +2563,9 @@ export default function DataLab() {
                           }`}>
                             {j.status}
                           </span>
+                        </td>
+                        <td className="py-2.5 px-4 font-mono font-bold text-cyan-400">
+                          {j.status === 'COMPLETED' ? '100.0%' : (j.progress_percent !== undefined && j.progress_percent !== null ? `${Number(j.progress_percent).toFixed(1)}%` : '--')}
                         </td>
                         <td className="py-2.5 px-4 text-slate-400">{formatSeconds(j.elapsed_seconds)}</td>
                         <td className="py-2.5 px-4 text-white font-bold">{j.trades_processed || 0}</td>
@@ -2452,23 +2617,34 @@ export default function DataLab() {
                 className="bg-slate-950 border border-slate-700 text-slate-200 text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-cyan-500"
               >
                 <option value="BENCHMARK_5">Benchmark 5 (Heavyweights)</option>
+                <option value="AUTOPILOT_PRIORITY_20">Autopilot Priority Pool (20 Stocks)</option>
                 <option value="NIFTY_50">NIFTY 50 (50 Benchmark Bluechips)</option>
                 <option value="LIVE_52">Live Scanner Universe (52 Stocks)</option>
                 <option value="RESEARCH_100">Expanded Research Universe (100 Stocks)</option>
-                <option value="ALL_117">All Locally Available Equities (122 Stocks)</option>
+                <option value="ALL_117">All Locally Available Equities (Dynamic Local DB)</option>
                 <option value="NIFTY_500">NIFTY 500 (500 Stocks - Broad Market)</option>
                 <option value="ALL_COLLECTED">All Collected Sources (NIFTY 500 + Watchlist + Local DB)</option>
               </select>
             </div>
 
-            <button
-              onClick={handleSync10Y}
-              disabled={syncing}
-              className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold text-xs rounded-lg flex items-center gap-2 transition disabled:opacity-50"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'Syncing...' : 'Sync 10Y OHLCV'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleSync10Y}
+                disabled={syncing || hoarding}
+                className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold text-xs rounded-lg flex items-center gap-2 transition disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+                {syncing ? 'Syncing 10Y...' : 'Sync 10Y OHLCV'}
+              </button>
+              <button
+                onClick={handleSync15MHoarder}
+                disabled={syncing || hoarding}
+                className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs rounded-lg flex items-center gap-2 transition disabled:opacity-50 shadow-lg shadow-emerald-950/40"
+              >
+                <Zap className={`w-3.5 h-3.5 ${hoarding ? 'animate-pulse' : ''}`} />
+                {hoarding ? 'Hoarding 15m...' : 'Sync 15m (Data Hoarder)'}
+              </button>
+            </div>
           </div>
 
           {syncMessage && (
@@ -2671,10 +2847,13 @@ export default function DataLab() {
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs font-bold text-white focus:border-cyan-500 focus:outline-none"
                 >
                   <option value="BENCHMARK_5">Production Benchmark (5 Stocks)</option>
+                  <option value="AUTOPILOT_PRIORITY_20">Autopilot Priority Pool (20 Stocks)</option>
                   <option value="NIFTY_50">NIFTY 50 Bluechips (50 Stocks)</option>
                   <option value="LIVE_52">Live Scanner Universe (52 Stocks)</option>
                   <option value="RESEARCH_100">Expanded Research Universe (100 Stocks)</option>
-                  <option value="ALL_117">All Locally Available Equities (117 Stocks)</option>
+                  <option value="ALL_117">All Locally Available Equities (Dynamic Local DB)</option>
+                  <option value="NIFTY_500">NIFTY 500 (500 Stocks - Broad Market)</option>
+                  <option value="ALL_COLLECTED">All Collected Sources (NIFTY 500 + Watchlist + Local DB)</option>
                   <option value="CUSTOM">Custom User Basket (Selected Tickers)</option>
                 </select>
               </div>
@@ -3353,86 +3532,15 @@ export default function DataLab() {
 
       {/* DETAILED RESULTS MODAL */}
       {resultModalOpen && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto p-4 sm:p-6 shadow-2xl space-y-6">
-            <div className="flex justify-between items-center pb-4 border-b border-slate-800">
-              <div>
-                <span className="text-[10px] uppercase font-bold text-cyan-400">Research Result Archive</span>
-                <h2 className="text-xl font-bold text-white">Job Result Analysis ({selectedResult?.job_id})</h2>
-              </div>
-              <button
-                onClick={() => setResultModalOpen(false)}
-                className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-lg"
-              >
-                Close
-              </button>
-            </div>
-
-            {selectedResult?.results?.is_partial && (
-              <div className="bg-amber-950/40 border border-amber-500/50 p-4 rounded-xl text-xs space-y-1.5 animate-fade-in">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-amber-300 flex items-center gap-1.5 text-sm">
-                    ⚠️ Interrupted Research Execution — Real Partial Telemetry Report
-                  </span>
-                  <span className="font-mono text-[10px] bg-amber-900/60 text-amber-200 px-2 py-0.5 rounded font-bold">
-                    Progress: {selectedResult.results.summary?.progress_percent}% ({selectedResult.results.summary?.completed_tasks}/{selectedResult.results.summary?.total_tasks} Cycles)
-                  </span>
-                </div>
-                <p className="text-slate-300 text-[11px] leading-relaxed">
-                  <strong>Runtime Duration:</strong> {selectedResult.results.summary?.duration_hours}h ({selectedResult.results.summary?.duration_seconds?.toLocaleString()}s) &bull; <strong>Models Fitted:</strong> {selectedResult.results.metrics?.models_fitted} &bull; <strong>Rebalance Date Reached:</strong> {selectedResult.results.metrics?.rebalance_date_reached} &bull; <strong>Reason:</strong> {selectedResult.results.summary?.cancellation_reason}
-                </p>
-              </div>
-            )}
-
-            {resultsLoading ? (
-              <div className="py-12 text-center text-slate-400 font-mono">Loading detailed performance artifacts...</div>
-            ) : selectedResult ? (
-              <div className="space-y-6">
-                {/* Metric Summary Scorecard */}
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3">
-                    <span className="text-[10px] uppercase font-bold text-slate-400">Total Net P&L</span>
-                    <div className={`text-lg font-black mt-1 ${(selectedResult.results?.metrics?.cumulative_net_pnl ?? selectedResult.results?.metrics?.total_pnl ?? selectedResult.results?.performance?.net_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      ₹{(selectedResult.results?.metrics?.cumulative_net_pnl ?? selectedResult.results?.metrics?.total_pnl ?? selectedResult.results?.performance?.net_pnl ?? 0).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3">
-                    <span className="text-[10px] uppercase font-bold text-slate-400">Current Equity</span>
-                    <div className="text-lg font-black text-cyan-400 mt-1">
-                      ₹{(selectedResult.results?.metrics?.current_equity ?? selectedResult.results?.metrics?.equity ?? 500000).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3">
-                    <span className="text-[10px] uppercase font-bold text-slate-400">Peak Equity</span>
-                    <div className="text-lg font-black text-white mt-1">
-                      ₹{(selectedResult.results?.metrics?.peak_equity ?? selectedResult.results?.metrics?.peak ?? 500000).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3">
-                    <span className="text-[10px] uppercase font-bold text-slate-400">Max Drawdown</span>
-                    <div className="text-lg font-black text-rose-400 mt-1">
-                      {selectedResult.results?.metrics?.max_drawdown_pct ?? selectedResult.results?.metrics?.max_drawdown ?? selectedResult.results?.performance?.max_drawdown_pct ?? 0}%
-                    </div>
-                  </div>
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3">
-                    <span className="text-[10px] uppercase font-bold text-slate-400">Models Fitted</span>
-                    <div className="text-lg font-black text-indigo-400 mt-1">
-                      {selectedResult.results?.metrics?.models_fitted ?? selectedResult.results?.summary?.models_fitted ?? 0}
-                    </div>
-                  </div>
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3">
-                    <span className="text-[10px] uppercase font-bold text-slate-400">Total Trades</span>
-                    <div className="text-lg font-black text-white mt-1">
-                      {selectedResult.results?.metrics?.total_trades ?? selectedResult.results?.performance?.total_trades ?? 0}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="py-12 text-center text-slate-500 font-mono">No result data found.</div>
-            )}
-          </div>
-        </div>
+        <ErrorBoundary onReset={() => setResultModalOpen(false)}>
+          <ResearchReportModal
+            isOpen={resultModalOpen}
+            onClose={() => setResultModalOpen(false)}
+            selectedResult={selectedResult}
+            isLoading={resultsLoading}
+            allJobs={jobList}
+          />
+        </ErrorBoundary>
       )}
     </div>
   );

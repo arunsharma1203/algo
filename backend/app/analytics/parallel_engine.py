@@ -230,44 +230,50 @@ class ParallelWalkForwardOrchestrator:
             num_workers = min(self.config.max_workers, len(pending_tickers))
             logger.info(f"Launching {num_workers} parallel workers on Apple Silicon for {len(pending_tickers)} pending tickers...")
 
+            pool_key = f"uwf_{job_id}"
+            from app.analytics.process_lifecycle_manager import ProcessLifecycleManager
             with ProcessPoolExecutor(
                 max_workers=num_workers,
                 initializer=_worker_init,
                 initargs=(self.config.ml_threads_per_worker,)
             ) as executor:
-                future_to_ticker = {
-                    executor.submit(_run_ticker_walk_forward_worker, t, initial_capital): t
-                    for t in pending_tickers
-                }
-
-                for future in as_completed(future_to_ticker):
-                    t = future_to_ticker[future]
-                    try:
-                        res = future.result()
-                        results[t] = res
-                    except Exception as e:
-                        results[t] = {"ticker": t, "status": "FAILED", "error": str(e)}
-
-                    completed_jobs += 1
-                    elapsed = time.time() - start_time
-                    rate = completed_jobs / elapsed if elapsed > 0 else 1.0
-                    remaining_jobs = total_jobs - completed_jobs
-                    estimated_remaining_seconds = round(remaining_jobs / rate, 1) if rate > 0 else 0.0
-
-                    self.save_checkpoint(job_id, results)
-
-                    telemetry = {
-                        "job_id": job_id,
-                        "total_jobs": total_jobs,
-                        "completed_jobs": completed_jobs,
-                        "active_workers": num_workers,
-                        "elapsed_seconds": round(elapsed, 1),
-                        "estimated_remaining_seconds": estimated_remaining_seconds,
-                        "latest_completed": t
+                ProcessLifecycleManager.register_worker_pool(pool_key, executor=executor)
+                try:
+                    future_to_ticker = {
+                        executor.submit(_run_ticker_walk_forward_worker, t, initial_capital): t
+                        for t in pending_tickers
                     }
 
-                    if progress_callback:
-                        progress_callback(telemetry)
+                    for future in as_completed(future_to_ticker):
+                        t = future_to_ticker[future]
+                        try:
+                            res = future.result()
+                            results[t] = res
+                        except Exception as e:
+                            results[t] = {"ticker": t, "status": "FAILED", "error": str(e)}
+
+                        completed_jobs += 1
+                        elapsed = time.time() - start_time
+                        rate = completed_jobs / elapsed if elapsed > 0 else 1.0
+                        remaining_jobs = total_jobs - completed_jobs
+                        estimated_remaining_seconds = round(remaining_jobs / rate, 1) if rate > 0 else 0.0
+
+                        self.save_checkpoint(job_id, results)
+
+                        telemetry = {
+                            "job_id": job_id,
+                            "total_jobs": total_jobs,
+                            "completed_jobs": completed_jobs,
+                            "active_workers": num_workers,
+                            "elapsed_seconds": round(elapsed, 1),
+                            "estimated_remaining_seconds": estimated_remaining_seconds,
+                            "latest_completed": t
+                        }
+
+                        if progress_callback:
+                            progress_callback(telemetry)
+                finally:
+                    ProcessLifecycleManager.terminate_worker_pool(pool_key)
 
         # Clear checkpoint on clean completion
         self.clear_checkpoint(job_id)

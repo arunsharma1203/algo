@@ -238,7 +238,7 @@ class ResearchOrchestrator:
         self,
         job_type: str,
         title: Optional[str] = None,
-        universe: str = "LIVE_52",
+        universe: str = "NIFTY_500",
         timeframe: str = "1d",
         priority: Optional[int] = None,
         payload: Optional[Dict[str, Any]] = None,
@@ -759,7 +759,7 @@ class ResearchOrchestrator:
 
     def _exec_data_sync(self, job: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         """Incremental data synchronization and quality audit."""
-        universe = job.get("universe", "LIVE_52")
+        universe = job.get("universe", "NIFTY_500")
         u_info = get_universe(universe)
         tickers = u_info.get("tickers", ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS"])
         
@@ -788,7 +788,7 @@ class ResearchOrchestrator:
         res_job_id = rjm.create_job(
             title=job.get("title", "Walk-Forward Research"),
             research_type=job.get("job_type", "PORTFOLIO_WALK_FORWARD"),
-            universe=job.get("universe", "LIVE_52"),
+            universe=job.get("universe", "NIFTY_500"),
             timeframe=job.get("timeframe", "1d"),
             history_years=payload.get("history_years", 10),
             worker_count=4
@@ -796,7 +796,7 @@ class ResearchOrchestrator:
         return {
             "status": "SUCCESS",
             "research_job_id": res_job_id,
-            "universe": job.get("universe", "LIVE_52")
+            "universe": job.get("universe", "NIFTY_500")
         }
 
     def _exec_oos_ab_test(self, job: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -853,7 +853,7 @@ class ResearchOrchestrator:
             else:
                 sess = forward_sim_engine.create_session(
                     title=f"Automated Forward Sim {date.today().isoformat()}",
-                    universe=job.get("universe", "LIVE_52"),
+                    universe=job.get("universe", "NIFTY_500"),
                     timeframe=job.get("timeframe", "1d")
                 )
                 session_id = sess["session_id"]
@@ -864,7 +864,7 @@ class ResearchOrchestrator:
 
     def _exec_scan(self, job: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         """Executes lightweight high-priority ML scan sweep."""
-        universe = job.get("universe", "LIVE_52")
+        universe = job.get("universe", "NIFTY_500")
         timeframe = "1d" if job["job_type"] == JobType.SWING_SCAN else "5m"
         return {
             "status": "SUCCESS",

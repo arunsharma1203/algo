@@ -33,3 +33,46 @@ export const searchTickers = async (query) => {
         return [];
     }
 };
+
+export const getDashboardIntelligence = async (forceRefresh = false) => {
+    try {
+        const response = await axios.get(`${API_URL}/dashboard/intelligence?force_refresh=${forceRefresh}`);
+        return response.data;
+    } catch (error) {
+        console.error("Dashboard Intelligence Error:", error);
+        throw error;
+    }
+};
+
+export const downloadDashboardReportPdf = async (forceRefresh = false) => {
+    try {
+        const response = await axios.get(`${API_URL}/dashboard/report/pdf?force_refresh=${forceRefresh}`, {
+            responseType: 'blob'
+        });
+        return response.data;
+    } catch (error) {
+        console.error("Dashboard PDF Download Error:", error);
+        throw error;
+    }
+};
+
+export const triggerTelegramReport = async (force = false) => {
+    try {
+        const response = await axios.post(`${API_URL}/dashboard/report/telegram/send?force=${force}`);
+        return response.data;
+    } catch (error) {
+        console.error("Trigger Telegram Report Error:", error);
+        throw error;
+    }
+};
+
+export const getReportDeliveryStatus = async () => {
+    try {
+        const response = await axios.get(`${API_URL}/dashboard/report/status`);
+        return response.data;
+    } catch (error) {
+        console.error("Report Delivery Status Error:", error);
+        return null;
+    }
+};
+

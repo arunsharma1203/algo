@@ -34,20 +34,14 @@ def run_swing_scan(custom_tickers: list = None, universe_preset: str = "NIFTY_50
     try:
         start_time = datetime.now()
         clean_custom = [t.strip().upper() for t in (custom_tickers or []) if t and t.strip()]
-        if universe_preset and universe_preset.upper() == "ALL_COLLECTED":
-            from app.analytics.universe_config import get_universe
-            u_info = get_universe("ALL_COLLECTED", custom_tickers=clean_custom)
-            universe = list(u_info.get("tickers", []))
-        elif clean_custom and (not universe_preset or universe_preset.upper() in ("CUSTOM", "WATCHLIST")):
-            universe = clean_custom
+        from app.analytics.universe_config import resolve_universe_tickers
+        clean_preset = universe_preset.strip().upper() if universe_preset else "NIFTY_500"
+        if clean_preset in ("CUSTOM", "WATCHLIST") and clean_custom:
+            universe = [t if t.endswith(('.NS', '.BO')) else f"{t}.NS" for t in clean_custom]
         else:
-            from app.analytics.universe_config import get_universe
-            u_info = get_universe(universe_preset or "NIFTY_500")
-            universe = list(u_info.get("tickers", []))
-            if not universe:
-                universe = INDIAN_STOCK_UNIVERSE[:50].copy()
+            universe = resolve_universe_tickers(clean_preset, custom_tickers=clean_custom)
         
-        yield format_sse({"type": "system", "message": f"[{start_time.strftime('%H:%M:%S')}] Initializing Swing Trade ML Pipeline for {len(universe)} symbols ({universe_preset or 'CUSTOM'})..."})
+        yield format_sse({"type": "system", "message": f"[{start_time.strftime('%H:%M:%S')}] Initializing Swing Trade ML Pipeline for {len(universe)} symbols ({clean_preset})..."})
         yield format_sse({"type": "info", "message": "Analyzing Macro Market Regime (NIFTY 50 & INDIA VIX)...", "progress": 3})
         
         macro = get_macro_regime()

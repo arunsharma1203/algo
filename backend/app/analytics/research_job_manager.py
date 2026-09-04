@@ -180,6 +180,92 @@ class ResearchJobManager:
             "timestamp": datetime.now().isoformat()
         }
 
+    @classmethod
+    def compute_research_fingerprint(cls, params: Dict[str, Any]) -> str:
+        """
+        Computes a deterministic SHA256 research fingerprint from all material parameters:
+        tickers, universe, research_type, model_type, timeframe, history_years,
+        initial_capital, max_portfolio_heat, kelly_mode, alpha158_enabled, chronos_enabled,
+        engine_version, and feature_version.
+        """
+        import hashlib
+        tickers = params.get("tickers") or []
+        if isinstance(tickers, str):
+            tickers = [t.strip().upper() for t in tickers.replace(";", ",").split(",") if t.strip()]
+        else:
+            tickers = [str(t).strip().upper() for t in tickers if str(t).strip()]
+
+        raw_model = str(params.get("model_type", "LIGHTGBM_ALPHA")).upper()
+        alpha158 = bool(params.get("alpha158_enabled", True) if "LIGHTGBM" in raw_model else False)
+        chronos = bool(params.get("chronos_enabled", False))
+
+        canonical_dict = {
+            "tickers": sorted(list(set(tickers))),
+            "universe": str(params.get("universe", "BENCHMARK_5")).upper(),
+            "research_type": str(params.get("research_type", "PORTFOLIO_WALK_FORWARD")).upper(),
+            "model_type": raw_model,
+            "timeframe": str(params.get("timeframe", "1d")).lower(),
+            "history_years": int(params.get("history_years", 10)),
+            "initial_capital": float(params.get("initial_capital", 500000.0)),
+            "max_portfolio_heat": float(params.get("max_portfolio_heat", 6.0)),
+            "kelly_mode": str(params.get("kelly_mode", "HALF")).upper(),
+            "alpha158_enabled": alpha158,
+            "chronos_enabled": chronos,
+            "engine_version": "2.0.0",
+            "feature_version": "2.0.0"
+        }
+        canonical_json = json.dumps(canonical_dict, sort_keys=True, separators=(',', ':'))
+        return hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
+
+    @classmethod
+    def find_existing_completed_job(cls, fingerprint: str) -> Optional[Dict[str, Any]]:
+        """
+        Queries SQLite database for an existing valid COMPLETED research job matching the fingerprint.
+        Verifies that actual results and metrics exist before qualifying as a reusable cache hit.
+        """
+        if not fingerprint:
+            return None
+
+        db_path = get_db_path()
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        try:
+            cur = conn.execute("""
+                SELECT job_id, title, research_type, universe, timeframe, history_years,
+                       status, completed_at, total_tasks, completed_tasks, elapsed_seconds,
+                       result_path, research_fingerprint
+                FROM research_jobs
+                WHERE research_fingerprint = ? AND status = 'COMPLETED' AND completed_tasks > 0
+                ORDER BY completed_at DESC LIMIT 1
+            """, (fingerprint,))
+            row = cur.fetchone()
+            if not row:
+                return None
+
+            col_names = [c[0] for c in cur.description]
+            job_dict = dict(zip(col_names, row))
+
+            # Verify that genuine results exist
+            job_id = job_dict["job_id"]
+            res_cur = conn.execute("SELECT total_pnl, win_rate, profit_factor, max_drawdown_pct, sharpe_ratio, total_trades, metrics_json, summary_json FROM research_job_results WHERE job_id = ?", (job_id,))
+            res_row = res_cur.fetchone()
+            if res_row:
+                res_cols = [c[0] for c in res_cur.description]
+                res_data = dict(zip(res_cols, res_row))
+                try:
+                    res_data["metrics"] = json.loads(res_data.get("metrics_json", "{}"))
+                    res_data["summary"] = json.loads(res_data.get("summary_json", "{}"))
+                except:
+                    pass
+                job_dict["results"] = res_data
+
+            # Check if result file exists on disk
+            res_path = job_dict.get("result_path")
+            job_dict["report_available"] = bool(res_path and os.path.exists(res_path))
+
+            return job_dict
+        finally:
+            conn.close()
+
     def create_job(
         self,
         research_type: str,
@@ -192,15 +278,13 @@ class ResearchJobManager:
         kelly_mode: str = "HALF",
         custom_tickers: Optional[List[str]] = None,
         title: Optional[str] = None,
-        model_factory: Optional[Callable[[], Any]] = None
+        model_factory: Optional[Callable[[], Any]] = None,
+        model_type: str = "LIGHTGBM_ALPHA",
+        force_rerun: bool = False
     ) -> Dict[str, Any]:
-        """Creates a new research job and queues it."""
-        job_id = f"res_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        """Creates a new research job, evaluates fingerprint for deduplication, and queues execution."""
         now_str = datetime.now().isoformat()
-        
-        if model_factory is not None:
-            self._custom_model_factories[job_id] = model_factory
-        
+
         if research_type == "SINGLE_STOCK_WALK_FORWARD" or custom_tickers:
             from app.data.validator import MarketDataValidator
             syms_to_check = custom_tickers if custom_tickers else universe
@@ -215,6 +299,67 @@ class ResearchJobManager:
             tickers = custom_tickers if custom_tickers else u_info.get("tickers", ["RELIANCE.NS"])
             
         total_tasks = len(tickers)
+
+        # 1. Deterministic Research Fingerprint Calculation
+        fingerprint_params = {
+            "tickers": tickers,
+            "universe": universe,
+            "research_type": research_type,
+            "model_type": model_type,
+            "timeframe": timeframe,
+            "history_years": history_years,
+            "initial_capital": initial_capital,
+            "max_portfolio_heat": max_portfolio_heat,
+            "kelly_mode": kelly_mode,
+            "alpha158_enabled": "LIGHTGBM" in str(model_type).upper(),
+            "chronos_enabled": False
+        }
+        fingerprint = self.compute_research_fingerprint(fingerprint_params)
+
+        # 2. Duplicate Research Detection / Cache Lookup
+        from app.analytics.master_logger import MasterLogger
+
+        if not force_rerun:
+            existing_completed = self.find_existing_completed_job(fingerprint)
+            if existing_completed:
+                logger.info(f"⚡ [ResearchEngine] CACHE HIT! Identical completed job found: {existing_completed['job_id']}")
+                MasterLogger.log_event(
+                    "RESEARCH", "RESEARCH_CACHE_HIT",
+                    f"Identical completed research found ({existing_completed['job_id']}) for fingerprint {fingerprint[:8]}. Skipping duplicate computation.",
+                    universe=universe,
+                    details={
+                        "existing_job_id": existing_completed["job_id"],
+                        "fingerprint": fingerprint,
+                        "completed_at": existing_completed.get("completed_at")
+                    }
+                )
+                return {
+                    "status": "EXISTING_RESEARCH_FOUND",
+                    "cache_hit": True,
+                    "fingerprint": fingerprint,
+                    "job": existing_completed,
+                    "message": f"Existing equivalent research found (Job {existing_completed['job_id']}). Recomputation skipped. Use 'Run Again' to override."
+                }
+            else:
+                MasterLogger.log_event(
+                    "RESEARCH", "RESEARCH_CACHE_MISS",
+                    f"Research cache miss for fingerprint {fingerprint[:8]}. Proceeding to compute new research.",
+                    universe=universe,
+                    details={"fingerprint": fingerprint, "universe": universe}
+                )
+        else:
+            MasterLogger.log_event(
+                "RESEARCH", "RESEARCH_FORCE_RERUN",
+                f"User forced new research run for fingerprint {fingerprint[:8]}. Executing under new job ID.",
+                universe=universe,
+                details={"fingerprint": fingerprint, "universe": universe}
+            )
+
+        # 3. Create Brand New Job ID
+        job_id = f"res_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        
+        if model_factory is not None:
+            self._custom_model_factories[job_id] = model_factory
 
         if not title:
             type_label = research_type.replace('_', ' ').title()
@@ -233,21 +378,33 @@ class ResearchJobManager:
                     job_id, title, research_type, universe, timeframe, history_years,
                     status, worker_count, initial_capital, max_portfolio_heat, kelly_mode,
                     created_at, total_tasks, completed_tasks, progress_percent, current_phase,
-                    checkpoint_path, result_path, last_heartbeat_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0.0, 'QUEUED', ?, ?, ?)
+                    checkpoint_path, result_path, last_heartbeat_at, research_fingerprint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0.0, 'QUEUED', ?, ?, ?, ?)
             """, (
                 job_id, title, research_type, universe, timeframe, history_years,
                 ResearchJobStatus.QUEUED, worker_count, initial_capital, max_portfolio_heat, kelly_mode,
-                now_str, total_tasks, chk_path, res_path, now_str
+                now_str, total_tasks, chk_path, res_path, now_str, fingerprint
             ))
             conn.commit()
         finally:
             conn.close()
 
-        self.log_event(job_id, "JOB_QUEUED", f"Job '{title}' queued with {total_tasks} tickers ({worker_count} workers).")
+        self.log_event(job_id, "JOB_QUEUED", f"Job '{title}' queued with {total_tasks} tickers ({worker_count} workers). Fingerprint: {fingerprint[:8]}")
+        MasterLogger.log_event(
+            "RESEARCH", "RESEARCH_STARTED",
+            f"Research job '{title}' ({job_id}) queued with {total_tasks} tasks. Fingerprint: {fingerprint[:8]}",
+            universe=universe,
+            details={"job_id": job_id, "fingerprint": fingerprint, "tasks": total_tasks}
+        )
         self._check_and_start_next_job()
 
-        return self.get_job(job_id)
+        new_job = self.get_job(job_id)
+        return {
+            "status": "QUEUED",
+            "cache_hit": False,
+            "fingerprint": fingerprint,
+            "job": new_job
+        }
 
     def log_event(self, job_id: str, event_type: str, message: str, data: Optional[Dict[str, Any]] = None):
         """Logs an event to SQLite and broadcasts to real-time SSE listeners."""
@@ -294,6 +451,106 @@ class ResearchJobManager:
         if queue in self._event_listeners:
             self._event_listeners.remove(queue)
 
+    def _reconcile_job_if_completed(self, job_dict: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """
+        Self-healing reconciliation: If a job is marked RUNNING or PAUSED in SQLite,
+        but its authoritative result file exists on disk with status == 'SUCCESS',
+        atomically reconcile SQLite status to COMPLETED (100%) and populate research_job_results.
+        Does NOT alter research calculations, features, models, or data.
+        """
+        if not job_dict or job_dict.get("status") not in ("RUNNING", "PAUSED"):
+            return job_dict
+
+        job_id = job_dict.get("job_id")
+        if not job_id:
+            return job_dict
+
+        res_path = job_dict.get("result_path") or os.path.join(RESULTS_DIR, f"result_{job_id}.json")
+        if not os.path.exists(res_path):
+            return job_dict
+
+        try:
+            with open(res_path, "r") as f:
+                res_data = json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to read result file {res_path} for reconciliation: {e}")
+            return job_dict
+
+        if not isinstance(res_data, dict) or res_data.get("status") != "SUCCESS":
+            return job_dict
+
+        # Authoritative tasks, runtime, and completion timestamp
+        total_tasks = int(job_dict.get("total_tasks") or res_data.get("total_tickers") or len(res_data.get("results", {})))
+        elapsed_sec = float(res_data.get("total_runtime_seconds") or job_dict.get("elapsed_seconds") or 0.0)
+        mtime = os.path.getmtime(res_path)
+        completed_iso = datetime.fromtimestamp(mtime).isoformat()
+
+        # Compute aggregate trades & PnL across all tickers if results map is present
+        results_map = res_data.get("results", {})
+        total_trades = 0
+        total_pnl = 0.0
+        total_wins = 0
+        if isinstance(results_map, dict):
+            for t_code, t_res in results_map.items():
+                if isinstance(t_res, dict):
+                    m = t_res.get("metrics", {})
+                    t_cnt = int(t_res.get("trades_count", m.get("total_trades", 0)))
+                    total_trades += t_cnt
+                    total_pnl += float(m.get("total_pnl", 0.0))
+                    wr = float(m.get("win_rate", 0.0))
+                    total_wins += (wr / 100.0) * t_cnt
+
+        overall_win_rate = round((total_wins / total_trades * 100.0), 2) if total_trades > 0 else 0.0
+
+        # Update SQLite atomically with retry
+        db_path = get_db_path()
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(db_path, timeout=15.0)
+                conn.execute("""
+                    UPDATE research_jobs SET
+                        status = 'COMPLETED',
+                        progress_percent = 100.0,
+                        completed_tasks = ?,
+                        current_phase = 'COMPLETED',
+                        completed_at = ?,
+                        elapsed_seconds = ?,
+                        estimated_remaining_seconds = 0.0,
+                        trades_processed = ?
+                    WHERE job_id = ?
+                """, (total_tasks, completed_iso, elapsed_sec, total_trades, job_id))
+
+                conn.execute("""
+                    INSERT OR REPLACE INTO research_job_results (
+                        job_id, total_pnl, win_rate, profit_factor, max_drawdown_pct,
+                        sharpe_ratio, total_trades, metrics_json, summary_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    job_id, total_pnl, overall_win_rate, 1.0, 0.0, 0.0, total_trades,
+                    json.dumps({"total_pnl": total_pnl, "win_rate": overall_win_rate, "total_trades": total_trades}, default=str),
+                    json.dumps({"reconciled": True, "total_tickers": total_tasks, "total_runtime_seconds": elapsed_sec}, default=str)
+                ))
+                conn.commit()
+                conn.close()
+                logger.info(f"✅ Self-healed completed research job {job_id}: reconciled status to COMPLETED (100%)")
+                break
+            except Exception as e:
+                time.sleep(0.2 * (attempt + 1))
+                if attempt == 2:
+                    logger.warning(f"Failed to reconcile job {job_id} in SQLite: {e}")
+
+        # Update dict in-place
+        job_dict["status"] = "COMPLETED"
+        job_dict["progress_percent"] = 100.0
+        job_dict["completed_tasks"] = total_tasks
+        job_dict["current_phase"] = "COMPLETED"
+        job_dict["completed_at"] = completed_iso
+        job_dict["elapsed_seconds"] = elapsed_sec
+        job_dict["estimated_remaining_seconds"] = 0.0
+        job_dict["trades_processed"] = total_trades
+
+        return job_dict
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         db_path = get_db_path()
         conn = sqlite3.connect(db_path, timeout=10.0)
@@ -307,7 +564,7 @@ class ResearchJobManager:
                 job_dict["resume_available"] = bool(chk_path and os.path.exists(chk_path))
                 job_dict["worker_states"] = self.worker_states
                 job_dict["system_telemetry"] = self.get_system_telemetry()
-                return job_dict
+                return self._reconcile_job_if_completed(job_dict)
             return None
         finally:
             conn.close()
@@ -324,6 +581,7 @@ class ResearchJobManager:
                 jd = dict(zip(col_names, row))
                 chk_path = jd.get("checkpoint_path")
                 jd["resume_available"] = bool(chk_path and os.path.exists(chk_path))
+                jd = self._reconcile_job_if_completed(jd)
                 jobs.append(jd)
             return jobs
         finally:
@@ -373,7 +631,10 @@ class ResearchJobManager:
                 jd["resume_available"] = bool(chk_path and os.path.exists(chk_path))
                 jd["worker_states"] = self.worker_states
                 jd["system_telemetry"] = self.get_system_telemetry()
-                return jd
+                reconciled = self._reconcile_job_if_completed(jd)
+                if reconciled and reconciled.get("status") in ('RUNNING', 'PAUSED'):
+                    return reconciled
+                return None
             return None
         finally:
             conn.close()
@@ -536,9 +797,16 @@ class ResearchJobManager:
         return None
 
     def cancel_job(self, job_id: str) -> Dict[str, Any]:
-        """Marks job cancelled, triggers cancellation flag, and preserves partial results."""
+        """Marks job cancelled, triggers cancellation flag, terminates worker pools, and preserves partial results."""
         self._cancel_flags[job_id] = True
         now_str = datetime.now().isoformat()
+
+        # Deterministically terminate any active OS worker pools
+        try:
+            from app.analytics.process_lifecycle_manager import ProcessLifecycleManager
+            ProcessLifecycleManager.terminate_all_pools()
+        except Exception as e:
+            logger.warning(f"Error terminating worker pools on cancel: {e}")
 
         db_path = get_db_path()
         conn = sqlite3.connect(db_path, timeout=10.0)
@@ -687,7 +955,7 @@ class ResearchJobManager:
             self._worker_thread.start()
 
     def _update_job_progress(self, job_id: str, updates: Dict[str, Any]):
-        """Updates progress fields atomically in SQLite."""
+        """Updates progress fields atomically in SQLite with retry logic."""
         set_clauses = []
         vals = []
         for k, v in updates.items():
@@ -697,13 +965,17 @@ class ResearchJobManager:
 
         sql = f"UPDATE research_jobs SET {', '.join(set_clauses)} WHERE job_id = ?"
         db_path = get_db_path()
-        try:
-            conn = sqlite3.connect(db_path, timeout=10.0)
-            conn.execute(sql, tuple(vals))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.warning(f"Failed to update research progress: {e}")
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(db_path, timeout=15.0)
+                conn.execute(sql, tuple(vals))
+                conn.commit()
+                conn.close()
+                return
+            except Exception as e:
+                time.sleep(0.15 * (attempt + 1))
+                if attempt == 2:
+                    logger.warning(f"Failed to update research progress for {job_id}: {e}")
 
     def _execute_job_thread(self, job_id: str):
         """Worker thread executing the research pipeline with real-time telemetry."""
@@ -881,6 +1153,8 @@ class ResearchJobManager:
 
                 from app.analytics.portfolio_walk_forward import MultiStockPortfolioWalkForwardEngine
                 m_factory = self._custom_model_factories.pop(job_id, None)
+                hist_yrs = float(job.get("history_years")) if job.get("history_years") else None
+                s_date = job.get("start_date")
                 engine = MultiStockPortfolioWalkForwardEngine(
                     tickers=tickers,
                     initial_capital=float(job.get("initial_capital", 500000.0)),
@@ -890,7 +1164,9 @@ class ResearchJobManager:
                     progress_callback=portfolio_progress_callback,
                     worker_count=workers,
                     model_factory=m_factory,
-                    model_type=job.get("model_type", "LIGHTGBM_ALPHA")
+                    model_type=job.get("model_type", "LIGHTGBM_ALPHA"),
+                    history_years=hist_yrs,
+                    start_date=s_date
                 )
                 results_payload = engine.run()
 

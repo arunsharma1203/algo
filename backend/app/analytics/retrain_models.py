@@ -108,13 +108,20 @@ def simulate_out_of_sample_trading(y_val: np.ndarray, preds_proba: np.ndarray, c
     ret_series = pd.Series(returns)
     traded_returns = ret_series[ret_series != 0]
 
+    is_low_sample = len(traded_returns) < 30
+
     if len(traded_returns) < 5:
         return {
             "sharpe": 0.0,
             "win_rate": 0.0,
             "profit_factor": 1.0,
             "max_drawdown_pct": 0.0,
-            "trade_count": len(traded_returns)
+            "trade_count": len(traded_returns),
+            "is_low_sample": True,
+            "sample_status": "LOW_SAMPLE",
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "expectancy_pct": 0.0
         }
 
     mean_r = traded_returns.mean()
@@ -140,7 +147,12 @@ def simulate_out_of_sample_trading(y_val: np.ndarray, preds_proba: np.ndarray, c
         "win_rate": win_rate,
         "profit_factor": profit_factor,
         "max_drawdown_pct": max_dd,
-        "trade_count": int(len(traded_returns))
+        "trade_count": int(len(traded_returns)),
+        "is_low_sample": is_low_sample,
+        "sample_status": "LOW_SAMPLE" if is_low_sample else "VALID",
+        "winning_trades": int(len(wins)),
+        "losing_trades": int(len(losses)),
+        "expectancy_pct": round(float(mean_r * 100.0), 3) if len(traded_returns) > 0 else 0.0
     }
 
 def execute_retraining_pipeline(timeframe: str = "swing") -> dict:

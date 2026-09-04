@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import ta
 from datetime import datetime, timedelta
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, Any, List, Optional, Callable
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.svm import SVC
@@ -38,7 +39,9 @@ class MultiStockPortfolioWalkForwardEngine:
                  progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
                  worker_count: int = 4,
                  model_factory: Optional[Callable[[], Any]] = None,
-                 model_type: str = "LIGHTGBM_ALPHA"):
+                 model_type: str = "LIGHTGBM_ALPHA",
+                 history_years: Optional[float] = None,
+                 start_date: Optional[str] = None):
         self.tickers = [t.strip().upper() for t in tickers if t]
         self.initial_capital = float(initial_capital)
         self.capital = float(initial_capital)
@@ -52,6 +55,15 @@ class MultiStockPortfolioWalkForwardEngine:
         self.worker_count = worker_count
         self.model_factory = model_factory
         self.model_type = model_type
+        self.history_years = float(history_years) if history_years else None
+        
+        # Calculate start_date if history_years is provided and start_date is not
+        if start_date:
+            self.start_date = str(start_date)
+        elif self.history_years:
+            self.start_date = (datetime.now() - timedelta(days=int(365.25 * self.history_years))).strftime('%Y-%m-%d')
+        else:
+            self.start_date = None
 
     def run(self) -> Dict[str, Any]:
         # 1. Ingest & Align Historical Data for all Universe Stocks
@@ -62,7 +74,7 @@ class MultiStockPortfolioWalkForwardEngine:
         purge_bars = 5
 
         for ticker in self.tickers:
-            df = HistoricalDataLayer.get_historical_ohlcv(ticker, timeframe="1d")
+            df = HistoricalDataLayer.get_historical_ohlcv(ticker, timeframe="1d", start_date=self.start_date)
             if df.empty or len(df) < 300:
                 continue
 
@@ -140,12 +152,16 @@ class MultiStockPortfolioWalkForwardEngine:
         executor = None
         if self.worker_count > 1:
             from app.analytics.parallel_engine import _run_cv_split_worker, _worker_init
-            from concurrent.futures import ProcessPoolExecutor, as_completed
             executor = ProcessPoolExecutor(
                 max_workers=min(4, self.worker_count),
                 initializer=_worker_init,
                 initargs=(1,)
             )
+            from app.analytics.process_lifecycle_manager import ProcessLifecycleManager
+            pool_key = f"pwf_{self.universe_name}_{int(time.time())}"
+            ProcessLifecycleManager.register_worker_pool(pool_key, executor=executor)
+        else:
+            pool_key = None
 
         try:
             start_simulation_time = time.time()
@@ -181,6 +197,8 @@ class MultiStockPortfolioWalkForwardEngine:
                 oof_y_val = []
                 oof_preds_proba = []
                 current_cycle_num = len(weekly_lifecycle) + 1
+                cycle_symbol = self.tickers[(current_cycle_num - 1) % len(self.tickers)] if self.tickers else "UNIVERSE"
+                cycle_active_symbol = cycle_symbol
 
                 if self.progress_callback:
                     self.progress_callback({
@@ -194,7 +212,7 @@ class MultiStockPortfolioWalkForwardEngine:
                         "sub_phase": "CV_SPLITS_DISPATCHED",
                         "models_fitted": len(weekly_lifecycle) * 15,
                         "trades_processed": len(portfolio_trades),
-                        "current_symbol": self.tickers[0] if self.tickers else "UNIVERSE",
+                        "current_symbol": cycle_symbol,
                         "timestamp": datetime.now().isoformat()
                     })
 
@@ -242,7 +260,7 @@ class MultiStockPortfolioWalkForwardEngine:
                                     "split_runtime": split_res.get("runtime_seconds", 0.0),
                                     "models_fitted": len(weekly_lifecycle) * 15 + (s_idx * 3),
                                     "trades_processed": len(portfolio_trades),
-                                    "current_symbol": self.tickers[0] if self.tickers else "UNIVERSE",
+                                    "current_symbol": cycle_symbol,
                                     "timestamp": datetime.now().isoformat()
                                 })
                         except Exception as e:
@@ -499,6 +517,7 @@ class MultiStockPortfolioWalkForwardEngine:
                                     "regime": cand['macro_regime'],
                                     "prob": cand['calibrated_prob']
                                 }
+                                cycle_active_symbol = cand['ticker']
                                 cycle_trades_opened += 1
                                 cycle_candidates_accepted += 1
                             else:
@@ -532,7 +551,7 @@ class MultiStockPortfolioWalkForwardEngine:
                         "rebalance_date": rebalance_date_str,
                         "training_start": training_start_date,
                         "training_end": training_end_date,
-                        "current_symbol": self.tickers[0] if self.tickers else "UNIVERSE",
+                        "current_symbol": cycle_active_symbol,
                         "trades_processed": len(portfolio_trades),
                         "trades_opened": cycle_trades_opened,
                         "trades_closed": cycle_trades_closed,
@@ -609,6 +628,8 @@ class MultiStockPortfolioWalkForwardEngine:
                 "universe_name": universe_info["name"],
                 "universe_size": len(self.tickers),
                 "survivorship_bias_disclosure": universe_info["survivorship_bias"],
+                "history_years": self.history_years,
+                "start_date": self.start_date,
                 "metrics": metrics,
                 "monte_carlo": monte_carlo,
                 "trades": portfolio_trades[::-1],
@@ -648,8 +669,11 @@ class MultiStockPortfolioWalkForwardEngine:
                 }
             }
         finally:
-            if executor is not None:
-                executor.shutdown(wait=False)
+            if pool_key is not None:
+                from app.analytics.process_lifecycle_manager import ProcessLifecycleManager
+                ProcessLifecycleManager.terminate_worker_pool(pool_key)
+            elif executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         return results_payload
 

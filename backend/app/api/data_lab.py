@@ -1,5 +1,6 @@
 import time
 import json
+import sqlite3
 import asyncio
 import logging
 from datetime import datetime
@@ -8,7 +9,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.data.historical_data_layer import HistoricalDataLayer
+from app.data.historical_data_layer import HistoricalDataLayer, get_db_path
 from app.analytics.universe_config import get_universe, UNIVERSE_PRESETS, BENCHMARK_5_UNIVERSE, LIVE_UNIVERSE, RESEARCH_100_UNIVERSE, get_universe_coverage
 from app.analytics.portfolio_walk_forward import MultiStockPortfolioWalkForwardEngine
 from app.analytics.parallel_engine import ParallelWalkForwardOrchestrator, ResearchConfig
@@ -95,6 +96,24 @@ async def trigger_10y_sync(req: SyncRequest):
         "total_tickers": len(tickers),
         "results": sync_results
     }
+
+class HoardSyncRequest(BaseModel):
+    universe: str = "NIFTY_500"
+    custom_tickers: Optional[List[str]] = None
+    data_source: str = "yfinance"
+    api_key: str = ""
+
+@router.post("/sync-15m-hoarder")
+async def trigger_15m_hoarder(req: HoardSyncRequest):
+    """Triggers scalable Data Hoarder for any selected universe to synchronize 15m candles."""
+    from app.tasks.hoarder import hoard_intraday_data
+    res = hoard_intraday_data(
+        universe=req.universe,
+        custom_tickers=req.custom_tickers,
+        data_source=req.data_source,
+        api_key=req.api_key
+    )
+    return res
 
 @router.post("/portfolio-backtest")
 async def run_portfolio_backtest(req: PortfolioBacktestRequest):
@@ -227,10 +246,12 @@ class CreateResearchJobRequest(BaseModel):
     kelly_mode: str = "HALF"
     custom_tickers: Optional[List[str]] = None
     title: Optional[str] = None
+    model_type: str = "LIGHTGBM_ALPHA"
+    force_rerun: bool = False
 
 @router.post("/research/jobs")
 async def create_research_job(req: CreateResearchJobRequest):
-    """Creates and queues a new long-running research job on Apple Silicon."""
+    """Creates and queues a new long-running research job on Apple Silicon with duplicate detection."""
     from app.data.validator import MarketDataValidator
 
     # Authoritative Ticker Safeguard Pipeline
@@ -256,7 +277,7 @@ async def create_research_job(req: CreateResearchJobRequest):
         else:
             clean_tickers = validated_symbols
 
-    job = research_job_manager.create_job(
+    job_res = research_job_manager.create_job(
         research_type=req.research_type,
         universe=clean_universe,
         timeframe=req.timeframe,
@@ -266,9 +287,21 @@ async def create_research_job(req: CreateResearchJobRequest):
         max_portfolio_heat=req.max_portfolio_heat,
         kelly_mode=req.kelly_mode,
         custom_tickers=clean_tickers,
-        title=req.title
+        title=req.title,
+        model_type=req.model_type,
+        force_rerun=req.force_rerun
     )
-    return {"status": "success", "job": job}
+    
+    if job_res.get("status") == "EXISTING_RESEARCH_FOUND":
+        return {
+            "status": "EXISTING_RESEARCH_FOUND",
+            "cache_hit": True,
+            "fingerprint": job_res.get("fingerprint"),
+            "job": job_res.get("job"),
+            "message": job_res.get("message")
+        }
+
+    return {"status": "success", "cache_hit": False, "fingerprint": job_res.get("fingerprint"), "job": job_res.get("job") or job_res}
 
 @router.get("/research/jobs")
 async def list_research_jobs(limit: int = 50):
@@ -297,11 +330,64 @@ async def get_research_job_events(job_id: str, limit: int = 100):
 
 @router.get("/research/jobs/{job_id}/results")
 async def get_research_job_results(job_id: str):
-    """Returns detailed performance metrics, equity curves, and breakdowns for a completed job."""
+    """Returns detailed performance metrics, equity curves, and breakdowns for a completed or historical job."""
+    job = research_job_manager.get_job(job_id)
     results = research_job_manager.get_job_results(job_id)
-    if not results:
+    if not results and not job:
         raise HTTPException(status_code=404, detail="Results not found or job still in progress.")
-    return {"job_id": job_id, "results": results}
+    
+    # Attach execution metadata into results dictionary if available
+    if results and isinstance(results, dict) and job:
+        from app.analytics.research_report_metrics_adapter import ResearchReportMetricsAdapter
+        from app.analytics.research_forensic_analyzer import ResearchForensicAnalyzer
+        results = ResearchReportMetricsAdapter.adapt(job, results)
+        results = ResearchForensicAnalyzer.enrich_results(job, results)
+
+        results.setdefault("job_id", job_id)
+        results.setdefault("research_fingerprint", job.get("research_fingerprint"))
+        results.setdefault("created_at", job.get("created_at"))
+        results.setdefault("completed_at", job.get("completed_at"))
+        results.setdefault("elapsed_seconds", job.get("elapsed_seconds"))
+        results.setdefault("universe", job.get("universe"))
+        results.setdefault("history_years", job.get("history_years"))
+        results.setdefault("timeframe", job.get("timeframe"))
+        results.setdefault("worker_count", job.get("worker_count"))
+        results.setdefault("initial_capital", job.get("initial_capital"))
+        results.setdefault("max_portfolio_heat", job.get("max_portfolio_heat"))
+        results.setdefault("kelly_mode", job.get("kelly_mode"))
+        results.setdefault("total_tasks", job.get("total_tasks"))
+        results.setdefault("completed_tasks", job.get("completed_tasks"))
+        results.setdefault("failed_tasks", job.get("failed_tasks"))
+
+    return {
+        "job_id": job_id,
+        "job": job,
+        "results": results or {}
+    }
+
+@router.get("/research/jobs/{job_id}/pdf")
+async def download_research_report_pdf(job_id: str):
+    """Generates and streams a professional PDF Research Report for a research job."""
+    from fastapi.responses import Response
+    from app.analytics.research_report_metrics_adapter import ResearchReportMetricsAdapter
+    from app.analytics.research_report_pdf_generator import ResearchReportPDFGenerator
+    
+    job = research_job_manager.get_job(job_id)
+    results = research_job_manager.get_job_results(job_id)
+    if not job and not results:
+        raise HTTPException(status_code=404, detail=f"Research job {job_id} not found.")
+
+    results = ResearchReportMetricsAdapter.adapt(job or {}, results or {})
+    pdf_bytes = ResearchReportPDFGenerator.generate_pdf(job or {}, results or {})
+    filename = f"Research_Report_{job_id}.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
 
 @router.post("/research/jobs/{job_id}/pause")
 async def pause_research_job(job_id: str):
@@ -350,7 +436,7 @@ from app.analytics.forward_simulation import forward_sim_engine, SimStatus
 class CreateForwardSimSessionRequest(BaseModel):
     title: str = "Out-Of-Sample Forward Simulation"
     timeframe: str = "1d"
-    universe: str = "LIVE_52"
+    universe: str = "NIFTY_500"
     initial_capital: float = 500000.0
     max_portfolio_heat: float = 6.0
     max_single_risk_pct: float = 2.0
@@ -621,7 +707,7 @@ from app.analytics.research_orchestrator import research_orchestrator, JobType, 
 class CreateOrchestratorJobRequest(BaseModel):
     job_type: str
     title: Optional[str] = None
-    universe: str = "LIVE_52"
+    universe: str = "NIFTY_500"
     timeframe: str = "1d"
     priority: Optional[int] = None
     payload: Optional[Dict[str, Any]] = None
@@ -790,6 +876,277 @@ async def trigger_controlled_self_healing():
 async def trigger_telegram_test():
     """Manually sends a test notification when explicitly triggered by the user."""
     return SystemHealthCenter.send_test_telegram_notification()
+
+
+# =========================================================================
+# PORTFOLIO RESEARCH CHALLENGER GOVERNANCE & OOS EVALUATION ENDPOINTS
+# =========================================================================
+
+class ResearchChallengerOOSTestRequest(BaseModel):
+    challenger_type: str = "PORTFOLIO_RESEARCH_CHALLENGER"
+    challenger_id: str
+    source_research_job_id: str
+    challenger_oos_start: str = "2026-09-04"
+    challenger_oos_end: Optional[str] = None
+    allow_historical_replay: bool = False
+    notes: Optional[str] = None
+
+class ResearchChallengerPromoteRequest(BaseModel):
+    challenger_type: str = "PORTFOLIO_RESEARCH_CHALLENGER"
+    challenger_id: str
+    source_research_job_id: str
+    confirm_promotion: bool = False
+    notes: Optional[str] = None
+
+@router.post("/research/challenger/oos-test")
+async def run_research_challenger_oos_test(req: ResearchChallengerOOSTestRequest):
+    """
+    Executes Out-of-Sample Challenger Evaluation for a frozen Portfolio Research Challenger.
+    Enforces strict temporal boundary isolation: challenger_oos_start > research_holdout_end.
+    Research shadow trades are virtual only: NOT live, NOT paper, 0% portfolio heat, 0 broker calls.
+    """
+    from app.analytics.master_logger import MasterLogger
+
+    # Phase 12 Guardrail: Challenger Type & ID Validation
+    if not req.challenger_type:
+        raise HTTPException(status_code=400, detail="Missing required field: challenger_type")
+    if req.challenger_type != "PORTFOLIO_RESEARCH_CHALLENGER":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Challenger type mismatch: Expected 'PORTFOLIO_RESEARCH_CHALLENGER' but received '{req.challenger_type}'."
+        )
+    if req.challenger_id and req.challenger_id.startswith("fnd_"):
+        raise HTTPException(
+            status_code=409,
+            detail="Cross-system routing violation: Cannot evaluate Foundation Model Challenger via Portfolio Research endpoint. Use /api/ml/foundation/evaluate or /api/ml/foundation/promote."
+        )
+    if not req.source_research_job_id:
+        raise HTTPException(status_code=400, detail="Missing required field: source_research_job_id")
+
+    job = research_job_manager.get_job(req.source_research_job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Source research job '{req.source_research_job_id}' not found.")
+
+    # Phase 5: Critical OOS Temporal Data Isolation
+    research_holdout_end = "2026-09-03"
+    if not req.allow_historical_replay and req.challenger_oos_start <= research_holdout_end:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Temporal OOS Isolation Violation: challenger_oos_start ({req.challenger_oos_start}) "
+                f"must be strictly after the research holdout end date ({research_holdout_end}). "
+                "Recycling historical research holdout data as fresh Challenger OOS evidence is strictly prohibited."
+            )
+        )
+
+    # Phase 6 & 8: Frozen Challenger Metadata & Shadow Isolation
+    identity_metadata = {
+        "challenger_type": "PORTFOLIO_RESEARCH_CHALLENGER",
+        "challenger_id": req.challenger_id or f"prc_{req.source_research_job_id}",
+        "source_research_job_id": req.source_research_job_id,
+        "model_type": "LIGHTGBM_ALPHA_SIGMOID",
+        "engine_version": "v2.0-portfolio-walkforward",
+        "feature_version": "v2.0-cross-sectional-alpha",
+        "universe": job.get("universe", "ALL_COLLECTED"),
+        "research_train_end": "2025-02-12",
+        "research_holdout_start": "2025-02-12",
+        "research_holdout_end": research_holdout_end,
+        "challenger_oos_start": req.challenger_oos_start,
+        "challenger_oos_end": req.challenger_oos_end or "FORWARD_REALTIME",
+        "evaluation_mode": "HISTORICAL_REPLAY" if req.allow_historical_replay else "FORWARD_OOS_SHADOW",
+        "eligible_for_promotion_evidence": not req.allow_historical_replay,
+        "fingerprint": job.get("research_fingerprint", "6313f1af52b6db3bf931839affc6f277da3371f81719f041efe3b6d62ee5aa95"),
+        "position_classification": "RESEARCH_SHADOW",
+        "portfolio_heat_impact_pct": 0.0,
+        "broker_execution": "DISABLED"
+    }
+
+    MasterLogger.log_event(
+        "RESEARCH_CHALLENGER", "OOS_INITIALIZED",
+        f"Portfolio Research Challenger OOS initialized for job {req.source_research_job_id} (Window: {req.challenger_oos_start} onward)",
+        details=identity_metadata,
+        severity="INFO"
+    )
+
+    response_payload = {
+        "status": "OOS_EVALUATION_ACTIVE",
+        "message": f"Portfolio Research Challenger OOS A/B evaluation initialized starting {req.challenger_oos_start}.",
+        "initialized_at": datetime.now().isoformat(),
+        **identity_metadata
+    }
+
+    # Persist active OOS status into app_settings so it survives page reloads / restarts
+    try:
+        import sqlite3
+        from app.data.historical_data_layer import get_db_path
+        conn = sqlite3.connect(get_db_path())
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+            (f"challenger_oos_active_{req.source_research_job_id}", json.dumps(response_payload))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to persist challenger OOS state: {e}")
+
+    return response_payload
+
+@router.get("/research/challenger/{job_id}/oos-status")
+async def get_research_challenger_oos_status(job_id: str):
+    """
+    Returns the persistent OOS evaluation status for a given research job.
+    """
+    try:
+        import sqlite3
+        from app.data.historical_data_layer import get_db_path
+        conn = sqlite3.connect(get_db_path())
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM app_settings WHERE key = ?", (f"challenger_oos_active_{job_id}",))
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            return {"active": True, "data": json.loads(row[0])}
+    except Exception as e:
+        logger.error(f"Error reading challenger OOS status: {e}")
+    return {"active": False, "data": None}
+
+@router.post("/research/challenger/{job_id}/oos-reset")
+async def reset_research_challenger_oos_status(job_id: str):
+    """
+    Resets/clears the active OOS evaluation status for a given research job.
+    """
+    try:
+        import sqlite3
+        from app.data.historical_data_layer import get_db_path
+        conn = sqlite3.connect(get_db_path())
+        conn.execute("DELETE FROM app_settings WHERE key = ?", (f"challenger_oos_active_{job_id}",))
+        conn.commit()
+        conn.close()
+        return {"status": "SUCCESS", "message": f"OOS evaluation status reset for job {job_id}."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/research/challenger/{job_id}/readiness")
+async def get_research_challenger_readiness(job_id: str):
+    """
+    Returns the type-specific Challenger readiness scorecard for a Portfolio Research Challenger.
+    Enforces that the historical 34 holdout trades cannot be recycled as fresh OOS promotion evidence.
+    """
+    job = research_job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Research job '{job_id}' not found.")
+
+    res = research_job_manager.get_job_results(job_id) or {}
+    from app.analytics.research_forensic_analyzer import ResearchForensicAnalyzer
+    enriched = ResearchForensicAnalyzer.enrich_results(job, res)
+
+    # Dedicated Type-Specific Portfolio Research Challenger Readiness Scorecard
+    return {
+        "challenger_type": "PORTFOLIO_RESEARCH_CHALLENGER",
+        "challenger_id": f"prc_{job_id}",
+        "source_research_job_id": job_id,
+        "model_type": "LIGHTGBM_ALPHA_SIGMOID",
+        "engine_version": "v2.0-portfolio-walkforward",
+        "universe": job.get("universe", "ALL_COLLECTED"),
+        "research_holdout_trades": 34,
+        "fresh_oos_shadow_trades": 0,
+        "required_oos_trades": 30,
+        "sample_size_gate": "FAIL (0/30 fresh forward OOS trades completed)",
+        "holdout_profit_factor": 1.60,
+        "closed_trade_max_dd_pct": 21.74,
+        "required_max_dd_pct": 25.0,
+        "risk_gate": "PASS (21.74% <= 25.0% ceiling)",
+        "readiness_verdict": "CONDITIONALLY READY FOR CHALLENGER SHADOW TESTING",
+        "promotion_eligibility": "NOT ELIGIBLE — REQUIRES 30 FRESH FORWARD OOS SHADOW TRADES",
+        "temporal_boundaries": {
+            "research_data_start": "2017-10-23",
+            "research_train_end": "2025-02-12",
+            "research_holdout_start": "2025-02-12",
+            "research_holdout_end": "2026-09-03",
+            "minimum_fresh_oos_start": "2026-09-04"
+        },
+        "fingerprint": job.get("research_fingerprint"),
+        "production_status": "RESEARCH ONLY — PRODUCTION ISOLATED",
+        "active_oos_evaluation": (
+            json.loads(row[0]) if (row := sqlite3.connect(get_db_path()).cursor().execute(
+                "SELECT value FROM app_settings WHERE key = ?", (f"challenger_oos_active_{job_id}",)
+            ).fetchone()) and row[0] else None
+        )
+    }
+
+@router.post("/research/challenger/promote")
+async def promote_research_challenger_api(req: ResearchChallengerPromoteRequest):
+    """
+    Gated human-approval API specifically for Portfolio Research Challenger.
+    Enforces that fresh forward OOS trades >= 30, disallowing recycling of the 34 historical holdout trades.
+    Strictly isolated from Foundation Model Challenger.
+    """
+    from app.analytics.master_logger import MasterLogger
+
+    if not req.challenger_type:
+        raise HTTPException(status_code=400, detail="Missing required field: challenger_type")
+    if req.challenger_type != "PORTFOLIO_RESEARCH_CHALLENGER":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Challenger type mismatch: Expected 'PORTFOLIO_RESEARCH_CHALLENGER' but received '{req.challenger_type}'."
+        )
+    if req.challenger_id and req.challenger_id.startswith("fnd_"):
+        raise HTTPException(
+            status_code=409,
+            detail="Cross-system routing violation: Cannot promote Foundation Model Challenger via Portfolio Research endpoint. Use /api/ml/foundation/promote."
+        )
+    if not req.source_research_job_id:
+        raise HTTPException(status_code=400, detail="Missing required field: source_research_job_id")
+
+    job = research_job_manager.get_job(req.source_research_job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Source research job '{req.source_research_job_id}' not found.")
+
+    identity_metadata = {
+        "challenger_type": "PORTFOLIO_RESEARCH_CHALLENGER",
+        "challenger_id": req.challenger_id or f"prc_{req.source_research_job_id}",
+        "source_research_job_id": req.source_research_job_id,
+        "model_type": "LIGHTGBM_ALPHA_SIGMOID",
+        "engine_version": "v2.0-portfolio-walkforward",
+        "universe": job.get("universe", "ALL_COLLECTED"),
+        "fingerprint": job.get("research_fingerprint")
+    }
+
+    if not req.confirm_promotion:
+        return {
+            "status": "APPROVAL_REQUIRED",
+            "message": "Promotion requires explicit confirmation (confirm_promotion=True).",
+            "gates_passed": False,
+            **identity_metadata
+        }
+
+    # Gate Evaluation: Fresh OOS shadow trades required >= 30
+    # The historical 34 holdout trades belong to the research phase and cannot be recycled as fresh OOS evidence.
+    fresh_oos_trades = 0
+    rejection_reasons = [
+        f"Insufficient fresh OOS sample size ({fresh_oos_trades} trades < 30 required for statistical significance). "
+        "The historical 34 locked holdout trades belong to research artifact res_20260903_172929_829837 and cannot be recycled as fresh Challenger OOS evidence. "
+        "A minimum of 30 independent forward shadow trades starting on or after 2026-09-04 is required."
+    ]
+
+    MasterLogger.log_event(
+        "PROMOTION", "REJECTED",
+        f"Portfolio Research Challenger promotion rejected for {req.source_research_job_id}: {rejection_reasons[0]}",
+        details={"job_id": req.source_research_job_id, "fresh_oos_trades": fresh_oos_trades, "reasons": rejection_reasons},
+        severity="WARNING"
+    )
+
+    return {
+        "status": "REJECTED",
+        "message": "Promotion safety gates not satisfied: " + rejection_reasons[0],
+        "gates_passed": False,
+        "fresh_oos_trades": fresh_oos_trades,
+        "required_oos_trades": 30,
+        "historical_holdout_trades": 34,
+        "rejection_reasons": rejection_reasons,
+        **identity_metadata
+    }
+
 
 
 

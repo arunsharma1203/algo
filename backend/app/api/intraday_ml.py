@@ -51,22 +51,14 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
         custom_list = []
         
     start_time = datetime.now()
-    clean_custom = [t.strip().upper() for t in custom_list if t and t.strip()]
-    if universe_preset and universe_preset.upper() == "ALL_COLLECTED":
-        from app.analytics.universe_config import get_universe
-        u_info = get_universe("ALL_COLLECTED", custom_tickers=clean_custom)
-        candidate_pool = list(u_info.get("tickers", []))
-        universe_label = f"ALL COLLECTED SOURCES ({len(candidate_pool)} stocks)"
-    elif clean_custom and (not universe_preset or universe_preset.upper() in ("CUSTOM", "WATCHLIST")):
+    from app.analytics.universe_config import resolve_universe_tickers
+    clean_preset = universe_preset.strip().upper() if universe_preset else "NIFTY_500"
+    if clean_preset in ("CUSTOM", "WATCHLIST") and clean_custom:
         candidate_pool = [t if t.endswith(('.NS', '.BO')) else f"{t}.NS" for t in clean_custom]
-        universe_label = "CUSTOM WATCHLIST"
+        universe_label = f"CUSTOM WATCHLIST ({len(candidate_pool)} stocks)"
     else:
-        from app.analytics.universe_config import get_universe
-        u_info = get_universe(universe_preset or "NIFTY_500")
-        candidate_pool = list(u_info.get("tickers", []))
-        if not candidate_pool:
-            candidate_pool = INDIAN_STOCK_UNIVERSE
-        universe_label = universe_preset or "NIFTY_500"
+        candidate_pool = resolve_universe_tickers(clean_preset, custom_tickers=clean_custom)
+        universe_label = f"{clean_preset} ({len(candidate_pool)} stocks)"
 
     yield format_sse({"type": "system", "message": f"[{start_time.strftime('%H:%M:%S')}] Initiating Intraday ML Sweep across {len(candidate_pool)} symbols ({universe_label})...", "progress": 1})
     
@@ -281,22 +273,24 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
     # Clean raw_df before persisting or sending
     best_trade.pop('raw_df', None)
 
-    # 9. Save as NOT_A_POSITION recommendation via shared persistence
+    # 9. Save as NOT_A_POSITION recommendation via shared persistence ONLY if qualified
     from app.api.ml_history import save_ml_trade, evaluate_ml_history
 
-    was_saved = save_ml_trade(
-        ticker=best_trade['ticker'],
-        is_bullish=best_trade['is_bullish'],
-        entry=best_trade['entry'],
-        sl=best_trade['sl'],
-        tp1=best_trade['tp1'],
-        tp2=best_trade['tp2'],
-        confidence=best_trade['prob_up'],
-        trade_type="INTRADAY",
-        explanation=final_result.explanation,
-        source='MANUAL',
-        position_type='NOT_A_POSITION'
-    )
+    was_saved = False
+    if final_result.qualified:
+        was_saved = save_ml_trade(
+            ticker=best_trade['ticker'],
+            is_bullish=best_trade['is_bullish'],
+            entry=best_trade['entry'],
+            sl=best_trade['sl'],
+            tp1=best_trade['tp1'],
+            tp2=best_trade['tp2'],
+            confidence=best_trade['prob_up'],
+            trade_type="INTRADAY",
+            explanation=final_result.explanation,
+            source='MANUAL',
+            position_type='NOT_A_POSITION'
+        )
 
     if was_saved:
         yield format_sse({"type": "info", "message": f"💾 Saved new recommendation for {best_trade['ticker']} to Trade History"})
