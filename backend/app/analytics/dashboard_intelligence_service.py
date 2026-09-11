@@ -416,17 +416,19 @@ class DashboardIntelligenceService:
                     curr.close as curr_close,
                     prev.close as prev_close
                 FROM ohlcv curr
-                JOIN ohlcv prev ON curr.ticker = prev.ticker AND prev.date = ?
-                WHERE curr.date = ?
+                JOIN ohlcv prev ON curr.ticker = prev.ticker AND prev.date = ? AND (prev.timeframe = '1d' OR prev.timeframe IS NULL)
+                WHERE curr.date = ? AND (curr.timeframe = '1d' OR curr.timeframe IS NULL)
                 """
                 df_ad = pd.read_sql_query(q, conn, params=(prev_date, latest_date))
                 
                 if not df_ad.empty:
+                    df_ad = df_ad.dropna(subset=["curr_close", "prev_close"]).copy()
                     df_ad["change"] = df_ad["curr_close"] - df_ad["prev_close"]
+                    df_ad = df_ad.dropna(subset=["change"])
                     adv = int((df_ad["change"] > 0).sum())
                     dec = int((df_ad["change"] < 0).sum())
                     unc = int((df_ad["change"] == 0).sum())
-                    evaluated_count = len(df_ad)
+                    evaluated_count = adv + dec + unc
                     missing_count = max(0, universe_size - evaluated_count)
                     coverage_pct = round(evaluated_count / universe_size * 100.0, 1) if universe_size > 0 else 0.0
                     
@@ -634,43 +636,58 @@ class DashboardIntelligenceService:
     def get_institutional_flows(cls) -> Dict[str, Any]:
         """
         FII / DII Institutional Flow Tracker.
-        Per strict rule: If verified API is unavailable, output 'Data unavailable'. Never fabricate.
+        Backed by official NSE disclosures via FiiDiiService.
         """
-        flows_data = {
-            "fii_latest_cr": None,
-            "fii_5d_cr": None,
-            "fii_20d_cr": None,
-            "dii_latest_cr": None,
-            "dii_5d_cr": None,
-            "dii_20d_cr": None,
-            "status": "UNAVAILABLE",
-            "message": "Official exchange institutional flow feed offline",
-            "source": "NSE / NSDL Official Filings",
-            "timestamp": datetime.now().isoformat()
-        }
-
         try:
-            conn = sqlite3.connect(get_db_path(), timeout=5.0)
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='institutional_flows'")
-            if cur.fetchone():
-                cur.execute("SELECT date, fii_net, dii_net FROM institutional_flows ORDER BY date DESC LIMIT 20")
-                rows = cur.fetchall()
-                if rows:
-                    latest = rows[0]
-                    flows_data["fii_latest_cr"] = round(float(latest[1]), 2)
-                    flows_data["dii_latest_cr"] = round(float(latest[2]), 2)
-                    flows_data["fii_5d_cr"] = round(sum(float(r[1]) for r in rows[:5]), 2)
-                    flows_data["dii_5d_cr"] = round(sum(float(r[2]) for r in rows[:5]), 2)
-                    flows_data["fii_20d_cr"] = round(sum(float(r[1]) for r in rows), 2)
-                    flows_data["dii_20d_cr"] = round(sum(float(r[2]) for r in rows), 2)
-                    flows_data["status"] = "FRESH"
-                    flows_data["message"] = f"Flows updated through {latest[0]}"
-            conn.close()
-        except Exception:
-            pass
+            from app.analytics.fii_dii_service import FiiDiiService
+            flow_data = FiiDiiService.get_latest_flows(limit=20)
+            history = flow_data.get("history", [])
+            latest = history[0] if history else {}
 
-        return flows_data
+            fii_latest = latest.get("fii_net")
+            dii_latest = latest.get("dii_net")
+            fii_5d = flow_data.get("multi_day_trend", {}).get("fii_5d_net")
+            dii_5d = flow_data.get("multi_day_trend", {}).get("dii_5d_net")
+            fii_20d = round(sum(item["fii_net"] for item in history), 2) if history else None
+            dii_20d = round(sum(item["dii_net"] for item in history), 2) if history else None
+
+            return {
+                "disclosure_date": flow_data.get("disclosure_date"),
+                "fii_latest_cr": fii_latest,
+                "dii_latest_cr": dii_latest,
+                "fii_gross_buy_cr": latest.get("fii_buy"),
+                "fii_gross_sell_cr": latest.get("fii_sell"),
+                "dii_gross_buy_cr": latest.get("dii_buy"),
+                "dii_gross_sell_cr": latest.get("dii_sell"),
+                "net_institutional_cr": flow_data.get("net_institutional_total"),
+                "formatted_net_total": flow_data.get("formatted_net_total"),
+                "fii_5d_cr": fii_5d,
+                "dii_5d_cr": dii_5d,
+                "fii_20d_cr": fii_20d,
+                "dii_20d_cr": dii_20d,
+                "status": "FRESH" if fii_latest is not None else "UNAVAILABLE",
+                "message": f"Official NSE Disclosures as of {flow_data.get('disclosure_date')}",
+                "source": "NSE Official Disclosures (Cash Market)",
+                "market_sentiment": flow_data.get("market_sentiment"),
+                "summary": flow_data.get("summary"),
+                "is_real_time": False,
+                "timestamp": datetime.now().isoformat(),
+                "history": history
+            }
+        except Exception as e:
+            return {
+                "disclosure_date": None,
+                "fii_latest_cr": None,
+                "fii_5d_cr": None,
+                "fii_20d_cr": None,
+                "dii_latest_cr": None,
+                "dii_5d_cr": None,
+                "dii_20d_cr": None,
+                "status": "UNAVAILABLE",
+                "message": f"Official flow feed offline ({str(e)})",
+                "source": "NSE / NSDL Official Filings",
+                "timestamp": datetime.now().isoformat()
+            }
 
     @classmethod
     def get_volatility_risk_radar(cls, indian_markets: List[Dict[str, Any]], global_cues: List[Dict[str, Any]]) -> Dict[str, Any]:

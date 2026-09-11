@@ -50,8 +50,8 @@ class ResearchReportMetricsAdapter:
                 v.get("trades_count", 0) for v in ticker_results.values() if isinstance(v, dict)
             )
 
-        # If top-level portfolio trades/equity_curve are missing, find companion portfolio run
-        if not trades or not equity_curve:
+        # If top-level portfolio trades are missing, find companion portfolio run
+        if not trades:
             companion_data = cls._find_companion_portfolio_results(job, adapted)
             if companion_data:
                 trades = companion_data.get("trades") or trades
@@ -66,6 +66,14 @@ class ResearchReportMetricsAdapter:
                     adapted["locked_final_holdout"] = companion_data["locked_final_holdout"]
                 if "metrics" in companion_data and not adapted.get("metrics"):
                     adapted["metrics"] = companion_data["metrics"]
+
+        if not equity_curve and trades:
+            init_cap = float(job.get("initial_capital") or adapted.get("initial_capital") or 500000.0)
+            running_eq = init_cap
+            equity_curve = []
+            for t in sorted(trades, key=lambda x: str(x.get("exit_date", ""))):
+                running_eq += float(t.get("pnl", 0))
+                equity_curve.append({"date": str(t.get("exit_date", ""))[:10], "equity": round(running_eq, 2)})
 
         adapted["trades"] = trades
         adapted["equity_curve"] = equity_curve
@@ -317,21 +325,6 @@ class ResearchReportMetricsAdapter:
                         return json.load(f)
         except Exception as e:
             logger.warning(f"Error querying companion portfolio job from database: {e}")
-
-        # 2. Check canonical completed portfolio walk-forward files on disk
-        candidates = [
-            os.path.join(RESULTS_DIR, "result_res_20260903_222923_36b0c8.json"),
-            os.path.join(RESULTS_DIR, "result_res_20260903_172929_829837.json"),
-        ]
-        for path in candidates:
-            if os.path.exists(path):
-                try:
-                    with open(path, "r") as f:
-                        data = json.load(f)
-                        if data and "trades" in data and len(data["trades"]) > 0:
-                            return data
-                except Exception as e:
-                    logger.warning(f"Error reading fallback portfolio file {path}: {e}")
 
         return None
 

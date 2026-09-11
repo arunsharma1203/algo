@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { runBacktest } from '../services/api';
-import TickerSearch from '../components/TickerSearch';
+import TickerAutocomplete from '../components/TickerAutocomplete';
 import { useLiveIndicator } from '../context/LiveIndicatorContext';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { PlayCircle, Settings, Check } from 'lucide-react';
@@ -158,7 +158,14 @@ export default function Optimizer() {
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Ticker</label>
-            <TickerSearch value={ticker} onChange={setTicker} />
+            <TickerAutocomplete
+              value={ticker}
+              onChange={setTicker}
+              multiSelect={false}
+              showPresets={true}
+              variant="light"
+              placeholder="e.g. RELIANCE.NS"
+            />
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>

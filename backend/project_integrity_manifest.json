@@ -1,0 +1,38 @@
+{
+  "project_name": "Autonomous Swing & Intraday Trading Platform",
+  "manifest_version": "1.0.0",
+  "created_at": "2026-09-11T10:18:00+05:30",
+  "authoritative_production_champions": {
+    "swing": {
+      "path": "models/swing/champion_ensemble.pkl",
+      "sha256": "11cd6a77e60b819e9d3260f10738e7a59033e6d3bf88a65b29892a02489ba534",
+      "status": "IMMUTABLE_LOCKED"
+    },
+    "intraday": {
+      "path": "models/intraday/champion_ensemble.pkl",
+      "sha256": "f6506e423de2cc442fddabd073f0800e64b09dfb71e8f7b0135aec4d0876dd91",
+      "status": "IMMUTABLE_LOCKED"
+    }
+  },
+  "database_invariants": {
+    "canonical_db_file": "backend/market_data.db",
+    "test_isolation": "MANDATORY_SANDBOX_OVERRIDE",
+    "unique_indexes": [
+      "idx_req_unique_mission_config ON research_experiments_queue(mission_id, config_hash)",
+      "idx_rel_unique_mission_config ON research_experiments_ledger(mission_id, config_hash)"
+    ],
+    "ohlcv_timeframes": ["1d", "15m"]
+  },
+  "integrity_rules_count": 25,
+  "remediation_milestones_completed": [
+    "0.5_TEST_ISOLATION_LOCKDOWN",
+    "1_REAL_MODEL_ARTIFACT_FOUNDATION",
+    "2_REAL_RESEARCH_OOS_FORWARD_PIPELINE",
+    "3_MODEL_REGISTRY_REAL_PROMOTION",
+    "4_DYNAMIC_METRICS_API_INTEGRITY",
+    "5_EXPERIMENT_UNIQUENESS_INTEGRITY",
+    "6_INTRADAY_DATA_PERSISTENCE",
+    "7_PERMANENT_INTEGRITY_GUARDRAILS"
+  ]
+}
+

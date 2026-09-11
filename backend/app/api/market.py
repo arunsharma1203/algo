@@ -1,3 +1,4 @@
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, HTTPException
 from app.data.market_data import fetch_historical_data
 from app.indicators.engine import apply_indicators
@@ -10,36 +11,100 @@ import time
 router = APIRouter()
 
 @router.get("/search")
-async def search_tickers(q: str):
+async def search_tickers(q: Optional[str] = None, query: Optional[str] = None):
+    """
+    Authoritative ticker search endpoint.
+    Searches local canonical equity universe first for immediate, zero-latency matches.
+    Only returns legitimate NSE/BSE equity instruments.
+    Returns empty list [] for non-existent/fake symbols (e.g. DSDSDS, SDFSDF).
+    Strictly read-only with zero side effects.
+    """
+    search_val = q or query or ""
+    if not search_val or not search_val.strip():
+        return []
+
+    clean_q = search_val.strip().upper()
+    results = []
+    seen_symbols = set()
+
+    # 1. Authoritative Local Universe Search (514+ NSE Equities)
     try:
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=15&newsCount=0"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
+        from app.analytics.universe_config import get_authoritative_universe_symbols
+        known_symbols = sorted(list(get_authoritative_universe_symbols()))
         
-        data = response.json()
-        results = []
-        for quote in data.get('quotes', []):
-            # Only include equities, and prioritize Indian exchanges (NSI/NSE, BSE) 
-            # Or allow all equities but add a flag. Let's include all but highlight Indian ones.
-            if quote.get('quoteType') == 'EQUITY':
-                symbol = quote.get('symbol')
-                name = quote.get('longname') or quote.get('shortname')
-                exchange = quote.get('exchDisp')
-                
-                # If they explicitly search Indian stocks, or we just return them
-                results.append({
-                    "symbol": symbol,
-                    "name": name,
-                    "exchange": exchange
-                })
-                
-        # Optional: Sort so Indian stocks (.NS, .BO) appear first
-        results.sort(key=lambda x: 0 if x['symbol'].endswith('.NS') or x['symbol'].endswith('.BO') else 1)
-        
+        # Priority 1: Exact symbol match (with or without .NS)
+        for sym in known_symbols:
+            base = sym.split(".")[0]
+            if clean_q == base or clean_q == sym:
+                if sym not in seen_symbols:
+                    seen_symbols.add(sym)
+                    results.append({
+                        "symbol": sym,
+                        "name": base,
+                        "exchange": "NSE"
+                    })
+
+        # Priority 2: Prefix matches
+        for sym in known_symbols:
+            base = sym.split(".")[0]
+            if base.startswith(clean_q) or sym.startswith(clean_q):
+                if sym not in seen_symbols:
+                    seen_symbols.add(sym)
+                    results.append({
+                        "symbol": sym,
+                        "name": base,
+                        "exchange": "NSE"
+                    })
+                if len(results) >= 12:
+                    break
+
+        # Priority 3: Substring matches if under limit
+        if len(results) < 8:
+            for sym in known_symbols:
+                base = sym.split(".")[0]
+                if clean_q in base and sym not in seen_symbols:
+                    seen_symbols.add(sym)
+                    results.append({
+                        "symbol": sym,
+                        "name": base,
+                        "exchange": "NSE"
+                    })
+                if len(results) >= 12:
+                    break
+    except Exception as local_err:
+        pass
+
+    # If local matches found, return them directly without hitting external network
+    if results:
         return results
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+
+    # 2. Fallback to external provider strictly if no local matches found
+    # Only return Indian equities (.NS, .BO) that are valid instruments
+    try:
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={clean_q}&quotesCount=10&newsCount=0"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        response = requests.get(url, headers=headers, timeout=3.0)
+        if response.status_code == 200:
+            data = response.json()
+            for quote in data.get('quotes', []):
+                if quote.get('quoteType') == 'EQUITY':
+                    symbol = quote.get('symbol', '')
+                    # Strictly require Indian exchange suffix
+                    if symbol.endswith(('.NS', '.BO')):
+                        name = quote.get('longname') or quote.get('shortname') or symbol
+                        exchange = quote.get('exchDisp') or ('NSE' if symbol.endswith('.NS') else 'BSE')
+                        if symbol not in seen_symbols:
+                            seen_symbols.add(symbol)
+                            results.append({
+                                "symbol": symbol,
+                                "name": name,
+                                "exchange": exchange
+                            })
+    except Exception:
+        pass
+
+    return results
+
 
 @router.get("/dump-stats")
 def get_dump_stats():

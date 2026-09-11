@@ -537,3 +537,386 @@ class ResearchReportPDFGenerator:
         doc.build(story)
         buffer.seek(0)
         return buffer.getvalue()
+
+    @classmethod
+    def generate_experiment_audit_pdf(cls, audit_data: Dict[str, Any]) -> bytes:
+        """
+        Generates a professional, self-contained, publication-quality research audit
+        PDF report for a single experiment or candidate using ReportLab.
+        Contains complete cryptographic provenance, parameters, governance gates,
+        cost sensitivity, walk-forward windows, and production safety disclaimers.
+        """
+        audit = audit_data or {}
+        metrics = audit.get("metrics") or {}
+        cost_sens = audit.get("cost_sensitivity") or {}
+        
+        # Flexible walk forward parsing (handles list or dict)
+        wf_raw = audit.get("walk_forward_details") or audit.get("walk_forward") or {}
+        if isinstance(wf_raw, list):
+            wf_windows = wf_raw
+            wf_stability = metrics.get("walk_forward_stability_pct") or audit.get("walk_forward_stability_pct")
+            wf = {"windows": wf_windows, "stability_pct": wf_stability}
+        elif isinstance(wf_raw, dict):
+            wf_windows = wf_raw.get("windows") or []
+            wf_stability = wf_raw.get("stability_pct") or metrics.get("walk_forward_stability_pct")
+            wf = {"windows": wf_windows, "stability_pct": wf_stability}
+        else:
+            wf_windows = []
+            wf_stability = metrics.get("walk_forward_stability_pct")
+            wf = {"windows": [], "stability_pct": wf_stability}
+
+        # Flexible governance gates parsing
+        gates_raw = audit.get("governance_gates") or {}
+        if isinstance(gates_raw, dict):
+            checklist = gates_raw.get("checklist") or gates_raw
+        else:
+            checklist = {}
+
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=letter,
+            rightMargin=36,
+            leftMargin=36,
+            topMargin=36,
+            bottomMargin=36
+        )
+
+        styles = getSampleStyleSheet()
+
+        title_style = ParagraphStyle(
+            'AuditDocTitle', parent=styles['Normal'],
+            fontName='Helvetica-Bold', fontSize=15, leading=19,
+            textColor=colors.HexColor('#0F172A')
+        )
+        subtitle_style = ParagraphStyle(
+            'AuditDocSubtitle', parent=styles['Normal'],
+            fontName='Helvetica', fontSize=8, leading=11,
+            textColor=colors.HexColor('#64748B')
+        )
+        section_heading = ParagraphStyle(
+            'AuditSectionHeading', parent=styles['Normal'],
+            fontName='Helvetica-Bold', fontSize=9.5, leading=13,
+            textColor=colors.HexColor('#0F172A'), spaceBefore=6, spaceAfter=3
+        )
+        body_style = ParagraphStyle(
+            'AuditBody', parent=styles['Normal'],
+            fontName='Helvetica', fontSize=7.5, leading=10,
+            textColor=colors.HexColor('#334155')
+        )
+        body_bold = ParagraphStyle(
+            'AuditBodyBold', parent=body_style,
+            fontName='Helvetica-Bold', textColor=colors.HexColor('#0F172A')
+        )
+        code_style = ParagraphStyle(
+            'AuditCode', parent=body_style,
+            fontName='Courier', fontSize=6.5, leading=8.5,
+            textColor=colors.HexColor('#0F172A')
+        )
+
+        def _v(val, decimals=2, suffix=""):
+            if val is None: return "N/A"
+            try:
+                num = float(val)
+                if num != num: return "N/A"
+                return f"{num:.{decimals}f}{suffix}"
+            except (ValueError, TypeError):
+                return str(val) if val is not None else "N/A"
+
+        story = []
+
+        # ── HEADER & TITLE ───────────────────────────────────────────────────
+        exp_id = audit.get("experiment_id", "N/A")
+        cand_id = audit.get("candidate_id") or "None (Not Frozen)"
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M IST")
+
+        header_table = Table([
+            [
+                Paragraph("<b>QUANTITATIVE ALPHA RESEARCH AUDIT REPORT</b>", title_style),
+                Paragraph("<font color='#0EA5E9'><b>AI QUANT LAB &bull; AUDIT SUITE</b></font><br/><font size=7 color='#64748B'>Autonomous Discovery Engine v1.0</font>", ParagraphStyle('HdrR', parent=title_style, fontSize=8.5, leading=11, alignment=2))
+            ],
+            [
+                Paragraph(f"Experiment ID: <b>{exp_id}</b> &bull; Candidate ID: <b>{cand_id}</b>", subtitle_style),
+                Paragraph(f"Report Generated: {now_str}", ParagraphStyle('HdrSubR', parent=subtitle_style, alignment=2))
+            ]
+        ], colWidths=[380, 160])
+        header_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 1)
+        ]))
+        story.append(header_table)
+        story.append(Spacer(1, 2))
+        story.append(HRFlowable(width="100%", thickness=1.2, color=colors.HexColor('#0EA5E9'), spaceBefore=1, spaceAfter=4))
+
+        # ── PRODUCTION ISOLATION DISCLAIMER ──────────────────────────────────
+        disclaimer_html = (
+            "<b>PRODUCTION SAFETY DISCLAIMER &bull; PURE RESEARCH ARTIFACT &bull; NOT A PRODUCTION CHAMPION</b><br/>"
+            "This document is a formal research audit record generated in an isolated sandbox. It has NOT been promoted to production. "
+            "Production trade execution and scanner signals continue to be driven strictly by the active immutable Champion models "
+            "(Intraday SHA-256: <code>f6506e42...</code> &bull; Swing SHA-256: <code>11cd6a77...</code>). Promotion requires out-of-sample forward testing, "
+            "human confirmation, and explicit governance authorization. Zero live positions or trade history records were modified."
+        )
+        disc_table = Table([[Paragraph(disclaimer_html, ParagraphStyle('Disc', parent=body_style, fontSize=6.5, leading=8.5, textColor=colors.HexColor('#4C1D95')))]], colWidths=[540])
+        disc_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#F5F3FF')),
+            ('BOX', (0, 0), (-1, -1), 0.75, colors.HexColor('#C4B5FD')),
+            ('PADDING', (0, 0), (-1, -1), 3),
+        ]))
+        story.append(disc_table)
+        story.append(Spacer(1, 4))
+
+        # ── 1. CRYPTOGRAPHIC PROVENANCE & IDENTIFIERS ─────────────────────────
+        story.append(Paragraph("1. Cryptographic Provenance &amp; Hashes", section_heading))
+        prov_rows = [
+            [Paragraph("Configuration Hash (SHA-256)", body_bold), Paragraph(str(audit.get("config_hash") or "N/A"), code_style)],
+            [Paragraph("Model Artifact (SHA-256)", body_bold), Paragraph(str(audit.get("artifact_sha256") or "N/A (Not Frozen in Vault)"), code_style)],
+            [Paragraph("Internal Model Fingerprint", body_bold), Paragraph(str(audit.get("model_hash") or "N/A"), code_style)],
+            [Paragraph("Training Dataset Fingerprint", body_bold), Paragraph(str(audit.get("dataset_hash") or "N/A"), code_style)],
+            [Paragraph("Governance Engine / Version", body_bold), Paragraph(f"{audit.get('governance_version', 'N/A')} &bull; Code: {audit.get('code_version', 'v1.0-autopilot')}", body_style)],
+            [Paragraph("Mission ID / Status", body_bold), Paragraph(f"{audit.get('mission_id', 'N/A')} &bull; Lifecycle: <b>{audit.get('status', 'N/A')}</b> &bull; Candidate: <b>{audit.get('candidate_status', 'NONE')}</b>", body_style)],
+        ]
+        prov_table = Table(prov_rows, colWidths=[150, 390])
+        prov_table.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+            ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#F8FAFC')),
+            ('PADDING', (0, 0), (-1, -1), 2.5),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        story.append(prov_table)
+        story.append(Spacer(1, 4))
+
+        # ── 2. HYPOTHESIS & STRATEGY SPECIFICATION ───────────────────────────
+        story.append(Paragraph("2. Hypothesis &amp; Strategy Specification", section_heading))
+        hypo_text = audit.get("hypothesis") or f"Evaluate {audit.get('model_family')} on {audit.get('feature_family')} with {audit.get('horizon_days')}D target horizon."
+        story.append(Paragraph(f"<b>Hypothesis:</b> {hypo_text}", body_style))
+        story.append(Spacer(1, 2))
+
+        strat_rows = [
+            ["Parameter", "Value", "Parameter", "Value"],
+            [Paragraph("Model Family", body_style), Paragraph(f"<b>{audit.get('model_family', 'N/A')}</b>", body_style),
+             Paragraph("Feature Family", body_style), Paragraph(f"<b>{audit.get('feature_family', 'N/A')} ({audit.get('feature_version', 'v1.0')})</b>", body_style)],
+            [Paragraph("Target Horizon", body_style), Paragraph(f"<b>{audit.get('horizon_days', 'N/A')} Days</b> ({audit.get('target', 'N/A')})", body_style),
+             Paragraph("Universe / Tickers", body_style), Paragraph(f"<b>{audit.get('universe', 'LIVE_52')} ({audit.get('ticker_count', 52)} Tickers)</b>", body_style)],
+            [Paragraph("Portfolio Construction", body_style), Paragraph(f"<b>{audit.get('portfolio_family', 'N/A')}</b>", body_style),
+             Paragraph("Entry / Exit Top-K", body_style), Paragraph(f"Top <b>{audit.get('entry_top_k', 'N/A')}</b> Entry / <b>{audit.get('exit_top_k', 'N/A')}</b> Exit", body_style)],
+            [Paragraph("Holding Period / Rebal", body_style), Paragraph(f"<b>{audit.get('holding_period', 'N/A')} Days</b> (Freq: {audit.get('rebalance_frequency', 1)})", body_style),
+             Paragraph("Research Seed", body_style), Paragraph(f"<b>{audit.get('seed', 42)}</b>", body_style)],
+            [Paragraph("Train Date Range", body_style), Paragraph(f"{audit.get('train_start', 'N/A')} &rarr; {audit.get('train_end', 'N/A')}", body_style),
+             Paragraph("Validation Range", body_style), Paragraph(f"{audit.get('val_start', 'N/A')} &rarr; {audit.get('val_end', 'N/A')}", body_style)],
+            [Paragraph("Locked OOS Date Range", body_style), Paragraph(f"<b>{audit.get('oos_start', 'N/A')} &rarr; {audit.get('oos_end', 'N/A')}</b>", body_style),
+             Paragraph("Candidate Status", body_style), Paragraph(f"<b>{audit.get('candidate_status', 'NONE')}</b>", body_style)],
+        ]
+        strat_table = Table(strat_rows, colWidths=[120, 150, 120, 150])
+        strat_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+            ('PADDING', (0, 0), (-1, -1), 2.5),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8FAFC')]),
+        ]))
+        story.append(strat_table)
+        story.append(Spacer(1, 4))
+
+        # ── 3. PERFORMANCE & RISK METRICS ─────────────────────────────────────
+        story.append(Paragraph("3. Authoritative Performance &amp; Risk Metrics", section_heading))
+        perf_rows = [
+            ["Metric", "Value", "Metric", "Value"],
+            [Paragraph("Net CAGR %", body_style), Paragraph(f"<b>{_v(audit.get('cagr_net'), 2, '%')}</b>", body_style),
+             Paragraph("Gross CAGR %", body_style), Paragraph(f"<b>{_v(audit.get('cagr_gross'), 2, '%')}</b>", body_style)],
+            [Paragraph("Sharpe Ratio", body_style), Paragraph(f"<b>{_v(audit.get('sharpe'), 2)}</b>", body_style),
+             Paragraph("Sortino Ratio", body_style), Paragraph(f"<b>{_v(audit.get('sortino'), 2)}</b>", body_style)],
+            [Paragraph("Profit Factor", body_style), Paragraph(f"<b>{_v(audit.get('profit_factor'), 2)}</b>", body_style),
+             Paragraph("Win Rate %", body_style), Paragraph(f"<b>{_v(audit.get('win_rate_pct'), 1, '%')}</b>", body_style)],
+            [Paragraph("Trade Expectancy", body_style), Paragraph(f"<b>{_v(audit.get('expectancy'), 4)}</b>", body_style),
+             Paragraph("Completed Trades", body_style), Paragraph(f"<b>{_v(audit.get('trade_count'), 0)}</b>", body_style)],
+            [Paragraph("Max Drawdown %", body_style), Paragraph(f"<font color='#F43F5E'><b>{_v(audit.get('max_drawdown_pct'), 1, '%')}</b></font>", body_style),
+             Paragraph("Annualized Turnover", body_style), Paragraph(f"<b>{_v(audit.get('turnover_pct'), 0, '%')}</b>", body_style)],
+            [Paragraph("Calmar Ratio", body_style), Paragraph(f"<b>{_v(audit.get('calmar'), 2)}</b>", body_style),
+             Paragraph("Walk-Forward Stability", body_style), Paragraph(f"<b>{_v(wf.get('stability_pct'), 1, '%')}</b>", body_style)],
+        ]
+        perf_table = Table(perf_rows, colWidths=[120, 150, 120, 150])
+        perf_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+            ('PADDING', (0, 0), (-1, -1), 2.5),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8FAFC')]),
+        ]))
+        story.append(perf_table)
+        story.append(Spacer(1, 4))
+
+        # ── 4. COST DRAG & FRICTION SENSITIVITY ────────────────────────────────
+        story.append(Paragraph("4. Cost Sensitivity &amp; Friction Drag Analysis", section_heading))
+        cost_rows = [
+            ["Friction Tier", "Drag %", "Net CAGR %", "Friction Survival Verdict"]
+        ]
+        for tier_key, tier_lbl in [("10bps", "10 bps (Institutional Tier)"), ("15bps", "15 bps (Prime Broker)"), ("20bps", "20 bps (Retail Direct)"), ("30bps", "30 bps (Adverse Execution)")]:
+            td = cost_sens.get(tier_key, {})
+            surv = td.get("survives")
+            surv_str = "PASS" if surv is True else ("FAIL" if surv is False else "N/A")
+            surv_col = "#10B981" if surv is True else ("#F43F5E" if surv is False else "#64748B")
+            cost_rows.append([
+                Paragraph(tier_lbl, body_style),
+                Paragraph(f"<b>{_v(td.get('drag_pct'), 2, '%')}</b>", body_style),
+                Paragraph(f"<b>{_v(td.get('cagr_net'), 2, '%')}</b>", body_style),
+                Paragraph(f"<font color='{surv_col}'><b>{surv_str}</b></font>", body_style),
+            ])
+        cost_table = Table(cost_rows, colWidths=[170, 110, 110, 150])
+        cost_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+            ('PADDING', (0, 0), (-1, -1), 2.5),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8FAFC')]),
+        ]))
+        story.append(cost_table)
+        story.append(Spacer(1, 4))
+
+        # ── 5. WALK-FORWARD MULTI-WINDOW ANALYSIS ─────────────────────────────
+        story.append(Paragraph("5. Walk-Forward Multi-Window Analysis", section_heading))
+        windows = wf.get("windows") or []
+        wf_rows = [["Window", "Validation Span", "Outcome Status", "Consistency"]]
+        if windows:
+            for w in windows:
+                w_idx = w.get("window") or w.get("window_index") or "N/A"
+                w_span = w.get("val_span") or f"{w.get('start_date', 'N/A')} &rarr; {w.get('end_date', 'N/A')}"
+                st = w.get("status", "N/A")
+                col = "#10B981" if st in ("POSITIVE", "PASSED") else ("#F43F5E" if st in ("NEGATIVE", "FAILED") else "#64748B")
+                wf_rows.append([
+                    Paragraph(f"Window {w_idx}", body_style),
+                    Paragraph(w_span, body_style),
+                    Paragraph(f"<font color='{col}'><b>{st}</b></font>", body_style),
+                    Paragraph("Passed Gate" if w.get("passed") else ("Failed Gate" if w.get("passed") is False else "N/A"), body_style),
+                ])
+        else:
+            wf_rows.append([
+                Paragraph("All Windows", body_style),
+                Paragraph(f"Overall Walk-Forward Stability: {_v(wf.get('stability_pct'), 1, '%')}", body_style),
+                Paragraph("STABLE" if (wf.get('stability_pct') or 0) >= 60.0 else "UNSTABLE", body_style),
+                Paragraph("Evaluated in Batch", body_style)
+            ])
+        wf_table = Table(wf_rows, colWidths=[90, 210, 120, 120])
+        wf_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+            ('PADDING', (0, 0), (-1, -1), 2.5),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8FAFC')]),
+        ]))
+        story.append(wf_table)
+        story.append(Spacer(1, 4))
+
+        # ── 6. OUT-OF-SAMPLE (OOS) ACCOUNTING & PROGRESS ──────────────────────
+        story.append(Paragraph("6. Out-of-Sample (OOS) Bar Accounting &amp; Forward Progress", section_heading))
+        oos_data = audit.get("oos_metrics") or {}
+        locked_bars = oos_data.get("locked_oos_bars_available", 0)
+        total_bars = oos_data.get("locked_oos_bars_total", 0)
+        completion_pct = oos_data.get("locked_oos_completion_pct", oos_data.get("locked_oos_bars_pct", 0.0))
+        future_bars = oos_data.get("future_forward_oos_bars", 0)
+        oos_trades = oos_data.get("completed_oos_trades", audit.get("trade_count", 0))
+        oos_status = oos_data.get("oos_status", "OOS_PENDING")
+
+        oos_rows = [
+            ["OOS Parameter / Metric", "Measured Value", "Accounting Scope", "Status / Integrity Verdict"],
+            [Paragraph("Historical Locked OOS Bars", body_style),
+             Paragraph(f"<b>{locked_bars:,} / {total_bars:,}</b>", body_style),
+             Paragraph("Backtest Evaluation Window", body_style),
+             Paragraph(f"<font color='#10B981'><b>{completion_pct:.1f}% COMPLETE</b></font>", body_style)],
+            [Paragraph("Future Forward OOS Bars", body_style),
+             Paragraph(f"<b>{future_bars:,} Bars</b>", body_style),
+             Paragraph("Forward Deployment Ledger", body_style),
+             Paragraph("<font color='#D97706'><b>PENDING (0 NEW BARS)</b></font>", body_style)],
+            [Paragraph("Completed OOS Trades", body_style),
+             Paragraph(f"<b>{oos_trades:,} Trades</b>", body_style),
+             Paragraph("Strict OOS Execution Count", body_style),
+             Paragraph("VALIDATED" if (oos_trades or 0) >= 30 else "INSUFFICIENT TRADES", body_style)],
+            [Paragraph("OOS Forward Status", body_style),
+             Paragraph(f"<b>{oos_status}</b>", body_style),
+             Paragraph("Production Promotion Gate", body_style),
+             Paragraph("<font color='#6366F1'><b>HOLD LOCKED</b></font>", body_style)]
+        ]
+        oos_table = Table(oos_rows, colWidths=[160, 120, 140, 120])
+        oos_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+            ('PADDING', (0, 0), (-1, -1), 2.5),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8FAFC')]),
+        ]))
+        story.append(oos_table)
+        story.append(Spacer(1, 4))
+
+        # ── 7. FORMAL GOVERNANCE GATES & VERDICT ──────────────────────────────
+        story.append(Paragraph("7. Formal Quantitative Governance Gates Audit", section_heading))
+        gate_rows = [["Formal Governance Gate", "Measured Value", "Required Threshold", "Result"]]
+        gate_spec = [
+            ("min_trades_30", "Minimum Completed Trades", ["min_trades_30", "min_trades_gate"]),
+            ("positive_net_cagr", "Positive Net CAGR", ["positive_net_cagr"]),
+            ("positive_expectancy", "Positive Trade Expectancy", ["positive_expectancy"]),
+            ("profit_factor_above_one", "Profit Factor Threshold", ["profit_factor_above_one"]),
+            ("positive_sharpe", "Positive Sharpe Ratio", ["positive_sharpe"]),
+            ("max_drawdown_ceiling", "Max Drawdown Ceiling", ["max_drawdown_ceiling"]),
+            ("cost_survival_30bps", "Friction Survival (30 bps)", ["cost_survival_30bps"]),
+            ("walk_forward_stability", "Walk-Forward Window Stability", ["walk_forward_stability"])
+        ]
+        for key_canonical, g_name, alt_keys in gate_spec:
+            g_data = {}
+            for k in alt_keys:
+                if k in checklist:
+                    g_data = checklist[k]
+                    break
+            p = g_data.get("passed")
+            p_str = "PASS" if p is True else ("FAIL" if p is False else "N/A")
+            p_col = "#10B981" if p is True else ("#F43F5E" if p is False else "#64748B")
+            gate_rows.append([
+                Paragraph(g_name, body_style),
+                Paragraph(str(g_data.get("value", "N/A")), body_style),
+                Paragraph(str(g_data.get("threshold", "N/A")), body_style),
+                Paragraph(f"<font color='{p_col}'><b>{p_str}</b></font>", body_style),
+            ])
+        gov_table = Table(gate_rows, colWidths=[170, 110, 150, 110])
+        gov_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+            ('PADDING', (0, 0), (-1, -1), 2.5),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8FAFC')]),
+        ]))
+        story.append(gov_table)
+        story.append(Spacer(1, 4))
+
+        # ── 8. RESEARCH VERDICT & LINEAGE SUMMARY ─────────────────────────────
+        story.append(Paragraph("8. Research Verdict &amp; Lineage Audit", section_heading))
+        verdict = audit.get("governance_verdict", "PENDING")
+        quality = audit.get("quality_class", "PENDING")
+        cand_status = audit.get("candidate_status", "NONE")
+        reasons = audit.get("rejection_reasons") or []
+        reasons_str = "; ".join(reasons) if reasons else "None &mdash; All quantitative validation criteria satisfied."
+        parent_id = audit.get("parent_id") or "ROOT"
+
+        verdict_color = "#10B981" if verdict == "PASS" else ("#F43F5E" if verdict == "FAIL" else "#D97706")
+        verdict_html = f"""
+        <b>OVERALL RESEARCH GOVERNANCE VERDICT:</b> <font color='{verdict_color}'><b>{verdict}</b></font> &bull; 
+        <b>QUALITY CLASS:</b> <b>{quality}</b> &bull; 
+        <b>CANDIDATE STATUS:</b> <b>{cand_status}</b><br/>
+        <b>Parent Experiment:</b> {parent_id} &bull; <b>Execution Duration:</b> {_v(audit.get('runtime_seconds'), 2, 's')}<br/>
+        <b>Rejection / Governance Notes:</b> {reasons_str}
+        """
+        v_box = Table([[Paragraph(verdict_html, body_style)]], colWidths=[540])
+        v_box.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#F0F9FF')),
+            ('BOX', (0, 0), (-1, -1), 0.75, colors.HexColor('#0EA5E9')),
+            ('PADDING', (0, 0), (-1, -1), 4),
+        ]))
+        story.append(v_box)
+
+        doc.build(story)
+        buffer.seek(0)
+        return buffer.getvalue()
+

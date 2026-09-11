@@ -8,7 +8,7 @@ import {
 import {
   getLatestData, API_BASE, getDashboardIntelligence, downloadDashboardReportPdf
 } from '../services/api';
-import TickerSearch from '../components/TickerSearch';
+import TickerAutocomplete from '../components/TickerAutocomplete';
 import { useLiveIndicator } from '../context/LiveIndicatorContext';
 
 // ── SAFE VALUE FORMATTING UTILITIES ─────────────────────────────────────
@@ -502,7 +502,7 @@ export default function Dashboard() {
         {/* Institutional Flows (FII/DII) */}
         <div className="lg:col-span-1 bg-white border border-gray-200 rounded-2xl p-5 shadow-sm flex flex-col justify-between">
           <div>
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center justify-between mb-2">
               <h2 className="text-sm font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
                 <TrendingUp size={16} className="text-blue-500" /> Institutional Flows (FII / DII)
               </h2>
@@ -513,23 +513,58 @@ export default function Dashboard() {
               </span>
             </div>
 
+            {/* Exact Disclosure Date Header */}
+            {fiiDii.disclosure_date && (
+              <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 bg-slate-50 border border-slate-100 px-2.5 py-1 rounded-md mb-3">
+                <span>Date: <strong className="text-slate-800">{fiiDii.disclosure_date}</strong></span>
+                <span className="text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.2 rounded border border-blue-100">Official NSE Feed</span>
+              </div>
+            )}
+
             {fiiDii.status === 'FRESH' ? (
-              <div className="space-y-2 mt-2">
-                <div className="flex justify-between items-center p-2 bg-slate-50 rounded-lg text-xs">
-                  <span className="font-medium text-slate-600">Latest Session FII</span>
-                  <span className={`font-bold ${fiiDii.fii_latest_cr >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                    {fiiDii.fii_latest_cr >= 0 ? '+' : ''}{safeNum(fiiDii.fii_latest_cr)} Cr
+              <div className="space-y-2">
+                <div className="flex justify-between items-center p-2.5 bg-slate-50 hover:bg-slate-100/70 transition-colors rounded-xl text-xs border border-slate-100">
+                  <div>
+                    <span className="font-bold text-slate-700 block">DII Domestic Flow</span>
+                    {fiiDii.dii_gross_buy_cr && (
+                      <span className="text-[10px] text-slate-400">Buy: ₹{safeNum(fiiDii.dii_gross_buy_cr)} | Sell: ₹{safeNum(fiiDii.dii_gross_sell_cr)}</span>
+                    )}
+                  </div>
+                  <span className={`font-black text-sm ${fiiDii.dii_latest_cr >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {fiiDii.dii_latest_cr >= 0 ? '+' : ''}₹{safeNum(fiiDii.dii_latest_cr)} Cr
                   </span>
                 </div>
-                <div className="flex justify-between items-center p-2 bg-slate-50 rounded-lg text-xs">
-                  <span className="font-medium text-slate-600">Latest Session DII</span>
-                  <span className={`font-bold ${fiiDii.dii_latest_cr >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                    {fiiDii.dii_latest_cr >= 0 ? '+' : ''}{safeNum(fiiDii.dii_latest_cr)} Cr
+
+                <div className="flex justify-between items-center p-2.5 bg-slate-50 hover:bg-slate-100/70 transition-colors rounded-xl text-xs border border-slate-100">
+                  <div>
+                    <span className="font-bold text-slate-700 block">FII / FPI Foreign Flow</span>
+                    {fiiDii.fii_gross_buy_cr && (
+                      <span className="text-[10px] text-slate-400">Buy: ₹{safeNum(fiiDii.fii_gross_buy_cr)} | Sell: ₹{safeNum(fiiDii.fii_gross_sell_cr)}</span>
+                    )}
+                  </div>
+                  <span className={`font-black text-sm ${fiiDii.fii_latest_cr >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {fiiDii.fii_latest_cr >= 0 ? '+' : ''}₹{safeNum(fiiDii.fii_latest_cr)} Cr
                   </span>
                 </div>
-                <div className="flex justify-between items-center p-2 bg-slate-50 rounded-lg text-xs">
-                  <span className="font-medium text-slate-600">5-Day Net FII</span>
-                  <span className="font-bold text-slate-800">{safeNum(fiiDii.fii_5d_cr)} Cr</span>
+
+                {/* Net Total */}
+                <div className="flex justify-between items-center px-3 py-2 bg-blue-50/70 border border-blue-100 rounded-xl text-xs">
+                  <span className="font-bold text-blue-900">Net Institutional Balance</span>
+                  <span className={`font-black text-sm ${fiiDii.net_institutional_cr >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                    {fiiDii.formatted_net_total || `${fiiDii.net_institutional_cr >= 0 ? '+' : ''}₹${safeNum(fiiDii.net_institutional_cr)} Cr`}
+                  </span>
+                </div>
+
+                {/* 5-Day Trend */}
+                <div className="grid grid-cols-2 gap-2 pt-1 text-[11px]">
+                  <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
+                    <span className="text-slate-400 block text-[10px]">5D Net DII</span>
+                    <span className="font-bold text-slate-800">{fiiDii.dii_5d_cr >= 0 ? '+' : ''}{safeNum(fiiDii.dii_5d_cr)} Cr</span>
+                  </div>
+                  <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
+                    <span className="text-slate-400 block text-[10px]">5D Net FII</span>
+                    <span className="font-bold text-slate-800">{fiiDii.fii_5d_cr >= 0 ? '+' : ''}{safeNum(fiiDii.fii_5d_cr)} Cr</span>
+                  </div>
                 </div>
               </div>
             ) : (
@@ -540,8 +575,9 @@ export default function Dashboard() {
             )}
           </div>
 
-          <div className="text-[10px] text-slate-400 border-t border-slate-100 pt-2">
-            Source: NSE / NSDL Official Filings
+          <div className="text-[10px] text-slate-400 border-t border-slate-100 pt-2 mt-3 flex justify-between items-center">
+            <span>Source: NSE Official Daily Disclosures</span>
+            <span>EOD Settlement</span>
           </div>
         </div>
 
@@ -836,10 +872,14 @@ export default function Dashboard() {
             <p className="text-xs text-slate-500">Ad-hoc technical indicator matrix and moving averages breakdown</p>
           </div>
           <div className="w-full sm:w-80">
-            <TickerSearch 
+            <TickerAutocomplete 
               value={tickerInput} 
               onChange={setTickerInput} 
-              onSubmit={fetchSingleTickerData} 
+              onSubmit={fetchSingleTickerData}
+              multiSelect={false}
+              showPresets={false}
+              variant="light"
+              placeholder="Search ticker (e.g. RELIANCE, GRSE)..."
             />
           </div>
         </div>

@@ -5,7 +5,7 @@ import {
   AlertTriangle, CheckCircle, TrendingUp, Cpu, Compass, Sliders, Play, 
   Pause, Square, Eye, Trash2, Clock, CheckCircle2, XCircle, Terminal, 
   ChevronRight, Server, Zap, ArrowRight, CornerDownRight, Gauge,
-  FileText, Send, Wrench, RotateCcw
+  FileText, Send, Wrench, RotateCcw, Award
 } from 'lucide-react';
 
 import { API_BASE } from '../services/api';

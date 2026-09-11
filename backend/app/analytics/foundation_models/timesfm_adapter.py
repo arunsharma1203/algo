@@ -2,7 +2,7 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from app.analytics.foundation_models.base import TimeSeriesFoundationModel, ForecastResult
 from app.data.validator import DataValidationError
@@ -24,41 +24,48 @@ class TimesFMAdapter(TimeSeriesFoundationModel):
         self._init_error = None
 
     def load_model(self) -> bool:
-        """Attempts to load TimesFM from official repository."""
+        """Loads genuine TimesFM 2.5 from Google checkpoint."""
         if self._is_loaded and self.model is not None:
             return True
 
         try:
             import torch
-            if torch.cuda.is_available():
-                self._device = "cuda"
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
                 self._device = "mps"
+            elif torch.cuda.is_available():
+                self._device = "cuda"
             else:
                 self._device = "cpu"
 
             try:
                 import timesfm
-                # Initialize official TimesFm instance
-                self.model = timesfm.TimesFm(
-                    context_len=512,
-                    horizon_len=128,
-                    backend="gpu" if self._device in ("cuda", "mps") else "cpu"
+                logger.info(f"Loading genuine TimesFM 2.5 checkpoint ({self.model_version})...")
+                self.model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(self.model_version)
+                config = timesfm.ForecastConfig(
+                    max_context=512,
+                    max_horizon=32,
+                    normalize_inputs=True
                 )
-                self.model.load_from_google_repo(self.model_version)
+                self.model.compile(config)
                 self._is_loaded = True
-                logger.info(f"TimesFM 2.5 ({self.model_version}) loaded successfully on {self._device}.")
+                self._checkpoint_info = {
+                    "checkpoint": self.model_version,
+                    "architecture": "TimesFM_2p5_200M_torch",
+                    "parameters": "200M",
+                    "device": self._device
+                }
+                logger.info(f"Genuine TimesFM 2.5 loaded and compiled successfully on {self._device}.")
                 return True
-            except ImportError:
-                logger.info("timesfm package not installed in environment; TimesFM adapter in stand-by.")
-                self._init_error = "timesfm package not installed"
+            except ImportError as ie:
+                self._init_error = f"timesfm package not installed: {ie}"
                 self._is_loaded = False
+                logger.warning(self._init_error)
                 return False
 
         except Exception as e:
-            self._init_error = str(e)
+            self._init_error = f"TimesFM 2.5 loading failed: {e}"
             self._is_loaded = False
-            logger.warning(f"TimesFM loading warning: {e}")
+            logger.error(self._init_error)
             return False
 
     def is_available(self) -> bool:
@@ -152,16 +159,12 @@ class TimesFMAdapter(TimeSeriesFoundationModel):
         # 3. Model Inference if available
         if self.is_available() and self.model is not None:
             try:
-                # TimesFM expects 2D array [batch_size, sequence_length]
                 context_prices = prices[-512:] if len(prices) > 512 else prices
-                input_tensor = [context_prices]
-                freq_code = 0 if timeframe == "15m" else 1 # 0: high-frequency, 1: daily
                 
-                # Official TimesFM forecast call
-                point_forecast, experimental_quantiles = self.model.forecast(
-                    input_tensor,
-                    freq=[freq_code],
-                    horizon_len=horizon_bars
+                # Official TimesFM 2.5 forecast call
+                point_forecast, _ = self.model.forecast(
+                    horizon=horizon_bars,
+                    inputs=[context_prices]
                 )
                 
                 forecast_path = [float(p) for p in point_forecast[0][:horizon_bars]]
@@ -170,7 +173,7 @@ class TimesFMAdapter(TimeSeriesFoundationModel):
                 
                 # Calculate dispersion/uncertainty across forecast trajectory
                 price_changes = np.diff(np.concatenate([[current_price], forecast_path]))
-                uncertainty = float(np.std(price_changes) / current_price * 100.0)
+                uncertainty = float(np.std(price_changes) / current_price * 100.0) if current_price > 0 else 0.0
                 
                 direction = "BULLISH" if expected_ret > 0.5 else ("BEARISH" if expected_ret < -0.5 else "NEUTRAL")
 
@@ -189,7 +192,7 @@ class TimesFMAdapter(TimeSeriesFoundationModel):
                 )
 
             except Exception as e:
-                logger.warning(f"TimesFM inference runtime note for {symbol}: {e}")
+                logger.warning(f"TimesFM 2.5 inference runtime error for {symbol}: {e}")
                 return ForecastResult(
                     model_name="timesfm_2.5",
                     model_version=self.model_version,
@@ -212,8 +215,54 @@ class TimesFMAdapter(TimeSeriesFoundationModel):
             horizon_bars=horizon_bars,
             expected_return_pct=0.0,
             status="unavailable",
-            error_message="TimesFM model engine is currently offline/unloaded."
+            error_message="TimesFM 2.5 model engine is currently offline/unloaded."
         )
+
+    def forecast_batch(
+        self,
+        batch_inputs: List[Tuple[str, np.ndarray]],
+        horizon_bars: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Executes fast vectorized batch inference for multiple series in a single forward pass.
+        batch_inputs: List of (identifier, price_array)
+        """
+        if not self.is_available():
+            raise RuntimeError("TimesFM 2.5 model is not loaded.")
+
+        inputs_list = []
+        current_prices = []
+        identifiers = []
+
+        for ident, p_arr in batch_inputs:
+            p_clean = np.asarray(p_arr, dtype=np.float32)
+            context = p_clean[-512:] if len(p_clean) > 512 else p_clean
+            inputs_list.append(context)
+            current_prices.append(float(context[-1]))
+            identifiers.append(ident)
+
+        point_forecasts, _ = self.model.forecast(
+            horizon=horizon_bars,
+            inputs=inputs_list
+        )
+
+        results = []
+        for i, ident in enumerate(identifiers):
+            f_path = [float(p) for p in point_forecasts[i][:horizon_bars]]
+            curr = current_prices[i]
+            exp_ret = ((f_path[-1] - curr) / curr) * 100.0 if curr > 0 else 0.0
+            changes = np.diff(np.concatenate([[curr], f_path]))
+            uncertainty = float(np.std(changes) / curr * 100.0) if curr > 0 else 0.0
+            results.append({
+                "identifier": ident,
+                "current_price": curr,
+                "forecast_path": f_path,
+                "expected_return_pct": round(exp_ret, 4),
+                "uncertainty_score": round(uncertainty, 4),
+                "model_version": self.model_version
+            })
+
+        return results
 
     def get_model_info(self) -> Dict[str, Any]:
         return {
@@ -225,6 +274,7 @@ class TimesFMAdapter(TimeSeriesFoundationModel):
             "supported_timeframes": ["15m", "1d"],
             "max_context_length": 512,
             "output_type": "continuous_trajectory",
+            "checkpoint_info": getattr(self, "_checkpoint_info", {}),
             "init_error": self._init_error
         }
 

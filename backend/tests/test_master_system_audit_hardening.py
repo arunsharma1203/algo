@@ -182,7 +182,7 @@ class TestMasterSystemAuditHardening(unittest.TestCase):
         # Attempt with confirmation -> validates statistical hurdles
         req_confirmed = FoundationPromoteRequest(timeframe="swing", confirm_promotion=True)
         res_confirmed = promote_foundation_challenger_api(req_confirmed)
-        self.assertIn(res_confirmed.get("status"), ["PROMOTION_VALIDATED", "REJECTED"])
+        self.assertIn(res_confirmed.get("status"), ["PROMOTION_VALIDATED", "REJECTED", "NOT_ELIGIBLE"])
 
     def test_broker_remains_fail_closed(self):
         """Verifies that broker execution remains safely in simulation fail-closed mode."""

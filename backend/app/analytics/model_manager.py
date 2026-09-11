@@ -19,6 +19,10 @@ class ModelArtifactError(Exception):
     """Raised when model artifact loading, serialization, or verification fails."""
     pass
 
+class ProductionModelMutationBlockedError(RuntimeError):
+    """Raised when an operation attempts to overwrite the active champion model during automated testing."""
+    pass
+
 class ModelManager:
     """
     Centralized Model Lifecycle, Registry, Versioning, and Rollback Manager.
@@ -194,6 +198,13 @@ class ModelManager:
         2. Persists new challenger as active champion.
         3. Updates metadata and version pointers.
         """
+        from app.data.database import is_testing_environment
+        if is_testing_environment() and not getattr(cls, "_ALLOW_PRODUCTION_PROMOTION_IN_TEST", False):
+            raise ProductionModelMutationBlockedError(
+                "FATAL: Attempted to promote model to production champion path during automated test execution! "
+                "Tests must use isolated test model directories."
+            )
+
         model_path, meta_path = cls.get_champion_paths(timeframe)
         current_meta = cls.load_champion_metadata(timeframe)
         prev_version = current_meta.get("version", "v1.0-champion")

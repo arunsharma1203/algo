@@ -906,7 +906,7 @@ class DashboardReportPDFGenerator:
             [Paragraph("Canonical Database (WAL Mode)", cell_bold), Paragraph(sys_health.get("database", "HEALTHY"), h_style(sys_health.get("database"))), Paragraph("Write-Ahead Logging Active with Low Latency", cell_muted)],
             [Paragraph("Telegram Notification Engine", cell_bold), Paragraph(sys_health.get("telegram", "HEALTHY"), h_style(sys_health.get("telegram"))), Paragraph("Bot Dispatch API Ready with Deduplication", cell_muted)],
             [Paragraph("Broker Execution Gateway", cell_bold), Paragraph(sys_health.get("broker_mode", "SIMULATION"), cell_regular), Paragraph("Fail-Safe Simulation Mode (Zero Live Capital Risk)", cell_muted)],
-            [Paragraph("Autonomous Job Scheduler", cell_bold), Paragraph(sys_health.get("scheduler", "HEALTHY"), h_style(sys_health.get("scheduler"))), Paragraph("APScheduler Daemon Active (Mon-Fri 09:30 IST)", cell_muted)],
+            [Paragraph("Autonomous Job Scheduler", cell_bold), Paragraph(sys_health.get("scheduler", "HEALTHY"), h_style(sys_health.get("scheduler"))), Paragraph("APScheduler Daemon Active (Mon-Fri 08:15 IST)", cell_muted)],
             [Paragraph("<b>OVERALL HEALTH SCORE</b>", cell_bold), Paragraph(f"<b>{sys_health.get('overall_score', 100)} / 100</b>", cell_bullish), Paragraph(f"<b>STATUS: {sys_health.get('overall_status', 'NOMINAL')}</b>", cell_bold)]
         ]
 

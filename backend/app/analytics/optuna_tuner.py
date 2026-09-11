@@ -94,6 +94,7 @@ def save_best_params(params: dict, timeframe: str = "swing") -> None:
 def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, return_metadata: bool = False) -> tuple:
     """
     Downloads real multi-year data from benchmark Nifty constituents and constructs point-in-time features.
+    Supports canonical resolution, local SQLite acceleration for swing daily data, and data coverage auditing.
     
     CRITICAL RULE:
     If real market data is unavailable or fails validation, NO synthetic/random data is generated.
@@ -102,47 +103,89 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, re
     if tickers is None:
         tickers = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS"]
 
+    # 1. Canonical Ticker Normalization & Deduplication
+    clean_tickers = []
+    seen = set()
+    for raw_t in tickers:
+        if not raw_t:
+            continue
+        t = str(raw_t).strip().upper()
+        if t.startswith(("CACHE_", "TEMP_", "DUMMY_")) or not t:
+            continue
+        if not t.endswith((".NS", ".BO")):
+            t = f"{t}.NS"
+        if t not in seen:
+            seen.add(t)
+            clean_tickers.append(t)
+
     period = "60d" if timeframe == "intraday" else "2y"
     interval = "15m" if timeframe == "intraday" else "1d"
     min_rows_per_stock = 100 if timeframe == "intraday" else 200
 
-    logger.info(f"Fetching validated real market benchmark data ({timeframe}) for {tickers}...")
-    try:
-        data = yf.download(tickers, period=period, interval=interval, progress=False)
-    except Exception as e:
-        logger.error(f"Market data fetch error for benchmark tickers: {e}")
-        raise DataValidationError(f"Could not fetch benchmark dataset from provider: {e}")
-
-    if data is None or data.empty:
-        raise DataValidationError("Provider returned an empty dataset for benchmark tickers.")
+    logger.info(f"Fetching validated real market benchmark data ({timeframe}) for {len(clean_tickers)} tickers...")
 
     stock_dfs = []
+    valid_tickers = []
+    excluded_tickers = {}
 
-    for t in tickers:
-        try:
-            if isinstance(data.columns, pd.MultiIndex):
-                try:
-                    df = data.xs(t, level=1, axis=1).copy()
-                except KeyError:
-                    continue
-            else:
-                if len(tickers) == 1:
-                    df = data.copy()
+    # 2. Ingest Data (Prefer Local SQLite for Swing to eliminate rate limits & network drag)
+    from app.data.historical_data_layer import HistoricalDataLayer
+
+    # If swing, attempt local retrieval first
+    tickers_to_fetch_remote = []
+    local_data_map = {}
+
+    if timeframe == "swing":
+        for t in clean_tickers:
+            try:
+                local_df = HistoricalDataLayer.get_historical_ohlcv(t, timeframe="1d")
+                if local_df is not None and not local_df.empty and len(local_df) >= min_rows_per_stock:
+                    # Filter to 2y lookback (~504 trading days)
+                    local_data_map[t] = local_df.tail(504).copy()
                 else:
-                    continue
+                    tickers_to_fetch_remote.append(t)
+            except Exception:
+                tickers_to_fetch_remote.append(t)
+    else:
+        tickers_to_fetch_remote = list(clean_tickers)
 
-            # 1. Structural Data Validation
+    remote_data = None
+    if tickers_to_fetch_remote:
+        try:
+            remote_data = yf.download(tickers_to_fetch_remote, period=period, interval=interval, progress=False)
+        except Exception as e:
+            logger.warning(f"Remote fetch error for {len(tickers_to_fetch_remote)} tickers: {e}")
+
+    for t in clean_tickers:
+        try:
+            df = None
+            if t in local_data_map:
+                df = local_data_map[t].copy()
+            elif remote_data is not None and not remote_data.empty:
+                if isinstance(remote_data.columns, pd.MultiIndex):
+                    try:
+                        df = remote_data.xs(t, level=1, axis=1).copy()
+                    except KeyError:
+                        pass
+                elif len(tickers_to_fetch_remote) == 1:
+                    df = remote_data.copy()
+
+            if df is None or df.empty:
+                excluded_tickers[t] = "no_data_available"
+                continue
+
+            # Structural Data Validation
             val_report = MarketDataValidator.validate_ohlcv(
                 df, ticker=t, timeframe=timeframe, min_rows=min_rows_per_stock
             )
             if not val_report["valid"]:
-                logger.warning(f"Ticker {t} failed data validation: {val_report['errors']}. Skipping.")
+                excluded_tickers[t] = f"validation_failed: {val_report['errors']}"
                 continue
 
             df = df.dropna(how='all')
             df.columns = [col.lower() for col in df.columns]
 
-            # 2. Point-In-Time Feature Engineering
+            # Point-In-Time Feature Engineering
             df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
             macd = ta.trend.MACD(df['close'])
             df['macd'] = macd.macd()
@@ -150,32 +193,32 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, re
             df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
             df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
 
-            # 3. Label Definition
+            # Label Definition
             if timeframe == "intraday":
                 df['returns'] = df['close'].pct_change()
-                # Target: positive return on the very next 15m candle
                 df['target'] = (df['returns'].shift(-1) > 0).astype(int)
                 features = ['rsi', 'macd', 'macd_diff', 'adx', 'returns']
             else: # swing
                 df['future_5d'] = df['close'].shift(-5)
-                # Target: cumulative forward return > 2% over next 5 daily bars
                 df['target'] = (((df['future_5d'] - df['close']) / df['close']) > 0.02).astype(int)
                 features = ['rsi', 'macd', 'macd_diff', 'adx', 'atr']
 
             clean_df = df.dropna(subset=features + ['target']).copy()
             if len(clean_df) < min_rows_per_stock:
+                excluded_tickers[t] = f"insufficient_rows_after_features: {len(clean_df)} < {min_rows_per_stock}"
                 continue
 
             clean_df['ticker'] = t
             clean_df['datetime'] = clean_df.index
             stock_dfs.append(clean_df[features + ['target', 'ticker', 'datetime']])
+            valid_tickers.append(t)
 
         except Exception as e:
-            logger.warning(f"Error preparing {t}: {e}")
+            excluded_tickers[t] = f"processing_error: {str(e)}"
             continue
 
     if not stock_dfs:
-        raise DataValidationError("Zero tickers passed data quality and feature validation. Aborting without synthetic fallback.")
+        raise DataValidationError(f"Zero tickers passed data quality and feature validation. Excluded: {excluded_tickers}")
 
     # Ticker-aware temporal ordering: group chronologically
     combined = pd.concat(stock_dfs).sort_values('datetime').reset_index(drop=True)
@@ -184,7 +227,7 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, re
     X = combined[features_list].values
     y = combined['target'].values.astype(int)
 
-    logger.info(f"Validated Benchmark Dataset ready ({timeframe}): {len(X)} samples across {len(stock_dfs)} tickers.")
+    logger.info(f"Validated Benchmark Dataset ready ({timeframe}): {len(X)} samples across {len(valid_tickers)}/{len(clean_tickers)} tickers.")
     
     if return_metadata:
         n_samples = len(combined)
@@ -193,7 +236,7 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, re
         test_df = combined.iloc[split_idx:]
         meta = {
             "timeframe": timeframe,
-            "tickers": tickers,
+            "tickers": valid_tickers,
             "total_bars_count": n_samples,
             "train_bars_count": len(train_df),
             "oos_bars_count": len(test_df),
@@ -203,7 +246,16 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, re
             "train_end": str(train_df['datetime'].max()) if len(train_df) > 0 else None,
             "oos_start": str(test_df['datetime'].min()) if len(test_df) > 0 else None,
             "oos_end": str(test_df['datetime'].max()) if len(test_df) > 0 else None,
-            "features": features_list
+            "features": features_list,
+            "ticker_series": combined['ticker'].values,
+            "datetime_series": combined['datetime'].values,
+            "coverage_audit": {
+                "requested_count": len(clean_tickers),
+                "valid_count": len(valid_tickers),
+                "excluded_count": len(excluded_tickers),
+                "excluded_tickers": excluded_tickers,
+                "canonical_tickers": valid_tickers
+            }
         }
         return X, y, features_list, meta
 

@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+import os
+from fastapi import FastAPI, Query
 from apscheduler.schedulers.background import BackgroundScheduler
 import logging
 from datetime import datetime
@@ -26,6 +27,9 @@ def init_db_wal():
 init_db_wal()
 
 import threading
+import pytz
+
+IST_TIMEZONE = pytz.timezone("Asia/Kolkata")
 
 # ── SCHEDULER SINGLETON & LIFECYCLE MANAGEMENT ────────────────────────
 _SCHEDULER_LOCK = threading.Lock()
@@ -36,11 +40,18 @@ def get_or_create_scheduler() -> BackgroundScheduler:
     global _SCHEDULER_INSTANCE
     with _SCHEDULER_LOCK:
         if _SCHEDULER_INSTANCE is None:
-            _SCHEDULER_INSTANCE = BackgroundScheduler(daemon=True)
+            from app.data.database import is_testing_environment
+            if is_testing_environment() or os.environ.get("SUPPRESS_SCHEDULER") == "true":
+                logger.info("[SCHEDULER ISOLATION] Test execution environment detected. Background schedulers disabled.")
+                _SCHEDULER_INSTANCE = BackgroundScheduler(daemon=True, timezone=IST_TIMEZONE)
+                return _SCHEDULER_INSTANCE
+
+            _SCHEDULER_INSTANCE = BackgroundScheduler(daemon=True, timezone=IST_TIMEZONE)
             
             # 1. Data Hoarder: Daily 16:00 IST (Broad 15m intraday sync)
             _SCHEDULER_INSTANCE.add_job(
                 hoard_intraday_data, 'cron', hour=16, minute=0,
+                timezone=IST_TIMEZONE,
                 kwargs={'universe': 'NIFTY_500'},
                 id='data_hoarder_1600', replace_existing=True
             )
@@ -112,13 +123,14 @@ def get_or_create_scheduler() -> BackgroundScheduler:
             except Exception as e:
                 logger.error(f"Failed to initialize research orchestrator daemon: {e}")
 
-            # 6. Daily Dashboard Market Intelligence Report (09:30 IST Mon-Fri)
+            # 6. Daily Dashboard Market Intelligence Report (08:15 IST Mon-Fri)
             try:
                 from app.analytics.dashboard_telegram_scheduler import execute_daily_dashboard_telegram_job
                 _SCHEDULER_INSTANCE.add_job(
                     execute_daily_dashboard_telegram_job,
-                    'cron', day_of_week='mon-fri', hour=9, minute=30,
-                    id='daily_dashboard_report_0930', replace_existing=True
+                    'cron', day_of_week='mon-fri', hour=8, minute=15,
+                    timezone=IST_TIMEZONE,
+                    id='daily_dashboard_report_0815', replace_existing=True
                 )
             except Exception as e:
                 logger.error(f"Failed to register daily dashboard report job: {e}")
@@ -141,6 +153,11 @@ from app.api.settings import router as settings_router
 from app.api.fno import router as fno_router
 from app.api.data_lab import router as data_lab_router
 from app.api.dashboard_intelligence import router as dashboard_router
+from app.api.qlib_research import router as qlib_research_router
+from app.api.research_autopilot import router as research_autopilot_router
+from app.api.watchlist import router as watchlist_router
+from app.api.watchlist_scanner import router as watchlist_scanner_router
+from app.api.smart_scanner import router as smart_scanner_router
 
 app = FastAPI(title="Swing Trading AI Backend")
 
@@ -207,14 +224,14 @@ def get_system_audit_log(
     return {"status": "success", "count": len(events), "events": events}
 
 @app.post("/api/system/pipeline-test")
-def run_pipeline_test():
+def run_pipeline_test(timeframe: str = Query("intraday", enum=["intraday", "swing"])):
     """
     Executes a safe, non-contaminating end-to-end synthetic pipeline diagnostic using TESTSTOCK.NS.
     Validates all 11 stages: Ingestion, Validation, Models, Meta-Learner, Calibration,
     Decision Gate, Risk Isolation, and Master Logger without mutating real market or broker state.
     """
     from app.analytics.synthetic_pipeline_tester import SyntheticPipelineTester
-    return SyntheticPipelineTester.run_diagnostic()
+    return SyntheticPipelineTester.run_diagnostic(timeframe=timeframe)
 
 @app.get("/api/market/universes")
 def get_market_universes():
@@ -257,6 +274,14 @@ app.include_router(settings_router, prefix="/api/settings", tags=["settings"])
 app.include_router(fno_router, prefix="/api/fno", tags=["fno"])
 app.include_router(data_lab_router, prefix="/api", tags=["data_lab"])
 app.include_router(dashboard_router, prefix="/api/dashboard", tags=["dashboard"])
+app.include_router(qlib_research_router, prefix="/api/ml/qlib", tags=["qlib_research"])
+app.include_router(watchlist_router, prefix="/api/watchlist", tags=["watchlist"])
+app.include_router(watchlist_scanner_router, prefix="/api/watchlist", tags=["watchlist_scanner"])
+app.include_router(research_autopilot_router, prefix="/api/research-autopilot", tags=["research_autopilot"])
+app.include_router(smart_scanner_router, prefix="/api", tags=["smart_scanner"])
+
+from app.api.qlib_system import router as qlib_system_router
+app.include_router(qlib_system_router, prefix="/api", tags=["qlib_system"])
 
 @app.get("/")
 def read_root():

@@ -13,6 +13,11 @@ def send_telegram_message(message: str) -> bool:
     Safe failure tolerance: returns False if credentials are not configured or network fails.
     """
     try:
+        from app.data.database import is_testing_environment
+        if is_testing_environment() or os.environ.get("SUPPRESS_TELEGRAM") == "true":
+            logger.info("[TELEGRAM ISOLATION] Test environment active. Suppressing outbound Telegram API request.")
+            return True
+
         db_path = get_db_path()
         conn = sqlite3.connect(db_path, timeout=5.0)
         cur = conn.cursor()
@@ -69,6 +74,11 @@ def send_telegram_document(document_bytes: bytes, filename: str, caption: str = 
     Safe failure tolerance: never crashes, logs delivery or failure, and suppresses credential leakage.
     """
     try:
+        from app.data.database import is_testing_environment
+        if is_testing_environment() or os.environ.get("SUPPRESS_TELEGRAM") == "true":
+            logger.info("[TELEGRAM ISOLATION] Test environment active. Suppressing outbound Telegram document request.")
+            return True
+
         db_path = get_db_path()
         conn = sqlite3.connect(db_path, timeout=5.0)
         cur = conn.cursor()

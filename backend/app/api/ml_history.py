@@ -206,7 +206,8 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
 
 _EVAL_CACHE = {
     'data': None,
-    'timestamp': 0
+    'timestamp': 0,
+    'db_path': None
 }
 _EVAL_CACHE_TTL = 60  # 60 seconds cache
 
@@ -223,11 +224,12 @@ def evaluate_ml_history(force_refresh: bool = False):
     """
     import time as time_module
     epoch_now = time_module.time()
-    if not force_refresh and _EVAL_CACHE['data'] is not None and (epoch_now - _EVAL_CACHE['timestamp']) < _EVAL_CACHE_TTL:
+    current_db = get_db_path()
+    if not force_refresh and _EVAL_CACHE['data'] is not None and _EVAL_CACHE.get('db_path') == current_db and (epoch_now - _EVAL_CACHE['timestamp']) < _EVAL_CACHE_TTL:
         return _EVAL_CACHE['data']
 
     ensure_ml_table()
-    conn = sqlite3.connect(get_db_path(), timeout=10.0)
+    conn = sqlite3.connect(current_db, timeout=10.0)
     conn.execute("PRAGMA busy_timeout = 10000;")
     df_trades = pd.read_sql_query("SELECT * FROM ml_trade_history ORDER BY id DESC", conn)
     conn.close()
@@ -235,6 +237,7 @@ def evaluate_ml_history(force_refresh: bool = False):
     if df_trades.empty:
         _EVAL_CACHE['data'] = []
         _EVAL_CACHE['timestamp'] = epoch_now
+        _EVAL_CACHE['db_path'] = current_db
         return []
         
     # Pre-fetch Macro State once for all trades
@@ -253,6 +256,7 @@ def evaluate_ml_history(force_refresh: bool = False):
     ]
     
     market_data = {}
+    live_quotes = {}
     if unresolved_tickers:
         # Expire cache if TTL reached
         if (epoch_now - _MARKET_DATA_CACHE['timestamp']) > _MARKET_DATA_TTL:
@@ -260,63 +264,73 @@ def evaluate_ml_history(force_refresh: bool = False):
 
         needed_tickers = [t for t in unresolved_tickers if t not in _MARKET_DATA_CACHE['data']]
         if needed_tickers:
-            # Check local historical data layer first before hitting external network
-            from app.data.historical_data_layer import HistoricalDataLayer
-            # Map ticker to its trade types in unresolved_df
-            ticker_trade_types = {}
-            for _, u_row in unresolved_df.iterrows():
-                tkr = u_row['ticker']
-                ttype = u_row.get('trade_type', 'INTRADAY')
-                ticker_trade_types.setdefault(tkr, set()).add(ttype)
-
-            for t in needed_tickers:
-                types = ticker_trade_types.get(t, {'INTRADAY'})
-                try:
-                    # If ticker only has SWING trades, route to authoritative daily OHLCV storage
-                    if types == {'SWING'}:
-                        df_local = HistoricalDataLayer.get_historical_ohlcv(t, timeframe="1d")
-                        if df_local is not None and not df_local.empty and len(df_local) >= 10:
-                            df_tick = pd.DataFrame({
-                                'High': df_local['high'],
-                                'Low': df_local['low'],
-                                'Close': df_local['close']
-                            }, index=df_local.index)
-                            _MARKET_DATA_CACHE['data'][t] = df_tick
-                            continue
-                    
-                    # For INTRADAY trades, mark for 15m candle retrieval
-                    still_needed.append(t)
-                except Exception:
-                    still_needed.append(t)
-
-            if still_needed:
-                try:
-                    hist = yf.download(still_needed, period="60d", interval="15m", progress=False, timeout=4)
-                    if len(still_needed) == 1:
-                        _MARKET_DATA_CACHE['data'][still_needed[0]] = hist
+            # Batch download 60-day 15m candles covering both Intraday and Swing time horizons
+            try:
+                hist = yf.download(needed_tickers, period="60d", interval="15m", progress=False, timeout=10)
+                if len(needed_tickers) == 1:
+                    t = needed_tickers[0]
+                    if hist is not None and not hist.empty:
+                        if isinstance(hist.columns, pd.MultiIndex):
+                            hist.columns = [c[0] for c in hist.columns]
+                        _MARKET_DATA_CACHE['data'][t] = hist
                     else:
-                        for ticker in still_needed:
-                            if hasattr(hist, 'columns') and 'Close' in hist and ticker in hist['Close']:
+                        _MARKET_DATA_CACHE['data'][t] = pd.DataFrame()
+                else:
+                    for ticker in needed_tickers:
+                        if hasattr(hist, 'columns') and 'Close' in hist and ticker in hist['Close']:
+                            df_tick = pd.DataFrame({
+                                'High': hist['High'][ticker],
+                                'Low': hist['Low'][ticker],
+                                'Close': hist['Close'][ticker]
+                            })
+                            _MARKET_DATA_CACHE['data'][ticker] = df_tick
+                        else:
+                            _MARKET_DATA_CACHE['data'][ticker] = pd.DataFrame()
+            except Exception as e:
+                logger.warning(f"yfinance 15m batch download warning: {e}")
+                for ticker in needed_tickers:
+                    if ticker not in _MARKET_DATA_CACHE['data']:
+                        _MARKET_DATA_CACHE['data'][ticker] = pd.DataFrame()
+
+            # For any ticker where 15m returned empty, fallback to recent daily candles
+            empty_tickers = [t for t in needed_tickers if _MARKET_DATA_CACHE['data'].get(t) is None or _MARKET_DATA_CACHE['data'][t].empty]
+            if empty_tickers:
+                try:
+                    hist_daily = yf.download(empty_tickers, period="60d", interval="1d", progress=False, timeout=8)
+                    if len(empty_tickers) == 1:
+                        t = empty_tickers[0]
+                        if hist_daily is not None and not hist_daily.empty:
+                            if isinstance(hist_daily.columns, pd.MultiIndex):
+                                hist_daily.columns = [c[0] for c in hist_daily.columns]
+                            _MARKET_DATA_CACHE['data'][t] = hist_daily
+                    else:
+                        for ticker in empty_tickers:
+                            if hasattr(hist_daily, 'columns') and 'Close' in hist_daily and ticker in hist_daily['Close']:
                                 df_tick = pd.DataFrame({
-                                    'High': hist['High'][ticker],
-                                    'Low': hist['Low'][ticker],
-                                    'Close': hist['Close'][ticker]
+                                    'High': hist_daily['High'][ticker],
+                                    'Low': hist_daily['Low'][ticker],
+                                    'Close': hist_daily['Close'][ticker]
                                 })
                                 _MARKET_DATA_CACHE['data'][ticker] = df_tick
-                            else:
-                                _MARKET_DATA_CACHE['data'][ticker] = pd.DataFrame()
                 except Exception as e:
-                    logger.warning(f"yfinance batch download warning: {e}")
-                    for ticker in still_needed:
-                        if ticker not in _MARKET_DATA_CACHE['data']:
-                            _MARKET_DATA_CACHE['data'][ticker] = pd.DataFrame()
+                    logger.warning(f"yfinance daily fallback warning: {e}")
 
             _MARKET_DATA_CACHE['timestamp'] = epoch_now
 
         market_data = _MARKET_DATA_CACHE['data']
 
+        # Pre-fetch live quotes for all unresolved tickers for authoritative fresh LTP
+        from app.data.market_provider import get_live_quote_with_meta
+        for t in unresolved_tickers:
+            try:
+                live_quotes[t] = get_live_quote_with_meta(t)
+            except Exception as e:
+                logger.warning(f"Live quote fetch error for {t}: {e}")
+                live_quotes[t] = None
+
     results = []
     finalized_updates = []
+    open_updates = []
 
     for _, row in df_trades.iterrows():
         trade_id = row['id']
@@ -367,6 +381,8 @@ def evaluate_ml_history(force_refresh: bool = False):
                 "risk_audit": None,
                 "current_price": raw_entry,
                 "reference_price": float(row.get('reference_price', raw_entry) or raw_entry),
+                "exit_price": raw_entry,
+                "exit_time": entry_time_str,
                 "price_source": row.get('price_source', 'Candle Close') if pd.notna(row.get('price_source')) else 'Candle Close',
                 "price_timestamp": row.get('price_timestamp', '') if pd.notna(row.get('price_timestamp')) else '',
                 "price_is_fresh": bool(row.get('price_is_fresh', False)) if pd.notna(row.get('price_is_fresh')) else False,
@@ -382,76 +398,162 @@ def evaluate_ml_history(force_refresh: bool = False):
         saved_outcome = row.get('outcome')
         if row.get('status') == 'CLOSED' and pd.notna(saved_outcome) and saved_outcome not in ('OPEN', None):
             outcome = saved_outcome
-            profit_pct = float(row.get('profit_pct', 0.0))
-            ideal_profit_pct = float(row.get('ideal_profit_pct', profit_pct))
+            raw_prof = row.get('profit_pct')
+            profit_pct = float(raw_prof) if pd.notna(raw_prof) and raw_prof is not None else 0.0
+            raw_ideal = row.get('ideal_profit_pct')
+            ideal_profit_pct = float(raw_ideal) if pd.notna(raw_ideal) and raw_ideal is not None else profit_pct
             saved_eff = row.get('effective_entry')
-            if pd.notna(saved_eff):
+            if pd.notna(saved_eff) and saved_eff is not None:
                 effective_entry = float(saved_eff)
             saved_drag = row.get('slippage_drag')
-            slippage_drag = float(saved_drag) if pd.notna(saved_drag) else round(ideal_profit_pct - profit_pct, 2)
-            current_price = raw_entry
+            slippage_drag = float(saved_drag) if pd.notna(saved_drag) and saved_drag is not None else round(ideal_profit_pct - profit_pct, 2)
+            exit_price_val = row.get('exit_price')
+            if exit_price_val is None or pd.isna(exit_price_val):
+                exit_price_val = sl if outcome == 'SL HIT' else (tp1 if outcome == 'TARGET MET' else raw_entry)
+            exit_time_val = row.get('exit_time')
+            current_price = float(exit_price_val) if exit_price_val is not None else raw_entry
             risk_audit_data = None
+            price_source_val = str(row.get('price_source', 'Archived')) if pd.notna(row.get('price_source')) else 'Archived'
+            price_timestamp_val = str(row.get('price_timestamp', '')) if pd.notna(row.get('price_timestamp')) else ''
+            price_is_fresh_val = False
         else:
             outcome = "OPEN"
             ideal_profit_pct = 0.0
             profit_pct = 0.0
             current_price = raw_entry
-            
+            exit_price_val = None
+            exit_time_val = None
+            price_source_val = "Model Candle Close"
+            price_timestamp_val = ""
+            price_is_fresh_val = False
+
+            quote = live_quotes.get(ticker)
+            if quote and quote.get("price") and float(quote["price"]) > 0:
+                current_price = float(quote["price"])
+                price_source_val = quote.get("source_name", "Live Market Feed")
+                price_timestamp_val = quote.get("timestamp", datetime.now().strftime("%H:%M:%S IST"))
+                price_is_fresh_val = bool(quote.get("is_realtime", False))
+
             if ticker in market_data:
                 df = market_data[ticker].dropna()
-                df_future = df[df.index.tz_localize(None) >= entry_time]
-                
-                if not df_future.empty:
-                    for timestamp_idx, f_row in df_future.iterrows():
-                        high = float(f_row['High'])
-                        low = float(f_row['Low'])
-                        close = float(f_row['Close'])
-                        t_time = timestamp_idx.replace(tzinfo=None)
-                        
-                        if direction == "BULLISH":
-                            if low <= sl:
-                                outcome = "SL HIT"
-                                ideal_profit_pct = ((sl - raw_entry) / raw_entry) * 100
-                                profit_pct = ((sl - effective_entry) / effective_entry) * 100
-                                break
-                            elif high >= tp1:
-                                outcome = "TARGET MET"
-                                ideal_profit_pct = ((tp1 - raw_entry) / raw_entry) * 100
-                                profit_pct = ((tp1 - effective_entry) / effective_entry) * 100
-                                break
-                        else:  # BEARISH
-                            if high >= sl:
-                                outcome = "SL HIT"
-                                ideal_profit_pct = ((raw_entry - sl) / raw_entry) * 100
-                                profit_pct = ((effective_entry - sl) / effective_entry) * 100
-                                break
-                            elif low <= tp1:
-                                outcome = "TARGET MET"
-                                ideal_profit_pct = ((raw_entry - tp1) / raw_entry) * 100
-                                profit_pct = ((effective_entry - tp1) / effective_entry) * 100
-                                break
-                                
-                        # Intraday 3:15 PM Square-off Rule
-                        if trade_type == 'INTRADAY':
-                            if (t_time.date() == entry_time.date() and (t_time.hour > 15 or (t_time.hour == 15 and t_time.minute >= 15))) or (t_time.date() > entry_time.date()):
-                                outcome = "SQUARED OFF (3:15 PM)"
-                                if direction == "BULLISH":
-                                    ideal_profit_pct = ((close - raw_entry) / raw_entry) * 100
-                                    profit_pct = ((close - effective_entry) / effective_entry) * 100
+                if not df.empty:
+                    if hasattr(df.index, 'tz') and df.index.tz is not None:
+                        idx_naive = df.index.tz_localize(None)
+                    else:
+                        idx_naive = df.index
+
+                    # Detect if daily or intraday
+                    is_daily = False
+                    if len(idx_naive) >= 2:
+                        bar_delta = (idx_naive[1] - idx_naive[0]).total_seconds()
+                        is_daily = (bar_delta >= 43200)
+                    elif len(idx_naive) == 1:
+                        is_daily = (idx_naive[0].hour == 0 and idx_naive[0].minute == 0)
+
+                    if is_daily:
+                        df_future = df[idx_naive.normalize() >= pd.Timestamp(entry_time).normalize()]
+                    else:
+                        df_future = df[idx_naive >= entry_time]
+
+                    if not df_future.empty:
+                        col_map = {str(c).lower(): c for c in df_future.columns}
+                        h_col = col_map.get('high', 'High')
+                        l_col = col_map.get('low', 'Low')
+                        c_col = col_map.get('close', 'Close')
+
+                        for timestamp_idx, f_row in df_future.iterrows():
+                            high = float(f_row[h_col]) if h_col in f_row else raw_entry
+                            low = float(f_row[l_col]) if l_col in f_row else raw_entry
+                            close = float(f_row[c_col]) if c_col in f_row else raw_entry
+                            t_time = timestamp_idx.replace(tzinfo=None) if hasattr(timestamp_idx, 'replace') else pd.to_datetime(timestamp_idx).tz_localize(None)
+
+                            if direction == "BULLISH":
+                                if low <= sl:
+                                    outcome = "SL HIT"
+                                    exit_price_val = sl
+                                    exit_time_val = str(t_time)
+                                    ideal_profit_pct = ((sl - raw_entry) / raw_entry) * 100
+                                    profit_pct = ((sl - effective_entry) / effective_entry) * 100
+                                    break
+                                elif high >= tp1:
+                                    outcome = "TARGET MET"
+                                    exit_price_val = tp1
+                                    exit_time_val = str(t_time)
+                                    ideal_profit_pct = ((tp1 - raw_entry) / raw_entry) * 100
+                                    profit_pct = ((tp1 - effective_entry) / effective_entry) * 100
+                                    break
+                            else:  # BEARISH
+                                if high >= sl:
+                                    outcome = "SL HIT"
+                                    exit_price_val = sl
+                                    exit_time_val = str(t_time)
+                                    ideal_profit_pct = ((raw_entry - sl) / raw_entry) * 100
+                                    profit_pct = ((effective_entry - sl) / effective_entry) * 100
+                                    break
+                                elif low <= tp1:
+                                    outcome = "TARGET MET"
+                                    exit_price_val = tp1
+                                    exit_time_val = str(t_time)
+                                    ideal_profit_pct = ((raw_entry - tp1) / raw_entry) * 100
+                                    profit_pct = ((effective_entry - tp1) / effective_entry) * 100
+                                    break
+
+                            # Intraday 3:15 PM Square-off Rule
+                            if trade_type == 'INTRADAY':
+                                if (t_time.date() == entry_time.date() and (t_time.hour > 15 or (t_time.hour == 15 and t_time.minute >= 15))) or (t_time.date() > entry_time.date()):
+                                    outcome = "SQUARED OFF (3:15 PM)"
+                                    exit_price_val = close
+                                    exit_time_val = str(t_time)
+                                    if direction == "BULLISH":
+                                        ideal_profit_pct = ((close - raw_entry) / raw_entry) * 100
+                                        profit_pct = ((close - effective_entry) / effective_entry) * 100
+                                    else:
+                                        ideal_profit_pct = ((raw_entry - close) / raw_entry) * 100
+                                        profit_pct = ((effective_entry - close) / effective_entry) * 100
+                                    break
+
+                        # If still OPEN after candle traversal, use fresh LTP for mark-to-market and live breach check
+                        if outcome == "OPEN":
+                            if not (quote and quote.get("price") and float(quote["price"]) > 0):
+                                current_price = float(df_future.iloc[-1][c_col]) if c_col in df_future.columns else raw_entry
+                                price_source_val = "Candle Close"
+                                price_timestamp_val = str(df_future.index[-1])
+                                price_is_fresh_val = False
+
+                            # Real-time SL/TP breach check on live LTP
+                            if direction == "BULLISH":
+                                if current_price <= sl:
+                                    outcome = "SL HIT"
+                                    exit_price_val = sl
+                                    exit_time_val = datetime.now().isoformat()
+                                    ideal_profit_pct = ((sl - raw_entry) / raw_entry) * 100
+                                    profit_pct = ((sl - effective_entry) / effective_entry) * 100
+                                elif current_price >= tp1:
+                                    outcome = "TARGET MET"
+                                    exit_price_val = tp1
+                                    exit_time_val = datetime.now().isoformat()
+                                    ideal_profit_pct = ((tp1 - raw_entry) / raw_entry) * 100
+                                    profit_pct = ((tp1 - effective_entry) / effective_entry) * 100
                                 else:
-                                    ideal_profit_pct = ((raw_entry - close) / raw_entry) * 100
-                                    profit_pct = ((effective_entry - close) / effective_entry) * 100
-                                break
-                    
-                    if outcome == "OPEN":
-                        current_price = float(df_future.iloc[-1]['Close'])
-                        if direction == "BULLISH":
-                            ideal_profit_pct = ((current_price - raw_entry) / raw_entry) * 100
-                            profit_pct = ((current_price - effective_entry) / effective_entry) * 100
-                        else:
-                            ideal_profit_pct = ((raw_entry - current_price) / raw_entry) * 100
-                            profit_pct = ((effective_entry - current_price) / effective_entry) * 100
-            
+                                    ideal_profit_pct = ((current_price - raw_entry) / raw_entry) * 100
+                                    profit_pct = ((current_price - effective_entry) / effective_entry) * 100
+                            else:  # BEARISH
+                                if current_price >= sl:
+                                    outcome = "SL HIT"
+                                    exit_price_val = sl
+                                    exit_time_val = datetime.now().isoformat()
+                                    ideal_profit_pct = ((raw_entry - sl) / raw_entry) * 100
+                                    profit_pct = ((effective_entry - sl) / effective_entry) * 100
+                                elif current_price <= tp1:
+                                    outcome = "TARGET MET"
+                                    exit_price_val = tp1
+                                    exit_time_val = datetime.now().isoformat()
+                                    ideal_profit_pct = ((raw_entry - tp1) / raw_entry) * 100
+                                    profit_pct = ((effective_entry - tp1) / effective_entry) * 100
+                                else:
+                                    ideal_profit_pct = ((raw_entry - current_price) / raw_entry) * 100
+                                    profit_pct = ((effective_entry - current_price) / effective_entry) * 100
+
             now_dt = datetime.now()
             # If Intraday and entry occurred during an actual trading session that has since closed
             if trade_type == 'INTRADAY' and outcome == 'OPEN':
@@ -460,6 +562,8 @@ def evaluate_ml_history(force_refresh: bool = False):
                 if is_entry_weekday:
                     if entry_time.date() < now_dt.date() or (entry_time.date() == now_dt.date() and is_now_weekday and (now_dt.hour > 15 or (now_dt.hour == 15 and now_dt.minute >= 30))):
                         outcome = "SQUARED OFF (3:15 PM)"
+                        exit_price_val = current_price
+                        exit_time_val = now_dt.isoformat()
 
             # ── SWING 5-TRADING-DAY HORIZON EXPIRATION ───────────────────
             # Swing trades that remain unresolved after 5 trading days are closed
@@ -471,15 +575,17 @@ def evaluate_ml_history(force_refresh: bool = False):
 
                 if trading_days_elapsed >= 5:
                     outcome = "SWING_HORIZON_REACHED"
+                    exit_price_val = current_price
+                    exit_time_val = now_dt.isoformat()
                     if direction == "BULLISH":
                         ideal_profit_pct = ((current_price - raw_entry) / raw_entry) * 100
                         profit_pct = ((current_price - effective_entry) / effective_entry) * 100
                     else:
                         ideal_profit_pct = ((raw_entry - current_price) / raw_entry) * 100
                         profit_pct = ((effective_entry - current_price) / effective_entry) * 100
-                    
+
             slippage_drag = round(ideal_profit_pct - profit_pct, 2)
-            
+
             # Risk Audit for open trades
             risk_audit_data = None
             if outcome == "OPEN":
@@ -500,6 +606,13 @@ def evaluate_ml_history(force_refresh: bool = False):
                     )
                 except Exception as e:
                     risk_audit_data = None
+                open_updates.append((
+                    round(current_price, 2),
+                    price_source_val,
+                    price_timestamp_val,
+                    1 if price_is_fresh_val else 0,
+                    trade_id
+                ))
             else:
                 # Collect finalized trade for permanent DB persistence
                 finalized_updates.append((
@@ -509,15 +622,11 @@ def evaluate_ml_history(force_refresh: bool = False):
                     slippage_drag,
                     round(ideal_profit_pct, 2),
                     'CLOSED',
+                    round(exit_price_val, 2) if exit_price_val is not None else None,
+                    str(exit_time_val) if exit_time_val is not None else None,
+                    round(current_price, 2) if current_price is not None else None,
                     trade_id
                 ))
-
-        explanation_data = None
-        if 'explanation' in row and pd.notna(row['explanation']) and row['explanation']:
-            try:
-                explanation_data = json.loads(row['explanation'])
-            except:
-                explanation_data = None
 
         tightened_sl_val = row.get('tightened_sl') if 'tightened_sl' in row and pd.notna(row['tightened_sl']) else None
         if risk_audit_data and risk_audit_data.get('tightened_sl'):
@@ -584,9 +693,11 @@ def evaluate_ml_history(force_refresh: bool = False):
             "risk_audit": risk_audit_data,
             "current_price": round(clean_curr_price, 2),
             "reference_price": round(clean_ref_price, 2),
-            "price_source": str(row.get('price_source', 'Candle Close')) if pd.notna(row.get('price_source')) else 'Candle Close',
-            "price_timestamp": str(row.get('price_timestamp', '')) if pd.notna(row.get('price_timestamp')) else '',
-            "price_is_fresh": bool(row.get('price_is_fresh', False)) if pd.notna(row.get('price_is_fresh')) else False,
+            "exit_price": round(float(exit_price_val), 2) if exit_price_val is not None else None,
+            "exit_time": str(exit_time_val) if exit_time_val is not None else None,
+            "price_source": price_source_val,
+            "price_timestamp": price_timestamp_val,
+            "price_is_fresh": price_is_fresh_val,
             "source": str(row.get('source', 'MANUAL')) if pd.notna(row.get('source')) else 'MANUAL',
             "position_type": str(row.get('position_type', 'NOT_A_POSITION')) if pd.notna(row.get('position_type')) else 'NOT_A_POSITION',
             "tightened_sl": _clean_optional_float(tightened_sl_val),
@@ -600,13 +711,28 @@ def evaluate_ml_history(force_refresh: bool = False):
             batch_conn = sqlite3.connect(get_db_path(), timeout=15.0)
             batch_conn.executemany("""
                 UPDATE ml_trade_history 
-                SET outcome = ?, profit_pct = ?, effective_entry = ?, slippage_drag = ?, ideal_profit_pct = ?, status = ?
+                SET outcome = ?, profit_pct = ?, effective_entry = ?, slippage_drag = ?, ideal_profit_pct = ?,
+                    status = ?, exit_price = ?, exit_time = ?, current_price = ?
                 WHERE id = ?
             """, finalized_updates)
             batch_conn.commit()
             batch_conn.close()
         except Exception as e:
             logger.warning(f"Batch outcome persistence error: {e}")
+
+    # 4. Persist updated live mark-to-market prices for active open trades
+    if open_updates:
+        try:
+            batch_conn = sqlite3.connect(get_db_path(), timeout=15.0)
+            batch_conn.executemany("""
+                UPDATE ml_trade_history 
+                SET current_price = ?, price_source = ?, price_timestamp = ?, price_is_fresh = ?
+                WHERE id = ?
+            """, open_updates)
+            batch_conn.commit()
+            batch_conn.close()
+        except Exception as e:
+            logger.warning(f"Batch open price persistence error: {e}")
 
     # Recursive sanitizer to guarantee zero NaN / Inf reach JSON serializer
     def _sanitize(obj):
@@ -621,6 +747,7 @@ def evaluate_ml_history(force_refresh: bool = False):
     clean_results = _sanitize(results)
     _EVAL_CACHE['data'] = clean_results
     _EVAL_CACHE['timestamp'] = time_module.time()
+    _EVAL_CACHE['db_path'] = current_db
     return clean_results
 
 

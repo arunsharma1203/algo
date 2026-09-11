@@ -1,0 +1,33 @@
+{
+  "model_id": "qlib_swing_20260911_110241",
+  "strategy": "SWING",
+  "engine": "QLIB",
+  "qlib_version": "0.9.7",
+  "model_class": "LGBModel",
+  "feature_handler": "Alpha158",
+  "feature_version": "qlib_alpha158_v1",
+  "universe": "LIVE_52",
+  "data_hash": "authoritative_nse_daily",
+  "train_start": "2023-01-02",
+  "train_end": "2023-12-26",
+  "valid_start": "2023-12-27",
+  "valid_end": "2024-03-12",
+  "oos_start": "2024-03-13",
+  "oos_end": "2024-05-31",
+  "metrics": {
+    "ic": -0.0407,
+    "rank_ic": 0.0443,
+    "trades_count": 260,
+    "wins_count": 121,
+    "losses_count": 139,
+    "win_rate": 46.54,
+    "profit_factor": 0.83,
+    "sharpe": -0.47,
+    "max_drawdown_pct": 24.42,
+    "mean_trade_pnl_pct": -0.09
+  },
+  "artifact_path": "/Users/arunsharma/Desktop/swing trade react/backend/models/qlib/swing/qlib_swing_20260911_110241/model.pkl",
+  "artifact_sha256": "ff2a99df7d40c4378f4a2273c9d6a97c00a71c5ba0ae1b88a478d2a6c6562175",
+  "status": "ACTIVE",
+  "created_at": "2026-09-11T11:02:41.101660"
+}

@@ -32,3 +32,10 @@ backend/checkpoints_test/
 patch_*.py
 fix_*.py
 restore_*.py
+
+# Runtime & Process artifacts
+backend/logs/
+backend/run/
+backend/mlruns/
+catboost_info/
+backend/catboost_info/

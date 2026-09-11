@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+import time
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -76,8 +77,12 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", univer
         return
 
     # 2. Load Persisted Champion Ensemble
-    champion_model = ModelManager.load_champion('intraday')
-    champion_meta = ModelManager.get_champion_metadata('intraday')
+    res = ModelManager.load_champion('intraday')
+    if isinstance(res, tuple) and len(res) == 2:
+        champion_model, champion_meta = res
+    else:
+        champion_model = res
+        champion_meta = ModelManager.get_champion_metadata('intraday')
     if not champion_model:
         logger.error("[Autopilot] Aborting sweep: Champion intraday model could not be loaded.")
         return
@@ -110,7 +115,8 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", univer
         try:
             # Wrap per-ticker download so one bad ticker (e.g. TATAMOTORS.NS) doesn't kill the sweep
             try:
-                df = yf.download(ticker, period="60d", interval="15m", progress=False)
+                from app.data.data_gateway import DataGateway
+                df = DataGateway.get_ohlcv(ticker, timeframe="15m", period="60d", use_cache=True, fetch_incremental=True)
             except Exception as dl_err:
                 ticker_errors.append((ticker, f"Download error: {dl_err}"))
                 logger.warning(f"[Autopilot] Data acquisition failed for {ticker}: {dl_err}")

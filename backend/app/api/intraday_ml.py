@@ -47,17 +47,19 @@ def get_or_init_intraday_champion():
     return model, meta
 
 async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
-    if custom_list is None:
-        custom_list = []
+    clean_custom = [t.strip().upper() for t in (custom_list or []) if t and t.strip()]
         
     start_time = datetime.now()
     from app.analytics.universe_config import resolve_universe_tickers
     clean_preset = universe_preset.strip().upper() if universe_preset else "NIFTY_500"
-    if clean_preset in ("CUSTOM", "WATCHLIST") and clean_custom:
+    if clean_preset == "CUSTOM" and clean_custom:
         candidate_pool = [t if t.endswith(('.NS', '.BO')) else f"{t}.NS" for t in clean_custom]
-        universe_label = f"CUSTOM WATCHLIST ({len(candidate_pool)} stocks)"
+        universe_label = f"CUSTOM BASKET ({len(candidate_pool)} stocks)"
+    elif clean_preset in ("WATCHLIST", "USER_WATCHLIST"):
+        candidate_pool = resolve_universe_tickers("WATCHLIST", custom_tickers=clean_custom if clean_custom else None)
+        universe_label = f"USER WATCHLIST ({len(candidate_pool)} stocks)"
     else:
-        candidate_pool = resolve_universe_tickers(clean_preset, custom_tickers=clean_custom)
+        candidate_pool = resolve_universe_tickers(clean_preset, custom_tickers=clean_custom if clean_custom else None)
         universe_label = f"{clean_preset} ({len(candidate_pool)} stocks)"
 
     yield format_sse({"type": "system", "message": f"[{start_time.strftime('%H:%M:%S')}] Initiating Intraday ML Sweep across {len(candidate_pool)} symbols ({universe_label})...", "progress": 1})
@@ -156,6 +158,13 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
                     df = bulk_data.copy()
                 else:
                     continue
+
+            # Persist downloaded 15m candles into canonical SQLite storage
+            from app.data.data_gateway import DataGateway
+            try:
+                DataGateway.persist_intraday_candles(ticker, df, timeframe="15m", source="yfinance")
+            except Exception as persist_err:
+                logger.debug(f"[IntradayML] Could not persist 15m candles for {ticker}: {persist_err}")
 
             # Use SHARED DECISION ENGINE for screening pass (skip enrichment for speed)
             from app.analytics.decision_engine import evaluate_ticker
@@ -391,8 +400,8 @@ async def get_ml_alerts():
 
 @router.get("/history")
 def get_ml_history(force_refresh: bool = False):
-    from app.api.ml_history import evaluate_ml_history
-    return evaluate_ml_history(force_refresh=force_refresh)
+    from app.analytics.position_monitor import PositionMonitorService
+    return PositionMonitorService.evaluate_all(force_refresh=force_refresh)
 
 @router.get("/intraday-scan")
 async def intraday_scan(custom_tickers: str = None, universe: str = "NIFTY_500"):

@@ -6,6 +6,8 @@ import {
   Database, Bell, Terminal, Clock, ChevronDown, ChevronRight 
 } from 'lucide-react';
 import { API_BASE } from '../services/api';
+import PipelineFlow from '../components/pipeline/PipelineFlow';
+import PipelineStageDrawer from '../components/pipeline/PipelineStageDrawer';
 
 const CATEGORIES = [
   { id: '', label: 'All Categories' },
@@ -42,6 +44,8 @@ export default function SystemAudit() {
   // Diagnostic state
   const [diagRunning, setDiagRunning] = useState(false);
   const [diagResult, setDiagResult] = useState(null);
+  const [diagTimeframe, setDiagTimeframe] = useState('intraday');
+  const [selectedStage, setSelectedStage] = useState(null);
 
   const fetchEvents = useCallback(async () => {
     setLoading(true);
@@ -78,7 +82,7 @@ export default function SystemAudit() {
   const runDiagnostic = async () => {
     setDiagRunning(true);
     try {
-      const res = await axios.post(`${API_BASE}/system/pipeline-test`);
+      const res = await axios.post(`${API_BASE}/system/pipeline-test?timeframe=${diagTimeframe}`);
       setDiagResult(res.data);
       fetchEvents(); // Refresh logs after diagnostic runs
     } catch (err) {
@@ -171,20 +175,40 @@ export default function SystemAudit() {
             <span>Refresh</span>
           </button>
 
+          {/* Timeframe Scope Selector */}
+          <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-700 text-xs font-bold font-mono">
+            <button
+              onClick={() => setDiagTimeframe('intraday')}
+              className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+                diagTimeframe === 'intraday' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              15m
+            </button>
+            <button
+              onClick={() => setDiagTimeframe('swing')}
+              className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+                diagTimeframe === 'swing' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              1D
+            </button>
+          </div>
+
           <button
             onClick={runDiagnostic}
             disabled={diagRunning}
-            className="flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold rounded-xl shadow-lg transition"
+            className="flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold rounded-xl shadow-lg transition cursor-pointer"
           >
             {diagRunning ? (
               <>
                 <RefreshCw size={14} className="animate-spin" />
-                <span>Sweeping 11 Stages...</span>
+                <span>Sweeping {diagTimeframe.toUpperCase()} Stages...</span>
               </>
             ) : (
               <>
                 <Play size={14} />
-                <span>Run Pipeline Health Test</span>
+                <span>Run Diagnostic ({diagTimeframe.toUpperCase()})</span>
               </>
             )}
           </button>
@@ -214,53 +238,30 @@ export default function SystemAudit() {
         </div>
       </div>
 
-      {/* Synthetic Diagnostic Results Card (Shows when run) */}
+      {/* Diagnostic Pipeline Flow Component (Dynamic from Backend Telemetry) */}
       {diagResult && (
-        <div className="bg-slate-900 border border-emerald-900/60 rounded-2xl p-5 shadow-2xl space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-            <div className="flex items-center space-x-3">
-              <div className={`p-2 rounded-lg ${diagResult.overall_pass ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 'bg-rose-950 text-rose-400 border border-rose-800'}`}>
-                {diagResult.overall_pass ? <CheckCircle2 size={20} /> : <AlertTriangle size={20} />}
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  Synthetic Pipeline Diagnostic: <span className={diagResult.overall_pass ? 'text-emerald-400' : 'text-rose-400'}>{diagResult.status}</span>
-                  <span className="text-xs font-mono font-normal text-slate-400">({diagResult.passed_stages}/{diagResult.total_stages} Stages Passed • {diagResult.duration_ms}ms)</span>
-                </h3>
-                <p className="text-xs text-slate-400">
-                  Target: <code>{diagResult.symbol}</code> • Safe simulated execution: No model corruption, no heat drag, Telegram safely suppressed.
-                </p>
-              </div>
-            </div>
+        <div className="space-y-2">
+          <div className="flex justify-end">
             <button 
               onClick={() => setDiagResult(null)}
-              className="text-xs text-slate-400 hover:text-white px-2 py-1 bg-slate-800 rounded-md"
+              className="text-xs text-slate-400 hover:text-white px-2.5 py-1 bg-slate-800 rounded-md transition cursor-pointer"
             >
-              Dismiss
+              Dismiss Diagnostic Flow
             </button>
           </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {diagResult.stages && diagResult.stages.map((st, idx) => (
-              <div 
-                key={idx} 
-                className={`p-3 rounded-xl border text-xs flex flex-col justify-between ${
-                  st.status === 'PASS' 
-                    ? 'bg-emerald-950/20 border-emerald-800/40 text-emerald-300' 
-                    : 'bg-rose-950/30 border-rose-800/50 text-rose-300'
-                }`}
-              >
-                <div className="flex items-center justify-between font-bold mb-1">
-                  <span className="truncate">{st.stage}</span>
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${st.status === 'PASS' ? 'bg-emerald-900/60 text-emerald-200' : 'bg-rose-900/60 text-rose-200'}`}>
-                    {st.status}
-                  </span>
-                </div>
-                <p className="text-[11px] text-slate-300 leading-relaxed">{st.detail}</p>
-              </div>
-            ))}
-          </div>
+          <PipelineFlow
+            diagResult={diagResult}
+            onSelectStage={(stage) => setSelectedStage(stage)}
+            selectedStageId={selectedStage?.stage_id}
+          />
         </div>
+      )}
+
+      {selectedStage && (
+        <PipelineStageDrawer
+          stage={selectedStage}
+          onClose={() => setSelectedStage(null)}
+        />
       )}
 
       {/* Filter Toolbar */}

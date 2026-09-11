@@ -225,8 +225,12 @@ class HistoricalDataLayer:
         conn = sqlite3.connect(db_path, timeout=30.0)
 
         try:
-            query = "SELECT date, open, high, low, close, volume, source FROM ohlcv WHERE ticker = ? AND (timeframe = ? OR timeframe IS NULL)"
-            params = [clean_ticker, timeframe]
+            if timeframe in ("1d", "daily"):
+                query = "SELECT date, open, high, low, close, volume, source FROM ohlcv WHERE ticker = ? AND (timeframe = '1d' OR timeframe IS NULL)"
+                params = [clean_ticker]
+            else:
+                query = "SELECT date, open, high, low, close, volume, source FROM ohlcv WHERE ticker = ? AND timeframe = ?"
+                params = [clean_ticker, timeframe]
 
             if start_date:
                 query += " AND date >= ?"

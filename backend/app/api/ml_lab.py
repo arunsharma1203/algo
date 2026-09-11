@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
 import sqlite3
+import json
 from typing import Optional
 from datetime import datetime
 
@@ -92,15 +93,15 @@ def get_lab_stats():
         
     # 3. Model Accuracy (Win Rate of past trades)
     try:
-        from app.api.ml_history import evaluate_ml_history
-        evaluated_trades = evaluate_ml_history()
+        from app.analytics.position_monitor import PositionMonitorService
+        evaluated_trades = PositionMonitorService.evaluate_all()
         closed_trades = [t for t in evaluated_trades if t.get('outcome') not in ('OPEN', None)]
         wins = [t for t in closed_trades if t.get('outcome') == 'TARGET MET' or (t.get('profit_pct') is not None and t.get('profit_pct') > 0)]
         
         total = len(closed_trades)
-        win_rate = round((len(wins) / total * 100), 1) if total > 0 else 0
+        win_rate = round((len(wins) / total * 100), 1) if total > 0 else None
     except Exception as e:
-        win_rate = 0
+        win_rate = None
         total = 0
 
     conn.close()
@@ -143,27 +144,95 @@ def get_foundation_status_api():
     }
 
 @router.post("/foundation/evaluate")
-def evaluate_foundation_challenger_api(timeframe: str = Query("swing", enum=["swing", "intraday"])):
+def evaluate_foundation_challenger_api(
+    timeframe: str = Query("swing", enum=["swing", "intraday"]),
+    universe: str = Query("LIVE_52", description="Authoritative evaluation universe (LIVE_52, BENCHMARK_5, NIFTY_50)")
+):
     """
     Executes an Out-Of-Sample incremental value benchmark comparing:
     Baseline Champion vs Baseline+TimesFM vs Baseline+Chronos vs Combined Challenger.
     """
-    res = FoundationChallengerEvaluator.evaluate_incremental_value(timeframe=timeframe)
+    clean_uni = universe.strip().upper() if universe else "LIVE_52"
+    res = FoundationChallengerEvaluator.evaluate_incremental_value(timeframe=timeframe, universe=clean_uni)
     if isinstance(res, dict):
         res["challenger_type"] = "FOUNDATION_MODEL_CHALLENGER"
-        res["challenger_id"] = f"fnd_challenger_timesfm_chronos_{timeframe}"
+        res["challenger_id"] = f"fnd_challenger_timesfm_chronos_{timeframe}_{clean_uni.lower()}"
         res["source_research_job_id"] = None
         res["model_type"] = "VOTING_ENSEMBLE_PLUS_FOUNDATION"
         res["engine_version"] = "v1.0-foundation-evaluator"
         res["feature_version"] = "timesfm_chronos_v1"
-        res["universe"] = "BENCHMARK_5"
+        res["universe"] = clean_uni
         res["evaluation_type"] = "OUT_OF_SAMPLE_BENCHMARK_SPLIT"
-        res["fingerprint"] = f"fnd_timesfm_chronos_bench5_{timeframe}"
+        res["fingerprint"] = f"fnd_timesfm_chronos_{clean_uni.lower()}_{timeframe}"
     return {"status": "success", "data": res}
 
+@router.post("/foundation/evaluate-real")
+def evaluate_real_foundation_challenger_api(
+    timeframe: str = Query("swing", enum=["swing", "intraday"]),
+    universe: str = Query("LIVE_52", description="Authoritative evaluation universe (LIVE_52, BENCHMARK_5, NIFTY_50)")
+):
+    """
+    Executes REAL_TIMESFM_CHRONOS_ABLATION Out-Of-Sample incremental value benchmark using
+    genuine Google TimesFM 2.5 (200M) and Amazon Chronos-2 forecasts.
+    """
+    from app.analytics.foundation_models.real_challenger_evaluator import RealFoundationChallengerEvaluator
+    clean_uni = universe.strip().upper() if universe else "LIVE_52"
+    res = RealFoundationChallengerEvaluator.evaluate_real_foundation_ablation(universe=clean_uni, timeframe=timeframe)
+    if isinstance(res, dict):
+        res["challenger_type"] = "FOUNDATION_MODEL_CHALLENGER"
+        res["challenger_id"] = f"real_fnd_timesfm_chronos_{timeframe}_{clean_uni.lower()}"
+        res["source_research_job_id"] = None
+        res["model_type"] = "VOTING_ENSEMBLE_PLUS_GENUINE_FOUNDATION"
+        res["engine_version"] = "v3.0-real-foundation-models"
+        res["universe"] = clean_uni
+        res["evaluation_type"] = "LOCKED_OOS_BENCHMARK_SPLIT"
+    return {"status": "success", "data": res}
+
+@router.get("/foundation/history")
+def get_foundation_evaluations_history_api(limit: int = 10):
+    """
+    Returns historical foundation challenger evaluations with verified model provenance.
+    """
+    from app.data.historical_data_layer import get_db_path
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("""
+        SELECT evaluation_id, timestamp, timeframe, model_version, universe,
+               prediction_count, total_bars_count, oos_bars_count, payload_json
+        FROM foundation_challenger_evaluations
+        ORDER BY timestamp DESC
+        LIMIT ?
+    """, (limit,))
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    for r in rows:
+        r["experiment_name"] = "LEGACY_PROXY_ABLATION"
+        r["engine_version"] = "v1.0"
+        r["model_provenance"] = {}
+        r["frozen_tuning_hyperparameters"] = {}
+        r["recommendation"] = "RETAIN_CHAMPION"
+        try:
+            p = json.loads(r.get("payload_json") or "{}")
+            if isinstance(p, dict):
+                r["experiment_name"] = p.get("experiment_name", "LEGACY_PROXY_ABLATION")
+                r["engine_version"] = p.get("engine_version", "v1.0")
+                r["model_provenance"] = p.get("model_provenance", {})
+                r["frozen_tuning_hyperparameters"] = p.get("frozen_tuning_hyperparameters", {})
+                r["recommendation"] = p.get("recommendation", "RETAIN_CHAMPION")
+                r["f1_champion"] = p.get("comparison", {}).get("champion", {}).get("f1")
+                r["f1_challenger"] = p.get("comparison", {}).get("plus_both", {}).get("f1")
+                r["sharpe_champion"] = p.get("comparison", {}).get("champion", {}).get("sharpe")
+                r["sharpe_challenger"] = p.get("comparison", {}).get("plus_both", {}).get("sharpe")
+                r["completed_trades"] = p.get("comparison", {}).get("plus_both", {}).get("completed_trade_count")
+        except Exception:
+            pass
+    return {"status": "success", "data": rows}
+
 class FoundationPromoteRequest(BaseModel):
-    challenger_type: str
-    challenger_id: str
+    challenger_type: str = "FOUNDATION_MODEL_CHALLENGER"
+    challenger_id: str = "fnd_challenger_timesfm_chronos_swing_live_52"
     evaluation_id: Optional[str] = None
     timeframe: str = "swing"
     challenger_variant: str = "plus_both"
@@ -203,11 +272,8 @@ def promote_foundation_challenger_api(req: FoundationPromoteRequest):
         "model_type": "VOTING_ENSEMBLE_PLUS_FOUNDATION",
         "engine_version": "v1.0-foundation-evaluator",
         "feature_version": "timesfm_chronos_v1",
-        "universe": "BENCHMARK_5",
-        "data_start": "2024-09-03",
-        "data_end": "2026-09-03",
+        "universe": "PENDING_VERIFICATION",
         "evaluation_type": "OUT_OF_SAMPLE_BENCHMARK_SPLIT",
-        "fingerprint": f"fnd_timesfm_chronos_bench5_{req.timeframe}"
     }
 
     if not req.confirm_promotion:
@@ -251,6 +317,14 @@ def promote_foundation_challenger_api(req: FoundationPromoteRequest):
             "rejection_reasons": rejection_reasons,
             **identity_metadata
         }
+
+    # Update dynamic provenance from verified snapshot
+    snap_universe = eval_res.get("universe", "LIVE_52")
+    identity_metadata["universe"] = snap_universe
+    identity_metadata["universe_hash"] = eval_res.get("universe_hash")
+    identity_metadata["data_start"] = eval_res.get("data_start")
+    identity_metadata["data_end"] = eval_res.get("data_end")
+    identity_metadata["fingerprint"] = f"fnd_timesfm_chronos_{snap_universe.lower()}_{req.timeframe}"
 
     # Extract metrics from atomic evaluation snapshot
     comparison = eval_res.get("comparison", {})
@@ -482,3 +556,42 @@ def get_ml_report(ticker: str):
         return {"status": "success", "data": df.to_dict(orient='records')}
     except Exception as e:
         return {"status": "error", "message": str(e), "data": []}
+
+@router.get("/production-win-rate")
+def get_production_win_rate():
+    """
+    Returns dynamically computed win rate from authoritative production closed trades in ml_trade_history.
+    If evaluated trades = 0, returns display_rate="N/A" (never 0%).
+    """
+    try:
+        from app.analytics.position_monitor import PositionMonitorService
+        evaluated_trades = PositionMonitorService.evaluate_all()
+        closed_trades = [t for t in evaluated_trades if t.get('outcome') not in ('OPEN', None)]
+        wins = [t for t in closed_trades if t.get('outcome') == 'TARGET MET' or (t.get('profit_pct') is not None and t.get('profit_pct') > 0)]
+        
+        total = len(closed_trades)
+        num_wins = len(wins)
+        if total > 0:
+            win_rate = round((num_wins / total * 100), 1)
+            display_rate = f"{win_rate}%"
+        else:
+            win_rate = None
+            display_rate = "N/A"
+            
+        return {
+            "status": "success",
+            "win_rate": win_rate,
+            "total_closed_trades": total,
+            "wins": num_wins,
+            "display_rate": display_rate
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "win_rate": None,
+            "total_closed_trades": 0,
+            "wins": 0,
+            "display_rate": "N/A",
+            "message": str(e)
+        }
+

@@ -471,8 +471,8 @@ export default function ResearchReportModal({
                   </span>
                 </div>
                 <div className="flex items-center gap-3 mt-1 text-[10px] text-slate-300 font-mono">
-                  <span>Holdout: <strong className="text-emerald-400">PASSED (+₹1.47M)</strong></span>
-                  <span>Closed DD: <strong className="text-cyan-400">21.74%</strong></span>
+                  <span>Holdout: <strong className="text-emerald-400">{holdoutDeep?.net_pnl !== undefined ? `PASSED (+${formatCurrency(holdoutDeep.net_pnl)})` : '—'}</strong></span>
+                  <span>Closed DD: <strong className="text-cyan-400">{ddForensics?.closed_trade_max_dd_pct ? formatPct(ddForensics.closed_trade_max_dd_pct) : '—'}</strong></span>
                   <span>Promotion: <strong className="text-amber-300">SHADOW ONLY</strong></span>
                 </div>
               </div>
@@ -556,7 +556,7 @@ export default function ResearchReportModal({
                     {formatPct(computedMetrics.maxDrawdownPct)}
                   </span>
                   <span className="text-[10px] text-emerald-400 font-mono block mt-0.5">
-                    Closed DD: {formatPct(ddForensics.closed_trade_max_drawdown_pct || 21.74)}
+                    Closed DD: {ddForensics?.closed_trade_max_dd_pct ? formatPct(ddForensics.closed_trade_max_dd_pct) : '—'}
                   </span>
                 </div>
 
@@ -585,16 +585,16 @@ export default function ResearchReportModal({
               <div className="bg-amber-950/30 border border-amber-500/30 rounded-xl p-4 text-xs font-mono space-y-2">
                 <div className="flex items-center gap-2 font-bold text-amber-300">
                   <AlertTriangle className="w-4 h-4 text-amber-400" />
-                  <span>Forensic Drawdown Audit: 58.75% MTM vs 21.74% Closed-Trade</span>
+                  <span>Forensic Drawdown Audit: {formatPct(computedMetrics.maxDrawdownPct)} MTM vs {ddForensics?.closed_trade_max_dd_pct ? formatPct(ddForensics.closed_trade_max_dd_pct) : '—'} Closed-Trade</span>
                 </div>
                 <p className="text-[11px] text-slate-300 leading-relaxed">
-                  {ddForensics.forensic_explanation || "On 2024-09-16, two positions exited, temporarily double-counting position values in both cash and open equity for a single bar. True closed-trade max drawdown is 21.74%."}
+                  {ddForensics.forensic_explanation || "Closed-trade maximum drawdown evaluated directly from realized exit prices across simulated cycles."}
                 </p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-amber-500/20 text-[11px]">
-                  <div>MTM Peak: <strong className="text-white">{formatCurrency(ddForensics.reported_mtm_peak || 9509568.98)}</strong> ({ddForensics.reported_mtm_peak_date})</div>
-                  <div>MTM Trough: <strong className="text-white">{formatCurrency(ddForensics.reported_mtm_trough || 3922535.86)}</strong> ({ddForensics.reported_mtm_trough_date})</div>
-                  <div>Closed Peak: <strong className="text-emerald-400">{formatCurrency(ddForensics.closed_trade_peak || 5392894.53)}</strong> ({ddForensics.closed_trade_peak_date})</div>
-                  <div>Closed Max DD: <strong className="text-emerald-400">{formatPct(ddForensics.closed_trade_max_drawdown_pct || 21.74)}</strong> ({formatCurrency(ddForensics.closed_trade_max_drawdown_amt || 1172644.49)})</div>
+                  <div>MTM Peak: <strong className="text-white">{ddForensics.reported_mtm_peak ? formatCurrency(ddForensics.reported_mtm_peak) : '—'}</strong> {ddForensics.reported_mtm_peak_date ? `(${ddForensics.reported_mtm_peak_date})` : ''}</div>
+                  <div>MTM Trough: <strong className="text-white">{ddForensics.reported_mtm_trough ? formatCurrency(ddForensics.reported_mtm_trough) : '—'}</strong> {ddForensics.reported_mtm_trough_date ? `(${ddForensics.reported_mtm_trough_date})` : ''}</div>
+                  <div>Closed Peak: <strong className="text-emerald-400">{ddForensics.closed_trade_peak ? formatCurrency(ddForensics.closed_trade_peak) : '—'}</strong> {ddForensics.closed_trade_peak_date ? `(${ddForensics.closed_trade_peak_date})` : ''}</div>
+                  <div>Closed Max DD: <strong className="text-emerald-400">{ddForensics?.closed_trade_max_dd_pct ? formatPct(ddForensics.closed_trade_max_dd_pct) : '—'}</strong> {ddForensics.closed_trade_max_dd_amt ? `(${formatCurrency(ddForensics.closed_trade_max_dd_amt)})` : ''}</div>
                 </div>
               </div>
 
@@ -651,13 +651,13 @@ export default function ResearchReportModal({
                     onClick={() => setEquityViewMode('REPORTED')}
                     className={`px-3 py-1 rounded transition ${equityViewMode === 'REPORTED' ? 'bg-cyan-600 text-white font-bold' : 'text-slate-400 hover:text-white'}`}
                   >
-                    Reported Daily MTM (58.75% DD)
+                    Reported Daily MTM ({formatPct(computedMetrics.maxDrawdownPct)} DD)
                   </button>
                   <button
                     onClick={() => setEquityViewMode('CLOSED')}
                     className={`px-3 py-1 rounded transition ${equityViewMode === 'CLOSED' ? 'bg-emerald-600 text-white font-bold' : 'text-slate-400 hover:text-white'}`}
                   >
-                    True Closed-Trade (21.74% DD)
+                    True Closed-Trade {ddForensics?.closed_trade_max_dd_pct ? `(${formatPct(ddForensics.closed_trade_max_dd_pct)} DD)` : ''}
                   </button>
                 </div>
               </div>
@@ -666,7 +666,7 @@ export default function ResearchReportModal({
               <div className="bg-slate-950 border border-slate-800 rounded-xl p-4">
                 <h3 className="text-sm font-bold text-white mb-2 flex items-center justify-between font-mono">
                   <span>Portfolio Equity Curve ({equityViewMode === 'REPORTED' ? 'Mark-to-Market' : 'Closed Trades'})</span>
-                  <span className="text-xs text-cyan-400">Peak: {formatCurrency(equityViewMode === 'REPORTED' ? computedMetrics.peakEquity : ddForensics.closed_trade_peak || 6004663)}</span>
+                  <span className="text-xs text-cyan-400">Peak: {formatCurrency(equityViewMode === 'REPORTED' ? computedMetrics.peakEquity : (ddForensics.closed_trade_peak || computedMetrics.peakEquity))}</span>
                 </h3>
                 <div className="h-72 w-full">
                   <ResponsiveContainer width="100%" height="100%">
@@ -694,7 +694,7 @@ export default function ResearchReportModal({
               <div className="bg-slate-950 border border-slate-800 rounded-xl p-4">
                 <h3 className="text-sm font-bold text-white mb-2 flex items-center justify-between font-mono">
                   <span>Underwater Drawdown Profile</span>
-                  <span className="text-xs text-rose-400">Max DD: {equityViewMode === 'REPORTED' ? formatPct(computedMetrics.maxDrawdownPct) : formatPct(ddForensics.closed_trade_max_drawdown_pct || 21.74)}</span>
+                  <span className="text-xs text-rose-400">Max DD: {equityViewMode === 'REPORTED' ? formatPct(computedMetrics.maxDrawdownPct) : (ddForensics?.closed_trade_max_dd_pct ? formatPct(ddForensics.closed_trade_max_dd_pct) : '—')}</span>
                 </h3>
                 <div className="h-44 w-full">
                   <ResponsiveContainer width="100%" height="100%">
@@ -1018,19 +1018,19 @@ export default function ResearchReportModal({
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono text-xs">
                   <div className="p-3 bg-slate-900 rounded-lg border border-slate-800">
                     <span className="text-[10px] text-slate-500 uppercase block">Holdout Net P&L</span>
-                    <strong className="text-emerald-400 text-base">{formatCurrency(holdoutDeep.net_pnl || 1465586.61)}</strong>
+                    <strong className="text-emerald-400 text-base">{holdoutDeep?.net_pnl !== undefined ? formatCurrency(holdoutDeep.net_pnl) : '—'}</strong>
                   </div>
                   <div className="p-3 bg-slate-900 rounded-lg border border-slate-800">
                     <span className="text-[10px] text-slate-500 uppercase block">Holdout Win Rate</span>
-                    <strong className="text-cyan-400 text-base">{formatPct(holdoutDeep.win_rate_pct || 47.06)}</strong>
+                    <strong className="text-cyan-400 text-base">{holdoutDeep?.win_rate_pct !== undefined ? formatPct(holdoutDeep.win_rate_pct) : '—'}</strong>
                   </div>
                   <div className="p-3 bg-slate-900 rounded-lg border border-slate-800">
                     <span className="text-[10px] text-slate-500 uppercase block">Holdout Profit Factor</span>
-                    <strong className="text-white text-base">{formatRatio(holdoutDeep.profit_factor || 1.60)}</strong>
+                    <strong className="text-white text-base">{holdoutDeep?.profit_factor !== undefined ? formatRatio(holdoutDeep.profit_factor) : '—'}</strong>
                   </div>
                   <div className="p-3 bg-slate-900 rounded-lg border border-slate-800">
                     <span className="text-[10px] text-slate-500 uppercase block">Trade Expectancy</span>
-                    <strong className="text-emerald-400 text-base">{formatCurrency(holdoutDeep.expectancy || 43105.49)}</strong>
+                    <strong className="text-emerald-400 text-base">{holdoutDeep?.expectancy !== undefined ? formatCurrency(holdoutDeep.expectancy) : '—'}</strong>
                   </div>
                 </div>
 
@@ -1038,20 +1038,20 @@ export default function ResearchReportModal({
                 <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 font-mono text-xs space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="font-bold text-amber-400">⚠️ Holdout Profit Concentration Warning</span>
-                    <span className="text-[10px] text-slate-400">Top 5 Trades = 99.36% of Profit</span>
+                    <span className="text-[10px] text-slate-400">Top 5 Trades = {holdoutDeep?.concentration?.top5_pct ? `${formatPct(holdoutDeep.concentration.top5_pct)} of Profit` : '—'}</span>
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-slate-300">
-                    <div>Top 1 Trade: <strong>{formatCurrency(holdoutDeep.concentration?.top1_pnl || 352265.75)}</strong> ({formatPct(holdoutDeep.concentration?.top1_pct || 24.04)})</div>
-                    <div>Top 3 Trades: <strong>{formatCurrency(holdoutDeep.concentration?.top3_pnl || 927330.88)}</strong> ({formatPct(holdoutDeep.concentration?.top3_pct || 63.27)})</div>
-                    <div>Top 5 Trades: <strong>{formatCurrency(holdoutDeep.concentration?.top5_pnl || 1456164.66)}</strong> ({formatPct(holdoutDeep.concentration?.top5_pct || 99.36)})</div>
-                    <div>Top 10 Trades: <strong>{formatCurrency(holdoutDeep.concentration?.top10_pnl || 2674203.15)}</strong> ({formatPct(holdoutDeep.concentration?.top10_pct || 182.47)})</div>
+                    <div>Top 1 Trade: <strong>{holdoutDeep?.concentration?.top1_pnl !== undefined ? formatCurrency(holdoutDeep.concentration.top1_pnl) : '—'}</strong> {holdoutDeep?.concentration?.top1_pct ? `(${formatPct(holdoutDeep.concentration.top1_pct)})` : ''}</div>
+                    <div>Top 3 Trades: <strong>{holdoutDeep?.concentration?.top3_pnl !== undefined ? formatCurrency(holdoutDeep.concentration.top3_pnl) : '—'}</strong> {holdoutDeep?.concentration?.top3_pct ? `(${formatPct(holdoutDeep.concentration.top3_pct)})` : ''}</div>
+                    <div>Top 5 Trades: <strong>{holdoutDeep?.concentration?.top5_pnl !== undefined ? formatCurrency(holdoutDeep.concentration.top5_pnl) : '—'}</strong> {holdoutDeep?.concentration?.top5_pct ? `(${formatPct(holdoutDeep.concentration.top5_pct)})` : ''}</div>
+                    <div>Top 10 Trades: <strong>{holdoutDeep?.concentration?.top10_pnl !== undefined ? formatCurrency(holdoutDeep.concentration.top10_pnl) : '—'}</strong> {holdoutDeep?.concentration?.top10_pct ? `(${formatPct(holdoutDeep.concentration.top10_pct)})` : ''}</div>
                   </div>
                 </div>
 
-                {/* Interactive 34 Holdout Trades Table */}
+                {/* Interactive Holdout Trades Table */}
                 <div className="space-y-2">
                   <div className="flex justify-between items-center text-xs font-mono">
-                    <span className="font-bold text-slate-300">Complete 34 Holdout Trades Ledger</span>
+                    <span className="font-bold text-slate-300">Complete {holdoutDeep?.total_trades || (holdoutTrades ? holdoutTrades.length : 0)} Holdout Trades Ledger</span>
                     <div className="flex items-center gap-2">
                       <input
                         type="text"
@@ -1138,14 +1138,14 @@ export default function ResearchReportModal({
                   <div>Engine: <strong className="text-white">LightGBM Walk-Forward v2.0</strong></div>
                   <div>Universe: <strong className="text-white">{job.universe || 'ALL_COLLECTED'}{stockConc.total_universe_stocks ? ` (${stockConc.total_universe_stocks} stocks)` : ''}</strong></div>
                   <div>Historical Span: <strong className="text-white">{horizon.actual_years ? `${horizon.actual_years} Years` : 'N/A'}{horizon.data_start ? ` (${horizon.data_start.slice(0,4)}–${horizon.data_end ? horizon.data_end.slice(0,4) : ''})` : ''}</strong></div>
-                  <div>Closed Max DD: <strong className="text-emerald-400">21.74% (vs 58.8% MTM)</strong></div>
-                  <div>Research Holdout: <strong className="text-cyan-300">34 trades / 367 candles</strong></div>
-                  <div>Holdout P&L: <strong className="text-emerald-400">+₹1,465,586.61 (PF 1.60)</strong></div>
+                  <div>Closed Max DD: <strong className="text-emerald-400">{ddForensics?.closed_trade_max_dd_pct ? `${formatPct(ddForensics.closed_trade_max_dd_pct)} (vs ${formatPct(computedMetrics.maxDrawdownPct)} MTM)` : '—'}</strong></div>
+                  <div>Research Holdout: <strong className="text-cyan-300">{holdoutDeep?.total_trades !== undefined ? `${holdoutDeep.total_trades} trades` : '—'}</strong></div>
+                  <div>Holdout P&L: <strong className="text-emerald-400">{holdoutDeep?.net_pnl !== undefined ? `${formatCurrency(holdoutDeep.net_pnl)} (PF ${formatRatio(holdoutDeep.profit_factor)})` : '—'}</strong></div>
                   <div>Fresh OOS Required: <strong className="text-amber-300">&ge; 30 trades (&ge; 2026-09-04)</strong></div>
-                  <div>Promotion Status: <strong className="text-rose-400">NOT ELIGIBLE (0/30 OOS)</strong></div>
+                  <div>Promotion Status: <strong className="text-rose-400">{challenger?.promotion_eligibility || 'NOT ELIGIBLE'}</strong></div>
                 </div>
                 <p className="text-[10px] text-slate-400 pt-1 border-t border-purple-500/20">
-                  Strictly isolated from production. Historical 34 holdout trades belong to research and cannot be recycled as fresh promotion evidence.
+                  Strictly isolated from production. Historical research holdout trades cannot be recycled as fresh OOS promotion evidence.
                 </p>
               </div>
 

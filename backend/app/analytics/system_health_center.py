@@ -552,11 +552,9 @@ class SystemHealthCenter:
 
             # 24-POINT RESEARCH REPORT & PRODUCTION ISOLATION AUDIT
             # 1. Champion Model Hashes Invariance
-            known_intra = "f6506e423de2cc442fddabd073f0800e64b09dfb71e8f7b0135aec4d0876dd91"
-            known_swing = "11cd6a77e60b819e9d3260f10738e7a59033e6d3bf88a65b29892a02489ba534"
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            intra_path = os.path.join(base_dir, "models", "intraday", "champion_ensemble.pkl")
-            swing_path = os.path.join(base_dir, "models", "swing", "champion_ensemble.pkl")
+            from app.analytics.model_registry import CHAMPION_HASHES
+            intra_path, _ = ModelManager.get_champion_paths("intraday")
+            swing_path, _ = ModelManager.get_champion_paths("swing")
             
             intra_ok = os.path.exists(intra_path)
             swing_ok = os.path.exists(swing_path)

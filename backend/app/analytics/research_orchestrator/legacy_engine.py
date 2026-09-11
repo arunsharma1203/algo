@@ -544,7 +544,7 @@ class ResearchOrchestrator:
         # Health Matrix Checks
         data_layer_healthy = os.path.exists(get_db_path())
         sqlite_wal_healthy = True
-        prod_model_exists = os.path.exists(os.path.join(backend_dir, "models", "swing", "champion_ensemble.pkl"))
+        prod_model_exists = os.path.exists(ModelManager.get_champion_paths("swing")[0])
 
         return {
             "automation_enabled": self.automation_enabled,
@@ -579,22 +579,45 @@ class ResearchOrchestrator:
         """Main queue supervisor loop running inside background thread."""
         while not self._stop_requested:
             try:
+                from app.data.database import is_test_db_active
+                if is_test_db_active():
+                    time.sleep(2.0)
+                    continue
+
                 if not self.queue_paused:
                     self._process_next_queue_job()
+            except sqlite3.OperationalError as oe:
+                if "no such table: orchestrator_jobs" in str(oe):
+                    time.sleep(5.0)
+                else:
+                    logger.warning(f"Database operational note in legacy orchestrator loop: {oe}")
             except Exception as e:
                 logger.error(f"Error in orchestrator loop: {e}", exc_info=True)
             time.sleep(1.0)
 
     def _process_next_queue_job(self):
         """Picks the highest priority eligible job and executes it."""
+        from app.data.database import is_test_db_active
+        if is_test_db_active():
+            return
+
         conn = self._get_connection()
         try:
+            # Check if orchestrator_jobs table exists in current database before querying
+            check = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='orchestrator_jobs'").fetchone()
+            if not check:
+                return
+
             # Query queued jobs ordered by Priority (P0 > P1 > P7), then created_at
             rows = conn.execute("""
                 SELECT * FROM orchestrator_jobs 
                 WHERE status IN ('QUEUED', 'WAITING_FOR_RESOURCE', 'WAITING_FOR_DEPENDENCY')
                 ORDER BY priority ASC, created_at ASC
             """).fetchall()
+        except sqlite3.OperationalError as oe:
+            if "no such table: orchestrator_jobs" in str(oe):
+                return
+            raise
         finally:
             conn.close()
 

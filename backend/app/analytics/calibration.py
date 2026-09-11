@@ -102,9 +102,9 @@ class ProbabilityCalibrator:
         """
         Fits Platt Scaling on historical resolved trades recorded in SQLite.
         """
-        from app.api.ml_history import evaluate_ml_history
+        from app.analytics.position_monitor import PositionMonitorService
         try:
-            history = evaluate_ml_history()
+            history = PositionMonitorService.evaluate_all()
             resolved = [t for t in history if t.get('outcome') not in ('OPEN', None)]
         except Exception as e:
             resolved = []

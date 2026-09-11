@@ -255,11 +255,14 @@ async def create_research_job(req: CreateResearchJobRequest):
     from app.data.validator import MarketDataValidator
 
     # Authoritative Ticker Safeguard Pipeline
+    from app.analytics.universe_config import UNIVERSE_PRESETS
     tickers_to_validate = None
-    if req.research_type == "SINGLE_STOCK_WALK_FORWARD":
+    if req.research_type in ("SINGLE_STOCK_WALK_FORWARD", "SINGLE_STOCK"):
         tickers_to_validate = req.custom_tickers if req.custom_tickers else req.universe
     elif req.custom_tickers:
         tickers_to_validate = req.custom_tickers
+    elif req.universe not in UNIVERSE_PRESETS:
+        tickers_to_validate = req.universe
 
     clean_universe = req.universe
     clean_tickers = req.custom_tickers
@@ -269,28 +272,32 @@ async def create_research_job(req: CreateResearchJobRequest):
             tickers_to_validate, timeframe=req.timeframe
         )
         if not valid:
-            raise HTTPException(status_code=400, detail=f"Ticker Validation Error: {err_msg}")
+            raise HTTPException(status_code=400, detail=f"INVALID_TICKER: {err_msg}")
         
-        if req.research_type == "SINGLE_STOCK_WALK_FORWARD":
+        if req.research_type in ("SINGLE_STOCK_WALK_FORWARD", "SINGLE_STOCK"):
             clean_universe = ", ".join(validated_symbols)
             clean_tickers = validated_symbols
         else:
             clean_tickers = validated_symbols
 
-    job_res = research_job_manager.create_job(
-        research_type=req.research_type,
-        universe=clean_universe,
-        timeframe=req.timeframe,
-        history_years=req.history_years,
-        worker_count=req.worker_count,
-        initial_capital=req.initial_capital,
-        max_portfolio_heat=req.max_portfolio_heat,
-        kelly_mode=req.kelly_mode,
-        custom_tickers=clean_tickers,
-        title=req.title,
-        model_type=req.model_type,
-        force_rerun=req.force_rerun
-    )
+    try:
+        job_res = research_job_manager.create_job(
+            research_type=req.research_type,
+            universe=clean_universe,
+            timeframe=req.timeframe,
+            history_years=req.history_years,
+            worker_count=req.worker_count,
+            initial_capital=req.initial_capital,
+            max_portfolio_heat=req.max_portfolio_heat,
+            kelly_mode=req.kelly_mode,
+            custom_tickers=clean_tickers,
+            title=req.title,
+            model_type=req.model_type,
+            force_rerun=req.force_rerun
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
     
     if job_res.get("status") == "EXISTING_RESEARCH_FOUND":
         return {
@@ -803,7 +810,7 @@ async def approve_orchestrator_promotion(job_id: str):
 
 from app.analytics.system_health_center import SystemHealthCenter
 from app.analytics.quant_risk_engine import QuantRiskEngine
-from app.api.ml_history import evaluate_ml_history
+from app.analytics.position_monitor import PositionMonitorService
 
 @router.get("/health/quick")
 async def get_quick_system_health():
@@ -818,7 +825,7 @@ async def get_deep_system_health():
 @router.get("/health/quant-risk")
 async def get_quant_risk_metrics():
     """Returns institutional-grade performance and risk statistics (Sharpe, Sortino, Calmar, VaR, CVaR, Regimes)."""
-    trades = evaluate_ml_history()
+    trades = PositionMonitorService.evaluate_all()
     metrics = QuantRiskEngine.compute_performance_metrics(trades)
     regimes = QuantRiskEngine.compute_regime_analysis(trades)
     return {
@@ -829,13 +836,13 @@ async def get_quant_risk_metrics():
 @router.get("/health/model-drift")
 async def get_model_drift_status():
     """Returns model calibration drift, Brier score drift, and decay classification."""
-    trades = evaluate_ml_history()
+    trades = PositionMonitorService.evaluate_all()
     return QuantRiskEngine.compute_model_drift(trades)
 
 @router.post("/health/recover-trades")
 async def trigger_trade_recovery_audit():
     """Audits and guarantees that 100% of historical trades from all databases are recovered and unified."""
-    trades = evaluate_ml_history(force_refresh=True)
+    trades = PositionMonitorService.evaluate_all(force_refresh=True)
     return {
         "status": "SUCCESS",
         "recovered_trades_count": len(trades),
@@ -1036,11 +1043,54 @@ async def get_research_challenger_readiness(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail=f"Research job '{job_id}' not found.")
 
-    res = research_job_manager.get_job_results(job_id) or {}
+    res = research_job_manager.get_job_results(job_id)
+    if not res:
+        return {
+            "challenger_type": "PORTFOLIO_RESEARCH_CHALLENGER",
+            "challenger_id": f"prc_{job_id}",
+            "source_research_job_id": job_id,
+            "model_type": "LIGHTGBM_ALPHA_SIGMOID",
+            "engine_version": "v2.0-portfolio-walkforward",
+            "universe": job.get("universe", "ALL_COLLECTED"),
+            "status": "UNAVAILABLE",
+            "readiness_verdict": "NO_JOB_RESULTS",
+            "message": f"Job {job_id} has not produced results or is still pending execution.",
+            "research_holdout_trades": None,
+            "holdout_profit_factor": None,
+            "closed_trade_max_dd_pct": None,
+            "fresh_oos_shadow_trades": 0,
+            "required_oos_trades": 30,
+            "sample_size_gate": "FAIL (0/30 fresh forward OOS shadow trades completed)",
+            "risk_gate": "UNAVAILABLE",
+            "promotion_eligibility": "INELIGIBLE — NO RESEARCH RESULTS AVAILABLE",
+            "fingerprint": job.get("research_fingerprint"),
+            "production_status": "RESEARCH ONLY — PRODUCTION ISOLATED"
+        }
+
     from app.analytics.research_forensic_analyzer import ResearchForensicAnalyzer
     enriched = ResearchForensicAnalyzer.enrich_results(job, res)
+    ho = enriched.get("holdout_deep_dive", {})
+    dd = enriched.get("drawdown_forensics", {})
 
-    # Dedicated Type-Specific Portfolio Research Challenger Readiness Scorecard
+    ho_trades = ho.get("total_trades", len([t for t in res.get("trades", []) if t.get("is_locked_holdout")]))
+    ho_pf = ho.get("profit_factor", res.get("authoritative_metrics", {}).get("profit_factor", 0.0))
+    ho_max_dd = dd.get("closed_trade_max_drawdown_pct", res.get("authoritative_metrics", {}).get("max_drawdown_pct", 0.0))
+
+    from app.analytics.research_shadow_scorer import count_fresh_shadow_trades
+    fresh_trades = count_fresh_shadow_trades(job_id)
+
+    risk_passed = (ho_max_dd is not None and ho_max_dd <= 25.0)
+    risk_gate = f"{'PASS' if risk_passed else 'FAIL'} ({ho_max_dd}% {'<=' if risk_passed else '>'} 25.0% ceiling)"
+    sample_size_passed = (fresh_trades >= 30)
+    sample_size_gate = f"{'PASS' if sample_size_passed else 'FAIL'} ({fresh_trades}/30 fresh forward OOS shadow trades completed)"
+
+    if sample_size_passed and risk_passed and (ho_pf and ho_pf >= 1.0):
+        readiness_verdict = "READY FOR PRODUCTION PROMOTION REVIEW"
+        promotion_eligibility = "ELIGIBLE FOR PROMOTION"
+    else:
+        readiness_verdict = "CONDITIONALLY READY FOR CHALLENGER SHADOW TESTING"
+        promotion_eligibility = f"NOT ELIGIBLE — REQUIRES 30 FRESH FORWARD OOS SHADOW TRADES (CURRENT: {fresh_trades})"
+
     return {
         "challenger_type": "PORTFOLIO_RESEARCH_CHALLENGER",
         "challenger_id": f"prc_{job_id}",
@@ -1048,21 +1098,21 @@ async def get_research_challenger_readiness(job_id: str):
         "model_type": "LIGHTGBM_ALPHA_SIGMOID",
         "engine_version": "v2.0-portfolio-walkforward",
         "universe": job.get("universe", "ALL_COLLECTED"),
-        "research_holdout_trades": 34,
-        "fresh_oos_shadow_trades": 0,
+        "research_holdout_trades": ho_trades,
+        "fresh_oos_shadow_trades": fresh_trades,
         "required_oos_trades": 30,
-        "sample_size_gate": "FAIL (0/30 fresh forward OOS trades completed)",
-        "holdout_profit_factor": 1.60,
-        "closed_trade_max_dd_pct": 21.74,
+        "sample_size_gate": sample_size_gate,
+        "holdout_profit_factor": ho_pf,
+        "closed_trade_max_dd_pct": ho_max_dd,
         "required_max_dd_pct": 25.0,
-        "risk_gate": "PASS (21.74% <= 25.0% ceiling)",
-        "readiness_verdict": "CONDITIONALLY READY FOR CHALLENGER SHADOW TESTING",
-        "promotion_eligibility": "NOT ELIGIBLE — REQUIRES 30 FRESH FORWARD OOS SHADOW TRADES",
+        "risk_gate": risk_gate,
+        "readiness_verdict": readiness_verdict,
+        "promotion_eligibility": promotion_eligibility,
         "temporal_boundaries": {
-            "research_data_start": "2017-10-23",
+            "research_data_start": enriched.get("horizon_forensics", {}).get("data_start", "2017-10-23"),
             "research_train_end": "2025-02-12",
             "research_holdout_start": "2025-02-12",
-            "research_holdout_end": "2026-09-03",
+            "research_holdout_end": enriched.get("horizon_forensics", {}).get("data_end", "2026-09-03"),
             "minimum_fresh_oos_start": "2026-09-04"
         },
         "fingerprint": job.get("research_fingerprint"),
@@ -1122,32 +1172,130 @@ async def promote_research_challenger_api(req: ResearchChallengerPromoteRequest)
 
     # Gate Evaluation: Fresh OOS shadow trades required >= 30
     # The historical 34 holdout trades belong to the research phase and cannot be recycled as fresh OOS evidence.
-    fresh_oos_trades = 0
-    rejection_reasons = [
-        f"Insufficient fresh OOS sample size ({fresh_oos_trades} trades < 30 required for statistical significance). "
-        "The historical 34 locked holdout trades belong to research artifact res_20260903_172929_829837 and cannot be recycled as fresh Challenger OOS evidence. "
-        "A minimum of 30 independent forward shadow trades starting on or after 2026-09-04 is required."
-    ]
+    from app.analytics.research_shadow_scorer import count_fresh_shadow_trades
+    fresh_oos_trades = count_fresh_shadow_trades(req.source_research_job_id)
+    rejection_reasons = []
+    if fresh_oos_trades < 30:
+        rejection_reasons.append(
+            f"Insufficient fresh OOS sample size ({fresh_oos_trades} trades < 30 required for statistical significance). "
+            "The historical 34 locked holdout trades belong to the research artifact and cannot be recycled as fresh Challenger OOS evidence. "
+            "A minimum of 30 independent forward shadow trades starting on or after 2026-09-04 is required."
+        )
 
-    MasterLogger.log_event(
-        "PROMOTION", "REJECTED",
-        f"Portfolio Research Challenger promotion rejected for {req.source_research_job_id}: {rejection_reasons[0]}",
-        details={"job_id": req.source_research_job_id, "fresh_oos_trades": fresh_oos_trades, "reasons": rejection_reasons},
-        severity="WARNING"
-    )
+    if rejection_reasons:
+        MasterLogger.log_event(
+            "PROMOTION", "REJECTED",
+            f"Portfolio Research Challenger promotion rejected for {req.source_research_job_id}: {rejection_reasons[0]}",
+            details={"job_id": req.source_research_job_id, "fresh_oos_trades": fresh_oos_trades, "reasons": rejection_reasons},
+            severity="WARNING"
+        )
+        return {
+            "status": "REJECTED",
+            "message": "Promotion safety gates not satisfied: " + rejection_reasons[0],
+            "gates_passed": False,
+            "fresh_oos_trades": fresh_oos_trades,
+            "required_oos_trades": 30,
+            "historical_holdout_trades": 34,
+            "rejection_reasons": rejection_reasons,
+            **identity_metadata
+        }
 
+    # All gates passed — promote genuine research candidate artifact via ModelRegistry
+    from app.analytics.model_registry import ModelRegistry, BlockedPromotionError
+    try:
+        cand_id = req.challenger_id or f"cand_{req.source_research_job_id}"
+        prom_res = ModelRegistry.promote_candidate(
+            candidate_id=cand_id,
+            timeframe="swing",
+            confirm=True
+        )
+        MasterLogger.log_event(
+            "PROMOTION", "APPROVED",
+            f"Portfolio Research Challenger {cand_id} promoted to production Champion.",
+            details={"job_id": req.source_research_job_id, "promotion": prom_res},
+            severity="INFO"
+        )
+        return {
+            "status": "PROMOTED",
+            "message": f"Candidate model {cand_id} successfully verified and promoted to active production Champion.",
+            "gates_passed": True,
+            "promotion_details": prom_res,
+            **identity_metadata
+        }
+    except BlockedPromotionError as bpe:
+        raise HTTPException(status_code=400, detail=f"Promotion blocked: {bpe}")
+    except Exception as e:
+        logger.error(f"[PromotionAPI] Error promoting candidate: {e}")
+        raise HTTPException(status_code=500, detail=f"Model promotion failed: {e}")
+
+
+# =========================================================================
+# NEW: Research Challenger Shadow Scan endpoints (additive — no existing code changed)
+# =========================================================================
+
+class ResearchShadowScanRequest(BaseModel):
+    source_research_job_id: str
+    notes: Optional[str] = None
+
+
+@router.post("/research/challenger/shadow-scan")
+async def run_research_challenger_shadow_scan(req: ResearchShadowScanRequest):
+    """
+    Triggers a fresh forward OOS shadow scan for a Portfolio Research Challenger.
+
+    What this does:
+      1. Scores every ticker in the research job's universe using the production champion model.
+      2. Cross-sectionally ranks tickers by probability (highest first).
+      3. Opens the top-10 virtual RESEARCH_SHADOW trades with zero portfolio heat.
+      4. Closes any shadow trades that have exceeded their 15-day horizon.
+      5. Saves results to `research_shadow_trades` table.
+
+    Call this once per trading day after market close to accumulate fresh OOS evidence.
+    After 30 shadow trades, the promotion gate unlocks.
+    """
+    from app.analytics.research_shadow_scorer import run_shadow_scan
+
+    job = research_job_manager.get_job(req.source_research_job_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Research job '{req.source_research_job_id}' not found."
+        )
+    if job.get("status") != "COMPLETED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Research job is not COMPLETED (status={job.get('status')}). Only completed research jobs can run shadow scans."
+        )
+
+    result = run_shadow_scan(req.source_research_job_id)
     return {
-        "status": "REJECTED",
-        "message": "Promotion safety gates not satisfied: " + rejection_reasons[0],
-        "gates_passed": False,
-        "fresh_oos_trades": fresh_oos_trades,
-        "required_oos_trades": 30,
-        "historical_holdout_trades": 34,
-        "rejection_reasons": rejection_reasons,
-        **identity_metadata
+        "endpoint": "research/challenger/shadow-scan",
+        "source_research_job_id": req.source_research_job_id,
+        **result
     }
 
 
+@router.get("/research/challenger/shadow-trades/{job_id}")
+async def get_research_challenger_shadow_trades(job_id: str, limit: int = 100):
+    """
+    Returns the list of fresh forward OOS shadow trades for a Portfolio Research Challenger.
+    These are the virtual trades counted toward the 30-trade promotion gate.
+    """
+    from app.analytics.research_shadow_scorer import list_shadow_trades, count_fresh_shadow_trades
 
+    job = research_job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Research job '{job_id}' not found.")
+
+    trades = list_shadow_trades(job_id, limit=limit)
+    fresh_count = count_fresh_shadow_trades(job_id)
+    return {
+        "source_research_job_id": job_id,
+        "fresh_oos_shadow_trades": fresh_count,
+        "required_oos_trades": 30,
+        "gate_status": "PASS" if fresh_count >= 30 else "FAIL",
+        "trades": trades,
+        "total_returned": len(trades),
+    }
 
 
