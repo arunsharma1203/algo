@@ -125,6 +125,12 @@ UNIVERSE_PRESETS: Dict[str, Dict[str, Any]] = {
         "description": "Broad 100-stock liquid universe for multi-asset research and portfolio walk-forward testing.",
         "survivorship_bias": "MODERATE-HIGH — Retrospective selection of current 100 liquid stocks."
     },
+    "ALL_DATABASE_STOCKS": {
+        "name": "All Database Stocks (Authoritative Local DB)",
+        "tickers": [], # Dynamically populated from SQLite database
+        "description": "All unique valid stocks available in the authoritative local SQLite database meeting minimum bar criteria.",
+        "survivorship_bias": "NONE / CANONICAL DB — All validated local equity assets."
+    },
     "ALL_117": {
         "name": "All Locally Available Equities (Dynamic Local DB - Legacy Alias)",
         "tickers": [], # Dynamically populated from database
@@ -145,6 +151,91 @@ UNIVERSE_PRESETS: Dict[str, Dict[str, Any]] = {
     }
 }
 
+def resolve_all_database_stocks(
+    timeframe: str = "1d",
+    min_bars: int = 60
+) -> Dict[str, Any]:
+    """
+    Authoritative dynamic universe resolver: discovers ALL unique, valid stocks
+    in the authoritative local SQLite database (ohlcv table).
+    
+    Returns:
+      {
+        "discovered_count": int,
+        "valid_count": int,
+        "scan_ready_count": int,
+        "scan_ready_symbols": List[str],
+        "valid_symbols": List[str],
+        "insufficient_bar_symbols": List[str],
+        "invalid_symbols": List[str]
+      }
+    """
+    try:
+        from app.data.historical_data_layer import get_db_path
+        db_path = get_db_path()
+        if not os.path.exists(db_path):
+            return {
+                "discovered_count": len(LIVE_UNIVERSE),
+                "valid_count": len(LIVE_UNIVERSE),
+                "scan_ready_count": len(LIVE_UNIVERSE),
+                "scan_ready_symbols": list(LIVE_UNIVERSE),
+                "valid_symbols": list(LIVE_UNIVERSE),
+                "insufficient_bar_symbols": [],
+                "invalid_symbols": []
+            }
+
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        cur = conn.cursor()
+        if timeframe == "1d":
+            query = "SELECT ticker, COUNT(*) FROM ohlcv WHERE timeframe = '1d' OR timeframe IS NULL GROUP BY ticker ORDER BY ticker"
+        else:
+            query = f"SELECT ticker, COUNT(*) FROM ohlcv WHERE timeframe = '{timeframe}' GROUP BY ticker ORDER BY ticker"
+        cur.execute(query)
+        rows = cur.fetchall()
+        conn.close()
+
+        discovered_count = len(rows)
+        valid_symbols = []
+        scan_ready_symbols = []
+        insufficient_symbols = []
+        invalid_symbols = []
+
+        for raw_ticker, cnt in rows:
+            ok, canonical_sym, err = validate_ticker(raw_ticker)
+            if ok:
+                valid_symbols.append(canonical_sym)
+                if cnt >= min_bars:
+                    scan_ready_symbols.append(canonical_sym)
+                else:
+                    insufficient_symbols.append(canonical_sym)
+            else:
+                invalid_symbols.append(raw_ticker)
+
+        # Deduplicate preserving order
+        valid_symbols = list(dict.fromkeys(valid_symbols))
+        scan_ready_symbols = list(dict.fromkeys(scan_ready_symbols))
+
+        return {
+            "discovered_count": discovered_count,
+            "valid_count": len(valid_symbols),
+            "scan_ready_count": len(scan_ready_symbols),
+            "scan_ready_symbols": scan_ready_symbols,
+            "valid_symbols": valid_symbols,
+            "insufficient_bar_symbols": insufficient_symbols,
+            "invalid_symbols": invalid_symbols
+        }
+    except Exception as e:
+        logger.error(f"[UniverseConfig] Failed resolving all database stocks: {e}")
+        return {
+            "discovered_count": len(LIVE_UNIVERSE),
+            "valid_count": len(LIVE_UNIVERSE),
+            "scan_ready_count": len(LIVE_UNIVERSE),
+            "scan_ready_symbols": list(LIVE_UNIVERSE),
+            "valid_symbols": list(LIVE_UNIVERSE),
+            "insufficient_bar_symbols": [],
+            "invalid_symbols": []
+        }
+
 def get_available_db_tickers() -> List[str]:
     """Retrieves all distinct tickers with daily data in the local canonical database."""
     try:
@@ -164,6 +255,18 @@ def get_available_db_tickers() -> List[str]:
 def get_universe(name: str = "BENCHMARK_5", custom_tickers: Optional[List[str]] = None) -> Dict[str, Any]:
     """Retrieves universe configuration and survivorship bias disclosures."""
     clean_name = name.strip().upper()
+    if clean_name in ("ALL_DATABASE_STOCKS", "ALL_DB", "DATABASE_ALL"):
+        res = resolve_all_database_stocks(timeframe="1d", min_bars=60)
+        symbols = res["scan_ready_symbols"] if res["scan_ready_symbols"] else res["valid_symbols"]
+        return {
+            "name": f"All Database Stocks ({res['scan_ready_count']} Scan Ready / {res['discovered_count']} Discovered)",
+            "tickers": symbols,
+            "discovered_count": res["discovered_count"],
+            "valid_count": res["valid_count"],
+            "scan_ready_count": res["scan_ready_count"],
+            "description": "All unique valid stocks available in the authoritative local SQLite database meeting minimum bar criteria.",
+            "survivorship_bias": "NONE / CANONICAL DB — All validated local equity assets."
+        }
     if clean_name in ("WATCHLIST", "USER_WATCHLIST"):
         if custom_tickers:
             tickers = [t if t.endswith(('.NS', '.BO')) else f"{t}.NS" for t in custom_tickers if t]

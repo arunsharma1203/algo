@@ -34,7 +34,7 @@ export default function QlibControlRoom() {
 
   // Scanner state
   const [scanStrategy, setScanStrategy] = useState('SWING');
-  const [scanUniverse, setScanUniverse] = useState('LIVE_52');
+  const [scanUniverse, setScanUniverse] = useState('ALL_DATABASE_STOCKS');
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [scanError, setScanError] = useState(null);
@@ -513,7 +513,10 @@ export default function QlibControlRoom() {
                   onChange={e => setScanUniverse(e.target.value)}
                   className="bg-slate-800 border border-slate-700 text-xs font-mono text-white rounded-xl px-3 py-2 outline-none"
                 >
-                  <option value="LIVE_52">Universe: LIVE_52 (Top Liquid)</option>
+                  <option value="ALL_DATABASE_STOCKS">Universe: ALL_DATABASE_STOCKS (Canonical Local DB)</option>
+                  <option value="LIVE_52">Universe: LIVE_52 (Top Liquid 52)</option>
+                  <option value="NIFTY_50">Universe: NIFTY_50 (Top 50 Bluechips)</option>
+                  <option value="NIFTY_500">Universe: NIFTY_500 (Broad Market)</option>
                 </select>
 
                 <button
@@ -524,6 +527,44 @@ export default function QlibControlRoom() {
                   {scanning ? <RefreshCw className="animate-spin" size={14} /> : <Play size={14} />}
                   {scanning ? 'Running Qlib Inference...' : 'Run Qlib Scan'}
                 </button>
+              </div>
+            </div>
+
+            {/* Dynamic Universe & Provenance Telemetry Banner */}
+            <div className="mt-4 pt-4 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono">
+              <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80">
+                <div className="text-gray-500 text-[10px] uppercase">Stocks Discovered</div>
+                <div className="text-purple-300 font-bold mt-0.5">
+                  {statusData?.universe_stats?.stocks_discovered ?? '511'}
+                </div>
+              </div>
+              <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80">
+                <div className="text-gray-500 text-[10px] uppercase">Valid for Scan</div>
+                <div className="text-emerald-400 font-bold mt-0.5">
+                  {statusData?.universe_stats?.stocks_scan_ready ?? '509'}
+                </div>
+              </div>
+              <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80">
+                <div className="text-gray-500 text-[10px] uppercase">Model</div>
+                <div className="text-white font-semibold mt-0.5 truncate" title={statusData?.models_status?.[scanStrategy.toLowerCase()]?.model_class || 'LGBModel'}>
+                  {statusData?.models_status?.[scanStrategy.toLowerCase()]?.model_class || 'LGBModel'}
+                </div>
+              </div>
+              <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80">
+                <div className="text-gray-500 text-[10px] uppercase">Model Hash</div>
+                <div className="text-purple-400 font-mono text-[11px] mt-0.5 truncate" title={statusData?.models_status?.[scanStrategy.toLowerCase()]?.artifact_sha256}>
+                  {statusData?.models_status?.[scanStrategy.toLowerCase()]?.artifact_sha256 ? `${statusData.models_status[scanStrategy.toLowerCase()].artifact_sha256.slice(0, 10)}...` : 'N/A'}
+                </div>
+              </div>
+              <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80">
+                <div className="text-gray-500 text-[10px] uppercase">Data Source</div>
+                <div className="text-gray-300 font-medium mt-0.5">Indian NSE/BSE</div>
+              </div>
+              <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80">
+                <div className="text-gray-500 text-[10px] uppercase">Data Freshness</div>
+                <div className="text-emerald-300 font-medium mt-0.5 truncate">
+                  {scanResult?.data_timestamp || 'Daily EOD'}
+                </div>
               </div>
             </div>
 

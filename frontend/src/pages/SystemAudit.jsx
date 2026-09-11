@@ -11,6 +11,7 @@ import PipelineStageDrawer from '../components/pipeline/PipelineStageDrawer';
 
 const CATEGORIES = [
   { id: '', label: 'All Categories' },
+  { id: 'SCAN_QLIB', label: 'Qlib Scans' },
   { id: 'SCAN_MANUAL', label: 'Manual Scans' },
   { id: 'SCAN_AUTONOMOUS', label: 'Autonomous Sweeps' },
   { id: 'DECISION_ENGINE', label: 'Decision Engine' },

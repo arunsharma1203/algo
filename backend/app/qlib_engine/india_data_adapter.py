@@ -20,6 +20,7 @@ import os
 import sqlite3
 import hashlib
 import logging
+import threading
 import numpy as np
 import pandas as pd
 from typing import List, Dict, Any, Optional, Tuple
@@ -31,6 +32,9 @@ from app.data.data_gateway import DataGateway
 from app.analytics.universe_config import resolve_universe_tickers
 
 logger = logging.getLogger(__name__)
+
+_QLIB_INITIALIZED = False
+_QLIB_INIT_LOCK = threading.Lock()
 
 DEFAULT_QLIB_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "data", "qlib_provider")
@@ -283,25 +287,76 @@ class IndiaMarketDataAdapter:
         """
         Initializes Microsoft Qlib with this Indian market data provider.
         Configures MLflow filesystem compatibility.
+        Thread-safe and idempotent singleton: avoids re-initialization if already initialized,
+        specifically preventing RecorderInitializationError if QlibRecorder or Experiment is active.
         """
+        global _QLIB_INITIALIZED
         os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
         os.environ["MLFLOW_DISABLE_AGENT_HINT"] = "1"
 
-        try:
-            qlib.init(
-                provider_uri=self.provider_uri,
-                clear_mem_cache=True,
-                auto_mount=False
-            )
-            return {
-                "status": "INITIALIZED",
-                "qlib_version": getattr(qlib, "__version__", "unknown"),
-                "provider_uri": self.provider_uri,
-                "calendars": os.listdir(self.cal_dir) if os.path.exists(self.cal_dir) else []
-            }
-        except Exception as e:
-            logger.error(f"[QlibAdapter] Initialization failed: {e}")
-            raise
+        with _QLIB_INIT_LOCK:
+            if _QLIB_INITIALIZED:
+                # Already initialized; verify provider_uri matches
+                try:
+                    from qlib.config import C
+                    curr_uri = C.get("provider_uri")
+                    # C["provider_uri"] may be dict {'__DEFAULT_FREQ': ...} or str
+                    if curr_uri:
+                        if isinstance(curr_uri, dict):
+                            curr_path = str(curr_uri.get("__DEFAULT_FREQ", ""))
+                        else:
+                            curr_path = str(curr_uri)
+                        if os.path.abspath(curr_path) == os.path.abspath(self.provider_uri):
+                            return {
+                                "status": "ALREADY_INITIALIZED",
+                                "qlib_version": getattr(qlib, "__version__", "unknown"),
+                                "provider_uri": self.provider_uri,
+                                "calendars": os.listdir(self.cal_dir) if os.path.exists(self.cal_dir) else []
+                            }
+                except Exception as check_err:
+                    logger.debug(f"[QlibAdapter] Error checking existing config: {check_err}")
+
+            # Check if Qlib recorder/experiment is currently active
+            try:
+                from qlib.workflow import R
+                if hasattr(R, "get_exp") and R.get_exp() is not None:
+                    logger.warning("[QlibAdapter] QlibRecorder/Experiment is currently active; skipping qlib.init to prevent RecorderInitializationError.")
+                    _QLIB_INITIALIZED = True
+                    return {
+                        "status": "RECORDER_ACTIVE_REUSED",
+                        "qlib_version": getattr(qlib, "__version__", "unknown"),
+                        "provider_uri": self.provider_uri,
+                        "calendars": os.listdir(self.cal_dir) if os.path.exists(self.cal_dir) else []
+                    }
+            except Exception:
+                pass
+
+            try:
+                qlib.init(
+                    provider_uri=self.provider_uri,
+                    clear_mem_cache=True,
+                    auto_mount=False
+                )
+                _QLIB_INITIALIZED = True
+                return {
+                    "status": "INITIALIZED",
+                    "qlib_version": getattr(qlib, "__version__", "unknown"),
+                    "provider_uri": self.provider_uri,
+                    "calendars": os.listdir(self.cal_dir) if os.path.exists(self.cal_dir) else []
+                }
+            except Exception as e:
+                # If error is RecorderInitializationError, mark as initialized and reuse
+                if "RecorderInitializationError" in type(e).__name__ or "QlibRecorder is already activated" in str(e):
+                    logger.info("[QlibAdapter] Recorder is active; reusing existing Qlib initialization.")
+                    _QLIB_INITIALIZED = True
+                    return {
+                        "status": "REUSED_AFTER_RECORDER_CHECK",
+                        "qlib_version": getattr(qlib, "__version__", "unknown"),
+                        "provider_uri": self.provider_uri,
+                        "calendars": os.listdir(self.cal_dir) if os.path.exists(self.cal_dir) else []
+                    }
+                logger.error(f"[QlibAdapter] Initialization failed: {e}")
+                raise
 
 
 _GLOBAL_ADAPTER = None
@@ -326,3 +381,4 @@ def ensure_qlib_ready(provider_uri: Optional[str] = None) -> IndiaMarketDataAdap
     
     adapter.initialize_qlib()
     return adapter
+

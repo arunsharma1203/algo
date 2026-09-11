@@ -33,7 +33,7 @@ router = APIRouter(prefix="/qlib", tags=["qlib_system"])
 
 class QlibScanRequest(BaseModel):
     strategy: str = "SWING"  # 'SWING', 'INTRADAY', 'FNO'
-    universe: str = "LIVE_52"
+    universe: str = "ALL_DATABASE_STOCKS"
     top_k: int = 5
     tickers: Optional[List[str]] = None
 
@@ -52,7 +52,9 @@ def get_qlib_system_status():
     """
     Returns complete telemetry for the Microsoft Qlib engine.
     """
+    from app.analytics.universe_config import resolve_all_database_stocks
     adapter = get_qlib_adapter()
+    uni_stats = resolve_all_database_stocks(timeframe="1d", min_bars=60)
     return {
         "engine": "QLIB",
         "badge": "QLIB ENGINE • ACTIVE",
@@ -66,7 +68,28 @@ def get_qlib_system_status():
         "feature_handlers": ["Alpha158", "Alpha360"],
         "supported_models": ["LGBModel", "DEnsembleModel", "CatBoostModel"],
         "models_status": QlibModelRegistry.get_registry_status(),
-        "system_mode": "PARALLEL_EXPERIMENTAL_BRANCH"
+        "system_mode": "PARALLEL_EXPERIMENTAL_BRANCH",
+        "primary_universe": "ALL_DATABASE_STOCKS",
+        "universe_stats": {
+            "stocks_discovered": uni_stats["discovered_count"],
+            "stocks_valid": uni_stats["valid_count"],
+            "stocks_scan_ready": uni_stats["scan_ready_count"]
+        }
+    }
+
+
+@router.get("/universe/stats")
+def get_universe_stats():
+    """Returns dynamic discovery and validation counts for database universe."""
+    from app.analytics.universe_config import resolve_all_database_stocks
+    stats = resolve_all_database_stocks(timeframe="1d", min_bars=60)
+    return {
+        "universe": "ALL_DATABASE_STOCKS",
+        "stocks_discovered": stats["discovered_count"],
+        "stocks_valid": stats["valid_count"],
+        "stocks_scan_ready": stats["scan_ready_count"],
+        "invalid_symbols_count": len(stats["invalid_symbols"]),
+        "insufficient_bar_symbols_count": len(stats["insufficient_bar_symbols"])
     }
 
 
