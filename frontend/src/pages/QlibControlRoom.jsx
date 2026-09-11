@@ -18,7 +18,8 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Sliders,
-  AlertTriangle
+  AlertTriangle,
+  Terminal
 } from 'lucide-react';
 import { API_BASE, getLegacyRuntimeHealth, getQlibRuntimeHealth } from '../services/api';
 
