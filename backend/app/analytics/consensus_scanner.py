@@ -160,13 +160,7 @@ class ConsensusScanner:
             ).fetchone()
             conn.close()
             if row and row[1]:
-                completed_at, payload_str = row[0], row[1]
-                # Return in-memory cache if it matches the latest SQLite completed_at
-                if strat_key in cls._LATEST_SCAN_RESULTS:
-                    cached = cls._LATEST_SCAN_RESULTS[strat_key]
-                    if cached.get("completed_at") == completed_at:
-                        return cached
-                payload = json.loads(payload_str)
+                payload = json.loads(row[1])
                 cls._LATEST_SCAN_RESULTS[strat_key] = payload
                 return payload
         except Exception as e:
