@@ -1528,9 +1528,18 @@ export default function ConsensusScanner() {
                                     {(opp.strategy || scanResult.strategy || 'INTRADAY')} • {(opp.timeframe || ((opp.strategy || scanResult.strategy || 'INTRADAY') === 'INTRADAY' ? '15m' : '1d'))}
                                   </span>
                                 </div>
-                                <p className="text-xs text-slate-500 font-mono">
-                                  Alpha-158 Score: <strong>{opp.score}%</strong> • Universe Percentile: <strong>{opp.rank_percentile ?? 'Top Tier'}%</strong>
-                                </p>
+                                <div className="flex items-center space-x-2 text-xs font-mono mt-0.5">
+                                  <span className="text-slate-500">
+                                    Alpha-158 Score: <strong className="text-purple-700">{opp.score}%</strong> • Percentile: <strong>{opp.rank_percentile ?? 'Top Tier'}%</strong>
+                                  </span>
+                                  {opp.meta_learner_v2 && (
+                                    <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                                      opp.meta_learner_v2.meta_adjustment > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                                    }`}>
+                                      Meta V2: {opp.meta_learner_v2.final_conviction}% ({opp.meta_learner_v2.meta_adjustment > 0 ? `+${opp.meta_learner_v2.meta_adjustment}` : opp.meta_learner_v2.meta_adjustment}%)
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             </div>
 
@@ -1619,9 +1628,18 @@ export default function ConsensusScanner() {
                                     {(cand.strategy || scanResult.strategy || 'INTRADAY')} • {(cand.timeframe || ((cand.strategy || scanResult.strategy || 'INTRADAY') === 'INTRADAY' ? '15m' : '1d'))}
                                   </span>
                                 </div>
-                                <p className="text-xs text-slate-500 font-mono">
-                                  Ensemble Confidence: <strong>{cand.confidence}%</strong> (Raw: {cand.raw_confidence || cand.confidence}%)
-                                </p>
+                                <div className="flex items-center space-x-2 text-xs font-mono mt-0.5">
+                                  <span className="text-slate-500">
+                                    Ensemble Confidence: <strong className="text-indigo-700">{cand.confidence}%</strong> (Raw: {cand.raw_confidence || cand.confidence}%)
+                                  </span>
+                                  {cand.meta_learner_v2 && (
+                                    <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                                      cand.meta_learner_v2.meta_adjustment > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                                    }`}>
+                                      Meta V2: {cand.meta_learner_v2.final_conviction}% ({cand.meta_learner_v2.meta_adjustment > 0 ? `+${cand.meta_learner_v2.meta_adjustment}` : cand.meta_learner_v2.meta_adjustment}%)
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             </div>
 
@@ -2039,8 +2057,15 @@ export default function ConsensusScanner() {
 
                             {/* Score & Engines */}
                             <td className="py-2.5 px-3 whitespace-nowrap text-[11px]">
-                              <div className="font-bold text-amber-700">
-                                {scoreVal ? `${Number(scoreVal).toFixed(0)}% Confluence` : '—'}
+                              <div className="font-bold text-amber-700 flex items-center space-x-1.5">
+                                <span>{scoreVal ? `${Number(scoreVal).toFixed(0)}% Confluence` : '—'}</span>
+                                {t.meta_learner_v2 && (
+                                  <span className={`text-[9px] px-1 py-0.2 rounded font-mono font-bold ${
+                                    t.meta_learner_v2.meta_adjustment > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                                  }`}>
+                                    Meta: {t.meta_learner_v2.final_conviction}%
+                                  </span>
+                                )}
                               </div>
                               <div className="text-[10px] text-slate-400 font-sans">
                                 {t.qlib_score != null && `Qlib: ${Number(t.qlib_score).toFixed(3)} `}

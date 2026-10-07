@@ -1095,7 +1095,7 @@ class ConsensusScanner:
                                 q_sl = round(q_entry * (1.0 + max(0.003, risk_pct)), 2)
                                 q_tp = round(q_entry * (1.0 - max(0.005, reward_pct)), 2)
 
-                    qlib_solo.append({
+                    _q_cand = {
                         "ticker": q.get("ticker") or f"{sym}.NS",
                         "symbol": sym,
                         "direction": q_dir,
@@ -1104,6 +1104,7 @@ class ConsensusScanner:
                         "timeframe": "15m" if strat_upper == "INTRADAY" else "1d",
                         "source": "QLIB_SOLO",
                         "score": q_score_pct,
+                        "composite_score": q_score_pct,
                         "raw_prediction": q.get("raw_prediction", q_score),
                         "calibrated_probability": q.get("calibrated_probability", q_score_pct),
                         "rank_percentile": q.get("rank_percentile"),
@@ -1118,7 +1119,21 @@ class ConsensusScanner:
                         "model_id": q.get("model_id"),
                         "model_hash": q.get("model_hash"),
                         "pnl_status": q.get("pnl_status", "FRESH")
-                    })
+                    }
+                    try:
+                        from app.analytics.consensus_meta_learner_v2 import ConsensusMetaLearnerV2
+                        _v2_eval = ConsensusMetaLearnerV2().predict_candidate(_q_cand)
+                        _q_cand["meta_learner_v2"] = {
+                            "base_conviction": _v2_eval.get("base_conviction", q_score_pct),
+                            "meta_adjustment": _v2_eval.get("meta_adjustment", 0.0),
+                            "final_conviction": _v2_eval.get("final_conviction", q_score_pct),
+                            "calibrated_probability": _v2_eval.get("calibrated_probability"),
+                            "group_attributions": _v2_eval.get("group_attributions", {}),
+                            "status": _v2_eval.get("status", "UNAVAILABLE")
+                        }
+                    except Exception:
+                        pass
+                    qlib_solo.append(_q_cand)
                     shadow_candidates_to_log.append({
                         "ticker": q.get("ticker") or f"{sym}.NS",
                         "symbol": sym,
@@ -1153,7 +1168,7 @@ class ConsensusScanner:
                             l_tp1 = round(l_tp1 + delta, 2)
                             l_tp2 = round(l_tp2 + delta, 2) if l_tp2 > 0 else round(l_tp1 * 1.01, 2)
 
-                    legacy_solo.append({
+                    _l_cand = {
                         "ticker": l.get("ticker") or f"{sym}.NS",
                         "symbol": sym,
                         "direction": l_dir,
@@ -1162,6 +1177,7 @@ class ConsensusScanner:
                         "timeframe": "15m" if strat_upper == "INTRADAY" else "1d",
                         "source": "LEGACY_SOLO",
                         "confidence": l_score_pct,
+                        "composite_score": l_score_pct,
                         "raw_confidence": l.get("raw_confidence", l_score_pct),
                         "entry": l_entry,
                         "entry_price": l_entry,
@@ -1174,7 +1190,21 @@ class ConsensusScanner:
                         "base_probs": l.get("base_probs", {}),
                         "explanation": l.get("explanation", {}),
                         "timestamp": l.get("timestamp") or datetime.now().isoformat()
-                    })
+                    }
+                    try:
+                        from app.analytics.consensus_meta_learner_v2 import ConsensusMetaLearnerV2
+                        _v2_eval = ConsensusMetaLearnerV2().predict_candidate(_l_cand)
+                        _l_cand["meta_learner_v2"] = {
+                            "base_conviction": _v2_eval.get("base_conviction", l_score_pct),
+                            "meta_adjustment": _v2_eval.get("meta_adjustment", 0.0),
+                            "final_conviction": _v2_eval.get("final_conviction", l_score_pct),
+                            "calibrated_probability": _v2_eval.get("calibrated_probability"),
+                            "group_attributions": _v2_eval.get("group_attributions", {}),
+                            "status": _v2_eval.get("status", "UNAVAILABLE")
+                        }
+                    except Exception:
+                        pass
+                    legacy_solo.append(_l_cand)
                     shadow_candidates_to_log.append({
                         "ticker": l.get("ticker") or f"{sym}.NS",
                         "symbol": sym,
@@ -1205,6 +1235,31 @@ class ConsensusScanner:
                     pass
 
             elapsed = round(time.time() - start_time, 2)
+            previous_active_trades = []
+            previous_active_scan_at = None
+            if len(unanimous_trades) == 0:
+                try:
+                    conn_prev = sqlite3.connect(get_db_path(), timeout=10.0)
+                    cur_prev = conn_prev.cursor()
+                    cur_prev.execute("""
+                        SELECT details_json, timestamp FROM consensus_trade_history
+                        WHERE strategy = ? AND status = 'OPEN'
+                        ORDER BY id DESC LIMIT ?
+                    """, (strat_upper, top_k))
+                    prev_rows = cur_prev.fetchall()
+                    for pr in prev_rows:
+                        if pr[0]:
+                            try:
+                                d_prev = json.loads(pr[0])
+                                previous_active_trades.append(d_prev)
+                                if not previous_active_scan_at:
+                                    previous_active_scan_at = pr[1]
+                            except Exception:
+                                pass
+                    conn_prev.close()
+                except Exception as prev_err:
+                    logger.debug(f"Could not load previous active trades: {prev_err}")
+
             result_payload = {
                 "scan_id": scan_id,
                 "strategy": strat_upper,
@@ -1246,6 +1301,8 @@ class ConsensusScanner:
                 },
                 "unanimous_trades": unanimous_trades[:top_k],
                 "consensus_trades": unanimous_trades[:top_k],
+                "previous_active_trades": previous_active_trades,
+                "previous_active_scan_at": previous_active_scan_at,
                 "conflicting_trades": conflicting_trades[:top_k],
                 "qlib_solo": qlib_solo[:top_k],
                 "legacy_solo": legacy_solo[:top_k],
