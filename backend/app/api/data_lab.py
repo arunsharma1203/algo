@@ -14,7 +14,6 @@ from app.analytics.universe_config import get_universe, UNIVERSE_PRESETS, BENCHM
 from app.analytics.portfolio_walk_forward import MultiStockPortfolioWalkForwardEngine
 from app.analytics.parallel_engine import ParallelWalkForwardOrchestrator, ResearchConfig
 from app.api.ml_backtest import WeeklyWalkForwardBacktestEngine
-import yfinance as yf
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/data-lab", tags=["Data Lab"])
@@ -100,7 +99,7 @@ async def trigger_10y_sync(req: SyncRequest):
 class HoardSyncRequest(BaseModel):
     universe: str = "NIFTY_500"
     custom_tickers: Optional[List[str]] = None
-    data_source: str = "yfinance"
+    data_source: str = "upstox"
     api_key: str = ""
 
 @router.post("/sync-15m-hoarder")
@@ -151,15 +150,19 @@ async def get_horizon_comparison(ticker: str = "RELIANCE.NS"):
         if not clean_t.endswith(('.NS', '.BO')):
             clean_t += '.NS'
 
-        df_10y = yf.download(clean_t, period="10y", interval="1d", progress=False)
-        if df_10y.empty or len(df_10y) < 1000:
-            raise HTTPException(status_code=400, detail="Insufficient 10-year historical data available.")
+        df_10y = HistoricalDataLayer.get_historical_ohlcv(clean_t, timeframe="1d")
+        if df_10y is None or len(df_10y) < 500:
+            from app.data.market_provider import fetch_candles
+            df_10y = fetch_candles(clean_t, interval="1d", period="2y")
+
+        if df_10y is None or len(df_10y) < 200:
+            raise HTTPException(status_code=400, detail="Insufficient historical data available.")
 
         # Test horizons
         horizons = {
-            "3_Years": 750,
-            "5_Years": 1250,
-            "7_Years": 1750,
+            "3_Years": min(750, len(df_10y)),
+            "5_Years": min(1250, len(df_10y)),
+            "7_Years": min(1750, len(df_10y)),
             "10_Years": len(df_10y)
         }
 

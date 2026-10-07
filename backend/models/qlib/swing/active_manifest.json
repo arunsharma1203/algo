@@ -1,33 +1,6864 @@
 {
-  "model_id": "qlib_swing_20260911_110241",
+  "model_id": "qlib_challenger_swing_20260912_141500_top15_80exp",
   "strategy": "SWING",
   "engine": "QLIB",
   "qlib_version": "0.9.7",
   "model_class": "LGBModel",
   "feature_handler": "Alpha158",
   "feature_version": "qlib_alpha158_v1",
-  "universe": "LIVE_52",
-  "data_hash": "authoritative_nse_daily",
-  "train_start": "2023-01-02",
-  "train_end": "2023-12-26",
-  "valid_start": "2023-12-27",
-  "valid_end": "2024-03-12",
-  "oos_start": "2024-03-13",
-  "oos_end": "2024-05-31",
-  "metrics": {
-    "ic": -0.0407,
-    "rank_ic": 0.0443,
-    "trades_count": 260,
-    "wins_count": 121,
-    "losses_count": 139,
-    "win_rate": 46.54,
-    "profit_factor": 0.83,
-    "sharpe": -0.47,
-    "max_drawdown_pct": 24.42,
-    "mean_trade_pnl_pct": -0.09
+  "feature_manifest": {
+    "feature_family": "Alpha158",
+    "feature_count": 158,
+    "feature_names": [
+      "('feature', 'KMID')",
+      "('feature', 'KLEN')",
+      "('feature', 'KMID2')",
+      "('feature', 'KUP')",
+      "('feature', 'KUP2')",
+      "('feature', 'KLOW')",
+      "('feature', 'KLOW2')",
+      "('feature', 'KSFT')",
+      "('feature', 'KSFT2')",
+      "('feature', 'OPEN0')",
+      "('feature', 'HIGH0')",
+      "('feature', 'LOW0')",
+      "('feature', 'VWAP0')",
+      "('feature', 'ROC5')",
+      "('feature', 'ROC10')",
+      "('feature', 'ROC20')",
+      "('feature', 'ROC30')",
+      "('feature', 'ROC60')",
+      "('feature', 'MA5')",
+      "('feature', 'MA10')",
+      "('feature', 'MA20')",
+      "('feature', 'MA30')",
+      "('feature', 'MA60')",
+      "('feature', 'STD5')",
+      "('feature', 'STD10')",
+      "('feature', 'STD20')",
+      "('feature', 'STD30')",
+      "('feature', 'STD60')",
+      "('feature', 'BETA5')",
+      "('feature', 'BETA10')",
+      "('feature', 'BETA20')",
+      "('feature', 'BETA30')",
+      "('feature', 'BETA60')",
+      "('feature', 'RSQR5')",
+      "('feature', 'RSQR10')",
+      "('feature', 'RSQR20')",
+      "('feature', 'RSQR30')",
+      "('feature', 'RSQR60')",
+      "('feature', 'RESI5')",
+      "('feature', 'RESI10')",
+      "('feature', 'RESI20')",
+      "('feature', 'RESI30')",
+      "('feature', 'RESI60')",
+      "('feature', 'MAX5')",
+      "('feature', 'MAX10')",
+      "('feature', 'MAX20')",
+      "('feature', 'MAX30')",
+      "('feature', 'MAX60')",
+      "('feature', 'MIN5')",
+      "('feature', 'MIN10')",
+      "('feature', 'MIN20')",
+      "('feature', 'MIN30')",
+      "('feature', 'MIN60')",
+      "('feature', 'QTLU5')",
+      "('feature', 'QTLU10')",
+      "('feature', 'QTLU20')",
+      "('feature', 'QTLU30')",
+      "('feature', 'QTLU60')",
+      "('feature', 'QTLD5')",
+      "('feature', 'QTLD10')",
+      "('feature', 'QTLD20')",
+      "('feature', 'QTLD30')",
+      "('feature', 'QTLD60')",
+      "('feature', 'RANK5')",
+      "('feature', 'RANK10')",
+      "('feature', 'RANK20')",
+      "('feature', 'RANK30')",
+      "('feature', 'RANK60')",
+      "('feature', 'RSV5')",
+      "('feature', 'RSV10')",
+      "('feature', 'RSV20')",
+      "('feature', 'RSV30')",
+      "('feature', 'RSV60')",
+      "('feature', 'IMAX5')",
+      "('feature', 'IMAX10')",
+      "('feature', 'IMAX20')",
+      "('feature', 'IMAX30')",
+      "('feature', 'IMAX60')",
+      "('feature', 'IMIN5')",
+      "('feature', 'IMIN10')",
+      "('feature', 'IMIN20')",
+      "('feature', 'IMIN30')",
+      "('feature', 'IMIN60')",
+      "('feature', 'IMXD5')",
+      "('feature', 'IMXD10')",
+      "('feature', 'IMXD20')",
+      "('feature', 'IMXD30')",
+      "('feature', 'IMXD60')",
+      "('feature', 'CORR5')",
+      "('feature', 'CORR10')",
+      "('feature', 'CORR20')",
+      "('feature', 'CORR30')",
+      "('feature', 'CORR60')",
+      "('feature', 'CORD5')",
+      "('feature', 'CORD10')",
+      "('feature', 'CORD20')",
+      "('feature', 'CORD30')",
+      "('feature', 'CORD60')",
+      "('feature', 'CNTP5')",
+      "('feature', 'CNTP10')",
+      "('feature', 'CNTP20')",
+      "('feature', 'CNTP30')",
+      "('feature', 'CNTP60')",
+      "('feature', 'CNTN5')",
+      "('feature', 'CNTN10')",
+      "('feature', 'CNTN20')",
+      "('feature', 'CNTN30')",
+      "('feature', 'CNTN60')",
+      "('feature', 'CNTD5')",
+      "('feature', 'CNTD10')",
+      "('feature', 'CNTD20')",
+      "('feature', 'CNTD30')",
+      "('feature', 'CNTD60')",
+      "('feature', 'SUMP5')",
+      "('feature', 'SUMP10')",
+      "('feature', 'SUMP20')",
+      "('feature', 'SUMP30')",
+      "('feature', 'SUMP60')",
+      "('feature', 'SUMN5')",
+      "('feature', 'SUMN10')",
+      "('feature', 'SUMN20')",
+      "('feature', 'SUMN30')",
+      "('feature', 'SUMN60')",
+      "('feature', 'SUMD5')",
+      "('feature', 'SUMD10')",
+      "('feature', 'SUMD20')",
+      "('feature', 'SUMD30')",
+      "('feature', 'SUMD60')",
+      "('feature', 'VMA5')",
+      "('feature', 'VMA10')",
+      "('feature', 'VMA20')",
+      "('feature', 'VMA30')",
+      "('feature', 'VMA60')",
+      "('feature', 'VSTD5')",
+      "('feature', 'VSTD10')",
+      "('feature', 'VSTD20')",
+      "('feature', 'VSTD30')",
+      "('feature', 'VSTD60')",
+      "('feature', 'WVMA5')",
+      "('feature', 'WVMA10')",
+      "('feature', 'WVMA20')",
+      "('feature', 'WVMA30')",
+      "('feature', 'WVMA60')",
+      "('feature', 'VSUMP5')",
+      "('feature', 'VSUMP10')",
+      "('feature', 'VSUMP20')",
+      "('feature', 'VSUMP30')",
+      "('feature', 'VSUMP60')",
+      "('feature', 'VSUMN5')",
+      "('feature', 'VSUMN10')",
+      "('feature', 'VSUMN20')",
+      "('feature', 'VSUMN30')",
+      "('feature', 'VSUMN60')",
+      "('feature', 'VSUMD5')",
+      "('feature', 'VSUMD10')",
+      "('feature', 'VSUMD20')",
+      "('feature', 'VSUMD30')",
+      "('feature', 'VSUMD60')"
+    ],
+    "horizon_days": 5,
+    "manifest_hash": "66d14511c92917e3016b8ca6698afa74a6e372681e1c50e817761046c1b12bf4",
+    "created_at": "2026-09-12T13:30:58.763397"
   },
-  "artifact_path": "/Users/arunsharma/Desktop/swing trade react/backend/models/qlib/swing/qlib_swing_20260911_110241/model.pkl",
-  "artifact_sha256": "ff2a99df7d40c4378f4a2273c9d6a97c00a71c5ba0ae1b88a478d2a6c6562175",
+  "universe": "NIFTY_500_ESTABLISHED",
+  "data_hash": "authoritative_nse_daily",
+  "train_start": "2016-08-29",
+  "train_end": "2023-08-31",
+  "valid_start": "2023-09-08",
+  "valid_end": "2025-03-11",
+  "oos_start": "2025-03-17",
+  "oos_end": "2026-09-11",
+  "horizon_days": 5,
+  "target_definition": "CROSS_SECTIONAL_RANK",
+  "friction_bps": 25.0,
+  "feature_importance": null,
+  "hyperparameters": {},
+  "random_seed": 42,
+  "metrics": {
+    "methodology": "DAILY_MTM_V1",
+    "ic": 0.0192,
+    "rank_ic": 0.0223,
+    "trades_count": 5445,
+    "win_rate": 49.99,
+    "profit_factor": 1.31,
+    "sharpe": 1.41,
+    "max_drawdown_pct": 15.06,
+    "peak_equity": 128.73,
+    "trough_equity": 109.35,
+    "max_capital_utilization_pct": 80.85,
+    "equity_curve": [
+      {
+        "date": "2025-03-17",
+        "equity": 100.0,
+        "cash": 84.0,
+        "invested_value": 16.0,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 16.0,
+        "daily_return": 0.0
+      },
+      {
+        "date": "2025-03-18",
+        "equity": 100.0,
+        "cash": 68.0,
+        "invested_value": 32.0,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 32.0,
+        "daily_return": 0.0
+      },
+      {
+        "date": "2025-03-19",
+        "equity": 101.84,
+        "cash": 52.0,
+        "invested_value": 49.84,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 48.94,
+        "daily_return": 0.0184
+      },
+      {
+        "date": "2025-03-20",
+        "equity": 102.0744,
+        "cash": 36.0,
+        "invested_value": 66.0744,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 64.73,
+        "daily_return": 0.002301
+      },
+      {
+        "date": "2025-03-21",
+        "equity": 104.2131,
+        "cash": 20.0,
+        "invested_value": 84.2131,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.81,
+        "daily_return": 0.020953
+      },
+      {
+        "date": "2025-03-24",
+        "equity": 105.9733,
+        "cash": 20.49,
+        "invested_value": 85.4833,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.66,
+        "daily_return": 0.01689
+      },
+      {
+        "date": "2025-03-25",
+        "equity": 104.0349,
+        "cash": 20.7512,
+        "invested_value": 83.2837,
+        "drawdown_pct": 1.83,
+        "capital_utilization_pct": 80.05,
+        "daily_return": -0.018292
+      },
+      {
+        "date": "2025-03-26",
+        "equity": 103.0962,
+        "cash": 20.7728,
+        "invested_value": 82.3234,
+        "drawdown_pct": 2.71,
+        "capital_utilization_pct": 79.85,
+        "daily_return": -0.009023
+      },
+      {
+        "date": "2025-03-27",
+        "equity": 104.0632,
+        "cash": 20.8376,
+        "invested_value": 83.2257,
+        "drawdown_pct": 1.8,
+        "capital_utilization_pct": 79.98,
+        "daily_return": 0.00938
+      },
+      {
+        "date": "2025-03-28",
+        "equity": 103.3092,
+        "cash": 20.7808,
+        "invested_value": 82.5284,
+        "drawdown_pct": 2.51,
+        "capital_utilization_pct": 79.88,
+        "daily_return": -0.007246
+      },
+      {
+        "date": "2025-04-01",
+        "equity": 103.522,
+        "cash": 20.7175,
+        "invested_value": 82.8045,
+        "drawdown_pct": 2.31,
+        "capital_utilization_pct": 79.99,
+        "daily_return": 0.00206
+      },
+      {
+        "date": "2025-04-02",
+        "equity": 104.2437,
+        "cash": 20.7342,
+        "invested_value": 83.5095,
+        "drawdown_pct": 1.63,
+        "capital_utilization_pct": 80.11,
+        "daily_return": 0.006971
+      },
+      {
+        "date": "2025-04-03",
+        "equity": 104.4461,
+        "cash": 20.7755,
+        "invested_value": 83.6706,
+        "drawdown_pct": 1.44,
+        "capital_utilization_pct": 80.11,
+        "daily_return": 0.001942
+      },
+      {
+        "date": "2025-04-04",
+        "equity": 101.2131,
+        "cash": 20.6939,
+        "invested_value": 80.5193,
+        "drawdown_pct": 4.49,
+        "capital_utilization_pct": 79.55,
+        "daily_return": -0.030953
+      },
+      {
+        "date": "2025-04-07",
+        "equity": 97.2458,
+        "cash": 20.4767,
+        "invested_value": 76.7691,
+        "drawdown_pct": 8.24,
+        "capital_utilization_pct": 78.94,
+        "daily_return": -0.039197
+      },
+      {
+        "date": "2025-04-08",
+        "equity": 98.9659,
+        "cash": 20.2552,
+        "invested_value": 78.7107,
+        "drawdown_pct": 6.61,
+        "capital_utilization_pct": 79.53,
+        "daily_return": 0.017688
+      },
+      {
+        "date": "2025-04-09",
+        "equity": 98.2151,
+        "cash": 20.0105,
+        "invested_value": 78.2046,
+        "drawdown_pct": 7.32,
+        "capital_utilization_pct": 79.63,
+        "daily_return": -0.007587
+      },
+      {
+        "date": "2025-04-11",
+        "equity": 100.2905,
+        "cash": 19.7991,
+        "invested_value": 80.4914,
+        "drawdown_pct": 5.36,
+        "capital_utilization_pct": 80.26,
+        "daily_return": 0.021131
+      },
+      {
+        "date": "2025-04-15",
+        "equity": 103.73,
+        "cash": 19.8609,
+        "invested_value": 83.8691,
+        "drawdown_pct": 2.12,
+        "capital_utilization_pct": 80.85,
+        "daily_return": 0.034296
+      },
+      {
+        "date": "2025-04-16",
+        "equity": 104.1937,
+        "cash": 20.1517,
+        "invested_value": 84.042,
+        "drawdown_pct": 1.68,
+        "capital_utilization_pct": 80.66,
+        "daily_return": 0.00447
+      },
+      {
+        "date": "2025-04-17",
+        "equity": 104.2086,
+        "cash": 20.4088,
+        "invested_value": 83.7998,
+        "drawdown_pct": 1.67,
+        "capital_utilization_pct": 80.42,
+        "daily_return": 0.000143
+      },
+      {
+        "date": "2025-04-21",
+        "equity": 106.24,
+        "cash": 20.7514,
+        "invested_value": 85.4885,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.47,
+        "daily_return": 0.019493
+      },
+      {
+        "date": "2025-04-22",
+        "equity": 106.4638,
+        "cash": 21.015,
+        "invested_value": 85.4488,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.26,
+        "daily_return": 0.002107
+      },
+      {
+        "date": "2025-04-23",
+        "equity": 107.286,
+        "cash": 21.156,
+        "invested_value": 86.1301,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.28,
+        "daily_return": 0.007723
+      },
+      {
+        "date": "2025-04-24",
+        "equity": 108.0488,
+        "cash": 21.3244,
+        "invested_value": 86.7244,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.26,
+        "daily_return": 0.00711
+      },
+      {
+        "date": "2025-04-25",
+        "equity": 105.9386,
+        "cash": 21.343,
+        "invested_value": 84.5956,
+        "drawdown_pct": 1.95,
+        "capital_utilization_pct": 79.85,
+        "daily_return": -0.01953
+      },
+      {
+        "date": "2025-04-28",
+        "equity": 106.3884,
+        "cash": 21.3323,
+        "invested_value": 85.0561,
+        "drawdown_pct": 1.54,
+        "capital_utilization_pct": 79.95,
+        "daily_return": 0.004246
+      },
+      {
+        "date": "2025-04-29",
+        "equity": 106.1391,
+        "cash": 21.3271,
+        "invested_value": 84.812,
+        "drawdown_pct": 1.77,
+        "capital_utilization_pct": 79.91,
+        "daily_return": -0.002343
+      },
+      {
+        "date": "2025-04-30",
+        "equity": 105.3457,
+        "cash": 21.3376,
+        "invested_value": 84.0081,
+        "drawdown_pct": 2.5,
+        "capital_utilization_pct": 79.75,
+        "daily_return": -0.007476
+      },
+      {
+        "date": "2025-05-02",
+        "equity": 105.406,
+        "cash": 21.2362,
+        "invested_value": 84.1698,
+        "drawdown_pct": 2.45,
+        "capital_utilization_pct": 79.85,
+        "daily_return": 0.000573
+      },
+      {
+        "date": "2025-05-05",
+        "equity": 106.7047,
+        "cash": 21.238,
+        "invested_value": 85.4667,
+        "drawdown_pct": 1.24,
+        "capital_utilization_pct": 80.1,
+        "daily_return": 0.01232
+      },
+      {
+        "date": "2025-05-06",
+        "equity": 105.494,
+        "cash": 21.1342,
+        "invested_value": 84.3598,
+        "drawdown_pct": 2.36,
+        "capital_utilization_pct": 79.97,
+        "daily_return": -0.011346
+      },
+      {
+        "date": "2025-05-07",
+        "equity": 105.8037,
+        "cash": 21.1334,
+        "invested_value": 84.6703,
+        "drawdown_pct": 2.08,
+        "capital_utilization_pct": 80.03,
+        "daily_return": 0.002936
+      },
+      {
+        "date": "2025-05-08",
+        "equity": 104.2433,
+        "cash": 21.0897,
+        "invested_value": 83.1536,
+        "drawdown_pct": 3.52,
+        "capital_utilization_pct": 79.77,
+        "daily_return": -0.014748
+      },
+      {
+        "date": "2025-05-09",
+        "equity": 104.1435,
+        "cash": 20.9968,
+        "invested_value": 83.1467,
+        "drawdown_pct": 3.61,
+        "capital_utilization_pct": 79.84,
+        "daily_return": -0.000958
+      },
+      {
+        "date": "2025-05-12",
+        "equity": 107.4794,
+        "cash": 21.0278,
+        "invested_value": 86.4516,
+        "drawdown_pct": 0.53,
+        "capital_utilization_pct": 80.44,
+        "daily_return": 0.032032
+      },
+      {
+        "date": "2025-05-13",
+        "equity": 108.476,
+        "cash": 21.1823,
+        "invested_value": 87.2937,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.47,
+        "daily_return": 0.009272
+      },
+      {
+        "date": "2025-05-14",
+        "equity": 110.1678,
+        "cash": 21.4119,
+        "invested_value": 88.7559,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.56,
+        "daily_return": 0.015596
+      },
+      {
+        "date": "2025-05-15",
+        "equity": 111.5722,
+        "cash": 21.6894,
+        "invested_value": 89.8828,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.56,
+        "daily_return": 0.012748
+      },
+      {
+        "date": "2025-05-16",
+        "equity": 112.5166,
+        "cash": 22.0494,
+        "invested_value": 90.4672,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.4,
+        "daily_return": 0.008465
+      },
+      {
+        "date": "2025-05-19",
+        "equity": 112.4632,
+        "cash": 22.2702,
+        "invested_value": 90.1929,
+        "drawdown_pct": 0.05,
+        "capital_utilization_pct": 80.2,
+        "daily_return": -0.000475
+      },
+      {
+        "date": "2025-05-20",
+        "equity": 111.6344,
+        "cash": 22.357,
+        "invested_value": 89.2774,
+        "drawdown_pct": 0.78,
+        "capital_utilization_pct": 79.97,
+        "daily_return": -0.007369
+      },
+      {
+        "date": "2025-05-21",
+        "equity": 112.6395,
+        "cash": 22.4745,
+        "invested_value": 90.165,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.05,
+        "daily_return": 0.009003
+      },
+      {
+        "date": "2025-05-22",
+        "equity": 112.861,
+        "cash": 22.5218,
+        "invested_value": 90.3392,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.04,
+        "daily_return": 0.001967
+      },
+      {
+        "date": "2025-05-23",
+        "equity": 113.2545,
+        "cash": 22.5204,
+        "invested_value": 90.7341,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.12,
+        "daily_return": 0.003487
+      },
+      {
+        "date": "2025-05-26",
+        "equity": 113.7191,
+        "cash": 22.5273,
+        "invested_value": 91.1918,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.19,
+        "daily_return": 0.004102
+      },
+      {
+        "date": "2025-05-27",
+        "equity": 115.0104,
+        "cash": 22.6324,
+        "invested_value": 92.378,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.32,
+        "daily_return": 0.011355
+      },
+      {
+        "date": "2025-05-28",
+        "equity": 115.6232,
+        "cash": 22.8094,
+        "invested_value": 92.8138,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.27,
+        "daily_return": 0.005328
+      },
+      {
+        "date": "2025-05-29",
+        "equity": 117.8443,
+        "cash": 23.0312,
+        "invested_value": 94.8131,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.46,
+        "daily_return": 0.01921
+      },
+      {
+        "date": "2025-05-30",
+        "equity": 117.9004,
+        "cash": 23.1455,
+        "invested_value": 94.7549,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.37,
+        "daily_return": 0.000476
+      },
+      {
+        "date": "2025-06-02",
+        "equity": 117.1483,
+        "cash": 23.2459,
+        "invested_value": 93.9024,
+        "drawdown_pct": 0.64,
+        "capital_utilization_pct": 80.16,
+        "daily_return": -0.006379
+      },
+      {
+        "date": "2025-06-03",
+        "equity": 117.8703,
+        "cash": 23.3692,
+        "invested_value": 94.5011,
+        "drawdown_pct": 0.03,
+        "capital_utilization_pct": 80.17,
+        "daily_return": 0.006163
+      },
+      {
+        "date": "2025-06-04",
+        "equity": 119.4146,
+        "cash": 23.5173,
+        "invested_value": 95.8973,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.31,
+        "daily_return": 0.013102
+      },
+      {
+        "date": "2025-06-05",
+        "equity": 120.2323,
+        "cash": 23.6753,
+        "invested_value": 96.5569,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.31,
+        "daily_return": 0.006847
+      },
+      {
+        "date": "2025-06-06",
+        "equity": 119.2344,
+        "cash": 23.7314,
+        "invested_value": 95.503,
+        "drawdown_pct": 0.83,
+        "capital_utilization_pct": 80.1,
+        "daily_return": -0.0083
+      },
+      {
+        "date": "2025-06-09",
+        "equity": 119.2235,
+        "cash": 23.7775,
+        "invested_value": 95.4459,
+        "drawdown_pct": 0.84,
+        "capital_utilization_pct": 80.06,
+        "daily_return": -9.1e-05
+      },
+      {
+        "date": "2025-06-10",
+        "equity": 120.1098,
+        "cash": 23.9014,
+        "invested_value": 96.2084,
+        "drawdown_pct": 0.1,
+        "capital_utilization_pct": 80.1,
+        "daily_return": 0.007434
+      },
+      {
+        "date": "2025-06-11",
+        "equity": 118.9531,
+        "cash": 23.8919,
+        "invested_value": 95.0613,
+        "drawdown_pct": 1.06,
+        "capital_utilization_pct": 79.91,
+        "daily_return": -0.00963
+      },
+      {
+        "date": "2025-06-12",
+        "equity": 117.3235,
+        "cash": 23.7804,
+        "invested_value": 93.5431,
+        "drawdown_pct": 2.42,
+        "capital_utilization_pct": 79.73,
+        "daily_return": -0.0137
+      },
+      {
+        "date": "2025-06-13",
+        "equity": 117.4688,
+        "cash": 23.6996,
+        "invested_value": 93.7692,
+        "drawdown_pct": 2.3,
+        "capital_utilization_pct": 79.82,
+        "daily_return": 0.001238
+      },
+      {
+        "date": "2025-06-16",
+        "equity": 117.7779,
+        "cash": 23.6247,
+        "invested_value": 94.1532,
+        "drawdown_pct": 2.04,
+        "capital_utilization_pct": 79.94,
+        "daily_return": 0.002632
+      },
+      {
+        "date": "2025-06-17",
+        "equity": 117.991,
+        "cash": 23.4907,
+        "invested_value": 94.5004,
+        "drawdown_pct": 1.86,
+        "capital_utilization_pct": 80.09,
+        "daily_return": 0.00181
+      },
+      {
+        "date": "2025-06-18",
+        "equity": 117.5956,
+        "cash": 23.4948,
+        "invested_value": 94.1008,
+        "drawdown_pct": 2.19,
+        "capital_utilization_pct": 80.02,
+        "daily_return": -0.003351
+      },
+      {
+        "date": "2025-06-19",
+        "equity": 115.3338,
+        "cash": 23.4151,
+        "invested_value": 91.9187,
+        "drawdown_pct": 4.07,
+        "capital_utilization_pct": 79.7,
+        "daily_return": -0.019234
+      },
+      {
+        "date": "2025-06-20",
+        "equity": 116.8641,
+        "cash": 23.3874,
+        "invested_value": 93.4767,
+        "drawdown_pct": 2.8,
+        "capital_utilization_pct": 79.99,
+        "daily_return": 0.013268
+      },
+      {
+        "date": "2025-06-23",
+        "equity": 118.4597,
+        "cash": 23.4299,
+        "invested_value": 95.0298,
+        "drawdown_pct": 1.47,
+        "capital_utilization_pct": 80.22,
+        "daily_return": 0.013654
+      },
+      {
+        "date": "2025-06-24",
+        "equity": 117.3115,
+        "cash": 23.4396,
+        "invested_value": 93.8719,
+        "drawdown_pct": 2.43,
+        "capital_utilization_pct": 80.02,
+        "daily_return": -0.009693
+      },
+      {
+        "date": "2025-06-25",
+        "equity": 117.9836,
+        "cash": 23.4751,
+        "invested_value": 94.5085,
+        "drawdown_pct": 1.87,
+        "capital_utilization_pct": 80.1,
+        "daily_return": 0.00573
+      },
+      {
+        "date": "2025-06-26",
+        "equity": 117.8276,
+        "cash": 23.6058,
+        "invested_value": 94.2218,
+        "drawdown_pct": 2.0,
+        "capital_utilization_pct": 79.97,
+        "daily_return": -0.001323
+      },
+      {
+        "date": "2025-06-27",
+        "equity": 119.1412,
+        "cash": 23.6502,
+        "invested_value": 95.491,
+        "drawdown_pct": 0.91,
+        "capital_utilization_pct": 80.15,
+        "daily_return": 0.011148
+      },
+      {
+        "date": "2025-06-30",
+        "equity": 120.2295,
+        "cash": 23.6599,
+        "invested_value": 96.5696,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.32,
+        "daily_return": 0.009135
+      },
+      {
+        "date": "2025-07-01",
+        "equity": 119.4202,
+        "cash": 23.7484,
+        "invested_value": 95.6717,
+        "drawdown_pct": 0.68,
+        "capital_utilization_pct": 80.11,
+        "daily_return": -0.006731
+      },
+      {
+        "date": "2025-07-02",
+        "equity": 119.9667,
+        "cash": 23.8711,
+        "invested_value": 96.0956,
+        "drawdown_pct": 0.22,
+        "capital_utilization_pct": 80.1,
+        "daily_return": 0.004576
+      },
+      {
+        "date": "2025-07-03",
+        "equity": 119.4125,
+        "cash": 23.8926,
+        "invested_value": 95.5199,
+        "drawdown_pct": 0.68,
+        "capital_utilization_pct": 79.99,
+        "daily_return": -0.00462
+      },
+      {
+        "date": "2025-07-04",
+        "equity": 119.2311,
+        "cash": 23.9288,
+        "invested_value": 95.3024,
+        "drawdown_pct": 0.83,
+        "capital_utilization_pct": 79.93,
+        "daily_return": -0.001519
+      },
+      {
+        "date": "2025-07-07",
+        "equity": 118.5926,
+        "cash": 23.8293,
+        "invested_value": 94.7633,
+        "drawdown_pct": 1.36,
+        "capital_utilization_pct": 79.91,
+        "daily_return": -0.005356
+      },
+      {
+        "date": "2025-07-08",
+        "equity": 118.7468,
+        "cash": 23.8428,
+        "invested_value": 94.904,
+        "drawdown_pct": 1.24,
+        "capital_utilization_pct": 79.92,
+        "daily_return": 0.001301
+      },
+      {
+        "date": "2025-07-09",
+        "equity": 120.0257,
+        "cash": 23.8863,
+        "invested_value": 96.1394,
+        "drawdown_pct": 0.17,
+        "capital_utilization_pct": 80.1,
+        "daily_return": 0.01077
+      },
+      {
+        "date": "2025-07-10",
+        "equity": 119.6304,
+        "cash": 23.8789,
+        "invested_value": 95.7515,
+        "drawdown_pct": 0.5,
+        "capital_utilization_pct": 80.04,
+        "daily_return": -0.003294
+      },
+      {
+        "date": "2025-07-11",
+        "equity": 119.0299,
+        "cash": 23.8154,
+        "invested_value": 95.2145,
+        "drawdown_pct": 1.0,
+        "capital_utilization_pct": 79.99,
+        "daily_return": -0.00502
+      },
+      {
+        "date": "2025-07-14",
+        "equity": 120.9882,
+        "cash": 23.8825,
+        "invested_value": 97.1056,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.26,
+        "daily_return": 0.016452
+      },
+      {
+        "date": "2025-07-15",
+        "equity": 121.2307,
+        "cash": 23.9863,
+        "invested_value": 97.2444,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.21,
+        "daily_return": 0.002005
+      },
+      {
+        "date": "2025-07-16",
+        "equity": 120.7526,
+        "cash": 24.0322,
+        "invested_value": 96.7204,
+        "drawdown_pct": 0.39,
+        "capital_utilization_pct": 80.1,
+        "daily_return": -0.003944
+      },
+      {
+        "date": "2025-07-17",
+        "equity": 120.411,
+        "cash": 24.084,
+        "invested_value": 96.327,
+        "drawdown_pct": 0.68,
+        "capital_utilization_pct": 80.0,
+        "daily_return": -0.002829
+      },
+      {
+        "date": "2025-07-18",
+        "equity": 119.9175,
+        "cash": 24.1343,
+        "invested_value": 95.7832,
+        "drawdown_pct": 1.08,
+        "capital_utilization_pct": 79.87,
+        "daily_return": -0.004099
+      },
+      {
+        "date": "2025-07-21",
+        "equity": 120.0226,
+        "cash": 24.0533,
+        "invested_value": 95.9693,
+        "drawdown_pct": 1.0,
+        "capital_utilization_pct": 79.96,
+        "daily_return": 0.000877
+      },
+      {
+        "date": "2025-07-22",
+        "equity": 119.669,
+        "cash": 23.989,
+        "invested_value": 95.68,
+        "drawdown_pct": 1.29,
+        "capital_utilization_pct": 79.95,
+        "daily_return": -0.002946
+      },
+      {
+        "date": "2025-07-23",
+        "equity": 119.887,
+        "cash": 23.9804,
+        "invested_value": 95.9066,
+        "drawdown_pct": 1.11,
+        "capital_utilization_pct": 80.0,
+        "daily_return": 0.001822
+      },
+      {
+        "date": "2025-07-24",
+        "equity": 119.0207,
+        "cash": 23.9633,
+        "invested_value": 95.0574,
+        "drawdown_pct": 1.82,
+        "capital_utilization_pct": 79.87,
+        "daily_return": -0.007225
+      },
+      {
+        "date": "2025-07-25",
+        "equity": 116.8273,
+        "cash": 23.8805,
+        "invested_value": 92.9468,
+        "drawdown_pct": 3.63,
+        "capital_utilization_pct": 79.56,
+        "daily_return": -0.018429
+      },
+      {
+        "date": "2025-07-28",
+        "equity": 115.4065,
+        "cash": 23.7049,
+        "invested_value": 91.7016,
+        "drawdown_pct": 4.8,
+        "capital_utilization_pct": 79.46,
+        "daily_return": -0.012161
+      },
+      {
+        "date": "2025-07-29",
+        "equity": 117.6105,
+        "cash": 23.5759,
+        "invested_value": 94.0346,
+        "drawdown_pct": 2.99,
+        "capital_utilization_pct": 79.95,
+        "daily_return": 0.019098
+      },
+      {
+        "date": "2025-07-30",
+        "equity": 117.8823,
+        "cash": 23.4621,
+        "invested_value": 94.4202,
+        "drawdown_pct": 2.76,
+        "capital_utilization_pct": 80.1,
+        "daily_return": 0.002311
+      },
+      {
+        "date": "2025-07-31",
+        "equity": 116.914,
+        "cash": 23.3633,
+        "invested_value": 93.5507,
+        "drawdown_pct": 3.56,
+        "capital_utilization_pct": 80.02,
+        "daily_return": -0.008214
+      },
+      {
+        "date": "2025-08-01",
+        "equity": 115.5038,
+        "cash": 23.3232,
+        "invested_value": 92.1807,
+        "drawdown_pct": 4.72,
+        "capital_utilization_pct": 79.81,
+        "daily_return": -0.012062
+      },
+      {
+        "date": "2025-08-04",
+        "equity": 116.989,
+        "cash": 23.3281,
+        "invested_value": 93.6609,
+        "drawdown_pct": 3.5,
+        "capital_utilization_pct": 80.06,
+        "daily_return": 0.012858
+      },
+      {
+        "date": "2025-08-05",
+        "equity": 116.9283,
+        "cash": 23.2764,
+        "invested_value": 93.6519,
+        "drawdown_pct": 3.55,
+        "capital_utilization_pct": 80.09,
+        "daily_return": -0.000519
+      },
+      {
+        "date": "2025-08-06",
+        "equity": 116.4484,
+        "cash": 23.2363,
+        "invested_value": 93.2121,
+        "drawdown_pct": 3.94,
+        "capital_utilization_pct": 80.05,
+        "daily_return": -0.004104
+      },
+      {
+        "date": "2025-08-07",
+        "equity": 115.8448,
+        "cash": 23.2177,
+        "invested_value": 92.627,
+        "drawdown_pct": 4.44,
+        "capital_utilization_pct": 79.96,
+        "daily_return": -0.005184
+      },
+      {
+        "date": "2025-08-08",
+        "equity": 114.7889,
+        "cash": 23.2043,
+        "invested_value": 91.5846,
+        "drawdown_pct": 5.31,
+        "capital_utilization_pct": 79.79,
+        "daily_return": -0.009115
+      },
+      {
+        "date": "2025-08-11",
+        "equity": 115.1991,
+        "cash": 23.179,
+        "invested_value": 92.0201,
+        "drawdown_pct": 4.98,
+        "capital_utilization_pct": 79.88,
+        "daily_return": 0.003574
+      },
+      {
+        "date": "2025-08-12",
+        "equity": 115.0274,
+        "cash": 23.1057,
+        "invested_value": 91.9216,
+        "drawdown_pct": 5.12,
+        "capital_utilization_pct": 79.91,
+        "daily_return": -0.001491
+      },
+      {
+        "date": "2025-08-13",
+        "equity": 116.5501,
+        "cash": 23.0385,
+        "invested_value": 93.5116,
+        "drawdown_pct": 3.86,
+        "capital_utilization_pct": 80.23,
+        "daily_return": 0.013238
+      },
+      {
+        "date": "2025-08-14",
+        "equity": 115.1741,
+        "cash": 22.9773,
+        "invested_value": 92.1967,
+        "drawdown_pct": 5.0,
+        "capital_utilization_pct": 80.05,
+        "daily_return": -0.011807
+      },
+      {
+        "date": "2025-08-18",
+        "equity": 116.8406,
+        "cash": 23.0807,
+        "invested_value": 93.7599,
+        "drawdown_pct": 3.62,
+        "capital_utilization_pct": 80.25,
+        "daily_return": 0.01447
+      },
+      {
+        "date": "2025-08-19",
+        "equity": 117.7885,
+        "cash": 23.2102,
+        "invested_value": 94.5783,
+        "drawdown_pct": 2.84,
+        "capital_utilization_pct": 80.3,
+        "daily_return": 0.008112
+      },
+      {
+        "date": "2025-08-20",
+        "equity": 118.1306,
+        "cash": 23.3524,
+        "invested_value": 94.7782,
+        "drawdown_pct": 2.56,
+        "capital_utilization_pct": 80.23,
+        "daily_return": 0.002905
+      },
+      {
+        "date": "2025-08-21",
+        "equity": 119.3552,
+        "cash": 23.4858,
+        "invested_value": 95.8694,
+        "drawdown_pct": 1.55,
+        "capital_utilization_pct": 80.32,
+        "daily_return": 0.010367
+      },
+      {
+        "date": "2025-08-22",
+        "equity": 118.4743,
+        "cash": 23.6333,
+        "invested_value": 94.841,
+        "drawdown_pct": 2.27,
+        "capital_utilization_pct": 80.05,
+        "daily_return": -0.007381
+      },
+      {
+        "date": "2025-08-25",
+        "equity": 118.0564,
+        "cash": 23.7135,
+        "invested_value": 94.3429,
+        "drawdown_pct": 2.62,
+        "capital_utilization_pct": 79.91,
+        "daily_return": -0.003527
+      },
+      {
+        "date": "2025-08-26",
+        "equity": 116.6489,
+        "cash": 23.6357,
+        "invested_value": 93.0132,
+        "drawdown_pct": 3.78,
+        "capital_utilization_pct": 79.74,
+        "daily_return": -0.011923
+      },
+      {
+        "date": "2025-08-28",
+        "equity": 115.5152,
+        "cash": 23.5008,
+        "invested_value": 92.0144,
+        "drawdown_pct": 4.71,
+        "capital_utilization_pct": 79.66,
+        "daily_return": -0.009719
+      },
+      {
+        "date": "2025-08-29",
+        "equity": 116.2186,
+        "cash": 23.3397,
+        "invested_value": 92.8789,
+        "drawdown_pct": 4.13,
+        "capital_utilization_pct": 79.92,
+        "daily_return": 0.006089
+      },
+      {
+        "date": "2025-09-01",
+        "equity": 118.6036,
+        "cash": 23.3562,
+        "invested_value": 95.2474,
+        "drawdown_pct": 2.17,
+        "capital_utilization_pct": 80.31,
+        "daily_return": 0.020522
+      },
+      {
+        "date": "2025-09-02",
+        "equity": 119.1744,
+        "cash": 23.3919,
+        "invested_value": 95.7825,
+        "drawdown_pct": 1.7,
+        "capital_utilization_pct": 80.37,
+        "daily_return": 0.004813
+      },
+      {
+        "date": "2025-09-03",
+        "equity": 119.6527,
+        "cash": 23.4881,
+        "invested_value": 96.1646,
+        "drawdown_pct": 1.3,
+        "capital_utilization_pct": 80.37,
+        "daily_return": 0.004014
+      },
+      {
+        "date": "2025-09-04",
+        "equity": 118.135,
+        "cash": 23.5608,
+        "invested_value": 94.5742,
+        "drawdown_pct": 2.55,
+        "capital_utilization_pct": 80.06,
+        "daily_return": -0.012685
+      },
+      {
+        "date": "2025-09-05",
+        "equity": 118.5397,
+        "cash": 23.6829,
+        "invested_value": 94.8568,
+        "drawdown_pct": 2.22,
+        "capital_utilization_pct": 80.02,
+        "daily_return": 0.003426
+      },
+      {
+        "date": "2025-09-08",
+        "equity": 119.4488,
+        "cash": 23.7826,
+        "invested_value": 95.6662,
+        "drawdown_pct": 1.47,
+        "capital_utilization_pct": 80.09,
+        "daily_return": 0.007669
+      },
+      {
+        "date": "2025-09-09",
+        "equity": 121.5885,
+        "cash": 23.8463,
+        "invested_value": 97.7421,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.39,
+        "daily_return": 0.017913
+      },
+      {
+        "date": "2025-09-10",
+        "equity": 121.4786,
+        "cash": 23.9158,
+        "invested_value": 97.5627,
+        "drawdown_pct": 0.09,
+        "capital_utilization_pct": 80.31,
+        "daily_return": -0.000904
+      },
+      {
+        "date": "2025-09-11",
+        "equity": 121.0293,
+        "cash": 24.0563,
+        "invested_value": 96.973,
+        "drawdown_pct": 0.46,
+        "capital_utilization_pct": 80.12,
+        "daily_return": -0.003698
+      },
+      {
+        "date": "2025-09-12",
+        "equity": 121.0903,
+        "cash": 24.1732,
+        "invested_value": 96.9171,
+        "drawdown_pct": 0.41,
+        "capital_utilization_pct": 80.04,
+        "daily_return": 0.000504
+      },
+      {
+        "date": "2025-09-15",
+        "equity": 122.7154,
+        "cash": 24.3347,
+        "invested_value": 98.3808,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.17,
+        "daily_return": 0.013421
+      },
+      {
+        "date": "2025-09-16",
+        "equity": 123.1933,
+        "cash": 24.3625,
+        "invested_value": 98.8308,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.22,
+        "daily_return": 0.003894
+      },
+      {
+        "date": "2025-09-17",
+        "equity": 123.3043,
+        "cash": 24.4202,
+        "invested_value": 98.8841,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.2,
+        "daily_return": 0.000901
+      },
+      {
+        "date": "2025-09-18",
+        "equity": 122.3703,
+        "cash": 24.4922,
+        "invested_value": 97.8781,
+        "drawdown_pct": 0.76,
+        "capital_utilization_pct": 79.99,
+        "daily_return": -0.007575
+      },
+      {
+        "date": "2025-09-19",
+        "equity": 123.4827,
+        "cash": 24.5962,
+        "invested_value": 98.8865,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.08,
+        "daily_return": 0.009091
+      },
+      {
+        "date": "2025-09-22",
+        "equity": 123.7039,
+        "cash": 24.6207,
+        "invested_value": 99.0833,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.1,
+        "daily_return": 0.001792
+      },
+      {
+        "date": "2025-09-23",
+        "equity": 124.1746,
+        "cash": 24.6804,
+        "invested_value": 99.4942,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.12,
+        "daily_return": 0.003805
+      },
+      {
+        "date": "2025-09-24",
+        "equity": 123.5379,
+        "cash": 24.6936,
+        "invested_value": 98.8442,
+        "drawdown_pct": 0.51,
+        "capital_utilization_pct": 80.01,
+        "daily_return": -0.005128
+      },
+      {
+        "date": "2025-09-25",
+        "equity": 122.1865,
+        "cash": 24.7266,
+        "invested_value": 97.4599,
+        "drawdown_pct": 1.6,
+        "capital_utilization_pct": 79.76,
+        "daily_return": -0.010939
+      },
+      {
+        "date": "2025-09-26",
+        "equity": 120.8254,
+        "cash": 24.586,
+        "invested_value": 96.2394,
+        "drawdown_pct": 2.7,
+        "capital_utilization_pct": 79.65,
+        "daily_return": -0.01114
+      },
+      {
+        "date": "2025-09-29",
+        "equity": 120.8306,
+        "cash": 24.4099,
+        "invested_value": 96.4207,
+        "drawdown_pct": 2.69,
+        "capital_utilization_pct": 79.8,
+        "daily_return": 4.3e-05
+      },
+      {
+        "date": "2025-09-30",
+        "equity": 120.3916,
+        "cash": 24.2774,
+        "invested_value": 96.1142,
+        "drawdown_pct": 3.05,
+        "capital_utilization_pct": 79.83,
+        "daily_return": -0.003633
+      },
+      {
+        "date": "2025-10-01",
+        "equity": 121.9541,
+        "cash": 24.23,
+        "invested_value": 97.7242,
+        "drawdown_pct": 1.79,
+        "capital_utilization_pct": 80.13,
+        "daily_return": 0.012979
+      },
+      {
+        "date": "2025-10-03",
+        "equity": 122.7808,
+        "cash": 24.2738,
+        "invested_value": 98.507,
+        "drawdown_pct": 1.12,
+        "capital_utilization_pct": 80.23,
+        "daily_return": 0.006778
+      },
+      {
+        "date": "2025-10-06",
+        "equity": 122.5764,
+        "cash": 24.3614,
+        "invested_value": 98.2149,
+        "drawdown_pct": 1.29,
+        "capital_utilization_pct": 80.13,
+        "daily_return": -0.001665
+      },
+      {
+        "date": "2025-10-07",
+        "equity": 122.6361,
+        "cash": 24.4358,
+        "invested_value": 98.2003,
+        "drawdown_pct": 1.24,
+        "capital_utilization_pct": 80.07,
+        "daily_return": 0.000488
+      },
+      {
+        "date": "2025-10-08",
+        "equity": 121.9392,
+        "cash": 24.4648,
+        "invested_value": 97.4744,
+        "drawdown_pct": 1.8,
+        "capital_utilization_pct": 79.94,
+        "daily_return": -0.005683
+      },
+      {
+        "date": "2025-10-09",
+        "equity": 123.4648,
+        "cash": 24.5113,
+        "invested_value": 98.9535,
+        "drawdown_pct": 0.57,
+        "capital_utilization_pct": 80.15,
+        "daily_return": 0.012511
+      },
+      {
+        "date": "2025-10-10",
+        "equity": 123.6643,
+        "cash": 24.5466,
+        "invested_value": 99.1178,
+        "drawdown_pct": 0.41,
+        "capital_utilization_pct": 80.15,
+        "daily_return": 0.001616
+      },
+      {
+        "date": "2025-10-13",
+        "equity": 124.4108,
+        "cash": 24.5895,
+        "invested_value": 99.8212,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.24,
+        "daily_return": 0.006036
+      },
+      {
+        "date": "2025-10-14",
+        "equity": 123.9979,
+        "cash": 24.69,
+        "invested_value": 99.3079,
+        "drawdown_pct": 0.33,
+        "capital_utilization_pct": 80.09,
+        "daily_return": -0.003319
+      },
+      {
+        "date": "2025-10-15",
+        "equity": 124.1335,
+        "cash": 24.7728,
+        "invested_value": 99.3606,
+        "drawdown_pct": 0.22,
+        "capital_utilization_pct": 80.04,
+        "daily_return": 0.001094
+      },
+      {
+        "date": "2025-10-16",
+        "equity": 124.9402,
+        "cash": 24.8421,
+        "invested_value": 100.0981,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.12,
+        "daily_return": 0.006499
+      },
+      {
+        "date": "2025-10-17",
+        "equity": 124.2698,
+        "cash": 24.8951,
+        "invested_value": 99.3747,
+        "drawdown_pct": 0.54,
+        "capital_utilization_pct": 79.97,
+        "daily_return": -0.005366
+      },
+      {
+        "date": "2025-10-20",
+        "equity": 125.015,
+        "cash": 24.9035,
+        "invested_value": 100.1115,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.08,
+        "daily_return": 0.005996
+      },
+      {
+        "date": "2025-10-21",
+        "equity": 125.7786,
+        "cash": 24.8968,
+        "invested_value": 100.8818,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.21,
+        "daily_return": 0.006108
+      },
+      {
+        "date": "2025-10-23",
+        "equity": 123.5982,
+        "cash": 24.8829,
+        "invested_value": 98.7152,
+        "drawdown_pct": 1.73,
+        "capital_utilization_pct": 79.87,
+        "daily_return": -0.017336
+      },
+      {
+        "date": "2025-10-24",
+        "equity": 123.2714,
+        "cash": 24.8384,
+        "invested_value": 98.4329,
+        "drawdown_pct": 1.99,
+        "capital_utilization_pct": 79.85,
+        "daily_return": -0.002644
+      },
+      {
+        "date": "2025-10-27",
+        "equity": 124.2516,
+        "cash": 24.8464,
+        "invested_value": 99.4052,
+        "drawdown_pct": 1.21,
+        "capital_utilization_pct": 80.0,
+        "daily_return": 0.007951
+      },
+      {
+        "date": "2025-10-28",
+        "equity": 124.4085,
+        "cash": 24.8088,
+        "invested_value": 99.5998,
+        "drawdown_pct": 1.09,
+        "capital_utilization_pct": 80.06,
+        "daily_return": 0.001263
+      },
+      {
+        "date": "2025-10-29",
+        "equity": 124.6376,
+        "cash": 24.7557,
+        "invested_value": 99.8819,
+        "drawdown_pct": 0.91,
+        "capital_utilization_pct": 80.14,
+        "daily_return": 0.001841
+      },
+      {
+        "date": "2025-10-30",
+        "equity": 124.4093,
+        "cash": 24.8221,
+        "invested_value": 99.5871,
+        "drawdown_pct": 1.09,
+        "capital_utilization_pct": 80.05,
+        "daily_return": -0.001832
+      },
+      {
+        "date": "2025-10-31",
+        "equity": 123.8251,
+        "cash": 24.8359,
+        "invested_value": 98.9892,
+        "drawdown_pct": 1.55,
+        "capital_utilization_pct": 79.94,
+        "daily_return": -0.004695
+      },
+      {
+        "date": "2025-11-03",
+        "equity": 124.8047,
+        "cash": 24.8533,
+        "invested_value": 99.9514,
+        "drawdown_pct": 0.77,
+        "capital_utilization_pct": 80.09,
+        "daily_return": 0.007911
+      },
+      {
+        "date": "2025-11-04",
+        "equity": 124.4007,
+        "cash": 24.9198,
+        "invested_value": 99.4808,
+        "drawdown_pct": 1.1,
+        "capital_utilization_pct": 79.97,
+        "daily_return": -0.003237
+      },
+      {
+        "date": "2025-11-06",
+        "equity": 122.6853,
+        "cash": 24.7879,
+        "invested_value": 97.8975,
+        "drawdown_pct": 2.46,
+        "capital_utilization_pct": 79.8,
+        "daily_return": -0.013789
+      },
+      {
+        "date": "2025-11-07",
+        "equity": 123.9903,
+        "cash": 24.7677,
+        "invested_value": 99.2226,
+        "drawdown_pct": 1.42,
+        "capital_utilization_pct": 80.02,
+        "daily_return": 0.010637
+      },
+      {
+        "date": "2025-11-10",
+        "equity": 124.7226,
+        "cash": 24.8281,
+        "invested_value": 99.8945,
+        "drawdown_pct": 0.84,
+        "capital_utilization_pct": 80.09,
+        "daily_return": 0.005906
+      },
+      {
+        "date": "2025-11-11",
+        "equity": 124.5514,
+        "cash": 24.7704,
+        "invested_value": 99.781,
+        "drawdown_pct": 0.98,
+        "capital_utilization_pct": 80.11,
+        "daily_return": -0.001373
+      },
+      {
+        "date": "2025-11-12",
+        "equity": 125.0708,
+        "cash": 24.7892,
+        "invested_value": 100.2816,
+        "drawdown_pct": 0.56,
+        "capital_utilization_pct": 80.18,
+        "daily_return": 0.00417
+      },
+      {
+        "date": "2025-11-13",
+        "equity": 125.4591,
+        "cash": 24.8417,
+        "invested_value": 100.6174,
+        "drawdown_pct": 0.25,
+        "capital_utilization_pct": 80.2,
+        "daily_return": 0.003105
+      },
+      {
+        "date": "2025-11-14",
+        "equity": 125.9352,
+        "cash": 24.9705,
+        "invested_value": 100.9647,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.17,
+        "daily_return": 0.003795
+      },
+      {
+        "date": "2025-11-17",
+        "equity": 126.2732,
+        "cash": 25.0924,
+        "invested_value": 101.1809,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.13,
+        "daily_return": 0.002684
+      },
+      {
+        "date": "2025-11-18",
+        "equity": 125.2553,
+        "cash": 25.084,
+        "invested_value": 100.1713,
+        "drawdown_pct": 0.81,
+        "capital_utilization_pct": 79.97,
+        "daily_return": -0.008061
+      },
+      {
+        "date": "2025-11-19",
+        "equity": 124.2905,
+        "cash": 25.045,
+        "invested_value": 99.2454,
+        "drawdown_pct": 1.57,
+        "capital_utilization_pct": 79.85,
+        "daily_return": -0.007703
+      },
+      {
+        "date": "2025-11-20",
+        "equity": 124.0321,
+        "cash": 24.9731,
+        "invested_value": 99.059,
+        "drawdown_pct": 1.77,
+        "capital_utilization_pct": 79.87,
+        "daily_return": -0.002079
+      },
+      {
+        "date": "2025-11-21",
+        "equity": 122.5515,
+        "cash": 24.8603,
+        "invested_value": 97.6913,
+        "drawdown_pct": 2.95,
+        "capital_utilization_pct": 79.71,
+        "daily_return": -0.011937
+      },
+      {
+        "date": "2025-11-24",
+        "equity": 121.3483,
+        "cash": 24.6747,
+        "invested_value": 96.6736,
+        "drawdown_pct": 3.9,
+        "capital_utilization_pct": 79.67,
+        "daily_return": -0.009818
+      },
+      {
+        "date": "2025-11-25",
+        "equity": 121.9515,
+        "cash": 24.5591,
+        "invested_value": 97.3924,
+        "drawdown_pct": 3.42,
+        "capital_utilization_pct": 79.86,
+        "daily_return": 0.004971
+      },
+      {
+        "date": "2025-11-26",
+        "equity": 122.7976,
+        "cash": 24.4753,
+        "invested_value": 98.3223,
+        "drawdown_pct": 2.75,
+        "capital_utilization_pct": 80.07,
+        "daily_return": 0.006938
+      },
+      {
+        "date": "2025-11-27",
+        "equity": 123.0555,
+        "cash": 24.4196,
+        "invested_value": 98.6359,
+        "drawdown_pct": 2.55,
+        "capital_utilization_pct": 80.16,
+        "daily_return": 0.0021
+      },
+      {
+        "date": "2025-11-28",
+        "equity": 122.122,
+        "cash": 24.4002,
+        "invested_value": 97.7218,
+        "drawdown_pct": 3.29,
+        "capital_utilization_pct": 80.02,
+        "daily_return": -0.007586
+      },
+      {
+        "date": "2025-12-01",
+        "equity": 122.1664,
+        "cash": 24.4548,
+        "invested_value": 97.7116,
+        "drawdown_pct": 3.25,
+        "capital_utilization_pct": 79.98,
+        "daily_return": 0.000364
+      },
+      {
+        "date": "2025-12-02",
+        "equity": 122.0066,
+        "cash": 24.4831,
+        "invested_value": 97.5234,
+        "drawdown_pct": 3.38,
+        "capital_utilization_pct": 79.93,
+        "daily_return": -0.001308
+      },
+      {
+        "date": "2025-12-03",
+        "equity": 121.6188,
+        "cash": 24.4655,
+        "invested_value": 97.1533,
+        "drawdown_pct": 3.69,
+        "capital_utilization_pct": 79.88,
+        "daily_return": -0.003178
+      },
+      {
+        "date": "2025-12-04",
+        "equity": 121.5334,
+        "cash": 24.3939,
+        "invested_value": 97.1394,
+        "drawdown_pct": 3.75,
+        "capital_utilization_pct": 79.93,
+        "daily_return": -0.000703
+      },
+      {
+        "date": "2025-12-05",
+        "equity": 120.7276,
+        "cash": 24.3154,
+        "invested_value": 96.4122,
+        "drawdown_pct": 4.39,
+        "capital_utilization_pct": 79.86,
+        "daily_return": -0.00663
+      },
+      {
+        "date": "2025-12-08",
+        "equity": 119.1466,
+        "cash": 24.2032,
+        "invested_value": 94.9434,
+        "drawdown_pct": 5.64,
+        "capital_utilization_pct": 79.69,
+        "daily_return": -0.013096
+      },
+      {
+        "date": "2025-12-09",
+        "equity": 121.0122,
+        "cash": 24.1577,
+        "invested_value": 96.8545,
+        "drawdown_pct": 4.17,
+        "capital_utilization_pct": 80.04,
+        "daily_return": 0.015658
+      },
+      {
+        "date": "2025-12-10",
+        "equity": 119.9686,
+        "cash": 24.0735,
+        "invested_value": 95.8951,
+        "drawdown_pct": 4.99,
+        "capital_utilization_pct": 79.93,
+        "daily_return": -0.008624
+      },
+      {
+        "date": "2025-12-11",
+        "equity": 120.2151,
+        "cash": 24.0019,
+        "invested_value": 96.2132,
+        "drawdown_pct": 4.8,
+        "capital_utilization_pct": 80.03,
+        "daily_return": 0.002054
+      },
+      {
+        "date": "2025-12-12",
+        "equity": 122.5697,
+        "cash": 24.0521,
+        "invested_value": 98.5176,
+        "drawdown_pct": 2.93,
+        "capital_utilization_pct": 80.38,
+        "daily_return": 0.019586
+      },
+      {
+        "date": "2025-12-15",
+        "equity": 123.8684,
+        "cash": 24.2458,
+        "invested_value": 99.6226,
+        "drawdown_pct": 1.9,
+        "capital_utilization_pct": 80.43,
+        "daily_return": 0.010596
+      },
+      {
+        "date": "2025-12-16",
+        "equity": 123.5467,
+        "cash": 24.3632,
+        "invested_value": 99.1835,
+        "drawdown_pct": 2.16,
+        "capital_utilization_pct": 80.28,
+        "daily_return": -0.002597
+      },
+      {
+        "date": "2025-12-17",
+        "equity": 122.9327,
+        "cash": 24.4585,
+        "invested_value": 98.4742,
+        "drawdown_pct": 2.65,
+        "capital_utilization_pct": 80.1,
+        "daily_return": -0.00497
+      },
+      {
+        "date": "2025-12-18",
+        "equity": 123.8368,
+        "cash": 24.5774,
+        "invested_value": 99.2594,
+        "drawdown_pct": 1.93,
+        "capital_utilization_pct": 80.15,
+        "daily_return": 0.007354
+      },
+      {
+        "date": "2025-12-19",
+        "equity": 125.1262,
+        "cash": 24.6779,
+        "invested_value": 100.4483,
+        "drawdown_pct": 0.91,
+        "capital_utilization_pct": 80.28,
+        "daily_return": 0.010412
+      },
+      {
+        "date": "2025-12-22",
+        "equity": 126.1662,
+        "cash": 24.8056,
+        "invested_value": 101.3605,
+        "drawdown_pct": 0.08,
+        "capital_utilization_pct": 80.34,
+        "daily_return": 0.008311
+      },
+      {
+        "date": "2025-12-23",
+        "equity": 126.9694,
+        "cash": 24.9611,
+        "invested_value": 102.0083,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.34,
+        "daily_return": 0.006366
+      },
+      {
+        "date": "2025-12-24",
+        "equity": 127.399,
+        "cash": 25.12,
+        "invested_value": 102.279,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.28,
+        "daily_return": 0.003384
+      },
+      {
+        "date": "2025-12-26",
+        "equity": 127.2036,
+        "cash": 25.3213,
+        "invested_value": 101.8823,
+        "drawdown_pct": 0.15,
+        "capital_utilization_pct": 80.09,
+        "daily_return": -0.001534
+      },
+      {
+        "date": "2025-12-29",
+        "equity": 126.6072,
+        "cash": 25.4157,
+        "invested_value": 101.1915,
+        "drawdown_pct": 0.62,
+        "capital_utilization_pct": 79.93,
+        "daily_return": -0.004688
+      },
+      {
+        "date": "2025-12-30",
+        "equity": 127.1497,
+        "cash": 25.4158,
+        "invested_value": 101.734,
+        "drawdown_pct": 0.2,
+        "capital_utilization_pct": 80.01,
+        "daily_return": 0.004285
+      },
+      {
+        "date": "2025-12-31",
+        "equity": 128.1675,
+        "cash": 25.4302,
+        "invested_value": 102.7373,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.16,
+        "daily_return": 0.008005
+      },
+      {
+        "date": "2026-01-01",
+        "equity": 128.7301,
+        "cash": 25.4549,
+        "invested_value": 103.2752,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.23,
+        "daily_return": 0.004389
+      },
+      {
+        "date": "2026-01-02",
+        "equity": 128.0171,
+        "cash": 25.5067,
+        "invested_value": 102.5104,
+        "drawdown_pct": 0.55,
+        "capital_utilization_pct": 80.08,
+        "daily_return": -0.005539
+      },
+      {
+        "date": "2026-01-05",
+        "equity": 127.9056,
+        "cash": 25.5279,
+        "invested_value": 102.3777,
+        "drawdown_pct": 0.64,
+        "capital_utilization_pct": 80.04,
+        "daily_return": -0.000871
+      },
+      {
+        "date": "2026-01-06",
+        "equity": 127.4977,
+        "cash": 25.5313,
+        "invested_value": 101.9664,
+        "drawdown_pct": 0.96,
+        "capital_utilization_pct": 79.98,
+        "daily_return": -0.003189
+      },
+      {
+        "date": "2026-01-07",
+        "equity": 127.0353,
+        "cash": 25.5538,
+        "invested_value": 101.4815,
+        "drawdown_pct": 1.32,
+        "capital_utilization_pct": 79.88,
+        "daily_return": -0.003627
+      },
+      {
+        "date": "2026-01-08",
+        "equity": 124.5608,
+        "cash": 25.3805,
+        "invested_value": 99.1803,
+        "drawdown_pct": 3.24,
+        "capital_utilization_pct": 79.62,
+        "daily_return": -0.019479
+      },
+      {
+        "date": "2026-01-09",
+        "equity": 122.573,
+        "cash": 25.1795,
+        "invested_value": 97.3936,
+        "drawdown_pct": 4.78,
+        "capital_utilization_pct": 79.46,
+        "daily_return": -0.015958
+      },
+      {
+        "date": "2026-01-12",
+        "equity": 122.3755,
+        "cash": 24.9202,
+        "invested_value": 97.4553,
+        "drawdown_pct": 4.94,
+        "capital_utilization_pct": 79.64,
+        "daily_return": -0.001611
+      },
+      {
+        "date": "2026-01-13",
+        "equity": 122.7621,
+        "cash": 24.7396,
+        "invested_value": 98.0224,
+        "drawdown_pct": 4.64,
+        "capital_utilization_pct": 79.85,
+        "daily_return": 0.003159
+      },
+      {
+        "date": "2026-01-14",
+        "equity": 123.4159,
+        "cash": 24.5869,
+        "invested_value": 98.829,
+        "drawdown_pct": 4.13,
+        "capital_utilization_pct": 80.08,
+        "daily_return": 0.005326
+      },
+      {
+        "date": "2026-01-15",
+        "equity": 123.3668,
+        "cash": 24.478,
+        "invested_value": 98.8888,
+        "drawdown_pct": 4.17,
+        "capital_utilization_pct": 80.16,
+        "daily_return": -0.000398
+      },
+      {
+        "date": "2026-01-16",
+        "equity": 122.3447,
+        "cash": 24.5504,
+        "invested_value": 97.7943,
+        "drawdown_pct": 4.96,
+        "capital_utilization_pct": 79.93,
+        "daily_return": -0.008285
+      },
+      {
+        "date": "2026-01-19",
+        "equity": 121.2179,
+        "cash": 24.4831,
+        "invested_value": 96.7348,
+        "drawdown_pct": 5.84,
+        "capital_utilization_pct": 79.8,
+        "daily_return": -0.00921
+      },
+      {
+        "date": "2026-01-20",
+        "equity": 117.9982,
+        "cash": 24.2905,
+        "invested_value": 93.7077,
+        "drawdown_pct": 8.34,
+        "capital_utilization_pct": 79.41,
+        "daily_return": -0.026561
+      },
+      {
+        "date": "2026-01-21",
+        "equity": 117.7744,
+        "cash": 24.0356,
+        "invested_value": 93.7388,
+        "drawdown_pct": 8.51,
+        "capital_utilization_pct": 79.59,
+        "daily_return": -0.001896
+      },
+      {
+        "date": "2026-01-22",
+        "equity": 118.7308,
+        "cash": 23.9045,
+        "invested_value": 94.8263,
+        "drawdown_pct": 7.77,
+        "capital_utilization_pct": 79.87,
+        "daily_return": 0.00812
+      },
+      {
+        "date": "2026-01-23",
+        "equity": 116.3055,
+        "cash": 23.7067,
+        "invested_value": 92.5988,
+        "drawdown_pct": 9.65,
+        "capital_utilization_pct": 79.62,
+        "daily_return": -0.020427
+      },
+      {
+        "date": "2026-01-27",
+        "equity": 116.0787,
+        "cash": 23.5386,
+        "invested_value": 92.5401,
+        "drawdown_pct": 9.83,
+        "capital_utilization_pct": 79.72,
+        "daily_return": -0.00195
+      },
+      {
+        "date": "2026-01-28",
+        "equity": 120.1275,
+        "cash": 23.5695,
+        "invested_value": 96.558,
+        "drawdown_pct": 6.68,
+        "capital_utilization_pct": 80.38,
+        "daily_return": 0.034879
+      },
+      {
+        "date": "2026-01-29",
+        "equity": 120.3468,
+        "cash": 23.6695,
+        "invested_value": 96.6773,
+        "drawdown_pct": 6.51,
+        "capital_utilization_pct": 80.33,
+        "daily_return": 0.001826
+      },
+      {
+        "date": "2026-01-30",
+        "equity": 120.1361,
+        "cash": 23.7368,
+        "invested_value": 96.3993,
+        "drawdown_pct": 6.68,
+        "capital_utilization_pct": 80.24,
+        "daily_return": -0.001751
+      },
+      {
+        "date": "2026-02-02",
+        "equity": 117.9429,
+        "cash": 23.8138,
+        "invested_value": 94.1291,
+        "drawdown_pct": 8.38,
+        "capital_utilization_pct": 79.81,
+        "daily_return": -0.018257
+      },
+      {
+        "date": "2026-02-03",
+        "equity": 121.1256,
+        "cash": 24.0929,
+        "invested_value": 97.0326,
+        "drawdown_pct": 5.91,
+        "capital_utilization_pct": 80.11,
+        "daily_return": 0.026985
+      },
+      {
+        "date": "2026-02-04",
+        "equity": 122.3542,
+        "cash": 24.1789,
+        "invested_value": 98.1753,
+        "drawdown_pct": 4.95,
+        "capital_utilization_pct": 80.24,
+        "daily_return": 0.010144
+      },
+      {
+        "date": "2026-02-05",
+        "equity": 121.6079,
+        "cash": 24.194,
+        "invested_value": 97.4139,
+        "drawdown_pct": 5.53,
+        "capital_utilization_pct": 80.1,
+        "daily_return": -0.0061
+      },
+      {
+        "date": "2026-02-06",
+        "equity": 121.5833,
+        "cash": 24.2259,
+        "invested_value": 97.3574,
+        "drawdown_pct": 5.55,
+        "capital_utilization_pct": 80.07,
+        "daily_return": -0.000202
+      },
+      {
+        "date": "2026-02-09",
+        "equity": 123.9899,
+        "cash": 24.5077,
+        "invested_value": 99.4822,
+        "drawdown_pct": 3.68,
+        "capital_utilization_pct": 80.23,
+        "daily_return": 0.019794
+      },
+      {
+        "date": "2026-02-10",
+        "equity": 123.8442,
+        "cash": 24.5782,
+        "invested_value": 99.2659,
+        "drawdown_pct": 3.8,
+        "capital_utilization_pct": 80.15,
+        "daily_return": -0.001176
+      },
+      {
+        "date": "2026-02-11",
+        "equity": 123.3026,
+        "cash": 24.5869,
+        "invested_value": 98.7157,
+        "drawdown_pct": 4.22,
+        "capital_utilization_pct": 80.06,
+        "daily_return": -0.004373
+      },
+      {
+        "date": "2026-02-12",
+        "equity": 122.486,
+        "cash": 24.5751,
+        "invested_value": 97.9109,
+        "drawdown_pct": 4.85,
+        "capital_utilization_pct": 79.94,
+        "daily_return": -0.006623
+      },
+      {
+        "date": "2026-02-13",
+        "equity": 119.8879,
+        "cash": 24.5308,
+        "invested_value": 95.3571,
+        "drawdown_pct": 6.87,
+        "capital_utilization_pct": 79.54,
+        "daily_return": -0.021211
+      },
+      {
+        "date": "2026-02-16",
+        "equity": 119.5755,
+        "cash": 24.3673,
+        "invested_value": 95.2082,
+        "drawdown_pct": 7.11,
+        "capital_utilization_pct": 79.62,
+        "daily_return": -0.002606
+      },
+      {
+        "date": "2026-02-17",
+        "equity": 120.3827,
+        "cash": 24.1903,
+        "invested_value": 96.1923,
+        "drawdown_pct": 6.48,
+        "capital_utilization_pct": 79.91,
+        "daily_return": 0.00675
+      },
+      {
+        "date": "2026-02-18",
+        "equity": 121.0888,
+        "cash": 24.0807,
+        "invested_value": 97.0081,
+        "drawdown_pct": 5.94,
+        "capital_utilization_pct": 80.11,
+        "daily_return": 0.005866
+      },
+      {
+        "date": "2026-02-19",
+        "equity": 120.4544,
+        "cash": 23.9766,
+        "invested_value": 96.4777,
+        "drawdown_pct": 6.43,
+        "capital_utilization_pct": 80.09,
+        "daily_return": -0.00524
+      },
+      {
+        "date": "2026-02-20",
+        "equity": 119.1746,
+        "cash": 23.9594,
+        "invested_value": 95.2152,
+        "drawdown_pct": 7.42,
+        "capital_utilization_pct": 79.9,
+        "daily_return": -0.010624
+      },
+      {
+        "date": "2026-02-23",
+        "equity": 118.8382,
+        "cash": 23.9584,
+        "invested_value": 94.8798,
+        "drawdown_pct": 7.68,
+        "capital_utilization_pct": 79.84,
+        "daily_return": -0.002823
+      },
+      {
+        "date": "2026-02-24",
+        "equity": 116.5446,
+        "cash": 23.7737,
+        "invested_value": 92.7709,
+        "drawdown_pct": 9.47,
+        "capital_utilization_pct": 79.6,
+        "daily_return": -0.0193
+      },
+      {
+        "date": "2026-02-25",
+        "equity": 117.3599,
+        "cash": 23.6198,
+        "invested_value": 93.74,
+        "drawdown_pct": 8.83,
+        "capital_utilization_pct": 79.87,
+        "daily_return": 0.006996
+      },
+      {
+        "date": "2026-02-26",
+        "equity": 117.7302,
+        "cash": 23.5308,
+        "invested_value": 94.1993,
+        "drawdown_pct": 8.54,
+        "capital_utilization_pct": 80.01,
+        "daily_return": 0.003155
+      },
+      {
+        "date": "2026-02-27",
+        "equity": 116.9581,
+        "cash": 23.4829,
+        "invested_value": 93.4752,
+        "drawdown_pct": 9.14,
+        "capital_utilization_pct": 79.92,
+        "daily_return": -0.006558
+      },
+      {
+        "date": "2026-03-02",
+        "equity": 115.5934,
+        "cash": 23.2927,
+        "invested_value": 92.3006,
+        "drawdown_pct": 10.2,
+        "capital_utilization_pct": 79.85,
+        "daily_return": -0.011668
+      },
+      {
+        "date": "2026-03-04",
+        "equity": 114.5342,
+        "cash": 23.2087,
+        "invested_value": 91.3255,
+        "drawdown_pct": 11.03,
+        "capital_utilization_pct": 79.74,
+        "daily_return": -0.009163
+      },
+      {
+        "date": "2026-03-05",
+        "equity": 114.6553,
+        "cash": 23.2089,
+        "invested_value": 91.4464,
+        "drawdown_pct": 10.93,
+        "capital_utilization_pct": 79.76,
+        "daily_return": 0.001057
+      },
+      {
+        "date": "2026-03-06",
+        "equity": 114.1449,
+        "cash": 23.0607,
+        "invested_value": 91.0841,
+        "drawdown_pct": 11.33,
+        "capital_utilization_pct": 79.8,
+        "daily_return": -0.004452
+      },
+      {
+        "date": "2026-03-09",
+        "equity": 112.3631,
+        "cash": 22.8873,
+        "invested_value": 89.4758,
+        "drawdown_pct": 12.71,
+        "capital_utilization_pct": 79.63,
+        "daily_return": -0.01561
+      },
+      {
+        "date": "2026-03-10",
+        "equity": 115.8054,
+        "cash": 22.8207,
+        "invested_value": 92.9847,
+        "drawdown_pct": 10.04,
+        "capital_utilization_pct": 80.29,
+        "daily_return": 0.030636
+      },
+      {
+        "date": "2026-03-11",
+        "equity": 115.4133,
+        "cash": 22.8755,
+        "invested_value": 92.5378,
+        "drawdown_pct": 10.34,
+        "capital_utilization_pct": 80.18,
+        "daily_return": -0.003386
+      },
+      {
+        "date": "2026-03-12",
+        "equity": 115.1806,
+        "cash": 22.915,
+        "invested_value": 92.2656,
+        "drawdown_pct": 10.53,
+        "capital_utilization_pct": 80.11,
+        "daily_return": -0.002016
+      },
+      {
+        "date": "2026-03-13",
+        "equity": 113.2064,
+        "cash": 22.8795,
+        "invested_value": 90.3268,
+        "drawdown_pct": 12.06,
+        "capital_utilization_pct": 79.79,
+        "daily_return": -0.01714
+      },
+      {
+        "date": "2026-03-16",
+        "equity": 112.5401,
+        "cash": 22.7929,
+        "invested_value": 89.7471,
+        "drawdown_pct": 12.58,
+        "capital_utilization_pct": 79.75,
+        "daily_return": -0.005886
+      },
+      {
+        "date": "2026-03-17",
+        "equity": 113.7903,
+        "cash": 22.6881,
+        "invested_value": 91.1022,
+        "drawdown_pct": 11.61,
+        "capital_utilization_pct": 80.06,
+        "daily_return": 0.011109
+      },
+      {
+        "date": "2026-03-18",
+        "equity": 116.4185,
+        "cash": 22.7278,
+        "invested_value": 93.6907,
+        "drawdown_pct": 9.56,
+        "capital_utilization_pct": 80.48,
+        "daily_return": 0.023097
+      },
+      {
+        "date": "2026-03-19",
+        "equity": 113.2959,
+        "cash": 22.6835,
+        "invested_value": 90.6124,
+        "drawdown_pct": 11.99,
+        "capital_utilization_pct": 79.98,
+        "daily_return": -0.026822
+      },
+      {
+        "date": "2026-03-20",
+        "equity": 114.011,
+        "cash": 22.79,
+        "invested_value": 91.221,
+        "drawdown_pct": 11.43,
+        "capital_utilization_pct": 80.01,
+        "daily_return": 0.006311
+      },
+      {
+        "date": "2026-03-23",
+        "equity": 110.4312,
+        "cash": 22.6393,
+        "invested_value": 87.7918,
+        "drawdown_pct": 14.21,
+        "capital_utilization_pct": 79.5,
+        "daily_return": -0.031399
+      },
+      {
+        "date": "2026-03-24",
+        "equity": 112.4994,
+        "cash": 22.6164,
+        "invested_value": 89.883,
+        "drawdown_pct": 12.61,
+        "capital_utilization_pct": 79.9,
+        "daily_return": 0.018729
+      },
+      {
+        "date": "2026-03-25",
+        "equity": 114.7928,
+        "cash": 22.5481,
+        "invested_value": 92.2447,
+        "drawdown_pct": 10.83,
+        "capital_utilization_pct": 80.36,
+        "daily_return": 0.020386
+      },
+      {
+        "date": "2026-03-27",
+        "equity": 112.2561,
+        "cash": 22.5103,
+        "invested_value": 89.7458,
+        "drawdown_pct": 12.8,
+        "capital_utilization_pct": 79.95,
+        "daily_return": -0.022099
+      },
+      {
+        "date": "2026-03-30",
+        "equity": 109.3465,
+        "cash": 22.3792,
+        "invested_value": 86.9674,
+        "drawdown_pct": 15.06,
+        "capital_utilization_pct": 79.53,
+        "daily_return": -0.025919
+      },
+      {
+        "date": "2026-04-01",
+        "equity": 114.6255,
+        "cash": 22.5594,
+        "invested_value": 92.0661,
+        "drawdown_pct": 10.96,
+        "capital_utilization_pct": 80.32,
+        "daily_return": 0.048277
+      },
+      {
+        "date": "2026-04-02",
+        "equity": 115.4449,
+        "cash": 22.6316,
+        "invested_value": 92.8133,
+        "drawdown_pct": 10.32,
+        "capital_utilization_pct": 80.4,
+        "daily_return": 0.007148
+      },
+      {
+        "date": "2026-04-06",
+        "equity": 116.7068,
+        "cash": 22.6471,
+        "invested_value": 94.0597,
+        "drawdown_pct": 9.34,
+        "capital_utilization_pct": 80.59,
+        "daily_return": 0.010931
+      },
+      {
+        "date": "2026-04-07",
+        "equity": 117.2132,
+        "cash": 22.8296,
+        "invested_value": 94.3836,
+        "drawdown_pct": 8.95,
+        "capital_utilization_pct": 80.52,
+        "daily_return": 0.004339
+      },
+      {
+        "date": "2026-04-08",
+        "equity": 121.924,
+        "cash": 23.4028,
+        "invested_value": 98.5212,
+        "drawdown_pct": 5.29,
+        "capital_utilization_pct": 80.81,
+        "daily_return": 0.04019
+      },
+      {
+        "date": "2026-04-09",
+        "equity": 121.4517,
+        "cash": 23.6661,
+        "invested_value": 97.7855,
+        "drawdown_pct": 5.65,
+        "capital_utilization_pct": 80.51,
+        "daily_return": -0.003874
+      },
+      {
+        "date": "2026-04-10",
+        "equity": 123.3875,
+        "cash": 24.0079,
+        "invested_value": 99.3796,
+        "drawdown_pct": 4.15,
+        "capital_utilization_pct": 80.54,
+        "daily_return": 0.015939
+      },
+      {
+        "date": "2026-04-13",
+        "equity": 122.8173,
+        "cash": 24.2002,
+        "invested_value": 98.6171,
+        "drawdown_pct": 4.59,
+        "capital_utilization_pct": 80.3,
+        "daily_return": -0.004621
+      },
+      {
+        "date": "2026-04-15",
+        "equity": 124.949,
+        "cash": 24.5543,
+        "invested_value": 100.3946,
+        "drawdown_pct": 2.94,
+        "capital_utilization_pct": 80.35,
+        "daily_return": 0.017356
+      },
+      {
+        "date": "2026-04-16",
+        "equity": 126.3154,
+        "cash": 24.763,
+        "invested_value": 101.5524,
+        "drawdown_pct": 1.88,
+        "capital_utilization_pct": 80.4,
+        "daily_return": 0.010936
+      },
+      {
+        "date": "2026-04-17",
+        "equity": 128.0558,
+        "cash": 25.0192,
+        "invested_value": 103.0366,
+        "drawdown_pct": 0.52,
+        "capital_utilization_pct": 80.46,
+        "daily_return": 0.013778
+      },
+      {
+        "date": "2026-04-20",
+        "equity": 128.5487,
+        "cash": 25.246,
+        "invested_value": 103.3028,
+        "drawdown_pct": 0.14,
+        "capital_utilization_pct": 80.36,
+        "daily_return": 0.003849
+      },
+      {
+        "date": "2026-04-21",
+        "equity": 128.6657,
+        "cash": 25.3838,
+        "invested_value": 103.2819,
+        "drawdown_pct": 0.05,
+        "capital_utilization_pct": 80.27,
+        "daily_return": 0.00091
+      },
+      {
+        "date": "2026-04-22",
+        "equity": 129.839,
+        "cash": 25.5877,
+        "invested_value": 104.2513,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.29,
+        "daily_return": 0.009119
+      },
+      {
+        "date": "2026-04-23",
+        "equity": 130.0045,
+        "cash": 25.7482,
+        "invested_value": 104.2563,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.19,
+        "daily_return": 0.001275
+      },
+      {
+        "date": "2026-04-24",
+        "equity": 129.0084,
+        "cash": 25.8368,
+        "invested_value": 103.1716,
+        "drawdown_pct": 0.77,
+        "capital_utilization_pct": 79.97,
+        "daily_return": -0.007662
+      },
+      {
+        "date": "2026-04-27",
+        "equity": 131.1518,
+        "cash": 25.965,
+        "invested_value": 105.1868,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.2,
+        "daily_return": 0.016614
+      },
+      {
+        "date": "2026-04-28",
+        "equity": 131.327,
+        "cash": 26.0603,
+        "invested_value": 105.2668,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.16,
+        "daily_return": 0.001336
+      },
+      {
+        "date": "2026-04-29",
+        "equity": 131.7477,
+        "cash": 26.1231,
+        "invested_value": 105.6245,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.17,
+        "daily_return": 0.003203
+      },
+      {
+        "date": "2026-04-30",
+        "equity": 131.8316,
+        "cash": 26.153,
+        "invested_value": 105.6786,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.16,
+        "daily_return": 0.000637
+      },
+      {
+        "date": "2026-05-01",
+        "equity": 131.7785,
+        "cash": 26.2646,
+        "invested_value": 105.5139,
+        "drawdown_pct": 0.04,
+        "capital_utilization_pct": 80.07,
+        "daily_return": -0.000403
+      },
+      {
+        "date": "2026-05-04",
+        "equity": 133.7118,
+        "cash": 26.374,
+        "invested_value": 107.3378,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.28,
+        "daily_return": 0.014671
+      },
+      {
+        "date": "2026-05-05",
+        "equity": 133.8177,
+        "cash": 26.49,
+        "invested_value": 107.3277,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.2,
+        "daily_return": 0.000792
+      },
+      {
+        "date": "2026-05-06",
+        "equity": 135.0953,
+        "cash": 26.5401,
+        "invested_value": 108.5551,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.35,
+        "daily_return": 0.009547
+      },
+      {
+        "date": "2026-05-07",
+        "equity": 136.4687,
+        "cash": 26.8641,
+        "invested_value": 109.6046,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.31,
+        "daily_return": 0.010166
+      },
+      {
+        "date": "2026-05-08",
+        "equity": 136.0849,
+        "cash": 26.9664,
+        "invested_value": 109.1185,
+        "drawdown_pct": 0.28,
+        "capital_utilization_pct": 80.18,
+        "daily_return": -0.002812
+      },
+      {
+        "date": "2026-05-11",
+        "equity": 135.116,
+        "cash": 27.0523,
+        "invested_value": 108.0637,
+        "drawdown_pct": 0.99,
+        "capital_utilization_pct": 79.98,
+        "daily_return": -0.00712
+      },
+      {
+        "date": "2026-05-12",
+        "equity": 131.5266,
+        "cash": 26.9609,
+        "invested_value": 104.5657,
+        "drawdown_pct": 3.62,
+        "capital_utilization_pct": 79.5,
+        "daily_return": -0.026566
+      },
+      {
+        "date": "2026-05-13",
+        "equity": 132.5813,
+        "cash": 26.8793,
+        "invested_value": 105.7021,
+        "drawdown_pct": 2.85,
+        "capital_utilization_pct": 79.73,
+        "daily_return": 0.008019
+      },
+      {
+        "date": "2026-05-14",
+        "equity": 133.0823,
+        "cash": 26.6772,
+        "invested_value": 106.4051,
+        "drawdown_pct": 2.48,
+        "capital_utilization_pct": 79.95,
+        "daily_return": 0.003778
+      },
+      {
+        "date": "2026-05-15",
+        "equity": 131.9241,
+        "cash": 26.4981,
+        "invested_value": 105.426,
+        "drawdown_pct": 3.33,
+        "capital_utilization_pct": 79.91,
+        "daily_return": -0.008703
+      },
+      {
+        "date": "2026-05-18",
+        "equity": 130.0463,
+        "cash": 26.286,
+        "invested_value": 103.7603,
+        "drawdown_pct": 4.71,
+        "capital_utilization_pct": 79.79,
+        "daily_return": -0.014234
+      },
+      {
+        "date": "2026-05-19",
+        "equity": 130.6052,
+        "cash": 26.3139,
+        "invested_value": 104.2914,
+        "drawdown_pct": 4.3,
+        "capital_utilization_pct": 79.85,
+        "daily_return": 0.004298
+      },
+      {
+        "date": "2026-05-20",
+        "equity": 131.104,
+        "cash": 26.2819,
+        "invested_value": 104.8221,
+        "drawdown_pct": 3.93,
+        "capital_utilization_pct": 79.95,
+        "daily_return": 0.003819
+      },
+      {
+        "date": "2026-05-21",
+        "equity": 132.5748,
+        "cash": 26.2516,
+        "invested_value": 106.3232,
+        "drawdown_pct": 2.85,
+        "capital_utilization_pct": 80.2,
+        "daily_return": 0.011219
+      },
+      {
+        "date": "2026-05-22",
+        "equity": 132.3738,
+        "cash": 26.3156,
+        "invested_value": 106.0583,
+        "drawdown_pct": 3.0,
+        "capital_utilization_pct": 80.12,
+        "daily_return": -0.001516
+      },
+      {
+        "date": "2026-05-25",
+        "equity": 134.4545,
+        "cash": 26.4356,
+        "invested_value": 108.019,
+        "drawdown_pct": 1.48,
+        "capital_utilization_pct": 80.34,
+        "daily_return": 0.015718
+      },
+      {
+        "date": "2026-05-26",
+        "equity": 135.4741,
+        "cash": 26.5599,
+        "invested_value": 108.9142,
+        "drawdown_pct": 0.73,
+        "capital_utilization_pct": 80.39,
+        "daily_return": 0.007583
+      },
+      {
+        "date": "2026-05-27",
+        "equity": 138.1987,
+        "cash": 26.8066,
+        "invested_value": 111.3921,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.6,
+        "daily_return": 0.020112
+      },
+      {
+        "date": "2026-05-28",
+        "equity": 138.1392,
+        "cash": 27.0992,
+        "invested_value": 111.04,
+        "drawdown_pct": 0.04,
+        "capital_utilization_pct": 80.38,
+        "daily_return": -0.000431
+      },
+      {
+        "date": "2026-05-29",
+        "equity": 137.7891,
+        "cash": 27.3204,
+        "invested_value": 110.4687,
+        "drawdown_pct": 0.3,
+        "capital_utilization_pct": 80.17,
+        "daily_return": -0.002534
+      },
+      {
+        "date": "2026-06-01",
+        "equity": 136.3436,
+        "cash": 27.5024,
+        "invested_value": 108.8412,
+        "drawdown_pct": 1.34,
+        "capital_utilization_pct": 79.83,
+        "daily_return": -0.01049
+      },
+      {
+        "date": "2026-06-02",
+        "equity": 136.7147,
+        "cash": 27.5708,
+        "invested_value": 109.1439,
+        "drawdown_pct": 1.07,
+        "capital_utilization_pct": 79.83,
+        "daily_return": 0.002721
+      },
+      {
+        "date": "2026-06-03",
+        "equity": 136.1429,
+        "cash": 27.4646,
+        "invested_value": 108.6783,
+        "drawdown_pct": 1.49,
+        "capital_utilization_pct": 79.83,
+        "daily_return": -0.004182
+      },
+      {
+        "date": "2026-06-04",
+        "equity": 137.2727,
+        "cash": 27.2807,
+        "invested_value": 109.9921,
+        "drawdown_pct": 0.67,
+        "capital_utilization_pct": 80.13,
+        "daily_return": 0.008299
+      },
+      {
+        "date": "2026-06-05",
+        "equity": 137.6057,
+        "cash": 27.2952,
+        "invested_value": 110.3105,
+        "drawdown_pct": 0.43,
+        "capital_utilization_pct": 80.16,
+        "daily_return": 0.002425
+      },
+      {
+        "date": "2026-06-08",
+        "equity": 135.5335,
+        "cash": 27.3052,
+        "invested_value": 108.2282,
+        "drawdown_pct": 1.93,
+        "capital_utilization_pct": 79.85,
+        "daily_return": -0.015059
+      },
+      {
+        "date": "2026-06-09",
+        "equity": 137.8068,
+        "cash": 27.34,
+        "invested_value": 110.4668,
+        "drawdown_pct": 0.28,
+        "capital_utilization_pct": 80.16,
+        "daily_return": 0.016773
+      },
+      {
+        "date": "2026-06-10",
+        "equity": 135.7441,
+        "cash": 27.3477,
+        "invested_value": 108.3964,
+        "drawdown_pct": 1.78,
+        "capital_utilization_pct": 79.85,
+        "daily_return": -0.014967
+      },
+      {
+        "date": "2026-06-11",
+        "equity": 135.0692,
+        "cash": 27.1959,
+        "invested_value": 107.8733,
+        "drawdown_pct": 2.26,
+        "capital_utilization_pct": 79.87,
+        "daily_return": -0.004972
+      },
+      {
+        "date": "2026-06-12",
+        "equity": 137.8244,
+        "cash": 27.2073,
+        "invested_value": 110.6172,
+        "drawdown_pct": 0.27,
+        "capital_utilization_pct": 80.26,
+        "daily_return": 0.020399
+      },
+      {
+        "date": "2026-06-15",
+        "equity": 138.7537,
+        "cash": 27.301,
+        "invested_value": 111.4526,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.32,
+        "daily_return": 0.006742
+      },
+      {
+        "date": "2026-06-16",
+        "equity": 138.7398,
+        "cash": 27.3286,
+        "invested_value": 111.4112,
+        "drawdown_pct": 0.01,
+        "capital_utilization_pct": 80.3,
+        "daily_return": -0.0001
+      },
+      {
+        "date": "2026-06-17",
+        "equity": 139.9247,
+        "cash": 27.4718,
+        "invested_value": 112.4529,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.37,
+        "daily_return": 0.00854
+      },
+      {
+        "date": "2026-06-18",
+        "equity": 140.1274,
+        "cash": 27.7751,
+        "invested_value": 112.3523,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.18,
+        "daily_return": 0.001449
+      },
+      {
+        "date": "2026-06-19",
+        "equity": 141.8537,
+        "cash": 27.9446,
+        "invested_value": 113.9091,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.3,
+        "daily_return": 0.01232
+      },
+      {
+        "date": "2026-06-22",
+        "equity": 142.8871,
+        "cash": 28.1337,
+        "invested_value": 114.7534,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.31,
+        "daily_return": 0.007285
+      },
+      {
+        "date": "2026-06-23",
+        "equity": 141.4672,
+        "cash": 28.2118,
+        "invested_value": 113.2554,
+        "drawdown_pct": 0.99,
+        "capital_utilization_pct": 80.06,
+        "daily_return": -0.009938
+      },
+      {
+        "date": "2026-06-24",
+        "equity": 140.9171,
+        "cash": 28.257,
+        "invested_value": 112.66,
+        "drawdown_pct": 1.38,
+        "capital_utilization_pct": 79.95,
+        "daily_return": -0.003889
+      },
+      {
+        "date": "2026-06-25",
+        "equity": 140.8484,
+        "cash": 28.3118,
+        "invested_value": 112.5366,
+        "drawdown_pct": 1.43,
+        "capital_utilization_pct": 79.9,
+        "daily_return": -0.000487
+      },
+      {
+        "date": "2026-06-26",
+        "equity": 140.7915,
+        "cash": 28.3081,
+        "invested_value": 112.4834,
+        "drawdown_pct": 1.47,
+        "capital_utilization_pct": 79.89,
+        "daily_return": -0.000404
+      },
+      {
+        "date": "2026-06-29",
+        "equity": 141.6223,
+        "cash": 28.2124,
+        "invested_value": 113.4099,
+        "drawdown_pct": 0.89,
+        "capital_utilization_pct": 80.08,
+        "daily_return": 0.005901
+      },
+      {
+        "date": "2026-06-30",
+        "equity": 142.2505,
+        "cash": 28.2354,
+        "invested_value": 114.0151,
+        "drawdown_pct": 0.45,
+        "capital_utilization_pct": 80.15,
+        "daily_return": 0.004435
+      },
+      {
+        "date": "2026-07-01",
+        "equity": 143.5199,
+        "cash": 28.3746,
+        "invested_value": 115.1453,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.23,
+        "daily_return": 0.008924
+      },
+      {
+        "date": "2026-07-02",
+        "equity": 144.5835,
+        "cash": 28.5391,
+        "invested_value": 116.0444,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.26,
+        "daily_return": 0.007411
+      },
+      {
+        "date": "2026-07-03",
+        "equity": 143.9755,
+        "cash": 28.6534,
+        "invested_value": 115.3221,
+        "drawdown_pct": 0.42,
+        "capital_utilization_pct": 80.1,
+        "daily_return": -0.004205
+      },
+      {
+        "date": "2026-07-06",
+        "equity": 145.9588,
+        "cash": 28.8644,
+        "invested_value": 117.0944,
+        "drawdown_pct": 0.0,
+        "capital_utilization_pct": 80.22,
+        "daily_return": 0.013775
+      },
+      {
+        "date": "2026-07-07",
+        "equity": 144.7568,
+        "cash": 28.9483,
+        "invested_value": 115.8086,
+        "drawdown_pct": 0.82,
+        "capital_utilization_pct": 80.0,
+        "daily_return": -0.008235
+      },
+      {
+        "date": "2026-07-08",
+        "equity": 141.5183,
+        "cash": 28.7905,
+        "invested_value": 112.7278,
+        "drawdown_pct": 3.04,
+        "capital_utilization_pct": 79.66,
+        "daily_return": -0.022373
+      },
+      {
+        "date": "2026-07-09",
+        "equity": 143.8662,
+        "cash": 28.8069,
+        "invested_value": 115.0593,
+        "drawdown_pct": 1.43,
+        "capital_utilization_pct": 79.98,
+        "daily_return": 0.016591
+      },
+      {
+        "date": "2026-07-10",
+        "equity": 144.7343,
+        "cash": 28.8307,
+        "invested_value": 115.9037,
+        "drawdown_pct": 0.84,
+        "capital_utilization_pct": 80.08,
+        "daily_return": 0.006035
+      },
+      {
+        "date": "2026-07-13",
+        "equity": 145.042,
+        "cash": 28.7656,
+        "invested_value": 116.2764,
+        "drawdown_pct": 0.63,
+        "capital_utilization_pct": 80.17,
+        "daily_return": 0.002126
+      },
+      {
+        "date": "2026-07-14",
+        "equity": 143.8089,
+        "cash": 28.7069,
+        "invested_value": 115.102,
+        "drawdown_pct": 1.47,
+        "capital_utilization_pct": 80.04,
+        "daily_return": -0.008502
+      },
+      {
+        "date": "2026-07-15",
+        "equity": 145.1563,
+        "cash": 28.8323,
+        "invested_value": 116.3241,
+        "drawdown_pct": 0.55,
+        "capital_utilization_pct": 80.14,
+        "daily_return": 0.009369
+      },
+      {
+        "date": "2026-07-16",
+        "equity": 145.1085,
+        "cash": 28.9116,
+        "invested_value": 116.1969,
+        "drawdown_pct": 0.58,
+        "capital_utilization_pct": 80.08,
+        "daily_return": -0.000329
+      },
+      {
+        "date": "2026-07-17",
+        "equity": 144.0042,
+        "cash": 28.9067,
+        "invested_value": 115.0976,
+        "drawdown_pct": 1.34,
+        "capital_utilization_pct": 79.93,
+        "daily_return": -0.00761
+      },
+      {
+        "date": "2026-07-20",
+        "equity": 144.7446,
+        "cash": 28.8685,
+        "invested_value": 115.8761,
+        "drawdown_pct": 0.83,
+        "capital_utilization_pct": 80.06,
+        "daily_return": 0.005142
+      },
+      {
+        "date": "2026-07-21",
+        "equity": 145.2523,
+        "cash": 28.926,
+        "invested_value": 116.3262,
+        "drawdown_pct": 0.48,
+        "capital_utilization_pct": 80.09,
+        "daily_return": 0.003507
+      },
+      {
+        "date": "2026-07-22",
+        "equity": 143.5767,
+        "cash": 28.8753,
+        "invested_value": 114.7014,
+        "drawdown_pct": 1.63,
+        "capital_utilization_pct": 79.89,
+        "daily_return": -0.011535
+      },
+      {
+        "date": "2026-07-23",
+        "equity": 141.6072,
+        "cash": 28.7259,
+        "invested_value": 112.8813,
+        "drawdown_pct": 2.98,
+        "capital_utilization_pct": 79.71,
+        "daily_return": -0.013718
+      },
+      {
+        "date": "2026-07-24",
+        "equity": 140.4365,
+        "cash": 28.6109,
+        "invested_value": 111.8256,
+        "drawdown_pct": 3.78,
+        "capital_utilization_pct": 79.63,
+        "daily_return": -0.008267
+      },
+      {
+        "date": "2026-07-27",
+        "equity": 142.512,
+        "cash": 28.4652,
+        "invested_value": 114.0468,
+        "drawdown_pct": 2.36,
+        "capital_utilization_pct": 80.03,
+        "daily_return": 0.014779
+      },
+      {
+        "date": "2026-07-28",
+        "equity": 142.6476,
+        "cash": 28.3572,
+        "invested_value": 114.2904,
+        "drawdown_pct": 2.27,
+        "capital_utilization_pct": 80.12,
+        "daily_return": 0.000951
+      },
+      {
+        "date": "2026-07-29",
+        "equity": 143.6825,
+        "cash": 28.2763,
+        "invested_value": 115.4062,
+        "drawdown_pct": 1.56,
+        "capital_utilization_pct": 80.32,
+        "daily_return": 0.007255
+      },
+      {
+        "date": "2026-07-30",
+        "equity": 142.0107,
+        "cash": 28.3828,
+        "invested_value": 113.6279,
+        "drawdown_pct": 2.7,
+        "capital_utilization_pct": 80.01,
+        "daily_return": -0.011636
+      },
+      {
+        "date": "2026-07-31",
+        "equity": 143.0509,
+        "cash": 28.4832,
+        "invested_value": 114.5678,
+        "drawdown_pct": 1.99,
+        "capital_utilization_pct": 80.09,
+        "daily_return": 0.007325
+      },
+      {
+        "date": "2026-08-03",
+        "equity": 145.5058,
+        "cash": 28.603,
+        "invested_value": 116.9028,
+        "drawdown_pct": 0.31,
+        "capital_utilization_pct": 80.34,
+        "daily_return": 0.01716
+      },
+      {
+        "date": "2026-08-04",
+        "equity": 144.9947,
+        "cash": 28.722,
+        "invested_value": 116.2726,
+        "drawdown_pct": 0.66,
+        "capital_utilization_pct": 80.19,
+        "daily_return": -0.003512
+      },
+      {
+        "date": "2026-08-05",
+        "equity": 145.8959,
+        "cash": 28.8299,
+        "invested_value": 117.0661,
+        "drawdown_pct": 0.04,
+        "capital_utilization_pct": 80.24,
+        "daily_return": 0.006216
+      },
+      {
+        "date": "2026-08-06",
+        "equity": 145.5853,
+        "cash": 29.0118,
+        "invested_value": 116.5735,
+        "drawdown_pct": 0.26,
+        "capital_utilization_pct": 80.07,
+        "daily_return": -0.002129
+      },
+      {
+        "date": "2026-08-07",
+        "equity": 145.4382,
+        "cash": 29.168,
+        "invested_value": 116.2701,
+        "drawdown_pct": 0.36,
+        "capital_utilization_pct": 79.94,
+        "daily_return": -0.001011
+      },
+      {
+        "date": "2026-08-10",
+        "equity": 145.2705,
+        "cash": 29.1559,
+        "invested_value": 116.1146,
+        "drawdown_pct": 0.47,
+        "capital_utilization_pct": 79.93,
+        "daily_return": -0.001153
+      },
+      {
+        "date": "2026-08-11",
+        "equity": 145.0174,
+        "cash": 29.102,
+        "invested_value": 115.9154,
+        "drawdown_pct": 0.64,
+        "capital_utilization_pct": 79.93,
+        "daily_return": -0.001742
+      },
+      {
+        "date": "2026-08-12",
+        "equity": 145.0657,
+        "cash": 29.0598,
+        "invested_value": 116.0059,
+        "drawdown_pct": 0.61,
+        "capital_utilization_pct": 79.97,
+        "daily_return": 0.000333
+      },
+      {
+        "date": "2026-08-13",
+        "equity": 145.583,
+        "cash": 28.9892,
+        "invested_value": 116.5938,
+        "drawdown_pct": 0.26,
+        "capital_utilization_pct": 80.09,
+        "daily_return": 0.003566
+      },
+      {
+        "date": "2026-08-14",
+        "equity": 144.7867,
+        "cash": 29.0309,
+        "invested_value": 115.7558,
+        "drawdown_pct": 0.8,
+        "capital_utilization_pct": 79.95,
+        "daily_return": -0.00547
+      },
+      {
+        "date": "2026-08-17",
+        "equity": 144.305,
+        "cash": 29.0378,
+        "invested_value": 115.2673,
+        "drawdown_pct": 1.13,
+        "capital_utilization_pct": 79.88,
+        "daily_return": -0.003327
+      },
+      {
+        "date": "2026-08-18",
+        "equity": 144.1673,
+        "cash": 29.0089,
+        "invested_value": 115.1583,
+        "drawdown_pct": 1.23,
+        "capital_utilization_pct": 79.88,
+        "daily_return": -0.000955
+      },
+      {
+        "date": "2026-08-19",
+        "equity": 143.4769,
+        "cash": 28.9174,
+        "invested_value": 114.5595,
+        "drawdown_pct": 1.7,
+        "capital_utilization_pct": 79.85,
+        "daily_return": -0.004788
+      },
+      {
+        "date": "2026-08-20",
+        "equity": 143.8547,
+        "cash": 28.8164,
+        "invested_value": 115.0383,
+        "drawdown_pct": 1.44,
+        "capital_utilization_pct": 79.97,
+        "daily_return": 0.002633
+      },
+      {
+        "date": "2026-08-21",
+        "equity": 144.8245,
+        "cash": 28.8484,
+        "invested_value": 115.9761,
+        "drawdown_pct": 0.78,
+        "capital_utilization_pct": 80.08,
+        "daily_return": 0.006741
+      },
+      {
+        "date": "2026-08-24",
+        "equity": 144.5758,
+        "cash": 28.8577,
+        "invested_value": 115.7181,
+        "drawdown_pct": 0.95,
+        "capital_utilization_pct": 80.04,
+        "daily_return": -0.001717
+      },
+      {
+        "date": "2026-08-25",
+        "equity": 144.3665,
+        "cash": 28.8354,
+        "invested_value": 115.5311,
+        "drawdown_pct": 1.09,
+        "capital_utilization_pct": 80.03,
+        "daily_return": -0.001448
+      },
+      {
+        "date": "2026-08-26",
+        "equity": 144.0368,
+        "cash": 28.8849,
+        "invested_value": 115.1519,
+        "drawdown_pct": 1.32,
+        "capital_utilization_pct": 79.95,
+        "daily_return": -0.002284
+      },
+      {
+        "date": "2026-08-27",
+        "equity": 143.6344,
+        "cash": 28.8267,
+        "invested_value": 114.8077,
+        "drawdown_pct": 1.59,
+        "capital_utilization_pct": 79.93,
+        "daily_return": -0.002794
+      },
+      {
+        "date": "2026-08-28",
+        "equity": 143.3779,
+        "cash": 28.7974,
+        "invested_value": 114.5805,
+        "drawdown_pct": 1.77,
+        "capital_utilization_pct": 79.92,
+        "daily_return": -0.001786
+      },
+      {
+        "date": "2026-08-31",
+        "equity": 142.7183,
+        "cash": 28.7802,
+        "invested_value": 113.9382,
+        "drawdown_pct": 2.22,
+        "capital_utilization_pct": 79.83,
+        "daily_return": -0.0046
+      },
+      {
+        "date": "2026-09-01",
+        "equity": 140.7411,
+        "cash": 28.6684,
+        "invested_value": 112.0728,
+        "drawdown_pct": 3.57,
+        "capital_utilization_pct": 79.63,
+        "daily_return": -0.013854
+      },
+      {
+        "date": "2026-09-02",
+        "equity": 140.4834,
+        "cash": 28.5311,
+        "invested_value": 111.9523,
+        "drawdown_pct": 3.75,
+        "capital_utilization_pct": 79.69,
+        "daily_return": -0.001831
+      },
+      {
+        "date": "2026-09-03",
+        "equity": 140.6357,
+        "cash": 28.371,
+        "invested_value": 112.2647,
+        "drawdown_pct": 3.65,
+        "capital_utilization_pct": 79.83,
+        "daily_return": 0.001084
+      },
+      {
+        "date": "2026-09-04",
+        "equity": 139.9858,
+        "cash": 28.2024,
+        "invested_value": 111.7834,
+        "drawdown_pct": 4.09,
+        "capital_utilization_pct": 79.85,
+        "daily_return": -0.004621
+      }
+    ],
+    "execution_metrics": {
+      "portfolio_accounting": "DAILY_MTM_V1",
+      "friction_bps": 25.0,
+      "net_trades_count": 5445,
+      "net_win_rate": 49.99,
+      "net_profit_factor": 1.31,
+      "net_sharpe": 1.41,
+      "annualized_sharpe": 1.41,
+      "annualized_vol_pct": 17.48,
+      "net_max_drawdown_pct": 15.06,
+      "peak_equity": 128.73,
+      "trough_equity": 109.35,
+      "equity_curve": [
+        {
+          "date": "2025-03-17",
+          "equity": 100.0,
+          "cash": 84.0,
+          "invested_value": 16.0,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 16.0,
+          "daily_return": 0.0
+        },
+        {
+          "date": "2025-03-18",
+          "equity": 100.0,
+          "cash": 68.0,
+          "invested_value": 32.0,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 32.0,
+          "daily_return": 0.0
+        },
+        {
+          "date": "2025-03-19",
+          "equity": 101.84,
+          "cash": 52.0,
+          "invested_value": 49.84,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 48.94,
+          "daily_return": 0.0184
+        },
+        {
+          "date": "2025-03-20",
+          "equity": 102.0744,
+          "cash": 36.0,
+          "invested_value": 66.0744,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 64.73,
+          "daily_return": 0.002301
+        },
+        {
+          "date": "2025-03-21",
+          "equity": 104.2131,
+          "cash": 20.0,
+          "invested_value": 84.2131,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.81,
+          "daily_return": 0.020953
+        },
+        {
+          "date": "2025-03-24",
+          "equity": 105.9733,
+          "cash": 20.49,
+          "invested_value": 85.4833,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.66,
+          "daily_return": 0.01689
+        },
+        {
+          "date": "2025-03-25",
+          "equity": 104.0349,
+          "cash": 20.7512,
+          "invested_value": 83.2837,
+          "drawdown_pct": 1.83,
+          "capital_utilization_pct": 80.05,
+          "daily_return": -0.018292
+        },
+        {
+          "date": "2025-03-26",
+          "equity": 103.0962,
+          "cash": 20.7728,
+          "invested_value": 82.3234,
+          "drawdown_pct": 2.71,
+          "capital_utilization_pct": 79.85,
+          "daily_return": -0.009023
+        },
+        {
+          "date": "2025-03-27",
+          "equity": 104.0632,
+          "cash": 20.8376,
+          "invested_value": 83.2257,
+          "drawdown_pct": 1.8,
+          "capital_utilization_pct": 79.98,
+          "daily_return": 0.00938
+        },
+        {
+          "date": "2025-03-28",
+          "equity": 103.3092,
+          "cash": 20.7808,
+          "invested_value": 82.5284,
+          "drawdown_pct": 2.51,
+          "capital_utilization_pct": 79.88,
+          "daily_return": -0.007246
+        },
+        {
+          "date": "2025-04-01",
+          "equity": 103.522,
+          "cash": 20.7175,
+          "invested_value": 82.8045,
+          "drawdown_pct": 2.31,
+          "capital_utilization_pct": 79.99,
+          "daily_return": 0.00206
+        },
+        {
+          "date": "2025-04-02",
+          "equity": 104.2437,
+          "cash": 20.7342,
+          "invested_value": 83.5095,
+          "drawdown_pct": 1.63,
+          "capital_utilization_pct": 80.11,
+          "daily_return": 0.006971
+        },
+        {
+          "date": "2025-04-03",
+          "equity": 104.4461,
+          "cash": 20.7755,
+          "invested_value": 83.6706,
+          "drawdown_pct": 1.44,
+          "capital_utilization_pct": 80.11,
+          "daily_return": 0.001942
+        },
+        {
+          "date": "2025-04-04",
+          "equity": 101.2131,
+          "cash": 20.6939,
+          "invested_value": 80.5193,
+          "drawdown_pct": 4.49,
+          "capital_utilization_pct": 79.55,
+          "daily_return": -0.030953
+        },
+        {
+          "date": "2025-04-07",
+          "equity": 97.2458,
+          "cash": 20.4767,
+          "invested_value": 76.7691,
+          "drawdown_pct": 8.24,
+          "capital_utilization_pct": 78.94,
+          "daily_return": -0.039197
+        },
+        {
+          "date": "2025-04-08",
+          "equity": 98.9659,
+          "cash": 20.2552,
+          "invested_value": 78.7107,
+          "drawdown_pct": 6.61,
+          "capital_utilization_pct": 79.53,
+          "daily_return": 0.017688
+        },
+        {
+          "date": "2025-04-09",
+          "equity": 98.2151,
+          "cash": 20.0105,
+          "invested_value": 78.2046,
+          "drawdown_pct": 7.32,
+          "capital_utilization_pct": 79.63,
+          "daily_return": -0.007587
+        },
+        {
+          "date": "2025-04-11",
+          "equity": 100.2905,
+          "cash": 19.7991,
+          "invested_value": 80.4914,
+          "drawdown_pct": 5.36,
+          "capital_utilization_pct": 80.26,
+          "daily_return": 0.021131
+        },
+        {
+          "date": "2025-04-15",
+          "equity": 103.73,
+          "cash": 19.8609,
+          "invested_value": 83.8691,
+          "drawdown_pct": 2.12,
+          "capital_utilization_pct": 80.85,
+          "daily_return": 0.034296
+        },
+        {
+          "date": "2025-04-16",
+          "equity": 104.1937,
+          "cash": 20.1517,
+          "invested_value": 84.042,
+          "drawdown_pct": 1.68,
+          "capital_utilization_pct": 80.66,
+          "daily_return": 0.00447
+        },
+        {
+          "date": "2025-04-17",
+          "equity": 104.2086,
+          "cash": 20.4088,
+          "invested_value": 83.7998,
+          "drawdown_pct": 1.67,
+          "capital_utilization_pct": 80.42,
+          "daily_return": 0.000143
+        },
+        {
+          "date": "2025-04-21",
+          "equity": 106.24,
+          "cash": 20.7514,
+          "invested_value": 85.4885,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.47,
+          "daily_return": 0.019493
+        },
+        {
+          "date": "2025-04-22",
+          "equity": 106.4638,
+          "cash": 21.015,
+          "invested_value": 85.4488,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.26,
+          "daily_return": 0.002107
+        },
+        {
+          "date": "2025-04-23",
+          "equity": 107.286,
+          "cash": 21.156,
+          "invested_value": 86.1301,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.28,
+          "daily_return": 0.007723
+        },
+        {
+          "date": "2025-04-24",
+          "equity": 108.0488,
+          "cash": 21.3244,
+          "invested_value": 86.7244,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.26,
+          "daily_return": 0.00711
+        },
+        {
+          "date": "2025-04-25",
+          "equity": 105.9386,
+          "cash": 21.343,
+          "invested_value": 84.5956,
+          "drawdown_pct": 1.95,
+          "capital_utilization_pct": 79.85,
+          "daily_return": -0.01953
+        },
+        {
+          "date": "2025-04-28",
+          "equity": 106.3884,
+          "cash": 21.3323,
+          "invested_value": 85.0561,
+          "drawdown_pct": 1.54,
+          "capital_utilization_pct": 79.95,
+          "daily_return": 0.004246
+        },
+        {
+          "date": "2025-04-29",
+          "equity": 106.1391,
+          "cash": 21.3271,
+          "invested_value": 84.812,
+          "drawdown_pct": 1.77,
+          "capital_utilization_pct": 79.91,
+          "daily_return": -0.002343
+        },
+        {
+          "date": "2025-04-30",
+          "equity": 105.3457,
+          "cash": 21.3376,
+          "invested_value": 84.0081,
+          "drawdown_pct": 2.5,
+          "capital_utilization_pct": 79.75,
+          "daily_return": -0.007476
+        },
+        {
+          "date": "2025-05-02",
+          "equity": 105.406,
+          "cash": 21.2362,
+          "invested_value": 84.1698,
+          "drawdown_pct": 2.45,
+          "capital_utilization_pct": 79.85,
+          "daily_return": 0.000573
+        },
+        {
+          "date": "2025-05-05",
+          "equity": 106.7047,
+          "cash": 21.238,
+          "invested_value": 85.4667,
+          "drawdown_pct": 1.24,
+          "capital_utilization_pct": 80.1,
+          "daily_return": 0.01232
+        },
+        {
+          "date": "2025-05-06",
+          "equity": 105.494,
+          "cash": 21.1342,
+          "invested_value": 84.3598,
+          "drawdown_pct": 2.36,
+          "capital_utilization_pct": 79.97,
+          "daily_return": -0.011346
+        },
+        {
+          "date": "2025-05-07",
+          "equity": 105.8037,
+          "cash": 21.1334,
+          "invested_value": 84.6703,
+          "drawdown_pct": 2.08,
+          "capital_utilization_pct": 80.03,
+          "daily_return": 0.002936
+        },
+        {
+          "date": "2025-05-08",
+          "equity": 104.2433,
+          "cash": 21.0897,
+          "invested_value": 83.1536,
+          "drawdown_pct": 3.52,
+          "capital_utilization_pct": 79.77,
+          "daily_return": -0.014748
+        },
+        {
+          "date": "2025-05-09",
+          "equity": 104.1435,
+          "cash": 20.9968,
+          "invested_value": 83.1467,
+          "drawdown_pct": 3.61,
+          "capital_utilization_pct": 79.84,
+          "daily_return": -0.000958
+        },
+        {
+          "date": "2025-05-12",
+          "equity": 107.4794,
+          "cash": 21.0278,
+          "invested_value": 86.4516,
+          "drawdown_pct": 0.53,
+          "capital_utilization_pct": 80.44,
+          "daily_return": 0.032032
+        },
+        {
+          "date": "2025-05-13",
+          "equity": 108.476,
+          "cash": 21.1823,
+          "invested_value": 87.2937,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.47,
+          "daily_return": 0.009272
+        },
+        {
+          "date": "2025-05-14",
+          "equity": 110.1678,
+          "cash": 21.4119,
+          "invested_value": 88.7559,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.56,
+          "daily_return": 0.015596
+        },
+        {
+          "date": "2025-05-15",
+          "equity": 111.5722,
+          "cash": 21.6894,
+          "invested_value": 89.8828,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.56,
+          "daily_return": 0.012748
+        },
+        {
+          "date": "2025-05-16",
+          "equity": 112.5166,
+          "cash": 22.0494,
+          "invested_value": 90.4672,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.4,
+          "daily_return": 0.008465
+        },
+        {
+          "date": "2025-05-19",
+          "equity": 112.4632,
+          "cash": 22.2702,
+          "invested_value": 90.1929,
+          "drawdown_pct": 0.05,
+          "capital_utilization_pct": 80.2,
+          "daily_return": -0.000475
+        },
+        {
+          "date": "2025-05-20",
+          "equity": 111.6344,
+          "cash": 22.357,
+          "invested_value": 89.2774,
+          "drawdown_pct": 0.78,
+          "capital_utilization_pct": 79.97,
+          "daily_return": -0.007369
+        },
+        {
+          "date": "2025-05-21",
+          "equity": 112.6395,
+          "cash": 22.4745,
+          "invested_value": 90.165,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.05,
+          "daily_return": 0.009003
+        },
+        {
+          "date": "2025-05-22",
+          "equity": 112.861,
+          "cash": 22.5218,
+          "invested_value": 90.3392,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.04,
+          "daily_return": 0.001967
+        },
+        {
+          "date": "2025-05-23",
+          "equity": 113.2545,
+          "cash": 22.5204,
+          "invested_value": 90.7341,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.12,
+          "daily_return": 0.003487
+        },
+        {
+          "date": "2025-05-26",
+          "equity": 113.7191,
+          "cash": 22.5273,
+          "invested_value": 91.1918,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.19,
+          "daily_return": 0.004102
+        },
+        {
+          "date": "2025-05-27",
+          "equity": 115.0104,
+          "cash": 22.6324,
+          "invested_value": 92.378,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.32,
+          "daily_return": 0.011355
+        },
+        {
+          "date": "2025-05-28",
+          "equity": 115.6232,
+          "cash": 22.8094,
+          "invested_value": 92.8138,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.27,
+          "daily_return": 0.005328
+        },
+        {
+          "date": "2025-05-29",
+          "equity": 117.8443,
+          "cash": 23.0312,
+          "invested_value": 94.8131,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.46,
+          "daily_return": 0.01921
+        },
+        {
+          "date": "2025-05-30",
+          "equity": 117.9004,
+          "cash": 23.1455,
+          "invested_value": 94.7549,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.37,
+          "daily_return": 0.000476
+        },
+        {
+          "date": "2025-06-02",
+          "equity": 117.1483,
+          "cash": 23.2459,
+          "invested_value": 93.9024,
+          "drawdown_pct": 0.64,
+          "capital_utilization_pct": 80.16,
+          "daily_return": -0.006379
+        },
+        {
+          "date": "2025-06-03",
+          "equity": 117.8703,
+          "cash": 23.3692,
+          "invested_value": 94.5011,
+          "drawdown_pct": 0.03,
+          "capital_utilization_pct": 80.17,
+          "daily_return": 0.006163
+        },
+        {
+          "date": "2025-06-04",
+          "equity": 119.4146,
+          "cash": 23.5173,
+          "invested_value": 95.8973,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.31,
+          "daily_return": 0.013102
+        },
+        {
+          "date": "2025-06-05",
+          "equity": 120.2323,
+          "cash": 23.6753,
+          "invested_value": 96.5569,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.31,
+          "daily_return": 0.006847
+        },
+        {
+          "date": "2025-06-06",
+          "equity": 119.2344,
+          "cash": 23.7314,
+          "invested_value": 95.503,
+          "drawdown_pct": 0.83,
+          "capital_utilization_pct": 80.1,
+          "daily_return": -0.0083
+        },
+        {
+          "date": "2025-06-09",
+          "equity": 119.2235,
+          "cash": 23.7775,
+          "invested_value": 95.4459,
+          "drawdown_pct": 0.84,
+          "capital_utilization_pct": 80.06,
+          "daily_return": -9.1e-05
+        },
+        {
+          "date": "2025-06-10",
+          "equity": 120.1098,
+          "cash": 23.9014,
+          "invested_value": 96.2084,
+          "drawdown_pct": 0.1,
+          "capital_utilization_pct": 80.1,
+          "daily_return": 0.007434
+        },
+        {
+          "date": "2025-06-11",
+          "equity": 118.9531,
+          "cash": 23.8919,
+          "invested_value": 95.0613,
+          "drawdown_pct": 1.06,
+          "capital_utilization_pct": 79.91,
+          "daily_return": -0.00963
+        },
+        {
+          "date": "2025-06-12",
+          "equity": 117.3235,
+          "cash": 23.7804,
+          "invested_value": 93.5431,
+          "drawdown_pct": 2.42,
+          "capital_utilization_pct": 79.73,
+          "daily_return": -0.0137
+        },
+        {
+          "date": "2025-06-13",
+          "equity": 117.4688,
+          "cash": 23.6996,
+          "invested_value": 93.7692,
+          "drawdown_pct": 2.3,
+          "capital_utilization_pct": 79.82,
+          "daily_return": 0.001238
+        },
+        {
+          "date": "2025-06-16",
+          "equity": 117.7779,
+          "cash": 23.6247,
+          "invested_value": 94.1532,
+          "drawdown_pct": 2.04,
+          "capital_utilization_pct": 79.94,
+          "daily_return": 0.002632
+        },
+        {
+          "date": "2025-06-17",
+          "equity": 117.991,
+          "cash": 23.4907,
+          "invested_value": 94.5004,
+          "drawdown_pct": 1.86,
+          "capital_utilization_pct": 80.09,
+          "daily_return": 0.00181
+        },
+        {
+          "date": "2025-06-18",
+          "equity": 117.5956,
+          "cash": 23.4948,
+          "invested_value": 94.1008,
+          "drawdown_pct": 2.19,
+          "capital_utilization_pct": 80.02,
+          "daily_return": -0.003351
+        },
+        {
+          "date": "2025-06-19",
+          "equity": 115.3338,
+          "cash": 23.4151,
+          "invested_value": 91.9187,
+          "drawdown_pct": 4.07,
+          "capital_utilization_pct": 79.7,
+          "daily_return": -0.019234
+        },
+        {
+          "date": "2025-06-20",
+          "equity": 116.8641,
+          "cash": 23.3874,
+          "invested_value": 93.4767,
+          "drawdown_pct": 2.8,
+          "capital_utilization_pct": 79.99,
+          "daily_return": 0.013268
+        },
+        {
+          "date": "2025-06-23",
+          "equity": 118.4597,
+          "cash": 23.4299,
+          "invested_value": 95.0298,
+          "drawdown_pct": 1.47,
+          "capital_utilization_pct": 80.22,
+          "daily_return": 0.013654
+        },
+        {
+          "date": "2025-06-24",
+          "equity": 117.3115,
+          "cash": 23.4396,
+          "invested_value": 93.8719,
+          "drawdown_pct": 2.43,
+          "capital_utilization_pct": 80.02,
+          "daily_return": -0.009693
+        },
+        {
+          "date": "2025-06-25",
+          "equity": 117.9836,
+          "cash": 23.4751,
+          "invested_value": 94.5085,
+          "drawdown_pct": 1.87,
+          "capital_utilization_pct": 80.1,
+          "daily_return": 0.00573
+        },
+        {
+          "date": "2025-06-26",
+          "equity": 117.8276,
+          "cash": 23.6058,
+          "invested_value": 94.2218,
+          "drawdown_pct": 2.0,
+          "capital_utilization_pct": 79.97,
+          "daily_return": -0.001323
+        },
+        {
+          "date": "2025-06-27",
+          "equity": 119.1412,
+          "cash": 23.6502,
+          "invested_value": 95.491,
+          "drawdown_pct": 0.91,
+          "capital_utilization_pct": 80.15,
+          "daily_return": 0.011148
+        },
+        {
+          "date": "2025-06-30",
+          "equity": 120.2295,
+          "cash": 23.6599,
+          "invested_value": 96.5696,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.32,
+          "daily_return": 0.009135
+        },
+        {
+          "date": "2025-07-01",
+          "equity": 119.4202,
+          "cash": 23.7484,
+          "invested_value": 95.6717,
+          "drawdown_pct": 0.68,
+          "capital_utilization_pct": 80.11,
+          "daily_return": -0.006731
+        },
+        {
+          "date": "2025-07-02",
+          "equity": 119.9667,
+          "cash": 23.8711,
+          "invested_value": 96.0956,
+          "drawdown_pct": 0.22,
+          "capital_utilization_pct": 80.1,
+          "daily_return": 0.004576
+        },
+        {
+          "date": "2025-07-03",
+          "equity": 119.4125,
+          "cash": 23.8926,
+          "invested_value": 95.5199,
+          "drawdown_pct": 0.68,
+          "capital_utilization_pct": 79.99,
+          "daily_return": -0.00462
+        },
+        {
+          "date": "2025-07-04",
+          "equity": 119.2311,
+          "cash": 23.9288,
+          "invested_value": 95.3024,
+          "drawdown_pct": 0.83,
+          "capital_utilization_pct": 79.93,
+          "daily_return": -0.001519
+        },
+        {
+          "date": "2025-07-07",
+          "equity": 118.5926,
+          "cash": 23.8293,
+          "invested_value": 94.7633,
+          "drawdown_pct": 1.36,
+          "capital_utilization_pct": 79.91,
+          "daily_return": -0.005356
+        },
+        {
+          "date": "2025-07-08",
+          "equity": 118.7468,
+          "cash": 23.8428,
+          "invested_value": 94.904,
+          "drawdown_pct": 1.24,
+          "capital_utilization_pct": 79.92,
+          "daily_return": 0.001301
+        },
+        {
+          "date": "2025-07-09",
+          "equity": 120.0257,
+          "cash": 23.8863,
+          "invested_value": 96.1394,
+          "drawdown_pct": 0.17,
+          "capital_utilization_pct": 80.1,
+          "daily_return": 0.01077
+        },
+        {
+          "date": "2025-07-10",
+          "equity": 119.6304,
+          "cash": 23.8789,
+          "invested_value": 95.7515,
+          "drawdown_pct": 0.5,
+          "capital_utilization_pct": 80.04,
+          "daily_return": -0.003294
+        },
+        {
+          "date": "2025-07-11",
+          "equity": 119.0299,
+          "cash": 23.8154,
+          "invested_value": 95.2145,
+          "drawdown_pct": 1.0,
+          "capital_utilization_pct": 79.99,
+          "daily_return": -0.00502
+        },
+        {
+          "date": "2025-07-14",
+          "equity": 120.9882,
+          "cash": 23.8825,
+          "invested_value": 97.1056,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.26,
+          "daily_return": 0.016452
+        },
+        {
+          "date": "2025-07-15",
+          "equity": 121.2307,
+          "cash": 23.9863,
+          "invested_value": 97.2444,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.21,
+          "daily_return": 0.002005
+        },
+        {
+          "date": "2025-07-16",
+          "equity": 120.7526,
+          "cash": 24.0322,
+          "invested_value": 96.7204,
+          "drawdown_pct": 0.39,
+          "capital_utilization_pct": 80.1,
+          "daily_return": -0.003944
+        },
+        {
+          "date": "2025-07-17",
+          "equity": 120.411,
+          "cash": 24.084,
+          "invested_value": 96.327,
+          "drawdown_pct": 0.68,
+          "capital_utilization_pct": 80.0,
+          "daily_return": -0.002829
+        },
+        {
+          "date": "2025-07-18",
+          "equity": 119.9175,
+          "cash": 24.1343,
+          "invested_value": 95.7832,
+          "drawdown_pct": 1.08,
+          "capital_utilization_pct": 79.87,
+          "daily_return": -0.004099
+        },
+        {
+          "date": "2025-07-21",
+          "equity": 120.0226,
+          "cash": 24.0533,
+          "invested_value": 95.9693,
+          "drawdown_pct": 1.0,
+          "capital_utilization_pct": 79.96,
+          "daily_return": 0.000877
+        },
+        {
+          "date": "2025-07-22",
+          "equity": 119.669,
+          "cash": 23.989,
+          "invested_value": 95.68,
+          "drawdown_pct": 1.29,
+          "capital_utilization_pct": 79.95,
+          "daily_return": -0.002946
+        },
+        {
+          "date": "2025-07-23",
+          "equity": 119.887,
+          "cash": 23.9804,
+          "invested_value": 95.9066,
+          "drawdown_pct": 1.11,
+          "capital_utilization_pct": 80.0,
+          "daily_return": 0.001822
+        },
+        {
+          "date": "2025-07-24",
+          "equity": 119.0207,
+          "cash": 23.9633,
+          "invested_value": 95.0574,
+          "drawdown_pct": 1.82,
+          "capital_utilization_pct": 79.87,
+          "daily_return": -0.007225
+        },
+        {
+          "date": "2025-07-25",
+          "equity": 116.8273,
+          "cash": 23.8805,
+          "invested_value": 92.9468,
+          "drawdown_pct": 3.63,
+          "capital_utilization_pct": 79.56,
+          "daily_return": -0.018429
+        },
+        {
+          "date": "2025-07-28",
+          "equity": 115.4065,
+          "cash": 23.7049,
+          "invested_value": 91.7016,
+          "drawdown_pct": 4.8,
+          "capital_utilization_pct": 79.46,
+          "daily_return": -0.012161
+        },
+        {
+          "date": "2025-07-29",
+          "equity": 117.6105,
+          "cash": 23.5759,
+          "invested_value": 94.0346,
+          "drawdown_pct": 2.99,
+          "capital_utilization_pct": 79.95,
+          "daily_return": 0.019098
+        },
+        {
+          "date": "2025-07-30",
+          "equity": 117.8823,
+          "cash": 23.4621,
+          "invested_value": 94.4202,
+          "drawdown_pct": 2.76,
+          "capital_utilization_pct": 80.1,
+          "daily_return": 0.002311
+        },
+        {
+          "date": "2025-07-31",
+          "equity": 116.914,
+          "cash": 23.3633,
+          "invested_value": 93.5507,
+          "drawdown_pct": 3.56,
+          "capital_utilization_pct": 80.02,
+          "daily_return": -0.008214
+        },
+        {
+          "date": "2025-08-01",
+          "equity": 115.5038,
+          "cash": 23.3232,
+          "invested_value": 92.1807,
+          "drawdown_pct": 4.72,
+          "capital_utilization_pct": 79.81,
+          "daily_return": -0.012062
+        },
+        {
+          "date": "2025-08-04",
+          "equity": 116.989,
+          "cash": 23.3281,
+          "invested_value": 93.6609,
+          "drawdown_pct": 3.5,
+          "capital_utilization_pct": 80.06,
+          "daily_return": 0.012858
+        },
+        {
+          "date": "2025-08-05",
+          "equity": 116.9283,
+          "cash": 23.2764,
+          "invested_value": 93.6519,
+          "drawdown_pct": 3.55,
+          "capital_utilization_pct": 80.09,
+          "daily_return": -0.000519
+        },
+        {
+          "date": "2025-08-06",
+          "equity": 116.4484,
+          "cash": 23.2363,
+          "invested_value": 93.2121,
+          "drawdown_pct": 3.94,
+          "capital_utilization_pct": 80.05,
+          "daily_return": -0.004104
+        },
+        {
+          "date": "2025-08-07",
+          "equity": 115.8448,
+          "cash": 23.2177,
+          "invested_value": 92.627,
+          "drawdown_pct": 4.44,
+          "capital_utilization_pct": 79.96,
+          "daily_return": -0.005184
+        },
+        {
+          "date": "2025-08-08",
+          "equity": 114.7889,
+          "cash": 23.2043,
+          "invested_value": 91.5846,
+          "drawdown_pct": 5.31,
+          "capital_utilization_pct": 79.79,
+          "daily_return": -0.009115
+        },
+        {
+          "date": "2025-08-11",
+          "equity": 115.1991,
+          "cash": 23.179,
+          "invested_value": 92.0201,
+          "drawdown_pct": 4.98,
+          "capital_utilization_pct": 79.88,
+          "daily_return": 0.003574
+        },
+        {
+          "date": "2025-08-12",
+          "equity": 115.0274,
+          "cash": 23.1057,
+          "invested_value": 91.9216,
+          "drawdown_pct": 5.12,
+          "capital_utilization_pct": 79.91,
+          "daily_return": -0.001491
+        },
+        {
+          "date": "2025-08-13",
+          "equity": 116.5501,
+          "cash": 23.0385,
+          "invested_value": 93.5116,
+          "drawdown_pct": 3.86,
+          "capital_utilization_pct": 80.23,
+          "daily_return": 0.013238
+        },
+        {
+          "date": "2025-08-14",
+          "equity": 115.1741,
+          "cash": 22.9773,
+          "invested_value": 92.1967,
+          "drawdown_pct": 5.0,
+          "capital_utilization_pct": 80.05,
+          "daily_return": -0.011807
+        },
+        {
+          "date": "2025-08-18",
+          "equity": 116.8406,
+          "cash": 23.0807,
+          "invested_value": 93.7599,
+          "drawdown_pct": 3.62,
+          "capital_utilization_pct": 80.25,
+          "daily_return": 0.01447
+        },
+        {
+          "date": "2025-08-19",
+          "equity": 117.7885,
+          "cash": 23.2102,
+          "invested_value": 94.5783,
+          "drawdown_pct": 2.84,
+          "capital_utilization_pct": 80.3,
+          "daily_return": 0.008112
+        },
+        {
+          "date": "2025-08-20",
+          "equity": 118.1306,
+          "cash": 23.3524,
+          "invested_value": 94.7782,
+          "drawdown_pct": 2.56,
+          "capital_utilization_pct": 80.23,
+          "daily_return": 0.002905
+        },
+        {
+          "date": "2025-08-21",
+          "equity": 119.3552,
+          "cash": 23.4858,
+          "invested_value": 95.8694,
+          "drawdown_pct": 1.55,
+          "capital_utilization_pct": 80.32,
+          "daily_return": 0.010367
+        },
+        {
+          "date": "2025-08-22",
+          "equity": 118.4743,
+          "cash": 23.6333,
+          "invested_value": 94.841,
+          "drawdown_pct": 2.27,
+          "capital_utilization_pct": 80.05,
+          "daily_return": -0.007381
+        },
+        {
+          "date": "2025-08-25",
+          "equity": 118.0564,
+          "cash": 23.7135,
+          "invested_value": 94.3429,
+          "drawdown_pct": 2.62,
+          "capital_utilization_pct": 79.91,
+          "daily_return": -0.003527
+        },
+        {
+          "date": "2025-08-26",
+          "equity": 116.6489,
+          "cash": 23.6357,
+          "invested_value": 93.0132,
+          "drawdown_pct": 3.78,
+          "capital_utilization_pct": 79.74,
+          "daily_return": -0.011923
+        },
+        {
+          "date": "2025-08-28",
+          "equity": 115.5152,
+          "cash": 23.5008,
+          "invested_value": 92.0144,
+          "drawdown_pct": 4.71,
+          "capital_utilization_pct": 79.66,
+          "daily_return": -0.009719
+        },
+        {
+          "date": "2025-08-29",
+          "equity": 116.2186,
+          "cash": 23.3397,
+          "invested_value": 92.8789,
+          "drawdown_pct": 4.13,
+          "capital_utilization_pct": 79.92,
+          "daily_return": 0.006089
+        },
+        {
+          "date": "2025-09-01",
+          "equity": 118.6036,
+          "cash": 23.3562,
+          "invested_value": 95.2474,
+          "drawdown_pct": 2.17,
+          "capital_utilization_pct": 80.31,
+          "daily_return": 0.020522
+        },
+        {
+          "date": "2025-09-02",
+          "equity": 119.1744,
+          "cash": 23.3919,
+          "invested_value": 95.7825,
+          "drawdown_pct": 1.7,
+          "capital_utilization_pct": 80.37,
+          "daily_return": 0.004813
+        },
+        {
+          "date": "2025-09-03",
+          "equity": 119.6527,
+          "cash": 23.4881,
+          "invested_value": 96.1646,
+          "drawdown_pct": 1.3,
+          "capital_utilization_pct": 80.37,
+          "daily_return": 0.004014
+        },
+        {
+          "date": "2025-09-04",
+          "equity": 118.135,
+          "cash": 23.5608,
+          "invested_value": 94.5742,
+          "drawdown_pct": 2.55,
+          "capital_utilization_pct": 80.06,
+          "daily_return": -0.012685
+        },
+        {
+          "date": "2025-09-05",
+          "equity": 118.5397,
+          "cash": 23.6829,
+          "invested_value": 94.8568,
+          "drawdown_pct": 2.22,
+          "capital_utilization_pct": 80.02,
+          "daily_return": 0.003426
+        },
+        {
+          "date": "2025-09-08",
+          "equity": 119.4488,
+          "cash": 23.7826,
+          "invested_value": 95.6662,
+          "drawdown_pct": 1.47,
+          "capital_utilization_pct": 80.09,
+          "daily_return": 0.007669
+        },
+        {
+          "date": "2025-09-09",
+          "equity": 121.5885,
+          "cash": 23.8463,
+          "invested_value": 97.7421,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.39,
+          "daily_return": 0.017913
+        },
+        {
+          "date": "2025-09-10",
+          "equity": 121.4786,
+          "cash": 23.9158,
+          "invested_value": 97.5627,
+          "drawdown_pct": 0.09,
+          "capital_utilization_pct": 80.31,
+          "daily_return": -0.000904
+        },
+        {
+          "date": "2025-09-11",
+          "equity": 121.0293,
+          "cash": 24.0563,
+          "invested_value": 96.973,
+          "drawdown_pct": 0.46,
+          "capital_utilization_pct": 80.12,
+          "daily_return": -0.003698
+        },
+        {
+          "date": "2025-09-12",
+          "equity": 121.0903,
+          "cash": 24.1732,
+          "invested_value": 96.9171,
+          "drawdown_pct": 0.41,
+          "capital_utilization_pct": 80.04,
+          "daily_return": 0.000504
+        },
+        {
+          "date": "2025-09-15",
+          "equity": 122.7154,
+          "cash": 24.3347,
+          "invested_value": 98.3808,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.17,
+          "daily_return": 0.013421
+        },
+        {
+          "date": "2025-09-16",
+          "equity": 123.1933,
+          "cash": 24.3625,
+          "invested_value": 98.8308,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.22,
+          "daily_return": 0.003894
+        },
+        {
+          "date": "2025-09-17",
+          "equity": 123.3043,
+          "cash": 24.4202,
+          "invested_value": 98.8841,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.2,
+          "daily_return": 0.000901
+        },
+        {
+          "date": "2025-09-18",
+          "equity": 122.3703,
+          "cash": 24.4922,
+          "invested_value": 97.8781,
+          "drawdown_pct": 0.76,
+          "capital_utilization_pct": 79.99,
+          "daily_return": -0.007575
+        },
+        {
+          "date": "2025-09-19",
+          "equity": 123.4827,
+          "cash": 24.5962,
+          "invested_value": 98.8865,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.08,
+          "daily_return": 0.009091
+        },
+        {
+          "date": "2025-09-22",
+          "equity": 123.7039,
+          "cash": 24.6207,
+          "invested_value": 99.0833,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.1,
+          "daily_return": 0.001792
+        },
+        {
+          "date": "2025-09-23",
+          "equity": 124.1746,
+          "cash": 24.6804,
+          "invested_value": 99.4942,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.12,
+          "daily_return": 0.003805
+        },
+        {
+          "date": "2025-09-24",
+          "equity": 123.5379,
+          "cash": 24.6936,
+          "invested_value": 98.8442,
+          "drawdown_pct": 0.51,
+          "capital_utilization_pct": 80.01,
+          "daily_return": -0.005128
+        },
+        {
+          "date": "2025-09-25",
+          "equity": 122.1865,
+          "cash": 24.7266,
+          "invested_value": 97.4599,
+          "drawdown_pct": 1.6,
+          "capital_utilization_pct": 79.76,
+          "daily_return": -0.010939
+        },
+        {
+          "date": "2025-09-26",
+          "equity": 120.8254,
+          "cash": 24.586,
+          "invested_value": 96.2394,
+          "drawdown_pct": 2.7,
+          "capital_utilization_pct": 79.65,
+          "daily_return": -0.01114
+        },
+        {
+          "date": "2025-09-29",
+          "equity": 120.8306,
+          "cash": 24.4099,
+          "invested_value": 96.4207,
+          "drawdown_pct": 2.69,
+          "capital_utilization_pct": 79.8,
+          "daily_return": 4.3e-05
+        },
+        {
+          "date": "2025-09-30",
+          "equity": 120.3916,
+          "cash": 24.2774,
+          "invested_value": 96.1142,
+          "drawdown_pct": 3.05,
+          "capital_utilization_pct": 79.83,
+          "daily_return": -0.003633
+        },
+        {
+          "date": "2025-10-01",
+          "equity": 121.9541,
+          "cash": 24.23,
+          "invested_value": 97.7242,
+          "drawdown_pct": 1.79,
+          "capital_utilization_pct": 80.13,
+          "daily_return": 0.012979
+        },
+        {
+          "date": "2025-10-03",
+          "equity": 122.7808,
+          "cash": 24.2738,
+          "invested_value": 98.507,
+          "drawdown_pct": 1.12,
+          "capital_utilization_pct": 80.23,
+          "daily_return": 0.006778
+        },
+        {
+          "date": "2025-10-06",
+          "equity": 122.5764,
+          "cash": 24.3614,
+          "invested_value": 98.2149,
+          "drawdown_pct": 1.29,
+          "capital_utilization_pct": 80.13,
+          "daily_return": -0.001665
+        },
+        {
+          "date": "2025-10-07",
+          "equity": 122.6361,
+          "cash": 24.4358,
+          "invested_value": 98.2003,
+          "drawdown_pct": 1.24,
+          "capital_utilization_pct": 80.07,
+          "daily_return": 0.000488
+        },
+        {
+          "date": "2025-10-08",
+          "equity": 121.9392,
+          "cash": 24.4648,
+          "invested_value": 97.4744,
+          "drawdown_pct": 1.8,
+          "capital_utilization_pct": 79.94,
+          "daily_return": -0.005683
+        },
+        {
+          "date": "2025-10-09",
+          "equity": 123.4648,
+          "cash": 24.5113,
+          "invested_value": 98.9535,
+          "drawdown_pct": 0.57,
+          "capital_utilization_pct": 80.15,
+          "daily_return": 0.012511
+        },
+        {
+          "date": "2025-10-10",
+          "equity": 123.6643,
+          "cash": 24.5466,
+          "invested_value": 99.1178,
+          "drawdown_pct": 0.41,
+          "capital_utilization_pct": 80.15,
+          "daily_return": 0.001616
+        },
+        {
+          "date": "2025-10-13",
+          "equity": 124.4108,
+          "cash": 24.5895,
+          "invested_value": 99.8212,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.24,
+          "daily_return": 0.006036
+        },
+        {
+          "date": "2025-10-14",
+          "equity": 123.9979,
+          "cash": 24.69,
+          "invested_value": 99.3079,
+          "drawdown_pct": 0.33,
+          "capital_utilization_pct": 80.09,
+          "daily_return": -0.003319
+        },
+        {
+          "date": "2025-10-15",
+          "equity": 124.1335,
+          "cash": 24.7728,
+          "invested_value": 99.3606,
+          "drawdown_pct": 0.22,
+          "capital_utilization_pct": 80.04,
+          "daily_return": 0.001094
+        },
+        {
+          "date": "2025-10-16",
+          "equity": 124.9402,
+          "cash": 24.8421,
+          "invested_value": 100.0981,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.12,
+          "daily_return": 0.006499
+        },
+        {
+          "date": "2025-10-17",
+          "equity": 124.2698,
+          "cash": 24.8951,
+          "invested_value": 99.3747,
+          "drawdown_pct": 0.54,
+          "capital_utilization_pct": 79.97,
+          "daily_return": -0.005366
+        },
+        {
+          "date": "2025-10-20",
+          "equity": 125.015,
+          "cash": 24.9035,
+          "invested_value": 100.1115,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.08,
+          "daily_return": 0.005996
+        },
+        {
+          "date": "2025-10-21",
+          "equity": 125.7786,
+          "cash": 24.8968,
+          "invested_value": 100.8818,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.21,
+          "daily_return": 0.006108
+        },
+        {
+          "date": "2025-10-23",
+          "equity": 123.5982,
+          "cash": 24.8829,
+          "invested_value": 98.7152,
+          "drawdown_pct": 1.73,
+          "capital_utilization_pct": 79.87,
+          "daily_return": -0.017336
+        },
+        {
+          "date": "2025-10-24",
+          "equity": 123.2714,
+          "cash": 24.8384,
+          "invested_value": 98.4329,
+          "drawdown_pct": 1.99,
+          "capital_utilization_pct": 79.85,
+          "daily_return": -0.002644
+        },
+        {
+          "date": "2025-10-27",
+          "equity": 124.2516,
+          "cash": 24.8464,
+          "invested_value": 99.4052,
+          "drawdown_pct": 1.21,
+          "capital_utilization_pct": 80.0,
+          "daily_return": 0.007951
+        },
+        {
+          "date": "2025-10-28",
+          "equity": 124.4085,
+          "cash": 24.8088,
+          "invested_value": 99.5998,
+          "drawdown_pct": 1.09,
+          "capital_utilization_pct": 80.06,
+          "daily_return": 0.001263
+        },
+        {
+          "date": "2025-10-29",
+          "equity": 124.6376,
+          "cash": 24.7557,
+          "invested_value": 99.8819,
+          "drawdown_pct": 0.91,
+          "capital_utilization_pct": 80.14,
+          "daily_return": 0.001841
+        },
+        {
+          "date": "2025-10-30",
+          "equity": 124.4093,
+          "cash": 24.8221,
+          "invested_value": 99.5871,
+          "drawdown_pct": 1.09,
+          "capital_utilization_pct": 80.05,
+          "daily_return": -0.001832
+        },
+        {
+          "date": "2025-10-31",
+          "equity": 123.8251,
+          "cash": 24.8359,
+          "invested_value": 98.9892,
+          "drawdown_pct": 1.55,
+          "capital_utilization_pct": 79.94,
+          "daily_return": -0.004695
+        },
+        {
+          "date": "2025-11-03",
+          "equity": 124.8047,
+          "cash": 24.8533,
+          "invested_value": 99.9514,
+          "drawdown_pct": 0.77,
+          "capital_utilization_pct": 80.09,
+          "daily_return": 0.007911
+        },
+        {
+          "date": "2025-11-04",
+          "equity": 124.4007,
+          "cash": 24.9198,
+          "invested_value": 99.4808,
+          "drawdown_pct": 1.1,
+          "capital_utilization_pct": 79.97,
+          "daily_return": -0.003237
+        },
+        {
+          "date": "2025-11-06",
+          "equity": 122.6853,
+          "cash": 24.7879,
+          "invested_value": 97.8975,
+          "drawdown_pct": 2.46,
+          "capital_utilization_pct": 79.8,
+          "daily_return": -0.013789
+        },
+        {
+          "date": "2025-11-07",
+          "equity": 123.9903,
+          "cash": 24.7677,
+          "invested_value": 99.2226,
+          "drawdown_pct": 1.42,
+          "capital_utilization_pct": 80.02,
+          "daily_return": 0.010637
+        },
+        {
+          "date": "2025-11-10",
+          "equity": 124.7226,
+          "cash": 24.8281,
+          "invested_value": 99.8945,
+          "drawdown_pct": 0.84,
+          "capital_utilization_pct": 80.09,
+          "daily_return": 0.005906
+        },
+        {
+          "date": "2025-11-11",
+          "equity": 124.5514,
+          "cash": 24.7704,
+          "invested_value": 99.781,
+          "drawdown_pct": 0.98,
+          "capital_utilization_pct": 80.11,
+          "daily_return": -0.001373
+        },
+        {
+          "date": "2025-11-12",
+          "equity": 125.0708,
+          "cash": 24.7892,
+          "invested_value": 100.2816,
+          "drawdown_pct": 0.56,
+          "capital_utilization_pct": 80.18,
+          "daily_return": 0.00417
+        },
+        {
+          "date": "2025-11-13",
+          "equity": 125.4591,
+          "cash": 24.8417,
+          "invested_value": 100.6174,
+          "drawdown_pct": 0.25,
+          "capital_utilization_pct": 80.2,
+          "daily_return": 0.003105
+        },
+        {
+          "date": "2025-11-14",
+          "equity": 125.9352,
+          "cash": 24.9705,
+          "invested_value": 100.9647,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.17,
+          "daily_return": 0.003795
+        },
+        {
+          "date": "2025-11-17",
+          "equity": 126.2732,
+          "cash": 25.0924,
+          "invested_value": 101.1809,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.13,
+          "daily_return": 0.002684
+        },
+        {
+          "date": "2025-11-18",
+          "equity": 125.2553,
+          "cash": 25.084,
+          "invested_value": 100.1713,
+          "drawdown_pct": 0.81,
+          "capital_utilization_pct": 79.97,
+          "daily_return": -0.008061
+        },
+        {
+          "date": "2025-11-19",
+          "equity": 124.2905,
+          "cash": 25.045,
+          "invested_value": 99.2454,
+          "drawdown_pct": 1.57,
+          "capital_utilization_pct": 79.85,
+          "daily_return": -0.007703
+        },
+        {
+          "date": "2025-11-20",
+          "equity": 124.0321,
+          "cash": 24.9731,
+          "invested_value": 99.059,
+          "drawdown_pct": 1.77,
+          "capital_utilization_pct": 79.87,
+          "daily_return": -0.002079
+        },
+        {
+          "date": "2025-11-21",
+          "equity": 122.5515,
+          "cash": 24.8603,
+          "invested_value": 97.6913,
+          "drawdown_pct": 2.95,
+          "capital_utilization_pct": 79.71,
+          "daily_return": -0.011937
+        },
+        {
+          "date": "2025-11-24",
+          "equity": 121.3483,
+          "cash": 24.6747,
+          "invested_value": 96.6736,
+          "drawdown_pct": 3.9,
+          "capital_utilization_pct": 79.67,
+          "daily_return": -0.009818
+        },
+        {
+          "date": "2025-11-25",
+          "equity": 121.9515,
+          "cash": 24.5591,
+          "invested_value": 97.3924,
+          "drawdown_pct": 3.42,
+          "capital_utilization_pct": 79.86,
+          "daily_return": 0.004971
+        },
+        {
+          "date": "2025-11-26",
+          "equity": 122.7976,
+          "cash": 24.4753,
+          "invested_value": 98.3223,
+          "drawdown_pct": 2.75,
+          "capital_utilization_pct": 80.07,
+          "daily_return": 0.006938
+        },
+        {
+          "date": "2025-11-27",
+          "equity": 123.0555,
+          "cash": 24.4196,
+          "invested_value": 98.6359,
+          "drawdown_pct": 2.55,
+          "capital_utilization_pct": 80.16,
+          "daily_return": 0.0021
+        },
+        {
+          "date": "2025-11-28",
+          "equity": 122.122,
+          "cash": 24.4002,
+          "invested_value": 97.7218,
+          "drawdown_pct": 3.29,
+          "capital_utilization_pct": 80.02,
+          "daily_return": -0.007586
+        },
+        {
+          "date": "2025-12-01",
+          "equity": 122.1664,
+          "cash": 24.4548,
+          "invested_value": 97.7116,
+          "drawdown_pct": 3.25,
+          "capital_utilization_pct": 79.98,
+          "daily_return": 0.000364
+        },
+        {
+          "date": "2025-12-02",
+          "equity": 122.0066,
+          "cash": 24.4831,
+          "invested_value": 97.5234,
+          "drawdown_pct": 3.38,
+          "capital_utilization_pct": 79.93,
+          "daily_return": -0.001308
+        },
+        {
+          "date": "2025-12-03",
+          "equity": 121.6188,
+          "cash": 24.4655,
+          "invested_value": 97.1533,
+          "drawdown_pct": 3.69,
+          "capital_utilization_pct": 79.88,
+          "daily_return": -0.003178
+        },
+        {
+          "date": "2025-12-04",
+          "equity": 121.5334,
+          "cash": 24.3939,
+          "invested_value": 97.1394,
+          "drawdown_pct": 3.75,
+          "capital_utilization_pct": 79.93,
+          "daily_return": -0.000703
+        },
+        {
+          "date": "2025-12-05",
+          "equity": 120.7276,
+          "cash": 24.3154,
+          "invested_value": 96.4122,
+          "drawdown_pct": 4.39,
+          "capital_utilization_pct": 79.86,
+          "daily_return": -0.00663
+        },
+        {
+          "date": "2025-12-08",
+          "equity": 119.1466,
+          "cash": 24.2032,
+          "invested_value": 94.9434,
+          "drawdown_pct": 5.64,
+          "capital_utilization_pct": 79.69,
+          "daily_return": -0.013096
+        },
+        {
+          "date": "2025-12-09",
+          "equity": 121.0122,
+          "cash": 24.1577,
+          "invested_value": 96.8545,
+          "drawdown_pct": 4.17,
+          "capital_utilization_pct": 80.04,
+          "daily_return": 0.015658
+        },
+        {
+          "date": "2025-12-10",
+          "equity": 119.9686,
+          "cash": 24.0735,
+          "invested_value": 95.8951,
+          "drawdown_pct": 4.99,
+          "capital_utilization_pct": 79.93,
+          "daily_return": -0.008624
+        },
+        {
+          "date": "2025-12-11",
+          "equity": 120.2151,
+          "cash": 24.0019,
+          "invested_value": 96.2132,
+          "drawdown_pct": 4.8,
+          "capital_utilization_pct": 80.03,
+          "daily_return": 0.002054
+        },
+        {
+          "date": "2025-12-12",
+          "equity": 122.5697,
+          "cash": 24.0521,
+          "invested_value": 98.5176,
+          "drawdown_pct": 2.93,
+          "capital_utilization_pct": 80.38,
+          "daily_return": 0.019586
+        },
+        {
+          "date": "2025-12-15",
+          "equity": 123.8684,
+          "cash": 24.2458,
+          "invested_value": 99.6226,
+          "drawdown_pct": 1.9,
+          "capital_utilization_pct": 80.43,
+          "daily_return": 0.010596
+        },
+        {
+          "date": "2025-12-16",
+          "equity": 123.5467,
+          "cash": 24.3632,
+          "invested_value": 99.1835,
+          "drawdown_pct": 2.16,
+          "capital_utilization_pct": 80.28,
+          "daily_return": -0.002597
+        },
+        {
+          "date": "2025-12-17",
+          "equity": 122.9327,
+          "cash": 24.4585,
+          "invested_value": 98.4742,
+          "drawdown_pct": 2.65,
+          "capital_utilization_pct": 80.1,
+          "daily_return": -0.00497
+        },
+        {
+          "date": "2025-12-18",
+          "equity": 123.8368,
+          "cash": 24.5774,
+          "invested_value": 99.2594,
+          "drawdown_pct": 1.93,
+          "capital_utilization_pct": 80.15,
+          "daily_return": 0.007354
+        },
+        {
+          "date": "2025-12-19",
+          "equity": 125.1262,
+          "cash": 24.6779,
+          "invested_value": 100.4483,
+          "drawdown_pct": 0.91,
+          "capital_utilization_pct": 80.28,
+          "daily_return": 0.010412
+        },
+        {
+          "date": "2025-12-22",
+          "equity": 126.1662,
+          "cash": 24.8056,
+          "invested_value": 101.3605,
+          "drawdown_pct": 0.08,
+          "capital_utilization_pct": 80.34,
+          "daily_return": 0.008311
+        },
+        {
+          "date": "2025-12-23",
+          "equity": 126.9694,
+          "cash": 24.9611,
+          "invested_value": 102.0083,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.34,
+          "daily_return": 0.006366
+        },
+        {
+          "date": "2025-12-24",
+          "equity": 127.399,
+          "cash": 25.12,
+          "invested_value": 102.279,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.28,
+          "daily_return": 0.003384
+        },
+        {
+          "date": "2025-12-26",
+          "equity": 127.2036,
+          "cash": 25.3213,
+          "invested_value": 101.8823,
+          "drawdown_pct": 0.15,
+          "capital_utilization_pct": 80.09,
+          "daily_return": -0.001534
+        },
+        {
+          "date": "2025-12-29",
+          "equity": 126.6072,
+          "cash": 25.4157,
+          "invested_value": 101.1915,
+          "drawdown_pct": 0.62,
+          "capital_utilization_pct": 79.93,
+          "daily_return": -0.004688
+        },
+        {
+          "date": "2025-12-30",
+          "equity": 127.1497,
+          "cash": 25.4158,
+          "invested_value": 101.734,
+          "drawdown_pct": 0.2,
+          "capital_utilization_pct": 80.01,
+          "daily_return": 0.004285
+        },
+        {
+          "date": "2025-12-31",
+          "equity": 128.1675,
+          "cash": 25.4302,
+          "invested_value": 102.7373,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.16,
+          "daily_return": 0.008005
+        },
+        {
+          "date": "2026-01-01",
+          "equity": 128.7301,
+          "cash": 25.4549,
+          "invested_value": 103.2752,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.23,
+          "daily_return": 0.004389
+        },
+        {
+          "date": "2026-01-02",
+          "equity": 128.0171,
+          "cash": 25.5067,
+          "invested_value": 102.5104,
+          "drawdown_pct": 0.55,
+          "capital_utilization_pct": 80.08,
+          "daily_return": -0.005539
+        },
+        {
+          "date": "2026-01-05",
+          "equity": 127.9056,
+          "cash": 25.5279,
+          "invested_value": 102.3777,
+          "drawdown_pct": 0.64,
+          "capital_utilization_pct": 80.04,
+          "daily_return": -0.000871
+        },
+        {
+          "date": "2026-01-06",
+          "equity": 127.4977,
+          "cash": 25.5313,
+          "invested_value": 101.9664,
+          "drawdown_pct": 0.96,
+          "capital_utilization_pct": 79.98,
+          "daily_return": -0.003189
+        },
+        {
+          "date": "2026-01-07",
+          "equity": 127.0353,
+          "cash": 25.5538,
+          "invested_value": 101.4815,
+          "drawdown_pct": 1.32,
+          "capital_utilization_pct": 79.88,
+          "daily_return": -0.003627
+        },
+        {
+          "date": "2026-01-08",
+          "equity": 124.5608,
+          "cash": 25.3805,
+          "invested_value": 99.1803,
+          "drawdown_pct": 3.24,
+          "capital_utilization_pct": 79.62,
+          "daily_return": -0.019479
+        },
+        {
+          "date": "2026-01-09",
+          "equity": 122.573,
+          "cash": 25.1795,
+          "invested_value": 97.3936,
+          "drawdown_pct": 4.78,
+          "capital_utilization_pct": 79.46,
+          "daily_return": -0.015958
+        },
+        {
+          "date": "2026-01-12",
+          "equity": 122.3755,
+          "cash": 24.9202,
+          "invested_value": 97.4553,
+          "drawdown_pct": 4.94,
+          "capital_utilization_pct": 79.64,
+          "daily_return": -0.001611
+        },
+        {
+          "date": "2026-01-13",
+          "equity": 122.7621,
+          "cash": 24.7396,
+          "invested_value": 98.0224,
+          "drawdown_pct": 4.64,
+          "capital_utilization_pct": 79.85,
+          "daily_return": 0.003159
+        },
+        {
+          "date": "2026-01-14",
+          "equity": 123.4159,
+          "cash": 24.5869,
+          "invested_value": 98.829,
+          "drawdown_pct": 4.13,
+          "capital_utilization_pct": 80.08,
+          "daily_return": 0.005326
+        },
+        {
+          "date": "2026-01-15",
+          "equity": 123.3668,
+          "cash": 24.478,
+          "invested_value": 98.8888,
+          "drawdown_pct": 4.17,
+          "capital_utilization_pct": 80.16,
+          "daily_return": -0.000398
+        },
+        {
+          "date": "2026-01-16",
+          "equity": 122.3447,
+          "cash": 24.5504,
+          "invested_value": 97.7943,
+          "drawdown_pct": 4.96,
+          "capital_utilization_pct": 79.93,
+          "daily_return": -0.008285
+        },
+        {
+          "date": "2026-01-19",
+          "equity": 121.2179,
+          "cash": 24.4831,
+          "invested_value": 96.7348,
+          "drawdown_pct": 5.84,
+          "capital_utilization_pct": 79.8,
+          "daily_return": -0.00921
+        },
+        {
+          "date": "2026-01-20",
+          "equity": 117.9982,
+          "cash": 24.2905,
+          "invested_value": 93.7077,
+          "drawdown_pct": 8.34,
+          "capital_utilization_pct": 79.41,
+          "daily_return": -0.026561
+        },
+        {
+          "date": "2026-01-21",
+          "equity": 117.7744,
+          "cash": 24.0356,
+          "invested_value": 93.7388,
+          "drawdown_pct": 8.51,
+          "capital_utilization_pct": 79.59,
+          "daily_return": -0.001896
+        },
+        {
+          "date": "2026-01-22",
+          "equity": 118.7308,
+          "cash": 23.9045,
+          "invested_value": 94.8263,
+          "drawdown_pct": 7.77,
+          "capital_utilization_pct": 79.87,
+          "daily_return": 0.00812
+        },
+        {
+          "date": "2026-01-23",
+          "equity": 116.3055,
+          "cash": 23.7067,
+          "invested_value": 92.5988,
+          "drawdown_pct": 9.65,
+          "capital_utilization_pct": 79.62,
+          "daily_return": -0.020427
+        },
+        {
+          "date": "2026-01-27",
+          "equity": 116.0787,
+          "cash": 23.5386,
+          "invested_value": 92.5401,
+          "drawdown_pct": 9.83,
+          "capital_utilization_pct": 79.72,
+          "daily_return": -0.00195
+        },
+        {
+          "date": "2026-01-28",
+          "equity": 120.1275,
+          "cash": 23.5695,
+          "invested_value": 96.558,
+          "drawdown_pct": 6.68,
+          "capital_utilization_pct": 80.38,
+          "daily_return": 0.034879
+        },
+        {
+          "date": "2026-01-29",
+          "equity": 120.3468,
+          "cash": 23.6695,
+          "invested_value": 96.6773,
+          "drawdown_pct": 6.51,
+          "capital_utilization_pct": 80.33,
+          "daily_return": 0.001826
+        },
+        {
+          "date": "2026-01-30",
+          "equity": 120.1361,
+          "cash": 23.7368,
+          "invested_value": 96.3993,
+          "drawdown_pct": 6.68,
+          "capital_utilization_pct": 80.24,
+          "daily_return": -0.001751
+        },
+        {
+          "date": "2026-02-02",
+          "equity": 117.9429,
+          "cash": 23.8138,
+          "invested_value": 94.1291,
+          "drawdown_pct": 8.38,
+          "capital_utilization_pct": 79.81,
+          "daily_return": -0.018257
+        },
+        {
+          "date": "2026-02-03",
+          "equity": 121.1256,
+          "cash": 24.0929,
+          "invested_value": 97.0326,
+          "drawdown_pct": 5.91,
+          "capital_utilization_pct": 80.11,
+          "daily_return": 0.026985
+        },
+        {
+          "date": "2026-02-04",
+          "equity": 122.3542,
+          "cash": 24.1789,
+          "invested_value": 98.1753,
+          "drawdown_pct": 4.95,
+          "capital_utilization_pct": 80.24,
+          "daily_return": 0.010144
+        },
+        {
+          "date": "2026-02-05",
+          "equity": 121.6079,
+          "cash": 24.194,
+          "invested_value": 97.4139,
+          "drawdown_pct": 5.53,
+          "capital_utilization_pct": 80.1,
+          "daily_return": -0.0061
+        },
+        {
+          "date": "2026-02-06",
+          "equity": 121.5833,
+          "cash": 24.2259,
+          "invested_value": 97.3574,
+          "drawdown_pct": 5.55,
+          "capital_utilization_pct": 80.07,
+          "daily_return": -0.000202
+        },
+        {
+          "date": "2026-02-09",
+          "equity": 123.9899,
+          "cash": 24.5077,
+          "invested_value": 99.4822,
+          "drawdown_pct": 3.68,
+          "capital_utilization_pct": 80.23,
+          "daily_return": 0.019794
+        },
+        {
+          "date": "2026-02-10",
+          "equity": 123.8442,
+          "cash": 24.5782,
+          "invested_value": 99.2659,
+          "drawdown_pct": 3.8,
+          "capital_utilization_pct": 80.15,
+          "daily_return": -0.001176
+        },
+        {
+          "date": "2026-02-11",
+          "equity": 123.3026,
+          "cash": 24.5869,
+          "invested_value": 98.7157,
+          "drawdown_pct": 4.22,
+          "capital_utilization_pct": 80.06,
+          "daily_return": -0.004373
+        },
+        {
+          "date": "2026-02-12",
+          "equity": 122.486,
+          "cash": 24.5751,
+          "invested_value": 97.9109,
+          "drawdown_pct": 4.85,
+          "capital_utilization_pct": 79.94,
+          "daily_return": -0.006623
+        },
+        {
+          "date": "2026-02-13",
+          "equity": 119.8879,
+          "cash": 24.5308,
+          "invested_value": 95.3571,
+          "drawdown_pct": 6.87,
+          "capital_utilization_pct": 79.54,
+          "daily_return": -0.021211
+        },
+        {
+          "date": "2026-02-16",
+          "equity": 119.5755,
+          "cash": 24.3673,
+          "invested_value": 95.2082,
+          "drawdown_pct": 7.11,
+          "capital_utilization_pct": 79.62,
+          "daily_return": -0.002606
+        },
+        {
+          "date": "2026-02-17",
+          "equity": 120.3827,
+          "cash": 24.1903,
+          "invested_value": 96.1923,
+          "drawdown_pct": 6.48,
+          "capital_utilization_pct": 79.91,
+          "daily_return": 0.00675
+        },
+        {
+          "date": "2026-02-18",
+          "equity": 121.0888,
+          "cash": 24.0807,
+          "invested_value": 97.0081,
+          "drawdown_pct": 5.94,
+          "capital_utilization_pct": 80.11,
+          "daily_return": 0.005866
+        },
+        {
+          "date": "2026-02-19",
+          "equity": 120.4544,
+          "cash": 23.9766,
+          "invested_value": 96.4777,
+          "drawdown_pct": 6.43,
+          "capital_utilization_pct": 80.09,
+          "daily_return": -0.00524
+        },
+        {
+          "date": "2026-02-20",
+          "equity": 119.1746,
+          "cash": 23.9594,
+          "invested_value": 95.2152,
+          "drawdown_pct": 7.42,
+          "capital_utilization_pct": 79.9,
+          "daily_return": -0.010624
+        },
+        {
+          "date": "2026-02-23",
+          "equity": 118.8382,
+          "cash": 23.9584,
+          "invested_value": 94.8798,
+          "drawdown_pct": 7.68,
+          "capital_utilization_pct": 79.84,
+          "daily_return": -0.002823
+        },
+        {
+          "date": "2026-02-24",
+          "equity": 116.5446,
+          "cash": 23.7737,
+          "invested_value": 92.7709,
+          "drawdown_pct": 9.47,
+          "capital_utilization_pct": 79.6,
+          "daily_return": -0.0193
+        },
+        {
+          "date": "2026-02-25",
+          "equity": 117.3599,
+          "cash": 23.6198,
+          "invested_value": 93.74,
+          "drawdown_pct": 8.83,
+          "capital_utilization_pct": 79.87,
+          "daily_return": 0.006996
+        },
+        {
+          "date": "2026-02-26",
+          "equity": 117.7302,
+          "cash": 23.5308,
+          "invested_value": 94.1993,
+          "drawdown_pct": 8.54,
+          "capital_utilization_pct": 80.01,
+          "daily_return": 0.003155
+        },
+        {
+          "date": "2026-02-27",
+          "equity": 116.9581,
+          "cash": 23.4829,
+          "invested_value": 93.4752,
+          "drawdown_pct": 9.14,
+          "capital_utilization_pct": 79.92,
+          "daily_return": -0.006558
+        },
+        {
+          "date": "2026-03-02",
+          "equity": 115.5934,
+          "cash": 23.2927,
+          "invested_value": 92.3006,
+          "drawdown_pct": 10.2,
+          "capital_utilization_pct": 79.85,
+          "daily_return": -0.011668
+        },
+        {
+          "date": "2026-03-04",
+          "equity": 114.5342,
+          "cash": 23.2087,
+          "invested_value": 91.3255,
+          "drawdown_pct": 11.03,
+          "capital_utilization_pct": 79.74,
+          "daily_return": -0.009163
+        },
+        {
+          "date": "2026-03-05",
+          "equity": 114.6553,
+          "cash": 23.2089,
+          "invested_value": 91.4464,
+          "drawdown_pct": 10.93,
+          "capital_utilization_pct": 79.76,
+          "daily_return": 0.001057
+        },
+        {
+          "date": "2026-03-06",
+          "equity": 114.1449,
+          "cash": 23.0607,
+          "invested_value": 91.0841,
+          "drawdown_pct": 11.33,
+          "capital_utilization_pct": 79.8,
+          "daily_return": -0.004452
+        },
+        {
+          "date": "2026-03-09",
+          "equity": 112.3631,
+          "cash": 22.8873,
+          "invested_value": 89.4758,
+          "drawdown_pct": 12.71,
+          "capital_utilization_pct": 79.63,
+          "daily_return": -0.01561
+        },
+        {
+          "date": "2026-03-10",
+          "equity": 115.8054,
+          "cash": 22.8207,
+          "invested_value": 92.9847,
+          "drawdown_pct": 10.04,
+          "capital_utilization_pct": 80.29,
+          "daily_return": 0.030636
+        },
+        {
+          "date": "2026-03-11",
+          "equity": 115.4133,
+          "cash": 22.8755,
+          "invested_value": 92.5378,
+          "drawdown_pct": 10.34,
+          "capital_utilization_pct": 80.18,
+          "daily_return": -0.003386
+        },
+        {
+          "date": "2026-03-12",
+          "equity": 115.1806,
+          "cash": 22.915,
+          "invested_value": 92.2656,
+          "drawdown_pct": 10.53,
+          "capital_utilization_pct": 80.11,
+          "daily_return": -0.002016
+        },
+        {
+          "date": "2026-03-13",
+          "equity": 113.2064,
+          "cash": 22.8795,
+          "invested_value": 90.3268,
+          "drawdown_pct": 12.06,
+          "capital_utilization_pct": 79.79,
+          "daily_return": -0.01714
+        },
+        {
+          "date": "2026-03-16",
+          "equity": 112.5401,
+          "cash": 22.7929,
+          "invested_value": 89.7471,
+          "drawdown_pct": 12.58,
+          "capital_utilization_pct": 79.75,
+          "daily_return": -0.005886
+        },
+        {
+          "date": "2026-03-17",
+          "equity": 113.7903,
+          "cash": 22.6881,
+          "invested_value": 91.1022,
+          "drawdown_pct": 11.61,
+          "capital_utilization_pct": 80.06,
+          "daily_return": 0.011109
+        },
+        {
+          "date": "2026-03-18",
+          "equity": 116.4185,
+          "cash": 22.7278,
+          "invested_value": 93.6907,
+          "drawdown_pct": 9.56,
+          "capital_utilization_pct": 80.48,
+          "daily_return": 0.023097
+        },
+        {
+          "date": "2026-03-19",
+          "equity": 113.2959,
+          "cash": 22.6835,
+          "invested_value": 90.6124,
+          "drawdown_pct": 11.99,
+          "capital_utilization_pct": 79.98,
+          "daily_return": -0.026822
+        },
+        {
+          "date": "2026-03-20",
+          "equity": 114.011,
+          "cash": 22.79,
+          "invested_value": 91.221,
+          "drawdown_pct": 11.43,
+          "capital_utilization_pct": 80.01,
+          "daily_return": 0.006311
+        },
+        {
+          "date": "2026-03-23",
+          "equity": 110.4312,
+          "cash": 22.6393,
+          "invested_value": 87.7918,
+          "drawdown_pct": 14.21,
+          "capital_utilization_pct": 79.5,
+          "daily_return": -0.031399
+        },
+        {
+          "date": "2026-03-24",
+          "equity": 112.4994,
+          "cash": 22.6164,
+          "invested_value": 89.883,
+          "drawdown_pct": 12.61,
+          "capital_utilization_pct": 79.9,
+          "daily_return": 0.018729
+        },
+        {
+          "date": "2026-03-25",
+          "equity": 114.7928,
+          "cash": 22.5481,
+          "invested_value": 92.2447,
+          "drawdown_pct": 10.83,
+          "capital_utilization_pct": 80.36,
+          "daily_return": 0.020386
+        },
+        {
+          "date": "2026-03-27",
+          "equity": 112.2561,
+          "cash": 22.5103,
+          "invested_value": 89.7458,
+          "drawdown_pct": 12.8,
+          "capital_utilization_pct": 79.95,
+          "daily_return": -0.022099
+        },
+        {
+          "date": "2026-03-30",
+          "equity": 109.3465,
+          "cash": 22.3792,
+          "invested_value": 86.9674,
+          "drawdown_pct": 15.06,
+          "capital_utilization_pct": 79.53,
+          "daily_return": -0.025919
+        },
+        {
+          "date": "2026-04-01",
+          "equity": 114.6255,
+          "cash": 22.5594,
+          "invested_value": 92.0661,
+          "drawdown_pct": 10.96,
+          "capital_utilization_pct": 80.32,
+          "daily_return": 0.048277
+        },
+        {
+          "date": "2026-04-02",
+          "equity": 115.4449,
+          "cash": 22.6316,
+          "invested_value": 92.8133,
+          "drawdown_pct": 10.32,
+          "capital_utilization_pct": 80.4,
+          "daily_return": 0.007148
+        },
+        {
+          "date": "2026-04-06",
+          "equity": 116.7068,
+          "cash": 22.6471,
+          "invested_value": 94.0597,
+          "drawdown_pct": 9.34,
+          "capital_utilization_pct": 80.59,
+          "daily_return": 0.010931
+        },
+        {
+          "date": "2026-04-07",
+          "equity": 117.2132,
+          "cash": 22.8296,
+          "invested_value": 94.3836,
+          "drawdown_pct": 8.95,
+          "capital_utilization_pct": 80.52,
+          "daily_return": 0.004339
+        },
+        {
+          "date": "2026-04-08",
+          "equity": 121.924,
+          "cash": 23.4028,
+          "invested_value": 98.5212,
+          "drawdown_pct": 5.29,
+          "capital_utilization_pct": 80.81,
+          "daily_return": 0.04019
+        },
+        {
+          "date": "2026-04-09",
+          "equity": 121.4517,
+          "cash": 23.6661,
+          "invested_value": 97.7855,
+          "drawdown_pct": 5.65,
+          "capital_utilization_pct": 80.51,
+          "daily_return": -0.003874
+        },
+        {
+          "date": "2026-04-10",
+          "equity": 123.3875,
+          "cash": 24.0079,
+          "invested_value": 99.3796,
+          "drawdown_pct": 4.15,
+          "capital_utilization_pct": 80.54,
+          "daily_return": 0.015939
+        },
+        {
+          "date": "2026-04-13",
+          "equity": 122.8173,
+          "cash": 24.2002,
+          "invested_value": 98.6171,
+          "drawdown_pct": 4.59,
+          "capital_utilization_pct": 80.3,
+          "daily_return": -0.004621
+        },
+        {
+          "date": "2026-04-15",
+          "equity": 124.949,
+          "cash": 24.5543,
+          "invested_value": 100.3946,
+          "drawdown_pct": 2.94,
+          "capital_utilization_pct": 80.35,
+          "daily_return": 0.017356
+        },
+        {
+          "date": "2026-04-16",
+          "equity": 126.3154,
+          "cash": 24.763,
+          "invested_value": 101.5524,
+          "drawdown_pct": 1.88,
+          "capital_utilization_pct": 80.4,
+          "daily_return": 0.010936
+        },
+        {
+          "date": "2026-04-17",
+          "equity": 128.0558,
+          "cash": 25.0192,
+          "invested_value": 103.0366,
+          "drawdown_pct": 0.52,
+          "capital_utilization_pct": 80.46,
+          "daily_return": 0.013778
+        },
+        {
+          "date": "2026-04-20",
+          "equity": 128.5487,
+          "cash": 25.246,
+          "invested_value": 103.3028,
+          "drawdown_pct": 0.14,
+          "capital_utilization_pct": 80.36,
+          "daily_return": 0.003849
+        },
+        {
+          "date": "2026-04-21",
+          "equity": 128.6657,
+          "cash": 25.3838,
+          "invested_value": 103.2819,
+          "drawdown_pct": 0.05,
+          "capital_utilization_pct": 80.27,
+          "daily_return": 0.00091
+        },
+        {
+          "date": "2026-04-22",
+          "equity": 129.839,
+          "cash": 25.5877,
+          "invested_value": 104.2513,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.29,
+          "daily_return": 0.009119
+        },
+        {
+          "date": "2026-04-23",
+          "equity": 130.0045,
+          "cash": 25.7482,
+          "invested_value": 104.2563,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.19,
+          "daily_return": 0.001275
+        },
+        {
+          "date": "2026-04-24",
+          "equity": 129.0084,
+          "cash": 25.8368,
+          "invested_value": 103.1716,
+          "drawdown_pct": 0.77,
+          "capital_utilization_pct": 79.97,
+          "daily_return": -0.007662
+        },
+        {
+          "date": "2026-04-27",
+          "equity": 131.1518,
+          "cash": 25.965,
+          "invested_value": 105.1868,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.2,
+          "daily_return": 0.016614
+        },
+        {
+          "date": "2026-04-28",
+          "equity": 131.327,
+          "cash": 26.0603,
+          "invested_value": 105.2668,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.16,
+          "daily_return": 0.001336
+        },
+        {
+          "date": "2026-04-29",
+          "equity": 131.7477,
+          "cash": 26.1231,
+          "invested_value": 105.6245,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.17,
+          "daily_return": 0.003203
+        },
+        {
+          "date": "2026-04-30",
+          "equity": 131.8316,
+          "cash": 26.153,
+          "invested_value": 105.6786,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.16,
+          "daily_return": 0.000637
+        },
+        {
+          "date": "2026-05-01",
+          "equity": 131.7785,
+          "cash": 26.2646,
+          "invested_value": 105.5139,
+          "drawdown_pct": 0.04,
+          "capital_utilization_pct": 80.07,
+          "daily_return": -0.000403
+        },
+        {
+          "date": "2026-05-04",
+          "equity": 133.7118,
+          "cash": 26.374,
+          "invested_value": 107.3378,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.28,
+          "daily_return": 0.014671
+        },
+        {
+          "date": "2026-05-05",
+          "equity": 133.8177,
+          "cash": 26.49,
+          "invested_value": 107.3277,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.2,
+          "daily_return": 0.000792
+        },
+        {
+          "date": "2026-05-06",
+          "equity": 135.0953,
+          "cash": 26.5401,
+          "invested_value": 108.5551,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.35,
+          "daily_return": 0.009547
+        },
+        {
+          "date": "2026-05-07",
+          "equity": 136.4687,
+          "cash": 26.8641,
+          "invested_value": 109.6046,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.31,
+          "daily_return": 0.010166
+        },
+        {
+          "date": "2026-05-08",
+          "equity": 136.0849,
+          "cash": 26.9664,
+          "invested_value": 109.1185,
+          "drawdown_pct": 0.28,
+          "capital_utilization_pct": 80.18,
+          "daily_return": -0.002812
+        },
+        {
+          "date": "2026-05-11",
+          "equity": 135.116,
+          "cash": 27.0523,
+          "invested_value": 108.0637,
+          "drawdown_pct": 0.99,
+          "capital_utilization_pct": 79.98,
+          "daily_return": -0.00712
+        },
+        {
+          "date": "2026-05-12",
+          "equity": 131.5266,
+          "cash": 26.9609,
+          "invested_value": 104.5657,
+          "drawdown_pct": 3.62,
+          "capital_utilization_pct": 79.5,
+          "daily_return": -0.026566
+        },
+        {
+          "date": "2026-05-13",
+          "equity": 132.5813,
+          "cash": 26.8793,
+          "invested_value": 105.7021,
+          "drawdown_pct": 2.85,
+          "capital_utilization_pct": 79.73,
+          "daily_return": 0.008019
+        },
+        {
+          "date": "2026-05-14",
+          "equity": 133.0823,
+          "cash": 26.6772,
+          "invested_value": 106.4051,
+          "drawdown_pct": 2.48,
+          "capital_utilization_pct": 79.95,
+          "daily_return": 0.003778
+        },
+        {
+          "date": "2026-05-15",
+          "equity": 131.9241,
+          "cash": 26.4981,
+          "invested_value": 105.426,
+          "drawdown_pct": 3.33,
+          "capital_utilization_pct": 79.91,
+          "daily_return": -0.008703
+        },
+        {
+          "date": "2026-05-18",
+          "equity": 130.0463,
+          "cash": 26.286,
+          "invested_value": 103.7603,
+          "drawdown_pct": 4.71,
+          "capital_utilization_pct": 79.79,
+          "daily_return": -0.014234
+        },
+        {
+          "date": "2026-05-19",
+          "equity": 130.6052,
+          "cash": 26.3139,
+          "invested_value": 104.2914,
+          "drawdown_pct": 4.3,
+          "capital_utilization_pct": 79.85,
+          "daily_return": 0.004298
+        },
+        {
+          "date": "2026-05-20",
+          "equity": 131.104,
+          "cash": 26.2819,
+          "invested_value": 104.8221,
+          "drawdown_pct": 3.93,
+          "capital_utilization_pct": 79.95,
+          "daily_return": 0.003819
+        },
+        {
+          "date": "2026-05-21",
+          "equity": 132.5748,
+          "cash": 26.2516,
+          "invested_value": 106.3232,
+          "drawdown_pct": 2.85,
+          "capital_utilization_pct": 80.2,
+          "daily_return": 0.011219
+        },
+        {
+          "date": "2026-05-22",
+          "equity": 132.3738,
+          "cash": 26.3156,
+          "invested_value": 106.0583,
+          "drawdown_pct": 3.0,
+          "capital_utilization_pct": 80.12,
+          "daily_return": -0.001516
+        },
+        {
+          "date": "2026-05-25",
+          "equity": 134.4545,
+          "cash": 26.4356,
+          "invested_value": 108.019,
+          "drawdown_pct": 1.48,
+          "capital_utilization_pct": 80.34,
+          "daily_return": 0.015718
+        },
+        {
+          "date": "2026-05-26",
+          "equity": 135.4741,
+          "cash": 26.5599,
+          "invested_value": 108.9142,
+          "drawdown_pct": 0.73,
+          "capital_utilization_pct": 80.39,
+          "daily_return": 0.007583
+        },
+        {
+          "date": "2026-05-27",
+          "equity": 138.1987,
+          "cash": 26.8066,
+          "invested_value": 111.3921,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.6,
+          "daily_return": 0.020112
+        },
+        {
+          "date": "2026-05-28",
+          "equity": 138.1392,
+          "cash": 27.0992,
+          "invested_value": 111.04,
+          "drawdown_pct": 0.04,
+          "capital_utilization_pct": 80.38,
+          "daily_return": -0.000431
+        },
+        {
+          "date": "2026-05-29",
+          "equity": 137.7891,
+          "cash": 27.3204,
+          "invested_value": 110.4687,
+          "drawdown_pct": 0.3,
+          "capital_utilization_pct": 80.17,
+          "daily_return": -0.002534
+        },
+        {
+          "date": "2026-06-01",
+          "equity": 136.3436,
+          "cash": 27.5024,
+          "invested_value": 108.8412,
+          "drawdown_pct": 1.34,
+          "capital_utilization_pct": 79.83,
+          "daily_return": -0.01049
+        },
+        {
+          "date": "2026-06-02",
+          "equity": 136.7147,
+          "cash": 27.5708,
+          "invested_value": 109.1439,
+          "drawdown_pct": 1.07,
+          "capital_utilization_pct": 79.83,
+          "daily_return": 0.002721
+        },
+        {
+          "date": "2026-06-03",
+          "equity": 136.1429,
+          "cash": 27.4646,
+          "invested_value": 108.6783,
+          "drawdown_pct": 1.49,
+          "capital_utilization_pct": 79.83,
+          "daily_return": -0.004182
+        },
+        {
+          "date": "2026-06-04",
+          "equity": 137.2727,
+          "cash": 27.2807,
+          "invested_value": 109.9921,
+          "drawdown_pct": 0.67,
+          "capital_utilization_pct": 80.13,
+          "daily_return": 0.008299
+        },
+        {
+          "date": "2026-06-05",
+          "equity": 137.6057,
+          "cash": 27.2952,
+          "invested_value": 110.3105,
+          "drawdown_pct": 0.43,
+          "capital_utilization_pct": 80.16,
+          "daily_return": 0.002425
+        },
+        {
+          "date": "2026-06-08",
+          "equity": 135.5335,
+          "cash": 27.3052,
+          "invested_value": 108.2282,
+          "drawdown_pct": 1.93,
+          "capital_utilization_pct": 79.85,
+          "daily_return": -0.015059
+        },
+        {
+          "date": "2026-06-09",
+          "equity": 137.8068,
+          "cash": 27.34,
+          "invested_value": 110.4668,
+          "drawdown_pct": 0.28,
+          "capital_utilization_pct": 80.16,
+          "daily_return": 0.016773
+        },
+        {
+          "date": "2026-06-10",
+          "equity": 135.7441,
+          "cash": 27.3477,
+          "invested_value": 108.3964,
+          "drawdown_pct": 1.78,
+          "capital_utilization_pct": 79.85,
+          "daily_return": -0.014967
+        },
+        {
+          "date": "2026-06-11",
+          "equity": 135.0692,
+          "cash": 27.1959,
+          "invested_value": 107.8733,
+          "drawdown_pct": 2.26,
+          "capital_utilization_pct": 79.87,
+          "daily_return": -0.004972
+        },
+        {
+          "date": "2026-06-12",
+          "equity": 137.8244,
+          "cash": 27.2073,
+          "invested_value": 110.6172,
+          "drawdown_pct": 0.27,
+          "capital_utilization_pct": 80.26,
+          "daily_return": 0.020399
+        },
+        {
+          "date": "2026-06-15",
+          "equity": 138.7537,
+          "cash": 27.301,
+          "invested_value": 111.4526,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.32,
+          "daily_return": 0.006742
+        },
+        {
+          "date": "2026-06-16",
+          "equity": 138.7398,
+          "cash": 27.3286,
+          "invested_value": 111.4112,
+          "drawdown_pct": 0.01,
+          "capital_utilization_pct": 80.3,
+          "daily_return": -0.0001
+        },
+        {
+          "date": "2026-06-17",
+          "equity": 139.9247,
+          "cash": 27.4718,
+          "invested_value": 112.4529,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.37,
+          "daily_return": 0.00854
+        },
+        {
+          "date": "2026-06-18",
+          "equity": 140.1274,
+          "cash": 27.7751,
+          "invested_value": 112.3523,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.18,
+          "daily_return": 0.001449
+        },
+        {
+          "date": "2026-06-19",
+          "equity": 141.8537,
+          "cash": 27.9446,
+          "invested_value": 113.9091,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.3,
+          "daily_return": 0.01232
+        },
+        {
+          "date": "2026-06-22",
+          "equity": 142.8871,
+          "cash": 28.1337,
+          "invested_value": 114.7534,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.31,
+          "daily_return": 0.007285
+        },
+        {
+          "date": "2026-06-23",
+          "equity": 141.4672,
+          "cash": 28.2118,
+          "invested_value": 113.2554,
+          "drawdown_pct": 0.99,
+          "capital_utilization_pct": 80.06,
+          "daily_return": -0.009938
+        },
+        {
+          "date": "2026-06-24",
+          "equity": 140.9171,
+          "cash": 28.257,
+          "invested_value": 112.66,
+          "drawdown_pct": 1.38,
+          "capital_utilization_pct": 79.95,
+          "daily_return": -0.003889
+        },
+        {
+          "date": "2026-06-25",
+          "equity": 140.8484,
+          "cash": 28.3118,
+          "invested_value": 112.5366,
+          "drawdown_pct": 1.43,
+          "capital_utilization_pct": 79.9,
+          "daily_return": -0.000487
+        },
+        {
+          "date": "2026-06-26",
+          "equity": 140.7915,
+          "cash": 28.3081,
+          "invested_value": 112.4834,
+          "drawdown_pct": 1.47,
+          "capital_utilization_pct": 79.89,
+          "daily_return": -0.000404
+        },
+        {
+          "date": "2026-06-29",
+          "equity": 141.6223,
+          "cash": 28.2124,
+          "invested_value": 113.4099,
+          "drawdown_pct": 0.89,
+          "capital_utilization_pct": 80.08,
+          "daily_return": 0.005901
+        },
+        {
+          "date": "2026-06-30",
+          "equity": 142.2505,
+          "cash": 28.2354,
+          "invested_value": 114.0151,
+          "drawdown_pct": 0.45,
+          "capital_utilization_pct": 80.15,
+          "daily_return": 0.004435
+        },
+        {
+          "date": "2026-07-01",
+          "equity": 143.5199,
+          "cash": 28.3746,
+          "invested_value": 115.1453,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.23,
+          "daily_return": 0.008924
+        },
+        {
+          "date": "2026-07-02",
+          "equity": 144.5835,
+          "cash": 28.5391,
+          "invested_value": 116.0444,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.26,
+          "daily_return": 0.007411
+        },
+        {
+          "date": "2026-07-03",
+          "equity": 143.9755,
+          "cash": 28.6534,
+          "invested_value": 115.3221,
+          "drawdown_pct": 0.42,
+          "capital_utilization_pct": 80.1,
+          "daily_return": -0.004205
+        },
+        {
+          "date": "2026-07-06",
+          "equity": 145.9588,
+          "cash": 28.8644,
+          "invested_value": 117.0944,
+          "drawdown_pct": 0.0,
+          "capital_utilization_pct": 80.22,
+          "daily_return": 0.013775
+        },
+        {
+          "date": "2026-07-07",
+          "equity": 144.7568,
+          "cash": 28.9483,
+          "invested_value": 115.8086,
+          "drawdown_pct": 0.82,
+          "capital_utilization_pct": 80.0,
+          "daily_return": -0.008235
+        },
+        {
+          "date": "2026-07-08",
+          "equity": 141.5183,
+          "cash": 28.7905,
+          "invested_value": 112.7278,
+          "drawdown_pct": 3.04,
+          "capital_utilization_pct": 79.66,
+          "daily_return": -0.022373
+        },
+        {
+          "date": "2026-07-09",
+          "equity": 143.8662,
+          "cash": 28.8069,
+          "invested_value": 115.0593,
+          "drawdown_pct": 1.43,
+          "capital_utilization_pct": 79.98,
+          "daily_return": 0.016591
+        },
+        {
+          "date": "2026-07-10",
+          "equity": 144.7343,
+          "cash": 28.8307,
+          "invested_value": 115.9037,
+          "drawdown_pct": 0.84,
+          "capital_utilization_pct": 80.08,
+          "daily_return": 0.006035
+        },
+        {
+          "date": "2026-07-13",
+          "equity": 145.042,
+          "cash": 28.7656,
+          "invested_value": 116.2764,
+          "drawdown_pct": 0.63,
+          "capital_utilization_pct": 80.17,
+          "daily_return": 0.002126
+        },
+        {
+          "date": "2026-07-14",
+          "equity": 143.8089,
+          "cash": 28.7069,
+          "invested_value": 115.102,
+          "drawdown_pct": 1.47,
+          "capital_utilization_pct": 80.04,
+          "daily_return": -0.008502
+        },
+        {
+          "date": "2026-07-15",
+          "equity": 145.1563,
+          "cash": 28.8323,
+          "invested_value": 116.3241,
+          "drawdown_pct": 0.55,
+          "capital_utilization_pct": 80.14,
+          "daily_return": 0.009369
+        },
+        {
+          "date": "2026-07-16",
+          "equity": 145.1085,
+          "cash": 28.9116,
+          "invested_value": 116.1969,
+          "drawdown_pct": 0.58,
+          "capital_utilization_pct": 80.08,
+          "daily_return": -0.000329
+        },
+        {
+          "date": "2026-07-17",
+          "equity": 144.0042,
+          "cash": 28.9067,
+          "invested_value": 115.0976,
+          "drawdown_pct": 1.34,
+          "capital_utilization_pct": 79.93,
+          "daily_return": -0.00761
+        },
+        {
+          "date": "2026-07-20",
+          "equity": 144.7446,
+          "cash": 28.8685,
+          "invested_value": 115.8761,
+          "drawdown_pct": 0.83,
+          "capital_utilization_pct": 80.06,
+          "daily_return": 0.005142
+        },
+        {
+          "date": "2026-07-21",
+          "equity": 145.2523,
+          "cash": 28.926,
+          "invested_value": 116.3262,
+          "drawdown_pct": 0.48,
+          "capital_utilization_pct": 80.09,
+          "daily_return": 0.003507
+        },
+        {
+          "date": "2026-07-22",
+          "equity": 143.5767,
+          "cash": 28.8753,
+          "invested_value": 114.7014,
+          "drawdown_pct": 1.63,
+          "capital_utilization_pct": 79.89,
+          "daily_return": -0.011535
+        },
+        {
+          "date": "2026-07-23",
+          "equity": 141.6072,
+          "cash": 28.7259,
+          "invested_value": 112.8813,
+          "drawdown_pct": 2.98,
+          "capital_utilization_pct": 79.71,
+          "daily_return": -0.013718
+        },
+        {
+          "date": "2026-07-24",
+          "equity": 140.4365,
+          "cash": 28.6109,
+          "invested_value": 111.8256,
+          "drawdown_pct": 3.78,
+          "capital_utilization_pct": 79.63,
+          "daily_return": -0.008267
+        },
+        {
+          "date": "2026-07-27",
+          "equity": 142.512,
+          "cash": 28.4652,
+          "invested_value": 114.0468,
+          "drawdown_pct": 2.36,
+          "capital_utilization_pct": 80.03,
+          "daily_return": 0.014779
+        },
+        {
+          "date": "2026-07-28",
+          "equity": 142.6476,
+          "cash": 28.3572,
+          "invested_value": 114.2904,
+          "drawdown_pct": 2.27,
+          "capital_utilization_pct": 80.12,
+          "daily_return": 0.000951
+        },
+        {
+          "date": "2026-07-29",
+          "equity": 143.6825,
+          "cash": 28.2763,
+          "invested_value": 115.4062,
+          "drawdown_pct": 1.56,
+          "capital_utilization_pct": 80.32,
+          "daily_return": 0.007255
+        },
+        {
+          "date": "2026-07-30",
+          "equity": 142.0107,
+          "cash": 28.3828,
+          "invested_value": 113.6279,
+          "drawdown_pct": 2.7,
+          "capital_utilization_pct": 80.01,
+          "daily_return": -0.011636
+        },
+        {
+          "date": "2026-07-31",
+          "equity": 143.0509,
+          "cash": 28.4832,
+          "invested_value": 114.5678,
+          "drawdown_pct": 1.99,
+          "capital_utilization_pct": 80.09,
+          "daily_return": 0.007325
+        },
+        {
+          "date": "2026-08-03",
+          "equity": 145.5058,
+          "cash": 28.603,
+          "invested_value": 116.9028,
+          "drawdown_pct": 0.31,
+          "capital_utilization_pct": 80.34,
+          "daily_return": 0.01716
+        },
+        {
+          "date": "2026-08-04",
+          "equity": 144.9947,
+          "cash": 28.722,
+          "invested_value": 116.2726,
+          "drawdown_pct": 0.66,
+          "capital_utilization_pct": 80.19,
+          "daily_return": -0.003512
+        },
+        {
+          "date": "2026-08-05",
+          "equity": 145.8959,
+          "cash": 28.8299,
+          "invested_value": 117.0661,
+          "drawdown_pct": 0.04,
+          "capital_utilization_pct": 80.24,
+          "daily_return": 0.006216
+        },
+        {
+          "date": "2026-08-06",
+          "equity": 145.5853,
+          "cash": 29.0118,
+          "invested_value": 116.5735,
+          "drawdown_pct": 0.26,
+          "capital_utilization_pct": 80.07,
+          "daily_return": -0.002129
+        },
+        {
+          "date": "2026-08-07",
+          "equity": 145.4382,
+          "cash": 29.168,
+          "invested_value": 116.2701,
+          "drawdown_pct": 0.36,
+          "capital_utilization_pct": 79.94,
+          "daily_return": -0.001011
+        },
+        {
+          "date": "2026-08-10",
+          "equity": 145.2705,
+          "cash": 29.1559,
+          "invested_value": 116.1146,
+          "drawdown_pct": 0.47,
+          "capital_utilization_pct": 79.93,
+          "daily_return": -0.001153
+        },
+        {
+          "date": "2026-08-11",
+          "equity": 145.0174,
+          "cash": 29.102,
+          "invested_value": 115.9154,
+          "drawdown_pct": 0.64,
+          "capital_utilization_pct": 79.93,
+          "daily_return": -0.001742
+        },
+        {
+          "date": "2026-08-12",
+          "equity": 145.0657,
+          "cash": 29.0598,
+          "invested_value": 116.0059,
+          "drawdown_pct": 0.61,
+          "capital_utilization_pct": 79.97,
+          "daily_return": 0.000333
+        },
+        {
+          "date": "2026-08-13",
+          "equity": 145.583,
+          "cash": 28.9892,
+          "invested_value": 116.5938,
+          "drawdown_pct": 0.26,
+          "capital_utilization_pct": 80.09,
+          "daily_return": 0.003566
+        },
+        {
+          "date": "2026-08-14",
+          "equity": 144.7867,
+          "cash": 29.0309,
+          "invested_value": 115.7558,
+          "drawdown_pct": 0.8,
+          "capital_utilization_pct": 79.95,
+          "daily_return": -0.00547
+        },
+        {
+          "date": "2026-08-17",
+          "equity": 144.305,
+          "cash": 29.0378,
+          "invested_value": 115.2673,
+          "drawdown_pct": 1.13,
+          "capital_utilization_pct": 79.88,
+          "daily_return": -0.003327
+        },
+        {
+          "date": "2026-08-18",
+          "equity": 144.1673,
+          "cash": 29.0089,
+          "invested_value": 115.1583,
+          "drawdown_pct": 1.23,
+          "capital_utilization_pct": 79.88,
+          "daily_return": -0.000955
+        },
+        {
+          "date": "2026-08-19",
+          "equity": 143.4769,
+          "cash": 28.9174,
+          "invested_value": 114.5595,
+          "drawdown_pct": 1.7,
+          "capital_utilization_pct": 79.85,
+          "daily_return": -0.004788
+        },
+        {
+          "date": "2026-08-20",
+          "equity": 143.8547,
+          "cash": 28.8164,
+          "invested_value": 115.0383,
+          "drawdown_pct": 1.44,
+          "capital_utilization_pct": 79.97,
+          "daily_return": 0.002633
+        },
+        {
+          "date": "2026-08-21",
+          "equity": 144.8245,
+          "cash": 28.8484,
+          "invested_value": 115.9761,
+          "drawdown_pct": 0.78,
+          "capital_utilization_pct": 80.08,
+          "daily_return": 0.006741
+        },
+        {
+          "date": "2026-08-24",
+          "equity": 144.5758,
+          "cash": 28.8577,
+          "invested_value": 115.7181,
+          "drawdown_pct": 0.95,
+          "capital_utilization_pct": 80.04,
+          "daily_return": -0.001717
+        },
+        {
+          "date": "2026-08-25",
+          "equity": 144.3665,
+          "cash": 28.8354,
+          "invested_value": 115.5311,
+          "drawdown_pct": 1.09,
+          "capital_utilization_pct": 80.03,
+          "daily_return": -0.001448
+        },
+        {
+          "date": "2026-08-26",
+          "equity": 144.0368,
+          "cash": 28.8849,
+          "invested_value": 115.1519,
+          "drawdown_pct": 1.32,
+          "capital_utilization_pct": 79.95,
+          "daily_return": -0.002284
+        },
+        {
+          "date": "2026-08-27",
+          "equity": 143.6344,
+          "cash": 28.8267,
+          "invested_value": 114.8077,
+          "drawdown_pct": 1.59,
+          "capital_utilization_pct": 79.93,
+          "daily_return": -0.002794
+        },
+        {
+          "date": "2026-08-28",
+          "equity": 143.3779,
+          "cash": 28.7974,
+          "invested_value": 114.5805,
+          "drawdown_pct": 1.77,
+          "capital_utilization_pct": 79.92,
+          "daily_return": -0.001786
+        },
+        {
+          "date": "2026-08-31",
+          "equity": 142.7183,
+          "cash": 28.7802,
+          "invested_value": 113.9382,
+          "drawdown_pct": 2.22,
+          "capital_utilization_pct": 79.83,
+          "daily_return": -0.0046
+        },
+        {
+          "date": "2026-09-01",
+          "equity": 140.7411,
+          "cash": 28.6684,
+          "invested_value": 112.0728,
+          "drawdown_pct": 3.57,
+          "capital_utilization_pct": 79.63,
+          "daily_return": -0.013854
+        },
+        {
+          "date": "2026-09-02",
+          "equity": 140.4834,
+          "cash": 28.5311,
+          "invested_value": 111.9523,
+          "drawdown_pct": 3.75,
+          "capital_utilization_pct": 79.69,
+          "daily_return": -0.001831
+        },
+        {
+          "date": "2026-09-03",
+          "equity": 140.6357,
+          "cash": 28.371,
+          "invested_value": 112.2647,
+          "drawdown_pct": 3.65,
+          "capital_utilization_pct": 79.83,
+          "daily_return": 0.001084
+        },
+        {
+          "date": "2026-09-04",
+          "equity": 139.9858,
+          "cash": 28.2024,
+          "invested_value": 111.7834,
+          "drawdown_pct": 4.09,
+          "capital_utilization_pct": 79.85,
+          "daily_return": -0.004621
+        }
+      ],
+      "holding_period": 5,
+      "top_k": 15,
+      "sizing_method": "EQUAL_WEIGHT",
+      "max_exposure_pct": 80.0,
+      "max_capital_utilization_pct": 80.85,
+      "entry_price_source": "SQLITE_OHLCV_CLOSE",
+      "exit_price_source": "SQLITE_OHLCV_CLOSE"
+    }
+  },
+  "artifact_path": "/Users/arunsharma/Desktop/swing trade react/backend/models/qlib/challengers/swing/qlib_challenger_swing_20260912_141500_top15_80exp/model.pkl",
+  "artifact_sha256": "cef743c21df065477d831ac7cb4c56fe1f35a6b99c52276e1a870d72ca407f9f",
   "status": "ACTIVE",
-  "created_at": "2026-09-11T11:02:41.101660"
+  "created_at": "2026-09-12T14:10:27.335949",
+  "candidate_model_id": "qlib_challenger_swing_20260912_141500_top15_80exp",
+  "portfolio_construction": {
+    "top_k": 15,
+    "holding_period": 5,
+    "sizing_method": "EQUAL_WEIGHT",
+    "max_exposure_pct": 80.0
+  },
+  "promoted_at": "2026-09-12T14:44:21.509730",
+  "promoted_by": "MANUAL_APPROVAL"
 }

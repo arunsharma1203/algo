@@ -1208,9 +1208,12 @@ class ResearchJobManager:
             elif res_type == "HORIZON_COMPARISON":
                 clean_t = tickers[0] if tickers else "RELIANCE.NS"
                 from app.api.ml_backtest import WeeklyWalkForwardBacktestEngine
-                import yfinance as yf
-                df_10y = yf.download(clean_t, period="10y", interval="1d", progress=False)
-                horizons = {"3_Years": 750, "5_Years": 1250, "7_Years": 1750, "10_Years": len(df_10y)}
+                from app.data.historical_data_layer import HistoricalDataLayer
+                df_10y = HistoricalDataLayer.get_historical_ohlcv(clean_t, timeframe="1d")
+                if df_10y is None or len(df_10y) < 500:
+                    from app.data.market_provider import fetch_candles
+                    df_10y = fetch_candles(clean_t, interval="1d", period="2y")
+                horizons = {"3_Years": min(750, len(df_10y)), "5_Years": min(1250, len(df_10y)), "7_Years": min(1750, len(df_10y)), "10_Years": len(df_10y)}
                 comp_res = {}
                 for idx, (h_name, n_bars) in enumerate(horizons.items()):
                     sub_df = df_10y.iloc[-n_bars:].copy()

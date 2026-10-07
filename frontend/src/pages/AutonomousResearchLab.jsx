@@ -25,6 +25,7 @@ import {
   getResearchLineage,
   getResearchVault,
   runUniverseTransfer,
+  evaluateCandidateOOS,
   getMissionRuntime,
   getResearchTelemetrySSEUrl,
   runAutonomousResearch
@@ -695,6 +696,23 @@ export default function AutonomousResearchLab() {
     try {
       await runUniverseTransfer(candidateId, targetUniverse);
       await fetchInitialData();
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleEvaluateCandidate = async (candidateId) => {
+    setActionLoading(true);
+    try {
+      const res = await evaluateCandidateOOS(candidateId);
+      await fetchInitialData();
+      if (selectedExperiment) {
+        const updated = await getResearchExperiment(selectedExperiment.experiment_id || candidateId);
+        setSelectedExperiment(updated);
+      }
+      return res;
     } catch (e) {
       setError(e.response?.data?.detail || e.message);
     } finally {
@@ -1711,9 +1729,23 @@ export default function AutonomousResearchLab() {
                       <span>{c.candidate_id}</span>
                     </button>
                     <div className="flex items-center space-x-2">
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300 font-mono">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded border font-mono ${
+                        c.status === 'OOS_PASSED' ? 'bg-emerald-100 text-emerald-800 border-emerald-300' :
+                        c.status === 'OOS_FAILED' ? 'bg-rose-100 text-rose-800 border-rose-300' :
+                        c.status === 'FORWARD_ACTIVE' ? 'bg-indigo-100 text-indigo-800 border-indigo-300' :
+                        'bg-amber-100 text-amber-800 border-amber-300'
+                      }`}>
                         {c.status}
                       </span>
+                      <button
+                        onClick={() => handleEvaluateCandidate(c.candidate_id)}
+                        disabled={actionLoading}
+                        className="px-2 py-1 bg-white hover:bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg text-[10px] font-bold flex items-center space-x-1 shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                        title="Run Out-of-Sample Forward Evaluation on new post-cutoff bars"
+                      >
+                        <FastForward size={11} />
+                        <span>Eval OOS</span>
+                      </button>
                       <button
                         onClick={() => handleInspectExperiment(c.candidate_id || c.experiment_id)}
                         className="px-2 py-1 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-[10px] font-bold flex items-center space-x-1 shadow-2xs transition-colors cursor-pointer"
@@ -2214,6 +2246,17 @@ export default function AutonomousResearchLab() {
                     </div>
 
                     <div className="flex items-center space-x-2 shrink-0">
+                      {candId && (
+                        <button
+                          onClick={() => handleEvaluateCandidate(candId)}
+                          disabled={actionLoading}
+                          className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white rounded-xl font-bold text-xs flex items-center space-x-1.5 shadow-sm transition-all cursor-pointer"
+                          title="Evaluate Candidate against accumulated forward OOS market data"
+                        >
+                          <FastForward size={14} />
+                          <span>Evaluate OOS</span>
+                        </button>
+                      )}
                       <button
                         onClick={() => handleDownloadPdf(expId || candId)}
                         disabled={downloadingPdf || (!expId && !candId)}
@@ -2424,14 +2467,21 @@ export default function AutonomousResearchLab() {
                                   <Clock size={11} className="text-slate-500" />
                                   <span>Future Forward OOS Progress</span>
                                 </div>
-                                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
-                                  {oosMetrics.oos_status || 'OOS_PENDING'}
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold border font-mono ${
+                                  (oosMetrics.oos_status === 'OOS_PASSED') ? 'bg-emerald-100 text-emerald-900 border-emerald-300' :
+                                  (oosMetrics.oos_status === 'OOS_FAILED') ? 'bg-rose-100 text-rose-900 border-rose-300' :
+                                  (oosMetrics.oos_status === 'FORWARD_ACTIVE' || (oosMetrics.future_forward_oos_bars || 0) > 0) ? 'bg-indigo-100 text-indigo-900 border-indigo-300' :
+                                  'bg-amber-100 text-amber-900 border-amber-300'
+                                }`}>
+                                  {oosMetrics.oos_status || ((oosMetrics.future_forward_oos_bars || 0) > 0 ? 'FORWARD_ACTIVE' : 'OOS_PENDING')}
                                 </span>
                               </div>
                               <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
                                 <div className="bg-white px-2.5 py-1.5 rounded-lg border border-slate-200/80 flex flex-col justify-between">
                                   <span className="text-slate-400 text-[9px] uppercase font-bold">Future Forward Bars</span>
-                                  <strong className="text-slate-800 font-bold mt-0.5">{formatInt(oosMetrics.future_forward_oos_bars || 0)} (0 new bars)</strong>
+                                  <strong className="text-slate-800 font-bold mt-0.5">
+                                    {formatInt(oosMetrics.future_forward_oos_bars || 0)} ({(oosMetrics.future_forward_oos_bars || 0) > 0 ? `${formatInt(oosMetrics.future_forward_oos_bars)} new bars` : '0 new bars'})
+                                  </strong>
                                 </div>
                                 <div className="bg-white px-2.5 py-1.5 rounded-lg border border-slate-200/80 flex flex-col justify-between">
                                   <span className="text-slate-400 text-[9px] uppercase font-bold">Completed OOS Trades</span>

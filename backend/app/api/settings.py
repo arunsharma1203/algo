@@ -150,7 +150,7 @@ def save_simulation_mode(config: SimulationConfig):
 # -------------------------------------------------------------
 
 class DataSourceConfig(BaseModel):
-    source: str = 'yfinance'  # 'yfinance' or 'upstox'
+    source: str = 'upstox'
 
 class UpstoxConfig(BaseModel):
     api_key: str = ""
@@ -174,34 +174,60 @@ def get_datasource_setting():
     algo_row = cur.fetchone()
     conn.close()
     
-    current_source = row[0] if row and row[0] else 'yfinance'
     has_upstox_token = bool(token_row and token_row[0] and len(token_row[0].strip()) > 10)
     has_algo_token = bool(algo_row and algo_row[0] and len(algo_row[0].strip()) > 10)
     
     return {
-        "source": current_source,
+        "source": "upstox",
         "has_upstox_token": has_upstox_token,
         "has_algo_token": has_algo_token,
-        "supported_sources": ["yfinance", "upstox"]
+        "supported_sources": ["upstox"]
     }
 
 @router.post("/datasource")
 def save_datasource_setting(config: DataSourceConfig):
-    chosen_source = config.source.lower().strip()
-    if chosen_source not in ('yfinance', 'upstox'):
-        chosen_source = 'yfinance'
-        
+    chosen_source = 'upstox'
     conn = sqlite3.connect(get_db_path(), timeout=5.0)
     conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('market_data_source', ?)", (chosen_source,))
     conn.commit()
     conn.close()
-    return {"status": "success", "source": chosen_source, "message": f"Data source set to {chosen_source.upper()}."}
+    return {"status": "success", "source": chosen_source, "message": "Authoritative market data source locked strictly to UPSTOX."}
+
+@router.get("/upstox/token-status")
+def get_upstox_token_status_endpoint(verify_live: bool = False):
+    """
+    Returns the real-time health and expiration status of the Upstox market data token.
+    Used by frontend banner to prompt token re-entry and lock execution on auth failure.
+    """
+    from app.data.upstox_provider import get_upstox_token_status
+    conn = sqlite3.connect(get_db_path(), timeout=5.0)
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM app_settings WHERE key = 'upstox_auth_status'")
+    row_status = cur.fetchone()
+    cur.execute("SELECT value FROM app_settings WHERE key = 'upstox_auth_error'")
+    row_err = cur.fetchone()
+    cur.execute("SELECT value FROM app_settings WHERE key = 'upstox_auth_error_time'")
+    row_time = cur.fetchone()
+    conn.close()
+
+    token_status = get_upstox_token_status(verify_live=verify_live)
+    db_auth_status = row_status[0] if row_status else None
+
+    # If DB has flagged TOKEN_EXPIRED or live probe failed, mark invalid
+    if db_auth_status == "TOKEN_EXPIRED":
+        token_status["status"] = "TOKEN_EXPIRED"
+        token_status["is_valid"] = False
+        token_status["message"] = row_err[0] if row_err else "Upstox token expired or authentication rejected."
+        token_status["error_time"] = row_time[0] if row_time else None
+
+    return token_status
 
 @router.get("/upstox")
 def get_upstox_settings():
-    from app.data.upstox_provider import get_upstox_config
+    from app.data.upstox_provider import get_upstox_config, get_upstox_limiter
     cfg = get_upstox_config()
     masked_secret = f"{cfg['api_secret'][:4]}****{cfg['api_secret'][-4:]}" if len(cfg['api_secret']) > 8 else ("****" if cfg['api_secret'] else "")
+    limiter = get_upstox_limiter()
     return {
         "api_key": cfg["api_key"],
         "api_secret_masked": masked_secret,
@@ -211,7 +237,8 @@ def get_upstox_settings():
         "has_algo_token": bool(cfg.get("algo_token")),
         "market_token": cfg["access_token"],
         "algo_token": cfg.get("algo_token", ""),
-        "redirect_uri": cfg["redirect_uri"]
+        "redirect_uri": cfg["redirect_uri"],
+        "rate_limits": limiter.get_stats()
     }
 
 @router.post("/upstox")
@@ -227,6 +254,10 @@ def save_upstox_settings(config: UpstoxConfig):
     if market_tok:
         conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_access_token', ?)", (market_tok,))
         conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_market_token', ?)", (market_tok,))
+        # Reset auth failure status upon new token configuration
+        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_auth_status', 'ACTIVE')")
+        conn.execute("DELETE FROM app_settings WHERE key IN ('upstox_auth_error', 'upstox_auth_error_time')")
+        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('market_data_source', 'upstox')")
         
     # Save Algo Trading Token
     if config.algo_token:
@@ -236,7 +267,7 @@ def save_upstox_settings(config: UpstoxConfig):
         conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_redirect_uri', ?)", (config.redirect_uri.strip(),))
     conn.commit()
     conn.close()
-    return {"status": "success", "message": "Upstox dual configuration saved."}
+    return {"status": "success", "message": "Upstox configuration saved and active."}
 
 @router.post("/upstox/test")
 def test_upstox_api(config: UpstoxConfig):
@@ -255,12 +286,14 @@ def test_upstox_api(config: UpstoxConfig):
         try:
             conn = sqlite3.connect(get_db_path(), timeout=5.0)
             conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('market_data_source', 'upstox')")
+            conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_auth_status', 'ACTIVE')")
+            conn.execute("DELETE FROM app_settings WHERE key IN ('upstox_auth_error', 'upstox_auth_error_time')")
             if token_to_test:
                 conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_access_token', ?)", (token_to_test.strip(),))
             conn.commit()
             conn.close()
             result["auto_switched_source"] = "upstox"
-            result["message"] += " Live Market Data Engine automatically set to UPSTOX."
+            result["message"] += " Live Market Data Engine automatically set to UPSTOX and status ACTIVE."
         except Exception as e:
             pass
             

@@ -246,6 +246,13 @@ export const runUniverseTransfer = async (candidateId, targetUniverse = 'RESEARC
     return res.data;
 };
 
+export const evaluateCandidateOOS = async (candidateId) => {
+    const res = await axios.post(`${API_URL}/research-autopilot/vault/evaluate`, {
+        candidate_id: candidateId
+    });
+    return res.data;
+};
+
 export const getMissionRuntime = async (missionId) => {
     const res = await axios.get(`${API_URL}/research-autopilot/mission/${missionId}/runtime`);
     return res.data;

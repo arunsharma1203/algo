@@ -23,11 +23,6 @@ from typing import Dict, Any, Optional, Tuple, List
 
 from app.data.database import get_db_path, is_testing_environment
 from app.analytics.master_logger import MasterLogger
-from app.analytics.research_orchestrator.candidate_vault import (
-    CandidateVault,
-    ResearchModelArtifact,
-    PortfolioStrategyArtifact
-)
 from app.analytics.model_manager import (
     ModelManager,
     ProductionModelMutationBlockedError,
@@ -46,17 +41,73 @@ class ModelIntegrityViolationError(Exception):
     """Raised when cryptographic or structural model integrity verification fails."""
     pass
 
+CHAMPION_HASHES: Dict[str, str] = {
+    "swing": "11cd6a77e60b819e9d3260f10738e7a59033e6d3bf88a65b29892a02489ba534",
+    "intraday": "d78677fa40c214737684dcd20cf42e5f79d6e4de96f931f3123181427d5ff8d8"
+}
+
 class ModelRegistry:
     """
     Authoritative registry and deployment controller for quantitative models.
     """
 
-    EXPECTED_CHAMPION_HASHES: Dict[str, str] = {
-        "swing": "11cd6a77e60b819e9d3260f10738e7a59033e6d3bf88a65b29892a02489ba534",
-        "intraday": "f6506e423de2cc442fddabd073f0800e64b09dfb71e8f7b0135aec4d0876dd91"
-    }
+    EXPECTED_CHAMPION_HASHES: Dict[str, str] = CHAMPION_HASHES
 
     _ALLOW_PRODUCTION_PROMOTION_IN_TEST: bool = False
+
+    @classmethod
+    def verify_champion_hash(cls, timeframe: str) -> Tuple[bool, str, str]:
+        """
+        Verifies champion model artifact SHA-256 against expected cryptographic hash.
+        Returns (is_valid, current_sha, expected_sha).
+        """
+        tf = timeframe.lower().strip()
+        expected = cls.EXPECTED_CHAMPION_HASHES.get(tf, "")
+        model_path, _ = ModelManager.get_champion_paths(tf)
+        if not os.path.exists(model_path):
+            return False, "", expected
+        current = cls.compute_file_sha256(model_path)
+        is_valid = (current == expected) if expected else False
+        return is_valid, current, expected
+
+    @classmethod
+    def load_champion(cls, timeframe: str, enforce_hash: bool = True) -> Tuple[Optional[Any], Dict[str, Any]]:
+        """
+        Authoritative champion model loader with fail-closed cryptographic verification.
+        Used by Legacy Smart AI Scanner and production services.
+        """
+        tf = timeframe.lower().strip()
+        if enforce_hash:
+            is_valid, current_sha, expected_sha = cls.verify_champion_hash(tf)
+            if not is_valid:
+                raise ModelIntegrityViolationError(
+                    f"CRYPTOGRAPHIC INTEGRITY FAILURE: {tf} champion artifact hash '{current_sha}' "
+                    f"does not match authoritative baseline '{expected_sha}'."
+                )
+        model, meta = ModelManager.load_champion(tf)
+        return model, meta
+
+    @classmethod
+    def get_champion_status(cls, timeframe: str) -> Dict[str, Any]:
+        """
+        Returns real-time verification and telemetry for the active champion.
+        """
+        tf = timeframe.lower().strip()
+        is_valid, current_sha, expected_sha = cls.verify_champion_hash(tf)
+        model_path, meta_path = ModelManager.get_champion_paths(tf)
+        meta = ModelManager.load_champion_metadata(tf)
+        file_size = os.path.getsize(model_path) if os.path.exists(model_path) else 0
+        return {
+            "timeframe": tf,
+            "status": "ACTIVE_VERIFIED" if is_valid else ("TAMPERED" if current_sha else "MISSING"),
+            "hash_verified": is_valid,
+            "file_size_bytes": file_size,
+            "artifact_sha256": current_sha,
+            "expected_sha256": expected_sha,
+            "version": meta.get("version", "v1.0-champion"),
+            "model_path": model_path,
+            "meta_path": meta_path
+        }
 
     @classmethod
     def verify_all_champions(cls) -> Dict[str, Any]:
@@ -65,21 +116,26 @@ class ModelRegistry:
         and returns structured metadata.
         """
         result = {}
+        all_intact = True
         for tf in ("swing", "intraday"):
-            model_path, meta_path = ModelManager.get_champion_paths(tf)
-            sha = ""
-            if os.path.exists(model_path):
-                sha = cls.compute_file_sha256(model_path)
+            status = cls.get_champion_status(tf)
+            if not status["hash_verified"]:
+                all_intact = False
             meta = ModelManager.load_champion_metadata(tf)
             result[tf] = {
                 "version": meta.get("version", "v1.0-champion"),
                 "timeframe": tf,
-                "model_path": model_path,
-                "artifact_sha256": sha,
+                "model_path": status["model_path"],
+                "artifact_sha256": status["artifact_sha256"],
+                "expected_sha256": status["expected_sha256"],
+                "hash_verified": status["hash_verified"],
+                "status": status["status"],
+                "file_size_bytes": status["file_size_bytes"],
                 "validation_metrics": meta.get("validation_metrics", {}),
                 "features": meta.get("features", []),
-                "is_intact": bool(sha)
+                "is_intact": status["hash_verified"]
             }
+        result["all_champions_intact"] = all_intact
         return result
 
     @classmethod
@@ -168,6 +224,7 @@ class ModelRegistry:
         6. Deployed file hash must match candidate artifact hash byte-for-byte.
         """
         cls.ensure_tables()
+        from app.analytics.research_orchestrator.candidate_vault import CandidateVault
         tf = timeframe.lower()
         if tf not in ("swing", "intraday"):
             raise ValueError(f"Invalid timeframe '{timeframe}'. Must be 'swing' or 'intraday'.")

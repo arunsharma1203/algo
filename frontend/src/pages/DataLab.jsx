@@ -724,7 +724,7 @@ export default function DataLab() {
     try {
       const res = await axios.post(`${API_BASE}/data-lab/sync-15m-hoarder`, {
         universe: universe,
-        data_source: 'yfinance'
+        data_source: 'upstox'
       });
       if (res.data?.status === 'COMPLETED') {
         setSyncMessage({
@@ -1189,11 +1189,21 @@ export default function DataLab() {
               {/* Primary Scorecard Grid */}
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
                 <div className="bg-slate-950 border border-slate-800 rounded-xl p-3">
-                  <span className="text-[10px] uppercase font-bold text-slate-400">Net Realized P&amp;L</span>
-                  <div className={`text-lg font-black mt-1 ${quantRiskData.metrics.net_pnl_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {quantRiskData.metrics.net_pnl_pct}%
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] uppercase font-bold text-slate-400">Cumulative Return</span>
+                    <span className="text-[9px] text-slate-500 font-sans cursor-help" title="Arithmetic sum of closed trade returns net of friction">(Σ r_i)</span>
                   </div>
-                  <span className="text-[10px] text-slate-500">Gross: {quantRiskData.metrics.gross_pnl_pct}%</span>
+                  <div className={`text-lg font-black mt-1 ${quantRiskData.metrics.net_pnl_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {quantRiskData.metrics.net_pnl_pct > 0 ? `+${quantRiskData.metrics.net_pnl_pct}%` : `${quantRiskData.metrics.net_pnl_pct}%`}
+                  </div>
+                  <div className="flex justify-between items-center text-[10px] text-slate-500 mt-0.5">
+                    <span>Gross: {quantRiskData.metrics.gross_pnl_pct}%</span>
+                    {quantRiskData.metrics.avg_trade_pnl_pct != null && (
+                      <span className={quantRiskData.metrics.avg_trade_pnl_pct >= 0 ? 'text-emerald-500 font-mono font-semibold' : 'text-rose-500 font-mono font-semibold'}>
+                        Avg: {quantRiskData.metrics.avg_trade_pnl_pct > 0 ? '+' : ''}{quantRiskData.metrics.avg_trade_pnl_pct}%
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="bg-slate-950 border border-slate-800 rounded-xl p-3">
                   <span className="text-[10px] uppercase font-bold text-slate-400">Win Rate (Realized)</span>

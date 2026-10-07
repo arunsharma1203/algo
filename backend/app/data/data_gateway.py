@@ -57,7 +57,7 @@ class DataGateway:
         ticker: str,
         df: pd.DataFrame,
         timeframe: str = "15m",
-        source: str = "yfinance"
+        source: str = "upstox"
     ) -> int:
         """
         Persists and deduplicates intraday candles into canonical SQLite ohlcv storage.

@@ -195,7 +195,8 @@ def evaluate_single_ticker_data(ticker: str, champion_model, champion_meta) -> D
                 champion_meta=champion_meta,
                 trade_type="INTRADAY",
                 source="WATCHLIST_SCANNER",
-                skip_enrichment=True
+                skip_enrichment=True,
+                allow_candle_close=True
             )
             ai_direction = eval_res.direction
             ai_conviction = round(eval_res.confidence, 1)

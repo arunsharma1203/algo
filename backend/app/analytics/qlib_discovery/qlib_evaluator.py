@@ -60,32 +60,18 @@ def prepare_strategy_dataset(
     raw_dfs = {}
     feat_dfs = {}
     
-    batch_intraday_df = None
-    if strategy != "SWING" and len(tickers) > 0:
-        try:
-            import yfinance as yf
-            batch_intraday_df = yf.download(tickers, period="60d", interval="15m", progress=False, group_by="ticker")
-        except Exception:
-            batch_intraday_df = None
+    from app.data.market_provider import fetch_candles
 
     for t in tickers:
         try:
             if strategy == "SWING":
                 df = HistoricalDataLayer.get_historical_ohlcv(t, timeframe="1d")
                 if df is None or len(df) < 100:
-                    import yfinance as yf
-                    df = yf.download(t, period="2y", interval="1d", progress=False)
+                    df = fetch_candles(t, interval="1d", period="2y")
             else:
-                # Intraday 15m from batch or single download
-                df = None
-                if batch_intraday_df is not None:
-                    try:
-                        df = batch_intraday_df[t].copy() if len(tickers) > 1 else batch_intraday_df.copy()
-                    except Exception:
-                        df = None
+                df = HistoricalDataLayer.get_historical_ohlcv(t, timeframe="15m")
                 if df is None or len(df) < 70:
-                    import yfinance as yf
-                    df = yf.download(t, period="60d", interval="15m", progress=False)
+                    df = fetch_candles(t, interval="15m", period="60d")
                 
             if df is not None and len(df) >= 70:
                 # Clean column headers

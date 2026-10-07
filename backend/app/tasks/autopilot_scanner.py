@@ -1,7 +1,6 @@
 import logging
 import sqlite3
 import time
-import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -41,7 +40,8 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", univer
     global _LAST_HEAT_ALERT_TIME
     from app.analytics.autonomous_bot import is_market_open, log_alert
     
-    now = datetime.now()
+    from app.analytics.trading_constants import get_ist_now, HARD_CUTOFF_TIME_IST
+    now = get_ist_now()
     logger.info(f"⏰ [Autopilot] Executing {session_name} scheduled sweep ({universe}) at {now.strftime('%H:%M:%S')} IST...")
     
     if not is_market_open():
@@ -50,6 +50,10 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", univer
 
     if not is_autopilot_enabled():
         logger.info(f"⏸️ [Autopilot] Autopilot mode is disabled in settings. Skipping sweep.")
+        return
+
+    if now.time() >= HARD_CUTOFF_TIME_IST:
+        logger.info(f"⏸️ [Autopilot] Past 13:45 IST cutoff ({now.strftime('%H:%M')} IST). Insufficient runway for intraday setups before 15:15 square-off. Skipping sweep.")
         return
 
     # 1. Portfolio Heat Safety & Risk Ceiling Check
@@ -140,6 +144,7 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", univer
                 macro_state=macro,
                 qualification_threshold=0.0,
                 skip_enrichment=False,
+                allow_candle_close=True
             )
 
             if not result.qualified:

@@ -1951,3 +1951,16 @@ class ForwardSimulationEngine:
 # Global Singleton instance
 forward_sim_engine = ForwardSimulationEngine()
 
+
+def get_holding_period(trade_type: str = "SWING") -> int:
+    """
+    Returns authoritative forward holding period horizon in trading days for strategy.
+    Enforces the agreed 5-trading-day Challenger OOS evaluation rule.
+    """
+    clean_type = trade_type.upper().strip()
+    if clean_type in ("SWING", "CHALLENGER_SWING"):
+        return 5  # 5 NSE trading days
+    elif clean_type in ("INTRADAY", "15M"):
+        return 1
+    return 5
+

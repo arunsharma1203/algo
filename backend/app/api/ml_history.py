@@ -2,8 +2,8 @@ import sqlite3
 import json
 import math
 import pandas as pd
-import yfinance as yf
 from datetime import datetime
+from typing import Optional, Dict, Any, List
 from app.data.historical_data_layer import get_db_path
 
 def ensure_ml_table():
@@ -31,7 +31,17 @@ def ensure_ml_table():
         ('model_candle_close', "REAL"),
         ('price_source', "TEXT"),
         ('price_timestamp', "TEXT"),
-        ('price_is_fresh', "INTEGER DEFAULT 0")
+        ('price_is_fresh', "INTEGER DEFAULT 0"),
+        ('engine', "TEXT DEFAULT 'LEGACY'"),
+        ('strategy', "TEXT"),
+        ('instrument', "TEXT"),
+        ('model_id', "TEXT"),
+        ('model_hash', "TEXT"),
+        ('data_timestamp', "TEXT"),
+        ('entry_price_source', "TEXT"),
+        ('entry_price_timestamp', "TEXT"),
+        ('entry_price_age_ms', "INTEGER"),
+        ('quote_freshness', "TEXT")
     ]:
         try:
             conn.execute(f"ALTER TABLE ml_trade_history ADD COLUMN {col} {col_type}")
@@ -71,20 +81,39 @@ def ensure_ml_table():
             model_candle_close REAL,
             price_source TEXT,
             price_timestamp TEXT,
-            price_is_fresh INTEGER DEFAULT 0
+            price_is_fresh INTEGER DEFAULT 0,
+            engine TEXT DEFAULT 'LEGACY',
+            strategy TEXT,
+            instrument TEXT,
+            model_id TEXT,
+            model_hash TEXT,
+            data_timestamp TEXT,
+            entry_price_source TEXT,
+            entry_price_timestamp TEXT,
+            entry_price_age_ms INTEGER,
+            quote_freshness TEXT
         )
     """)
     conn.commit()
     conn.close()
 
-def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_type='INTRADAY', explanation=None, source='MANUAL', position_type='NOT_A_POSITION'):
+def save_ml_trade(
+    ticker, is_bullish, entry, sl, tp1, tp2, confidence,
+    trade_type='INTRADAY', explanation=None, source='MANUAL',
+    position_type='NOT_A_POSITION', engine='LEGACY',
+    strategy=None, model_id=None, model_hash=None,
+    data_timestamp=None, instrument=None,
+    entry_price_source=None, entry_price_timestamp=None,
+    entry_price_age_ms=None, quote_freshness=None
+):
     """
     Persists a trade recommendation or position to ml_trade_history.
     
     Args:
-        source: WHO created this record. 'MANUAL' (manual scan), 'AUTOPILOT', or 'BROKER'.
+        source: WHO created this record. 'MANUAL' (manual scan), 'AUTOPILOT', 'BROKER', or 'QLIB_SCANNER'.
         position_type: WHAT this record represents. 'NOT_A_POSITION' (tracked recommendation), 
                        'PAPER_POSITION' (paper position), or 'LIVE_POSITION' (broker-executed).
+        engine: Authoritative source engine. 'LEGACY' (Champion/Ensemble) or 'QLIB' (Microsoft Qlib).
     
     Returns:
         True if record was saved, False if deduplicated (skipped) or disallowed.
@@ -105,13 +134,13 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
             return False
 
         import re
-        if not re.match(r"^[A-Z0-9_\-]{1,20}(\.(NS|BO))?$", clean_ticker):
+        if not re.match(r"^[A-Z0-9_\-&]{1,20}(\.(NS|BO))?$", clean_ticker):
             import logging
             logging.getLogger(__name__).error(f"[save_ml_trade] Invalid ticker format '{ticker}'.")
             return False
 
     # ── HARD FAIL-SAFE: CASH-EQUITY SWING SHORT BAN ──────────────────
-    if trade_type == 'SWING' and not is_bullish:
+    if trade_type == 'SWING' and not is_bullish and engine != 'FNO':
         import logging
         logging.getLogger(__name__).warning(f"[save_ml_trade] Refusing to persist BEARISH SWING trade for {ticker}. Cash shorts disallowed.")
         return False
@@ -129,6 +158,11 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
     p_ts = now.strftime("%H:%M:%S IST")
     p_fresh = 0
 
+    ep_source = entry_price_source or p_source
+    ep_ts = entry_price_timestamp or p_ts
+    ep_age_ms = entry_price_age_ms
+    q_fresh = quote_freshness or ("REAL_TIME" if p_fresh else "DELAYED")
+
     if isinstance(explanation, dict):
         if "reference_price" in explanation:
             ref_price = float(explanation["reference_price"])
@@ -140,14 +174,24 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
             p_ts = str(explanation["price_timestamp"])
         if "price_is_fresh" in explanation:
             p_fresh = 1 if explanation["price_is_fresh"] else 0
+        if "entry_price_source" in explanation and not entry_price_source:
+            ep_source = str(explanation["entry_price_source"])
+        if "entry_price_timestamp" in explanation and not entry_price_timestamp:
+            ep_ts = str(explanation["entry_price_timestamp"])
+        if "entry_price_age_ms" in explanation and entry_price_age_ms is None:
+            ep_age_ms = explanation["entry_price_age_ms"]
+        if "quote_freshness" in explanation and not quote_freshness:
+            q_fresh = str(explanation["quote_freshness"])
 
     # DETERMINISTIC DEDUPLICATION LOGIC:
-    # Check if an active OPEN setup or recommendation already exists for this (ticker, trade_type, direction)
+    # Check if an active OPEN setup or recommendation already exists for this (ticker, trade_type, direction, engine)
     cur = conn.execute("""
         SELECT id, timestamp, confidence FROM ml_trade_history 
-        WHERE ticker = ? AND trade_type = ? AND direction = ? AND (status = 'OPEN' OR outcome = 'OPEN')
+        WHERE ticker = ? AND trade_type = ? AND direction = ? 
+          AND (engine = ? OR (engine IS NULL AND ? = 'LEGACY'))
+          AND (status = 'OPEN' OR outcome = 'OPEN')
         ORDER BY id DESC LIMIT 1
-    """, (ticker, trade_type, direction))
+    """, (ticker, trade_type, direction, engine, engine))
     
     last_trade = cur.fetchone()
     if last_trade:
@@ -164,9 +208,10 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
             conn.execute("""
                 UPDATE ml_trade_history
                 SET confidence = ?, explanation = ?, reference_price = ?, model_candle_close = ?,
-                    price_source = ?, price_timestamp = ?, price_is_fresh = ?
+                    price_source = ?, price_timestamp = ?, price_is_fresh = ?,
+                    entry_price_source = ?, entry_price_timestamp = ?, entry_price_age_ms = ?, quote_freshness = ?
                 WHERE id = ?
-            """, (float(confidence), explanation_str, ref_price, m_close, p_source, p_ts, p_fresh, trade_id))
+            """, (float(confidence), explanation_str, ref_price, m_close, p_source, p_ts, p_fresh, ep_source, ep_ts, ep_age_ms, q_fresh, trade_id))
             conn.commit()
             conn.close()
 
@@ -174,41 +219,46 @@ def save_ml_trade(ticker, is_bullish, entry, sl, tp1, tp2, confidence, trade_typ
                 from app.analytics.master_logger import MasterLogger
                 MasterLogger.log_event(
                     "ML_HISTORY", "DUPLICATE_SUPPRESSED",
-                    f"Suppressed duplicate OPEN setup for {ticker} ({trade_type} {direction}). Updated active setup #{trade_id} (confidence: {last_confidence:.1f}% -> {float(confidence):.1f}%).",
+                    f"Suppressed duplicate OPEN setup for {ticker} ({engine} {trade_type} {direction}). Updated active setup #{trade_id} (confidence: {last_confidence:.1f}% -> {float(confidence):.1f}%).",
                     ticker=ticker,
-                    details={"ticker": ticker, "trade_type": trade_type, "direction": direction, "trade_id": trade_id, "prev_conf": last_confidence, "new_conf": float(confidence)}
+                    details={"ticker": ticker, "trade_type": trade_type, "direction": direction, "trade_id": trade_id, "prev_conf": last_confidence, "new_conf": float(confidence), "engine": engine}
                 )
             except Exception:
                 pass
             return False
 
+    rec_strategy = strategy or trade_type
+    rec_instrument = instrument or ticker
+
     conn.execute("""
         INSERT INTO ml_trade_history (
             timestamp, ticker, direction, entry, sl, tp1, tp2, confidence,
             trade_type, status, outcome, explanation, source, position_type,
-            reference_price, model_candle_close, price_source, price_timestamp, price_is_fresh
+            reference_price, model_candle_close, price_source, price_timestamp, price_is_fresh,
+            engine, strategy, instrument, model_id, model_hash, data_timestamp,
+            entry_price_source, entry_price_timestamp, entry_price_age_ms, quote_freshness
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         timestamp, ticker, direction, float(entry), float(sl), float(tp1), float(tp2),
         float(confidence), trade_type, explanation_str, source, position_type,
-        ref_price, m_close, p_source, p_ts, p_fresh
+        ref_price, m_close, p_source, p_ts, p_fresh,
+        engine, rec_strategy, rec_instrument, model_id, model_hash, data_timestamp or timestamp,
+        ep_source, ep_ts, ep_age_ms, q_fresh
     ))
     conn.commit()
     conn.close()
 
     # Bust evaluation cache immediately so newly saved trades appear instantly
     global _EVAL_CACHE
+    if isinstance(_EVAL_CACHE, dict):
+        _EVAL_CACHE.clear()
     _EVAL_CACHE['data'] = None
     _EVAL_CACHE['timestamp'] = 0
 
     return True
 
-_EVAL_CACHE = {
-    'data': None,
-    'timestamp': 0,
-    'db_path': None
-}
+_EVAL_CACHE = {}
 _EVAL_CACHE_TTL = 60  # 60 seconds cache
 
 _MARKET_DATA_CACHE = {
@@ -217,27 +267,40 @@ _MARKET_DATA_CACHE = {
 }
 _MARKET_DATA_TTL = 600  # 10 minutes cache
 
-def evaluate_ml_history(force_refresh: bool = False):
+def evaluate_ml_history(force_refresh: bool = False, engine: Optional[str] = "LEGACY"):
     """
     Evaluates recorded ML trade history against subsequent market price action.
     Resolved trades are permanently stored in SQLite for instant retrieval.
+    Enforces strict engine boundary (default 'LEGACY' queries only Legacy records).
     """
+    from typing import Optional
     import time as time_module
     epoch_now = time_module.time()
     current_db = get_db_path()
-    if not force_refresh and _EVAL_CACHE['data'] is not None and _EVAL_CACHE.get('db_path') == current_db and (epoch_now - _EVAL_CACHE['timestamp']) < _EVAL_CACHE_TTL:
-        return _EVAL_CACHE['data']
+    cache_key = f"{current_db}_{engine}"
+
+    if not force_refresh and cache_key in _EVAL_CACHE:
+        cached_entry = _EVAL_CACHE[cache_key]
+        if (epoch_now - cached_entry.get('timestamp', 0)) < _EVAL_CACHE_TTL:
+            return cached_entry.get('data', [])
 
     ensure_ml_table()
     conn = sqlite3.connect(current_db, timeout=10.0)
     conn.execute("PRAGMA busy_timeout = 10000;")
-    df_trades = pd.read_sql_query("SELECT * FROM ml_trade_history ORDER BY id DESC", conn)
+
+    # Engine boundary query
+    if engine == "LEGACY":
+        query = "SELECT * FROM ml_trade_history WHERE (engine = 'LEGACY' OR engine IS NULL) ORDER BY id DESC"
+    elif engine == "QLIB":
+        query = "SELECT * FROM ml_trade_history WHERE (engine = 'QLIB' OR source = 'QLIB_SCANNER') ORDER BY id DESC"
+    else:
+        query = "SELECT * FROM ml_trade_history ORDER BY id DESC"
+
+    df_trades = pd.read_sql_query(query, conn)
     conn.close()
     
     if df_trades.empty:
-        _EVAL_CACHE['data'] = []
-        _EVAL_CACHE['timestamp'] = epoch_now
-        _EVAL_CACHE['db_path'] = current_db
+        _EVAL_CACHE[cache_key] = {'data': [], 'timestamp': epoch_now, 'db_path': current_db}
         return []
         
     # Pre-fetch Macro State once for all trades
@@ -264,69 +327,34 @@ def evaluate_ml_history(force_refresh: bool = False):
 
         needed_tickers = [t for t in unresolved_tickers if t not in _MARKET_DATA_CACHE['data']]
         if needed_tickers:
-            # Batch download 60-day 15m candles covering both Intraday and Swing time horizons
-            try:
-                hist = yf.download(needed_tickers, period="60d", interval="15m", progress=False, timeout=10)
-                if len(needed_tickers) == 1:
-                    t = needed_tickers[0]
-                    if hist is not None and not hist.empty:
-                        if isinstance(hist.columns, pd.MultiIndex):
-                            hist.columns = [c[0] for c in hist.columns]
-                        _MARKET_DATA_CACHE['data'][t] = hist
+            from app.data.historical_data_layer import HistoricalDataLayer
+            from app.data.market_provider import fetch_candles
+            for t in needed_tickers:
+                try:
+                    clean_t = t.replace(".NS", "").replace(".BO", "").strip().upper()
+                    df_t = HistoricalDataLayer.get_historical_ohlcv(clean_t, timeframe="15m")
+                    if df_t is None or df_t.empty or len(df_t) < 10:
+                        df_t = fetch_candles(clean_t, interval="15m", period="60d")
+                    if df_t is not None and not df_t.empty:
+                        df_t.columns = [str(c).capitalize() for c in df_t.columns]
+                        _MARKET_DATA_CACHE['data'][t] = df_t
                     else:
                         _MARKET_DATA_CACHE['data'][t] = pd.DataFrame()
-                else:
-                    for ticker in needed_tickers:
-                        if hasattr(hist, 'columns') and 'Close' in hist and ticker in hist['Close']:
-                            df_tick = pd.DataFrame({
-                                'High': hist['High'][ticker],
-                                'Low': hist['Low'][ticker],
-                                'Close': hist['Close'][ticker]
-                            })
-                            _MARKET_DATA_CACHE['data'][ticker] = df_tick
-                        else:
-                            _MARKET_DATA_CACHE['data'][ticker] = pd.DataFrame()
-            except Exception as e:
-                logger.warning(f"yfinance 15m batch download warning: {e}")
-                for ticker in needed_tickers:
-                    if ticker not in _MARKET_DATA_CACHE['data']:
-                        _MARKET_DATA_CACHE['data'][ticker] = pd.DataFrame()
-
-            # For any ticker where 15m returned empty, fallback to recent daily candles
-            empty_tickers = [t for t in needed_tickers if _MARKET_DATA_CACHE['data'].get(t) is None or _MARKET_DATA_CACHE['data'][t].empty]
-            if empty_tickers:
-                try:
-                    hist_daily = yf.download(empty_tickers, period="60d", interval="1d", progress=False, timeout=8)
-                    if len(empty_tickers) == 1:
-                        t = empty_tickers[0]
-                        if hist_daily is not None and not hist_daily.empty:
-                            if isinstance(hist_daily.columns, pd.MultiIndex):
-                                hist_daily.columns = [c[0] for c in hist_daily.columns]
-                            _MARKET_DATA_CACHE['data'][t] = hist_daily
-                    else:
-                        for ticker in empty_tickers:
-                            if hasattr(hist_daily, 'columns') and 'Close' in hist_daily and ticker in hist_daily['Close']:
-                                df_tick = pd.DataFrame({
-                                    'High': hist_daily['High'][ticker],
-                                    'Low': hist_daily['Low'][ticker],
-                                    'Close': hist_daily['Close'][ticker]
-                                })
-                                _MARKET_DATA_CACHE['data'][ticker] = df_tick
                 except Exception as e:
-                    logger.warning(f"yfinance daily fallback warning: {e}")
+                    logger.debug(f"[MLHistory] Candle fetch skipped for {t}: {e}")
+                    _MARKET_DATA_CACHE['data'][t] = pd.DataFrame()
 
             _MARKET_DATA_CACHE['timestamp'] = epoch_now
 
         market_data = _MARKET_DATA_CACHE['data']
 
-        # Pre-fetch live quotes for all unresolved tickers for authoritative fresh LTP
-        from app.data.market_provider import get_live_quote_with_meta
-        for t in unresolved_tickers:
-            try:
-                live_quotes[t] = get_live_quote_with_meta(t)
-            except Exception as e:
-                logger.warning(f"Live quote fetch error for {t}: {e}")
-                live_quotes[t] = None
+        # Pre-fetch live quotes for all unresolved tickers in ONE single bulk batch request
+        from app.data.market_provider import get_bulk_live_quotes_with_meta
+        try:
+            live_quotes = get_bulk_live_quotes_with_meta(unresolved_tickers)
+        except Exception as e:
+            logger.warning(f"Bulk live quote fetch error in evaluate_ml_history: {e}")
+            live_quotes = {}
 
     results = []
     finalized_updates = []
@@ -467,7 +495,9 @@ def evaluate_ml_history(force_refresh: bool = False):
                             close = float(f_row[c_col]) if c_col in f_row else raw_entry
                             t_time = timestamp_idx.replace(tzinfo=None) if hasattr(timestamp_idx, 'replace') else pd.to_datetime(timestamp_idx).tz_localize(None)
 
-                            if direction == "BULLISH":
+                            is_bullish_structure = (tp1 > sl) if (tp1 and sl and tp1 != sl) else (direction in ("BULLISH", "BUY", "LONG"))
+
+                            if is_bullish_structure:
                                 if low <= sl:
                                     outcome = "SL HIT"
                                     exit_price_val = sl
@@ -482,7 +512,7 @@ def evaluate_ml_history(force_refresh: bool = False):
                                     ideal_profit_pct = ((tp1 - raw_entry) / raw_entry) * 100
                                     profit_pct = ((tp1 - effective_entry) / effective_entry) * 100
                                     break
-                            else:  # BEARISH
+                            else:  # Short structure (SL > Entry > TP)
                                 if high >= sl:
                                     outcome = "SL HIT"
                                     exit_price_val = sl
@@ -504,7 +534,7 @@ def evaluate_ml_history(force_refresh: bool = False):
                                     outcome = "SQUARED OFF (3:15 PM)"
                                     exit_price_val = close
                                     exit_time_val = str(t_time)
-                                    if direction == "BULLISH":
+                                    if is_bullish_structure:
                                         ideal_profit_pct = ((close - raw_entry) / raw_entry) * 100
                                         profit_pct = ((close - effective_entry) / effective_entry) * 100
                                     else:
@@ -512,47 +542,47 @@ def evaluate_ml_history(force_refresh: bool = False):
                                         profit_pct = ((effective_entry - close) / effective_entry) * 100
                                     break
 
-                        # If still OPEN after candle traversal, use fresh LTP for mark-to-market and live breach check
-                        if outcome == "OPEN":
-                            if not (quote and quote.get("price") and float(quote["price"]) > 0):
-                                current_price = float(df_future.iloc[-1][c_col]) if c_col in df_future.columns else raw_entry
-                                price_source_val = "Candle Close"
-                                price_timestamp_val = str(df_future.index[-1])
-                                price_is_fresh_val = False
+                        if outcome == "OPEN" and not (quote and quote.get("price") and float(quote["price"]) > 0):
+                            current_price = float(df_future.iloc[-1][c_col]) if c_col in df_future.columns else raw_entry
+                            price_source_val = "Candle Close"
+                            price_timestamp_val = str(df_future.index[-1])
+                            price_is_fresh_val = False
 
-                            # Real-time SL/TP breach check on live LTP
-                            if direction == "BULLISH":
-                                if current_price <= sl:
-                                    outcome = "SL HIT"
-                                    exit_price_val = sl
-                                    exit_time_val = datetime.now().isoformat()
-                                    ideal_profit_pct = ((sl - raw_entry) / raw_entry) * 100
-                                    profit_pct = ((sl - effective_entry) / effective_entry) * 100
-                                elif current_price >= tp1:
-                                    outcome = "TARGET MET"
-                                    exit_price_val = tp1
-                                    exit_time_val = datetime.now().isoformat()
-                                    ideal_profit_pct = ((tp1 - raw_entry) / raw_entry) * 100
-                                    profit_pct = ((tp1 - effective_entry) / effective_entry) * 100
-                                else:
-                                    ideal_profit_pct = ((current_price - raw_entry) / raw_entry) * 100
-                                    profit_pct = ((current_price - effective_entry) / effective_entry) * 100
-                            else:  # BEARISH
-                                if current_price >= sl:
-                                    outcome = "SL HIT"
-                                    exit_price_val = sl
-                                    exit_time_val = datetime.now().isoformat()
-                                    ideal_profit_pct = ((raw_entry - sl) / raw_entry) * 100
-                                    profit_pct = ((effective_entry - sl) / effective_entry) * 100
-                                elif current_price <= tp1:
-                                    outcome = "TARGET MET"
-                                    exit_price_val = tp1
-                                    exit_time_val = datetime.now().isoformat()
-                                    ideal_profit_pct = ((raw_entry - tp1) / raw_entry) * 100
-                                    profit_pct = ((effective_entry - tp1) / effective_entry) * 100
-                                else:
-                                    ideal_profit_pct = ((raw_entry - current_price) / raw_entry) * 100
-                                    profit_pct = ((effective_entry - current_price) / effective_entry) * 100
+            # Real-time SL/TP breach check on live LTP or latest price (applies even if df_future is empty)
+            if outcome == "OPEN":
+                is_bullish_structure = (tp1 > sl) if (tp1 and sl and tp1 != sl) else (direction in ("BULLISH", "BUY", "LONG"))
+                if is_bullish_structure:
+                    if current_price <= sl:
+                        outcome = "SL HIT"
+                        exit_price_val = sl
+                        exit_time_val = datetime.now().isoformat()
+                        ideal_profit_pct = ((sl - raw_entry) / raw_entry) * 100
+                        profit_pct = ((sl - effective_entry) / effective_entry) * 100
+                    elif current_price >= tp1:
+                        outcome = "TARGET MET"
+                        exit_price_val = tp1
+                        exit_time_val = datetime.now().isoformat()
+                        ideal_profit_pct = ((tp1 - raw_entry) / raw_entry) * 100
+                        profit_pct = ((tp1 - effective_entry) / effective_entry) * 100
+                    else:
+                        ideal_profit_pct = ((current_price - raw_entry) / raw_entry) * 100
+                        profit_pct = ((current_price - effective_entry) / effective_entry) * 100
+                else:  # Short structure
+                    if current_price >= sl:
+                        outcome = "SL HIT"
+                        exit_price_val = sl
+                        exit_time_val = datetime.now().isoformat()
+                        ideal_profit_pct = ((raw_entry - sl) / raw_entry) * 100
+                        profit_pct = ((effective_entry - sl) / effective_entry) * 100
+                    elif current_price <= tp1:
+                        outcome = "TARGET MET"
+                        exit_price_val = tp1
+                        exit_time_val = datetime.now().isoformat()
+                        ideal_profit_pct = ((raw_entry - tp1) / raw_entry) * 100
+                        profit_pct = ((effective_entry - tp1) / effective_entry) * 100
+                    else:
+                        ideal_profit_pct = ((raw_entry - current_price) / raw_entry) * 100
+                        profit_pct = ((effective_entry - current_price) / effective_entry) * 100
 
             now_dt = datetime.now()
             # If Intraday and entry occurred during an actual trading session that has since closed
@@ -568,10 +598,16 @@ def evaluate_ml_history(force_refresh: bool = False):
             # ── SWING 5-TRADING-DAY HORIZON EXPIRATION ───────────────────
             # Swing trades that remain unresolved after 5 trading days are closed
             if trade_type == 'SWING' and outcome == 'OPEN':
-                try:
-                    trading_days_elapsed = int(np.busday_count(entry_time.date(), now_dt.date()))
-                except Exception:
-                    trading_days_elapsed = max(0, (now_dt.date() - entry_time.date()).days * 5 // 7)
+                trading_days_elapsed = 0
+                if pd.notna(entry_time) and hasattr(entry_time, 'date'):
+                    try:
+                        from app.analytics.nse_holidays import count_nse_trading_days
+                        trading_days_elapsed = count_nse_trading_days(entry_time.date(), now_dt.date())
+                    except Exception:
+                        try:
+                            trading_days_elapsed = max(0, (now_dt.date() - entry_time.date()).days * 5 // 7)
+                        except Exception:
+                            trading_days_elapsed = 0
 
                 if trading_days_elapsed >= 5:
                     outcome = "SWING_HORIZON_REACHED"
@@ -583,6 +619,53 @@ def evaluate_ml_history(force_refresh: bool = False):
                     else:
                         ideal_profit_pct = ((raw_entry - current_price) / raw_entry) * 100
                         profit_pct = ((effective_entry - current_price) / effective_entry) * 100
+
+            # ── FNO CONTRACT EXPIRY MANAGEMENT ───────────────────────────
+            if trade_type == 'FNO' and outcome == 'OPEN':
+                fno_info = None
+                if explanation_data and isinstance(explanation_data, dict):
+                    fno_info = explanation_data.get('fno_contract_info')
+
+                expiry_str = fno_info.get('expiry') if fno_info else None
+                if expiry_str:
+                    try:
+                        exp_date = None
+                        for fmt in ("%d-%b-%Y", "%Y-%m-%d", "%d-%b-%y"):
+                            try:
+                                exp_date = datetime.strptime(expiry_str.strip(), fmt).date()
+                                break
+                            except Exception:
+                                pass
+
+                        if exp_date:
+                            # In India, F&O equity contracts expire on expiry day at 15:30 IST
+                            is_past_expiry = (now_dt.date() > exp_date) or (
+                                now_dt.date() == exp_date and (now_dt.hour > 15 or (now_dt.hour == 15 and now_dt.minute >= 30))
+                            )
+                            if is_past_expiry:
+                                strike = float(fno_info.get('strike') or 0.0)
+                                opt_type = str(fno_info.get('option_type', 'PE')).upper()
+                                spot_val = float(fno_info.get('spot_price') or current_price or 0.0)
+
+                                if spot_val > 0 and strike > 0:
+                                    # Intrinsic value at expiry
+                                    if opt_type == 'CE':
+                                        intrinsic = max(0.0, spot_val - strike)
+                                    else:
+                                        intrinsic = max(0.0, strike - spot_val)
+                                    outcome = "EXPIRED"
+                                    exit_price_val = round(intrinsic, 2)
+                                    exit_time_val = now_dt.isoformat()
+                                    profit_pct = round(((exit_price_val - effective_entry) / effective_entry) * 100.0, 2)
+                                    ideal_profit_pct = round(((exit_price_val - raw_entry) / raw_entry) * 100.0, 2)
+                                else:
+                                    outcome = "EXPIRY DATA UNAVAILABLE"
+                                    exit_price_val = raw_entry
+                                    exit_time_val = now_dt.isoformat()
+                                    profit_pct = 0.0
+                                    ideal_profit_pct = 0.0
+                    except Exception:
+                        pass
 
             slippage_drag = round(ideal_profit_pct - profit_pct, 2)
 
@@ -673,7 +756,7 @@ def evaluate_ml_history(force_refresh: bool = False):
 
         results.append({
             "id": trade_id,
-            "timestamp": entry_time_str[:16].replace("T", " "),
+            "timestamp": entry_time_str[:16].replace("T", " ") if entry_time_str else "",
             "ticker": ticker,
             "direction": direction,
             "entry": clean_raw_entry,
@@ -702,7 +785,13 @@ def evaluate_ml_history(force_refresh: bool = False):
             "position_type": str(row.get('position_type', 'NOT_A_POSITION')) if pd.notna(row.get('position_type')) else 'NOT_A_POSITION',
             "tightened_sl": _clean_optional_float(tightened_sl_val),
             "ai_guard_action": ai_guard_action_val,
-            "risk_level": current_risk_level
+            "risk_level": current_risk_level,
+            "engine": str(row.get('engine', 'LEGACY')) if pd.notna(row.get('engine')) else 'LEGACY',
+            "strategy": str(row.get('strategy', '')) if pd.notna(row.get('strategy')) else trade_type,
+            "instrument": str(row.get('instrument', ticker)) if pd.notna(row.get('instrument')) else ticker,
+            "model_id": str(row.get('model_id', '')) if pd.notna(row.get('model_id')) else '',
+            "model_hash": str(row.get('model_hash', '')) if pd.notna(row.get('model_hash')) else '',
+            "data_timestamp": str(row.get('data_timestamp', '')) if pd.notna(row.get('data_timestamp')) else ''
         })
 
     # 3. Persist finalized trades into SQLite in a single atomic batch
@@ -745,9 +834,7 @@ def evaluate_ml_history(force_refresh: bool = False):
         return obj
 
     clean_results = _sanitize(results)
-    _EVAL_CACHE['data'] = clean_results
-    _EVAL_CACHE['timestamp'] = time_module.time()
-    _EVAL_CACHE['db_path'] = current_db
+    _EVAL_CACHE[cache_key] = {'data': clean_results, 'timestamp': time_module.time(), 'db_path': current_db}
     return clean_results
 
 
@@ -798,14 +885,13 @@ def save_ml_training_data(ticker, df):
     # Convert datetime to string if not already
     save_df['datetime'] = save_df['datetime'].astype(str)
     
-    # Write to temp
-    save_df.to_sql('temp_ml_data', conn, if_exists='replace', index=False)
-    
-    # Insert or replace
-    conn.execute("""
-        INSERT OR REPLACE INTO ml_training_data (datetime, ticker, close, rsi, macd, macd_diff, adx, atr, returns, target, source, hoard_timestamp)
-        SELECT datetime, ticker, close, rsi, macd, macd_diff, adx, atr, returns, target, source, hoard_timestamp FROM temp_ml_data
-    """)
+    # Direct parameterized thread-safe batch insert without shared temp table collisions
+    rows = save_df[['datetime', 'ticker', 'close', 'rsi', 'macd', 'macd_diff', 'adx', 'atr', 'returns', 'target', 'source', 'hoard_timestamp']].values.tolist()
+    conn.executemany("""
+        INSERT OR REPLACE INTO ml_training_data (
+            datetime, ticker, close, rsi, macd, macd_diff, adx, atr, returns, target, source, hoard_timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, rows)
     conn.commit()
     conn.close()
 

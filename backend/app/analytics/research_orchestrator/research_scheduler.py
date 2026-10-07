@@ -250,52 +250,110 @@ class ResearchScheduler:
             # ── STAGE 1: DATA_LOADING ─────────────────────────────────────
             transition_stage(ResearchStage.DATA_LOADING)
             tickers = resolve_universe_tickers(mission.universe)
-            time.sleep(0.15)  # Verifiable boundary tick
+            from app.data.historical_data_layer import HistoricalDataLayer
+            raw_dfs = {}
+            for t in tickers[:35]:  # Bound universe to top symbols for memory and runtime efficiency
+                try:
+                    df_t = HistoricalDataLayer.get_historical_ohlcv(t, timeframe="1d")
+                    if df_t is not None and len(df_t) >= 80:
+                        df_t = df_t.dropna(how='all')
+                        df_t.columns = [str(c).lower() for c in df_t.columns]
+                        if 'close' in df_t.columns and len(df_t[df_t['close'] > 0]) >= 80:
+                            raw_dfs[t] = df_t[df_t['close'] > 0].copy()
+                except Exception:
+                    continue
+
+            time.sleep(0.15)
             telemetry_broadcaster.emit(
                 mission_id=mission.mission_id,
                 event_type=TelemetryEventType.STAGE_PROGRESS.value,
                 experiment_id=exp_id,
                 worker_id=worker_id,
                 stage=ResearchStage.DATA_LOADING.value,
-                stage_progress={"current": len(tickers), "total": len(tickers), "unit": "tickers", "pct": 100.0}
+                stage_progress={"current": len(raw_dfs), "total": len(tickers), "unit": "tickers", "pct": 100.0}
             )
 
             # ── STAGE 2: DATA_VALIDATION ──────────────────────────────────
             transition_stage(ResearchStage.DATA_VALIDATION)
-            if not tickers:
-                raise ValueError(f"Universe {mission.universe} resolved to 0 tickers.")
+            if not raw_dfs:
+                raise ValueError(f"Universe {mission.universe} yielded 0 valid tickers with sufficient historical bars in SQLite.")
             time.sleep(0.12)
 
             # ── STAGE 3: FEATURE_GENERATION ───────────────────────────────
             transition_stage(ResearchStage.FEATURE_GENERATION)
             feature_family = changes.get("feature_family", "Alpha158")
+            from app.analytics.qlib_discovery.alpha158_engine import compute_alpha158_features
+            from app.analytics.qlib_discovery.alpha360_engine import compute_alpha360_features
+
+            feat_dfs = {}
+            feature_names = []
+            for t, df_t in raw_dfs.items():
+                try:
+                    if str(feature_family).lower() == "alpha360":
+                        f_df = compute_alpha360_features(df_t)
+                    else:
+                        f_df = compute_alpha158_features(df_t)
+                    if f_df is not None and not f_df.empty:
+                        feat_dfs[t] = f_df
+                        if not feature_names:
+                            feature_names = list(f_df.columns)
+                except Exception:
+                    continue
+
+            if not feat_dfs or not feature_names:
+                raise ValueError(f"Feature generation ({feature_family}) yielded zero valid feature sets.")
             time.sleep(0.18)
 
             # ── STAGE 4: TARGET_GENERATION ────────────────────────────────
             transition_stage(ResearchStage.TARGET_GENERATION)
-            horizon = changes.get("horizon_days", 10)
-            seed = cfg.get("seed", 42)
-            np.random.seed(seed)
-            n_val_days = 500
-            dates = pd.date_range(mission.data_boundaries.get("val_start", "2021-09-05"), periods=n_val_days, freq="B")
+            horizon = int(changes.get("horizon_days", 10))
+            seed = int(cfg.get("seed", 42))
+
+            train_X_list, train_y_list = [], []
+            val_X_list, val_y_list, val_ret_list, val_date_list, val_ticker_list = [], [], [], [], []
+
+            for t, df_t in raw_dfs.items():
+                f_df = feat_dfs.get(t)
+                if f_df is None or f_df.empty:
+                    continue
+                fwd_ret = (df_t['close'].shift(-horizon) / df_t['close'] - 1.0).fillna(0.0)
+                target = (fwd_ret > 0).astype(int)
+
+                aligned = pd.concat([f_df, pd.DataFrame({'target': target, 'fwd_ret': fwd_ret}, index=df_t.index)], axis=1).dropna()
+                if len(aligned) < 60:
+                    continue
+
+                split_pt = int(len(aligned) * 0.70)
+                train_slice = aligned.iloc[:split_pt]
+                val_slice = aligned.iloc[split_pt:]
+
+                train_X_list.append(train_slice[feature_names].values)
+                train_y_list.append(train_slice['target'].values)
+
+                val_X_list.append(val_slice[feature_names].values)
+                val_y_list.append(val_slice['target'].values)
+                val_ret_list.append(val_slice['fwd_ret'].values)
+                val_date_list.extend(val_slice.index)
+                val_ticker_list.extend([t] * len(val_slice))
+
+            if not train_X_list or not val_X_list:
+                raise ValueError(f"Insufficient aligned training/validation observations across {len(raw_dfs)} tickers.")
+
+            X_train = np.nan_to_num(np.vstack(train_X_list))
+            y_train = np.concatenate(train_y_list)
+            X_val = np.nan_to_num(np.vstack(val_X_list))
+            y_val = np.concatenate(val_y_list)
+            fwd_ret_val = np.concatenate(val_ret_list)
             time.sleep(0.12)
 
             # ── STAGE 5: MODEL_TRAINING ───────────────────────────────────
             transition_stage(ResearchStage.MODEL_TRAINING)
             model_name = changes.get("model_family", "LightGBM")
-            alpha_boost = 0.0003 if "DoubleEnsemble" in model_name else 0.0001
-            if horizon >= 15:
-                alpha_boost += 0.0001
-            
-            # Train a genuine quantitative estimator with deterministic seed
             trained_model = None
             try:
                 from app.analytics.qlib_discovery.model_trainer import create_model
                 trained_model = create_model(model_name, random_state=seed)
-                rng = np.random.RandomState(seed)
-                X_synth = rng.normal(0, 1, (100, 5))
-                y_synth = (X_synth[:, 0] + X_synth[:, 1] > 0).astype(int)
-                trained_model.fit(X_synth, y_synth)
+                trained_model.fit(X_train, y_train)
             except Exception as train_err:
                 logger.warning(f"[Scheduler] Model training failed for {model_name}: {train_err}")
                 trained_model = None
@@ -303,12 +361,17 @@ class ResearchScheduler:
 
             # ── STAGE 6: VALIDATION ───────────────────────────────────────
             transition_stage(ResearchStage.VALIDATION)
-            dummy_scores = pd.DataFrame({
-                "date": [1] * 50,
-                "score": np.random.normal(0, 1, 50),
-                "target": np.random.normal(0, 1, 50) + alpha_boost * 100
+            if trained_model is None:
+                raise ValueError(f"Model training failed for {model_name}; cannot execute empirical validation.")
+
+            val_probs = trained_model.predict_proba(X_val)[:, 1]
+            val_scores_df = pd.DataFrame({
+                "date": val_date_list,
+                "ticker": val_ticker_list,
+                "score": val_probs,
+                "target": fwd_ret_val
             })
-            sig_metrics = ResearchMetricsEngine.compute_signal_metrics(dummy_scores, "target", "score")
+            sig_metrics = ResearchMetricsEngine.compute_signal_metrics(val_scores_df, "target", "score")
             time.sleep(0.15)
             telemetry_broadcaster.emit(
                 mission_id=mission.mission_id,
@@ -321,22 +384,32 @@ class ResearchScheduler:
 
             # ── STAGE 7: PORTFOLIO_SIMULATION ─────────────────────────────
             transition_stage(ResearchStage.PORTFOLIO_SIMULATION)
-            entry_k = cfg.get("entry_top_k", 5)
-            exit_k = cfg.get("exit_top_k", 15)
+            entry_k = int(cfg.get("entry_top_k", 5))
+            exit_k = int(cfg.get("exit_top_k", 15))
+
+            daily_groups = val_scores_df.groupby("date")
+            dates_sorted = sorted(daily_groups.groups.keys())
+
             daily_returns_list = []
             trades_simulated = []
-            for i, d in enumerate(dates):
-                mkt_ret = np.random.normal(0.0005, 0.012)
-                alpha = np.random.normal(alpha_boost, 0.004)
-                port_ret = mkt_ret + alpha
-                daily_returns_list.append(port_ret)
-                if i % horizon == 0:
-                    trades_simulated.append({
-                        "trade_id": f"tr_{i}",
-                        "pnl_pct": (np.prod(1.0 + np.array(daily_returns_list[-horizon:])) - 1.0) * 100.0
-                    })
-            returns_series = pd.Series(daily_returns_list, index=dates)
 
+            for d in dates_sorted:
+                grp = daily_groups.get_group(d)
+                top_stocks = grp.sort_values("score", ascending=False).head(entry_k)
+                mean_ret = float(top_stocks["target"].mean() / max(horizon, 1))
+                daily_returns_list.append(mean_ret)
+
+            for i in range(0, len(dates_sorted), max(1, horizon)):
+                window_returns = daily_returns_list[i : i + horizon]
+                period_ret = float(np.prod(1.0 + np.array(window_returns)) - 1.0) * 100.0
+                trades_simulated.append({
+                    "trade_id": f"tr_{i}",
+                    "pnl_pct": round(period_ret, 3),
+                    "entry_date": str(dates_sorted[i]),
+                    "exit_date": str(dates_sorted[min(i + horizon - 1, len(dates_sorted) - 1)])
+                })
+
+            returns_series = pd.Series(daily_returns_list, index=dates_sorted)
             base_turnover = 2400.0 / (horizon / 5.0)
             turnover_annual = base_turnover * (entry_k / float(exit_k)) if exit_k > entry_k else base_turnover
 
@@ -354,7 +427,7 @@ class ResearchScheduler:
 
             # ── STAGE 9: WALK_FORWARD ─────────────────────────────────────
             transition_stage(ResearchStage.WALK_FORWARD)
-            chunk_size = n_val_days // 5
+            chunk_size = max(1, len(returns_series) // 5)
             wf_positive = 0
             for w in range(5):
                 sub = returns_series.iloc[w * chunk_size : (w + 1) * chunk_size]
@@ -401,12 +474,12 @@ class ResearchScheduler:
                     raise ValueError(f"Cannot freeze candidate for experiment {exp_id}: Genuine trained model object is missing.")
                 
                 from app.analytics.research_orchestrator.candidate_vault import ResearchModelArtifact
-                feature_names = [f"f_{i}" for i in range(5)]
+                candidate_feature_schema = feature_names if feature_names else [f"f_{i}" for i in range(X_train.shape[1])]
                 model_artifact = ResearchModelArtifact(
                     artifact_type="RESEARCH_MODEL",
                     model_type=model_name,
                     model_object=trained_model,
-                    feature_schema=feature_names,
+                    feature_schema=candidate_feature_schema,
                     target_definition=f"Return horizon {changes.get('horizon_days', 10)}d",
                     training_period={"start": mission.data_boundaries.get("train_start", "2020-01-01"), "end": mission.data_boundaries.get("train_end", "2021-09-04")},
                     validation_period={"start": mission.data_boundaries.get("val_start", "2021-09-05"), "end": mission.data_boundaries.get("val_end", "2023-01-01")},

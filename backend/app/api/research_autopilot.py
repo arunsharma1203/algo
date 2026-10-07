@@ -111,6 +111,9 @@ class UniverseTransferRequest(BaseModel):
     candidate_id: str
     target_universe: str = "RESEARCH_100"
 
+class EvaluateCandidateRequest(BaseModel):
+    candidate_id: str
+
 @router.get("/status")
 def get_research_status(mission_id: Optional[str] = None):
     """Returns production safety locks, active mission info, and research metrics."""
@@ -292,6 +295,18 @@ def run_universe_transfer_api(req: UniverseTransferRequest):
     except Exception as e:
         logger.error(f"[ResearchAPI] Universe transfer error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/vault/evaluate")
+def evaluate_candidate_api(req: EvaluateCandidateRequest):
+    """Triggers live forward Out-of-Sample evaluation against accumulated post-cutoff bars."""
+    try:
+        res = orchestrator.run_oos_evaluation(req.candidate_id)
+        return {"status": "success", "data": res}
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"[ResearchAPI] OOS Evaluation error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/mission/{mission_id}/runtime")
 def get_mission_runtime_api(mission_id: str):

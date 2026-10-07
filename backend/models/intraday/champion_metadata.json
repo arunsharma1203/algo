@@ -1,26 +1,49 @@
 {
-  "version": "v1.0-champion",
   "timeframe": "intraday",
-  "status": "BASELINE_ACTIVE",
-  "champion_f1": 0.685,
+  "champion_f1": 0.3275,
   "validation_metrics": {
-    "f1": 0.685,
-    "precision": 0.67,
-    "recall": 0.7,
-    "sharpe_ratio": 1.45,
-    "max_drawdown_pct": 8.5,
-    "win_rate_pct": 58.2
+    "f1": 0.3275,
+    "precision": 0.4163,
+    "recall": 0.2715,
+    "sharpe_ratio": 1.59,
+    "win_rate_pct": 50.0,
+    "profit_factor": 1.27,
+    "max_drawdown_pct": 7.85,
+    "trade_count": 154
   },
   "features": [
     "rsi",
     "macd",
     "macd_diff",
     "adx",
-    "returns"
+    "returns",
+    "vwap_deviation",
+    "orb_breakout",
+    "ema_alignment",
+    "volume_surge",
+    "time_of_day"
   ],
-  "target_definition": "Binary return > 0 on next 15m candle",
-  "last_retrained": "2026-08-29T17:34:57.200011",
-  "total_promotions": 1,
-  "data_source": "yfinance",
-  "hyperparameter_source": "optuna_intraday_best_params.json"
+  "target_definition": "Triple-Barrier (+1.5 ATR TP, -1.0 ATR SL, 12-bar horizon)",
+  "samples_trained": 51711,
+  "last_retrained": "2026-10-04T23:14:43.632077",
+  "hyperparameters": {
+    "status": "SUCCESS",
+    "timeframe": "intraday",
+    "rf_n_estimators": 80,
+    "rf_max_depth": 5,
+    "rf_min_samples_split": 5,
+    "gb_n_estimators": 80,
+    "gb_learning_rate": 0.08,
+    "gb_max_depth": 3,
+    "svm_c": 0.8,
+    "best_f1_score": 0.3603,
+    "best_accuracy": 0.6,
+    "n_trials": 20,
+    "last_tuned": "2026-09-20T13:30:00.000000",
+    "validation_method": "TimeSeriesSplit(n_splits=4, walk_forward=True, purged=True)"
+  },
+  "version": "v1.2-champion",
+  "promoted_at": "2026-10-04T23:28:12.995911",
+  "total_promotions": 3,
+  "previous_version": "v1.1-champion"
 }

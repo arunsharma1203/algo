@@ -625,7 +625,18 @@ class ResearchOrchestrator:
             "newly_frozen_candidates": frozen_candidates
         }
 
+    @classmethod
+    def evaluate_oos_candidate_live(cls, candidate_id: str) -> Dict[str, Any]:
+        """
+        Classmethod entrypoint invoked by IntradayMarketDaemon to perform
+        live Out-Of-Sample forward evaluation of frozen research candidates
+        against genuinely new market bars.
+        """
+        instance = cls()
+        return instance.run_oos_evaluation(candidate_id)
+
     def run_oos_evaluation(self, candidate_id: str) -> Dict[str, Any]:
+
         """
         Live OOS evaluation against genuinely new post-cutoff daily bars.
 

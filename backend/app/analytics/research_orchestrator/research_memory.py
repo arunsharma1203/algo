@@ -1208,8 +1208,13 @@ class ResearchMemory:
             "completed_locked_oos_bars": oos_bar_metrics["completed_locked_oos_bars"],
             "oos_completion_pct": oos_bar_metrics["oos_completion_pct"],
             "future_forward_oos_bars": oos_bar_metrics["future_forward_oos_bars"],
-            "completed_oos_trades": oos_bar_metrics["completed_oos_trades"],
-            "oos_status": candidate_status if candidate_status != "NONE (NOT_FROZEN)" else oos_bar_metrics["oos_status"],
+            # OOS Status: if evaluated to OOS_PASSED or OOS_FAILED, maintain that definitive verdict.
+            # If candidate is in initial OOS_PENDING state but new forward bars exist post-cutoff,
+            # transition status to FORWARD_ACTIVE so operators can see data has accumulated.
+            "oos_status": (
+                candidate_status if candidate_status in ("OOS_PASSED", "OOS_FAILED")
+                else (oos_bar_metrics["oos_status"] if candidate_status == "OOS_PENDING" else (candidate_status if candidate_status != "NONE (NOT_FROZEN)" else oos_bar_metrics["oos_status"]))
+            ),
 
             # Performance Metrics
             "metrics": metrics_payload,

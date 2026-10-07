@@ -91,7 +91,7 @@ class ModelManager:
             ),
             "last_retrained": datetime.now().isoformat(),
             "total_promotions": 1,
-            "data_source": "yfinance",
+            "data_source": "upstox",
         }
 
     get_champion_metadata = load_champion_metadata

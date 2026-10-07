@@ -199,8 +199,9 @@ class TestMilestone3SmartScanner(unittest.TestCase):
         self.assertEqual(heat_status.get("actual_positions"), 0)
 
     def test_11_database_row_counts_preserved(self):
-        canonical_db = get_db_path()
-        conn = sqlite3.connect(canonical_db)
+        from app.data.database import _CANONICAL_DB_PATH
+        canonical_db = _CANONICAL_DB_PATH if os.path.exists(_CANONICAL_DB_PATH) else get_db_path()
+        conn = sqlite3.connect(f"file:{canonical_db}?mode=ro", uri=True)
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM ml_trade_history")
         rows = c.fetchone()[0]

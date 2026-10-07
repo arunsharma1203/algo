@@ -246,6 +246,35 @@ class CandidateVault:
         }
 
     @classmethod
+    def resolve_artifact_path(cls, artifact_path: Optional[str]) -> Optional[str]:
+        """Resolves artifact path robustly across workspace root and backend directory."""
+        if not artifact_path:
+            return None
+        if os.path.isabs(artifact_path) and os.path.exists(artifact_path):
+            return artifact_path
+        # Check direct relative path
+        if os.path.exists(artifact_path):
+            return os.path.abspath(artifact_path)
+        # Check relative to BASE_DIR
+        base_rel = os.path.join(BASE_DIR, artifact_path)
+        if os.path.exists(base_rel):
+            return base_rel
+        # Check with 'backend/' prefix stripped
+        if artifact_path.startswith("backend/"):
+            stripped = artifact_path[len("backend/"):]
+            if os.path.exists(stripped):
+                return os.path.abspath(stripped)
+            stripped_base = os.path.join(BASE_DIR, stripped)
+            if os.path.exists(stripped_base):
+                return stripped_base
+        # Check inside VAULT_STORAGE_DIR by basename
+        base_name = os.path.basename(artifact_path)
+        vault_direct = os.path.join(VAULT_STORAGE_DIR, base_name)
+        if os.path.exists(vault_direct):
+            return vault_direct
+        return artifact_path
+
+    @classmethod
     def load_artifact(cls, candidate_id: str) -> Any:
         """
         Loads and verifies the serialized artifact for a given candidate.
@@ -255,9 +284,10 @@ class CandidateVault:
         if not cand:
             raise ValueError(f"Candidate {candidate_id} not found in vault.")
 
-        artifact_path = cand.get("artifact_path")
+        raw_path = cand.get("artifact_path")
+        artifact_path = cls.resolve_artifact_path(raw_path)
         if not artifact_path or not os.path.exists(artifact_path):
-            raise FileNotFoundError(f"Artifact file missing on disk for candidate {candidate_id}: {artifact_path}")
+            raise FileNotFoundError(f"Artifact file missing on disk for candidate {candidate_id}: {raw_path}")
 
         # Compute SHA-256
         h = hashlib.sha256()
@@ -296,7 +326,8 @@ class CandidateVault:
         res["universe_transfer"] = json.loads(res["universe_transfer_json"]) if res.get("universe_transfer_json") else {}
 
         # Audit artifact on disk for legacy vs genuine classification
-        art_path = res.get("artifact_path")
+        raw_art_path = res.get("artifact_path")
+        art_path = cls.resolve_artifact_path(raw_art_path)
         res["artifact_classification"] = "UNKNOWN"
         res["is_production_eligible"] = False
 

@@ -34,10 +34,14 @@ class TemporalSplitter:
     def partition_dates(
         dates: List[str],
         train_ratio: float = 0.70,
-        val_ratio: float = 0.15
-    ) -> Dict[str, Tuple[str, str]]:
+        val_ratio: float = 0.15,
+        purge_bars: int = 5,
+        embargo_bars: int = 2
+    ) -> Dict[str, Any]:
         """
-        Splits sorted list of date strings into non-overlapping chronological segments.
+        Splits sorted list of date strings into non-overlapping chronological segments,
+        incorporating label horizon purge bars (to prevent forward label lookahead from train to valid)
+        and embargo bars (between valid and test).
         """
         if not dates or len(dates) < 30:
             raise TemporalSplitError(f"Insufficient dates for temporal partitioning: {len(dates) if dates else 0} < 30")
@@ -45,15 +49,26 @@ class TemporalSplitter:
         sorted_dates = sorted(list(set(dates)))
         n = len(sorted_dates)
 
-        train_end_idx = int(n * train_ratio)
-        val_end_idx = int(n * (train_ratio + val_ratio))
+        raw_train_end_idx = int(n * train_ratio)
+        raw_val_end_idx = int(n * (train_ratio + val_ratio))
 
-        if train_end_idx < 10 or (val_end_idx - train_end_idx) < 5 or (n - val_end_idx) < 5:
+        # Apply purge: remove trailing `purge_bars` from train to ensure forward labels (e.g. 5-day horizon)
+        # do not overlap with validation segment
+        effective_train_end_idx = max(5, raw_train_end_idx - max(0, purge_bars))
+        val_start_idx = raw_train_end_idx
+
+        # Apply embargo: remove trailing `embargo_bars` from validation before test segment
+        effective_val_end_idx = max(val_start_idx + 3, raw_val_end_idx - max(0, embargo_bars))
+        oos_start_idx = raw_val_end_idx
+
+        if effective_train_end_idx < 5 or (effective_val_end_idx - val_start_idx) < 3 or (n - oos_start_idx) < 3:
             raise TemporalSplitError("Temporal split partitions are too small. Need more historical data.")
 
-        train_segment = (sorted_dates[0], sorted_dates[train_end_idx - 1])
-        val_segment = (sorted_dates[train_end_idx], sorted_dates[val_end_idx - 1])
-        oos_segment = (sorted_dates[val_end_idx], sorted_dates[-1])
+        train_segment = (sorted_dates[0], sorted_dates[effective_train_end_idx - 1])
+        purged_segment = (sorted_dates[effective_train_end_idx], sorted_dates[val_start_idx - 1]) if val_start_idx > effective_train_end_idx else None
+        val_segment = (sorted_dates[val_start_idx], sorted_dates[effective_val_end_idx - 1])
+        embargo_segment = (sorted_dates[effective_val_end_idx], sorted_dates[oos_start_idx - 1]) if oos_start_idx > effective_val_end_idx else None
+        oos_segment = (sorted_dates[oos_start_idx], sorted_dates[-1])
 
         # Verify strict monotonicity
         t_end = pd.to_datetime(train_segment[1])
@@ -70,7 +85,11 @@ class TemporalSplitter:
         return {
             "train": train_segment,
             "valid": val_segment,
-            "test": oos_segment
+            "test": oos_segment,
+            "purge_bars": purge_bars,
+            "embargo_bars": embargo_bars,
+            "purged_range": purged_segment,
+            "embargo_range": embargo_segment
         }
 
     @staticmethod
@@ -79,10 +98,18 @@ class TemporalSplitter:
         end_date: str,
         calendar_dates: List[str],
         train_ratio: float = 0.70,
-        val_ratio: float = 0.15
-    ) -> Dict[str, Tuple[str, str]]:
+        val_ratio: float = 0.15,
+        purge_bars: int = 5,
+        embargo_bars: int = 2
+    ) -> Dict[str, Any]:
         """
         Filters calendar dates within [start_date, end_date] and partitions them.
         """
         filtered = [d for d in calendar_dates if start_date <= d <= end_date]
-        return TemporalSplitter.partition_dates(filtered, train_ratio, val_ratio)
+        return TemporalSplitter.partition_dates(
+            filtered,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            purge_bars=purge_bars,
+            embargo_bars=embargo_bars
+        )

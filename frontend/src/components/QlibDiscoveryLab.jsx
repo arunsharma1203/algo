@@ -119,6 +119,19 @@ export default function QlibDiscoveryLab({ initialStrategy = 'SWING' }) {
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mb-8">
+      {/* Lab Classification Disclaimer Banner */}
+      <div className="bg-amber-950/60 border-b border-amber-500/40 px-6 py-2.5 flex items-center justify-between gap-3 text-xs text-amber-200">
+        <div className="flex items-center gap-2">
+          <Info size={16} className="text-amber-400 shrink-0" />
+          <span>
+            <strong className="text-amber-300">RESEARCH LAB NOTICE:</strong> QLIB-INSPIRED / CUSTOM RESEARCH (In-house NumPy/Pandas factor discovery; distinct from official Microsoft Qlib Production Engine).
+          </span>
+        </div>
+        <span className="text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded uppercase font-bold tracking-wider">
+          In-House Discovery Lab
+        </span>
+      </div>
+
       {/* Header Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 p-6 text-white flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
@@ -133,7 +146,7 @@ export default function QlibDiscoveryLab({ initialStrategy = 'SWING' }) {
             Exhaustive empirical search for predictive signals in Indian equity data across Alpha158 features, multi-horizons, models, deciles, regimes, and locked holdout OOS.
           </p>
           <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-mono text-slate-400">
-            <span>Provenance: <strong className="text-emerald-300">QLIB-INSPIRED / QLIB-COMPATIBLE FEATURE IMPLEMENTATION</strong></span>
+            <span>Provenance: <strong className="text-amber-300">QLIB-INSPIRED / CUSTOM RESEARCH (In-house formulas)</strong></span>
             <span>•</span>
             <span>Universe: <strong className="text-slate-200">LIVE_52 (Canonical SQLite)</strong></span>
             <span>•</span>

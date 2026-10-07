@@ -1,5 +1,6 @@
 import os
 import json
+import sqlite3
 import logging
 import numpy as np
 import pandas as pd
@@ -11,9 +12,9 @@ from sklearn.svm import SVC
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import f1_score, precision_score, recall_score
-import yfinance as yf
 import ta
 
+from app.data.historical_data_layer import get_db_path
 from app.data.validator import MarketDataValidator, DataValidationError
 
 logger = logging.getLogger(__name__)
@@ -101,7 +102,25 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, re
     Raises DataValidationError strictly.
     """
     if tickers is None:
-        tickers = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS"]
+        try:
+            conn = sqlite3.connect(get_db_path(), timeout=10.0)
+            tf_query = "15m" if timeframe == "intraday" else "1d"
+            top_rows = conn.execute("""
+                SELECT ticker FROM ohlcv 
+                WHERE timeframe = ? 
+                GROUP BY ticker 
+                HAVING count(*) >= 300 
+                ORDER BY count(*) DESC LIMIT 30
+            """, (tf_query,)).fetchall()
+            conn.close()
+            if top_rows and len(top_rows) >= 10:
+                tickers = [r[0] for r in top_rows]
+            else:
+                from app.analytics.universe_config import get_universe
+                u_stocks = get_universe("NSE_1000") or get_universe("NIFTY_500")
+                tickers = u_stocks[:30] if u_stocks else ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS"]
+        except Exception:
+            tickers = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS"]
 
     # 1. Canonical Ticker Normalization & Deduplication
     clean_tickers = []
@@ -128,47 +147,38 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, re
     valid_tickers = []
     excluded_tickers = {}
 
-    # 2. Ingest Data (Prefer Local SQLite for Swing to eliminate rate limits & network drag)
+    # 2. Ingest Data (Local SQLite prioritized for zero latency and offline reliability)
     from app.data.historical_data_layer import HistoricalDataLayer
 
-    # If swing, attempt local retrieval first
     tickers_to_fetch_remote = []
     local_data_map = {}
 
-    if timeframe == "swing":
-        for t in clean_tickers:
-            try:
-                local_df = HistoricalDataLayer.get_historical_ohlcv(t, timeframe="1d")
-                if local_df is not None and not local_df.empty and len(local_df) >= min_rows_per_stock:
-                    # Filter to 2y lookback (~504 trading days)
-                    local_data_map[t] = local_df.tail(504).copy()
-                else:
-                    tickers_to_fetch_remote.append(t)
-            except Exception:
+    tf_str = "15m" if timeframe == "intraday" else "1d"
+    limit_bars = 1500 if timeframe == "intraday" else 504
+
+    for t in clean_tickers:
+        try:
+            local_df = HistoricalDataLayer.get_historical_ohlcv(t, timeframe=tf_str)
+            if local_df is not None and not local_df.empty and len(local_df) >= min_rows_per_stock:
+                local_data_map[t] = local_df.copy()
+            else:
                 tickers_to_fetch_remote.append(t)
-    else:
-        tickers_to_fetch_remote = list(clean_tickers)
+        except Exception:
+            tickers_to_fetch_remote.append(t)
 
     remote_data = None
-    if tickers_to_fetch_remote:
-        try:
-            remote_data = yf.download(tickers_to_fetch_remote, period=period, interval=interval, progress=False)
-        except Exception as e:
-            logger.warning(f"Remote fetch error for {len(tickers_to_fetch_remote)} tickers: {e}")
-
     for t in clean_tickers:
         try:
             df = None
             if t in local_data_map:
                 df = local_data_map[t].copy()
-            elif remote_data is not None and not remote_data.empty:
-                if isinstance(remote_data.columns, pd.MultiIndex):
-                    try:
-                        df = remote_data.xs(t, level=1, axis=1).copy()
-                    except KeyError:
-                        pass
-                elif len(tickers_to_fetch_remote) == 1:
-                    df = remote_data.copy()
+                if 'datetime' not in df.columns:
+                    df['datetime'] = df.index
+                df = df.dropna().reset_index(drop=True)
+            elif t in tickers_to_fetch_remote:
+                from app.data.market_provider import fetch_candles
+                clean_sym = t.replace(".NS", "").replace(".BO", "").strip().upper()
+                df = fetch_candles(clean_sym, interval=interval, period=period)
 
             if df is None or df.empty:
                 excluded_tickers[t] = "no_data_available"
@@ -193,24 +203,145 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, re
             df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
             df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range()
 
-            # Label Definition
+            # Dynamic Triple-Barrier ATR Labeling (12 bars / 3 hours horizon)
+            eval_window = 12 if timeframe == "intraday" else 5
+            tp_barrier = df['close'] + (1.5 * df['atr'])
+            sl_barrier = df['close'] - (1.0 * df['atr'])
+
             if timeframe == "intraday":
                 df['returns'] = df['close'].pct_change()
-                df['target'] = (df['returns'].shift(-1) > 0).astype(int)
-                features = ['rsi', 'macd', 'macd_diff', 'adx', 'returns']
-            else: # swing
-                df['future_5d'] = df['close'].shift(-5)
-                df['target'] = (((df['future_5d'] - df['close']) / df['close']) > 0.02).astype(int)
+
+                # Compute normalized time_of_day (0.0 at 09:15 to 1.0 at 15:30 IST)
+                try:
+                    if 'datetime' in df.columns:
+                        dt_idx = pd.to_datetime(df['datetime'])
+                    else:
+                        dt_idx = pd.to_datetime(df.index)
+
+                    if isinstance(dt_idx, pd.DatetimeIndex):
+                        minutes_from_open = (dt_idx.hour * 60 + dt_idx.minute) - (9 * 60 + 15)
+                        date_series = pd.Series(dt_idx.date, index=df.index)
+                    else:
+                        minutes_from_open = (dt_idx.dt.hour * 60 + dt_idx.dt.minute) - (9 * 60 + 15)
+                        date_series = pd.Series(dt_idx.dt.date.values, index=df.index)
+
+                    df['time_of_day'] = np.clip(minutes_from_open / 375.0, 0.0, 1.0)
+                except Exception:
+                    df['time_of_day'] = 0.5
+                    date_series = pd.Series(df.index.astype(str), index=df.index)
+                    minutes_from_open = pd.Series(100, index=df.index)
+
+                # Structural Feature 1: Session VWAP Deviation (Normalized by ATR)
+                typical_price = (df['high'] + df['low'] + df['close']) / 3.0
+                pv = typical_price * df['volume']
+                cum_pv = pv.groupby(date_series).cumsum()
+                cum_vol = df['volume'].groupby(date_series).cumsum()
+                vwap = cum_pv / np.maximum(cum_vol, 1.0)
+                df['vwap_deviation'] = np.clip((df['close'] - vwap) / np.maximum(df['atr'], 1e-4), -5.0, 5.0)
+
+                # Structural Feature 2: Opening Range Breakout (ORB 30m: 09:15-09:45 IST)
+                orb_mask = minutes_from_open < 30
+                orb_high = df['high'].where(orb_mask).groupby(date_series).transform('max')
+                orb_low = df['low'].where(orb_mask).groupby(date_series).transform('min')
+                df['orb_breakout'] = np.where(
+                    orb_mask, 
+                    0.0, 
+                    np.where(df['close'] > orb_high, 1.0, np.where(df['close'] < orb_low, -1.0, 0.0))
+                )
+
+                # Structural Feature 3: Multi-Timeframe EMA Trend Alignment (9, 21, 50)
+                ema9 = df['close'].ewm(span=9, adjust=False).mean()
+                ema21 = df['close'].ewm(span=21, adjust=False).mean()
+                ema50 = df['close'].ewm(span=50, adjust=False).mean()
+                df['ema_alignment'] = np.where(
+                    (ema9 > ema21) & (ema21 > ema50), 
+                    1.0, 
+                    np.where((ema9 < ema21) & (ema21 < ema50), -1.0, 0.0)
+                )
+
+                # Structural Feature 4: Volume Surge Ratio (Current volume / 20-bar SMA)
+                vol_sma20 = df['volume'].rolling(20).mean()
+                df['volume_surge'] = np.clip(df['volume'] / np.maximum(vol_sma20, 1.0), 0.1, 10.0)
+
+                features = [
+                    'rsi', 'macd', 'macd_diff', 'adx', 'returns',
+                    'vwap_deviation', 'orb_breakout', 'ema_alignment', 'volume_surge', 'time_of_day'
+                ]
+            else:  # swing
                 features = ['rsi', 'macd', 'macd_diff', 'adx', 'atr']
 
-            clean_df = df.dropna(subset=features + ['target']).copy()
+            # CRITICAL: Path-Dependent Triple-Barrier Labeling & Realized Trade Returns.
+            # Group by trading date so forward lookahead NEVER bleeds across session boundaries.
+            n_rows = len(df)
+            dates_arr = date_series.values if timeframe == "intraday" else np.array([idx.date() if hasattr(idx, 'date') else str(idx)[:10] for idx in pd.to_datetime(df.index)])
+            highs_arr = df['high'].values
+            lows_arr = df['low'].values
+            closes_arr = df['close'].values
+            atrs_arr = df['atr'].values
+
+            tp_mult = 1.5
+            sl_mult = 1.0
+            real_rets = np.zeros(n_rows)
+            targets = np.zeros(n_rows, dtype=int)
+
+            for i in range(n_rows):
+                c_date = dates_arr[i]
+                entry = closes_arr[i]
+                atr = atrs_arr[i]
+                if np.isnan(atr) or atr <= 0 or entry <= 0:
+                    continue
+                tp = entry + tp_mult * atr
+                sl = entry - sl_mult * atr
+
+                hit = False
+                for step in range(1, eval_window + 1):
+                    idx = i + step
+                    if idx >= n_rows:
+                        break
+                    if timeframe == "intraday" and dates_arr[idx] != c_date:
+                        break
+                    h = highs_arr[idx]
+                    l = lows_arr[idx]
+                    if h >= tp and l <= sl:
+                        # Simultaneous touch: conservative assumption is SL hit first
+                        real_rets[i] = (sl / entry) - 1.0
+                        targets[i] = 0
+                        hit = True
+                        break
+                    elif h >= tp:
+                        real_rets[i] = (tp / entry) - 1.0
+                        targets[i] = 1
+                        hit = True
+                        break
+                    elif l <= sl:
+                        real_rets[i] = (sl / entry) - 1.0
+                        targets[i] = 0
+                        hit = True
+                        break
+
+                if not hit:
+                    # Time barrier reached (eval_window bars or session end)
+                    last_idx = min(i + eval_window, n_rows - 1)
+                    if timeframe == "intraday":
+                        while last_idx > i and (last_idx >= n_rows or dates_arr[last_idx] != c_date):
+                            last_idx -= 1
+                    exit_p = closes_arr[last_idx] if last_idx > i else entry
+                    ret = (exit_p / entry) - 1.0
+                    real_rets[i] = ret
+                    targets[i] = 1 if ret > 0 else 0
+
+            df['trade_ret'] = real_rets
+            df['target'] = targets
+
+            clean_df = df.dropna(subset=features + ['target', 'trade_ret']).copy()
             if len(clean_df) < min_rows_per_stock:
                 excluded_tickers[t] = f"insufficient_rows_after_features: {len(clean_df)} < {min_rows_per_stock}"
                 continue
 
             clean_df['ticker'] = t
-            clean_df['datetime'] = clean_df.index
-            stock_dfs.append(clean_df[features + ['target', 'ticker', 'datetime']])
+            clean_df['datetime'] = clean_df['datetime'] if 'datetime' in clean_df.columns else clean_df.index
+            clean_df['future_ret'] = clean_df['trade_ret']
+            stock_dfs.append(clean_df[features + ['target', 'ticker', 'datetime', 'future_ret']])
             valid_tickers.append(t)
 
         except Exception as e:
@@ -222,7 +353,10 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, re
 
     # Ticker-aware temporal ordering: group chronologically
     combined = pd.concat(stock_dfs).sort_values('datetime').reset_index(drop=True)
-    features_list = ['rsi', 'macd', 'macd_diff', 'adx', 'returns'] if timeframe == "intraday" else ['rsi', 'macd', 'macd_diff', 'adx', 'atr']
+    features_list = [
+        'rsi', 'macd', 'macd_diff', 'adx', 'returns',
+        'vwap_deviation', 'orb_breakout', 'ema_alignment', 'volume_surge', 'time_of_day'
+    ] if timeframe == "intraday" else ['rsi', 'macd', 'macd_diff', 'adx', 'atr']
     
     X = combined[features_list].values
     y = combined['target'].values.astype(int)
@@ -246,6 +380,7 @@ def prepare_benchmark_dataset(timeframe: str = "swing", tickers: list = None, re
             "train_end": str(train_df['datetime'].max()) if len(train_df) > 0 else None,
             "oos_start": str(test_df['datetime'].min()) if len(test_df) > 0 else None,
             "oos_end": str(test_df['datetime'].max()) if len(test_df) > 0 else None,
+            "future_returns": combined['future_ret'].values,
             "features": features_list,
             "ticker_series": combined['ticker'].values,
             "datetime_series": combined['datetime'].values,

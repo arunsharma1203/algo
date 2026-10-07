@@ -4,7 +4,6 @@ import asyncio
 import logging
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import ta
 from datetime import datetime
 from fastapi import APIRouter
@@ -96,34 +95,26 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
 
     yield format_sse({"type": "info", "message": f"Screening volume and momentum activity across {len(candidate_pool)} universe symbols...", "progress": 10})
     
-    # Bulk fetch 1-day volume to rank active stocks in non-blocking batches
+    # Bulk fetch 1-day volume from local SQLite to rank active stocks fast
     if len(candidate_pool) > 50:
-        chunk_size = 100
-        chunks = [candidate_pool[i:i + chunk_size] for i in range(0, len(candidate_pool), chunk_size)]
-        top_stocks_dict = {}
-        
-        for c_idx, chk in enumerate(chunks):
-            progress_val = 10 + int((c_idx / len(chunks)) * 5)
-            yield format_sse({
-                "type": "info",
-                "message": f"📊 Volume Screening Batch {c_idx+1}/{len(chunks)} ({len(chk)} symbols)...",
-                "progress": progress_val
-            })
-            try:
-                chk_df = await asyncio.to_thread(yf.download, chk, period="1d", progress=False)
-                if 'Volume' in chk_df:
-                    v_df = chk_df['Volume']
-                    if len(v_df) > 0:
-                        v_latest = v_df.iloc[-1].dropna()
-                        for s_sym, s_vol in v_latest.items():
-                            top_stocks_dict[s_sym] = float(s_vol)
-            except Exception as e:
-                logger.warning(f"Batch {c_idx+1} download warning: {e}")
-                
-        if top_stocks_dict:
-            sorted_by_vol = sorted(top_stocks_dict.items(), key=lambda x: x[1], reverse=True)
-            top_stocks = [x[0] for x in sorted_by_vol[:50]]
-        else:
+        try:
+            from app.data.historical_data_layer import get_db_path
+            import sqlite3
+            conn = sqlite3.connect(get_db_path(), timeout=5.0)
+            rows = conn.execute("""
+                SELECT ticker, volume FROM ohlcv 
+                WHERE (timeframe = '1d' OR timeframe IS NULL) 
+                ORDER BY date DESC, volume DESC
+            """).fetchall()
+            conn.close()
+            vol_by_sym = {}
+            for r in rows:
+                sym_clean = r[0].strip().upper()
+                if sym_clean not in vol_by_sym and r[1] is not None:
+                    vol_by_sym[sym_clean] = float(r[1])
+            sorted_candidates = sorted(candidate_pool, key=lambda s: vol_by_sym.get(s, vol_by_sym.get(f"{s}.NS", 0.0)), reverse=True)
+            top_stocks = sorted_candidates[:50]
+        except Exception:
             top_stocks = candidate_pool[:50]
     else:
         top_stocks = candidate_pool
@@ -136,38 +127,34 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
 
     total = len(top_stocks)
     yield format_sse({"type": "info", "message": f"Fetching 60-day 15m candle feeds for top {total} active liquid symbols...", "progress": 15})
-    
-    try:
-        bulk_data = await asyncio.to_thread(yf.download, top_stocks, period="60d", interval="15m", progress=False)
-    except Exception as e:
-        yield format_sse({"type": "error", "message": f"Bulk data fetch failed: {e}", "progress": 100})
-        return
+
+    from app.data.historical_data_layer import HistoricalDataLayer
+    from app.data.market_provider import fetch_candles
+    from app.data.data_gateway import DataGateway
+    from app.analytics.decision_engine import evaluate_ticker
 
     results = []
     features = ['rsi', 'macd', 'macd_diff', 'adx', 'returns']
 
     for idx, ticker in enumerate(top_stocks):
         try:
-            if isinstance(bulk_data.columns, pd.MultiIndex):
-                try:
-                    df = bulk_data.xs(ticker, level=1, axis=1).copy()
-                except KeyError:
-                    continue
-            else:
-                if len(top_stocks) == 1:
-                    df = bulk_data.copy()
-                else:
-                    continue
+            clean_t = ticker.replace(".NS", "").replace(".BO", "").strip().upper()
+            df = HistoricalDataLayer.get_historical_ohlcv(clean_t, timeframe="15m")
+            if df is None or len(df) < 50:
+                df = fetch_candles(clean_t, interval="15m", period="60d")
+                if df is not None and not df.empty:
+                    try:
+                        DataGateway.persist_intraday_candles(clean_t, df, timeframe="15m", source="upstox")
+                    except Exception as persist_err:
+                        logger.debug(f"[IntradayML] Could not persist 15m candles for {clean_t}: {persist_err}")
 
-            # Persist downloaded 15m candles into canonical SQLite storage
-            from app.data.data_gateway import DataGateway
-            try:
-                DataGateway.persist_intraday_candles(ticker, df, timeframe="15m", source="yfinance")
-            except Exception as persist_err:
-                logger.debug(f"[IntradayML] Could not persist 15m candles for {ticker}: {persist_err}")
+            if df is None or len(df) < 30:
+                continue
+
+            # Standardize columns
+            df.columns = [str(c).lower() for c in df.columns]
 
             # Use SHARED DECISION ENGINE for screening pass (skip enrichment for speed)
-            from app.analytics.decision_engine import evaluate_ticker
             screen_result = evaluate_ticker(
                 ticker=ticker,
                 df=df,
@@ -176,7 +163,7 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
                 trade_type="INTRADAY",
                 source="MANUAL",
                 macro_state=macro,
-                skip_enrichment=True,  # Enrichment runs only on best trade
+                skip_enrichment=True,
             )
 
             progress_pct = int(18 + ((idx + 1) / total * 70))
@@ -197,9 +184,14 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
                 "progress": progress_pct
             })
 
+            is_bull = screen_result.is_bullish
+            base_score = float(screen_result.score)
+            directional_conviction = base_score if is_bull else round(100.0 - base_score, 1)
+
             results.append({
                 "ticker": ticker,
-                "score": float(screen_result.score),
+                "score": directional_conviction,
+                "directional_conviction": directional_conviction,
                 "prob_up": float(screen_result.raw_confidence),
                 "base_probs": screen_result.base_probs,
                 "adx": screen_result.adx,
@@ -244,8 +236,8 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
 
     # Report enrichment results
     pc = final_result.pipeline_components
-    if pc.get('nlp_vader') is True:
-        yield format_sse({"type": "info", "message": f"📰 VADER News Sentiment for {best_ticker}: {final_result.nlp_sentiment:+} ({final_result.nlp_headline[:55]}...)", "progress": 92})
+    if pc.get('nlp_finbert') is True or pc.get('nlp_vader') is True:
+        yield format_sse({"type": "info", "message": f"📰 FinBERT News Sentiment for {best_ticker}: {final_result.nlp_sentiment:+} ({final_result.nlp_headline[:55]}...)", "progress": 92})
     if pc.get('fno') is True and final_result.fno_info:
         yield format_sse({"type": "info", "message": f"📊 NSE Option Chain: PCR {final_result.fno_info.get('pcr')} | Max Pain ₹{final_result.fno_info.get('max_pain')}", "progress": 94})
     if pc.get('timesfm') is True or pc.get('chronos') is True:
@@ -255,8 +247,14 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
     if pc.get('calibration') is True:
         yield format_sse({"type": "info", "message": f"📊 Final Calibrated Win Rate: {final_result.confidence:.1f}%", "progress": 99})
 
+    # Calculate directional calibrated conviction (so Short setups display honest win-rate e.g. 100 - 15 = 85%)
+    calibrated_conviction = final_result.confidence if final_result.is_bullish else round(100.0 - final_result.confidence, 1)
+    raw_conviction = final_result.raw_confidence if final_result.is_bullish else round(100.0 - final_result.raw_confidence, 1)
+
     # Merge enrichment results into best_trade dict for frontend compatibility
-    best_trade['prob_up'] = final_result.confidence
+    best_trade['prob_up'] = calibrated_conviction
+    best_trade['score'] = calibrated_conviction
+    best_trade['raw_score'] = raw_conviction
     best_trade['is_bullish'] = final_result.is_bullish
     best_trade['entry'] = final_result.entry
     best_trade['sl'] = final_result.sl
@@ -273,6 +271,12 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
     best_trade['price_source'] = final_result.price_source
     best_trade['price_timestamp'] = final_result.price_timestamp
     best_trade['price_is_fresh'] = final_result.price_is_fresh
+    best_trade['entry_price_source'] = getattr(final_result, 'entry_price_source', final_result.price_source)
+    best_trade['entry_price_timestamp'] = getattr(final_result, 'entry_price_timestamp', final_result.price_timestamp)
+    best_trade['entry_price_age_ms'] = getattr(final_result, 'entry_price_age_ms', None)
+    best_trade['quote_freshness'] = getattr(final_result, 'quote_freshness', 'UNKNOWN')
+    best_trade['qualified'] = final_result.qualified
+    best_trade['rejection_reason'] = final_result.rejection_reason
 
     if final_result.timesfm_forecast:
         best_trade['timesfm_forecast'] = final_result.timesfm_forecast
@@ -294,21 +298,31 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
             sl=best_trade['sl'],
             tp1=best_trade['tp1'],
             tp2=best_trade['tp2'],
-            confidence=best_trade['prob_up'],
+            confidence=calibrated_conviction,
             trade_type="INTRADAY",
             explanation=final_result.explanation,
             source='MANUAL',
-            position_type='NOT_A_POSITION'
+            position_type='NOT_A_POSITION',
+            engine='LEGACY',
+            entry_price_source=best_trade['entry_price_source'],
+            entry_price_timestamp=best_trade['entry_price_timestamp'],
+            entry_price_age_ms=best_trade['entry_price_age_ms'],
+            quote_freshness=best_trade['quote_freshness']
         )
+    else:
+        yield format_sse({
+            "type": "warning",
+            "message": f"⚠️ Candidate {best_trade['ticker']} disqualified: {final_result.rejection_reason}. Live recommendation suppressed."
+        })
 
     if was_saved:
-        yield format_sse({"type": "info", "message": f"💾 Saved new recommendation for {best_trade['ticker']} to Trade History"})
+        yield format_sse({"type": "info", "message": f"💾 Saved new recommendation for {best_trade['ticker']} (LTP: ₹{best_trade['entry']:.2f}, {best_trade['entry_price_source']}) to Trade History"})
         try:
             from app.analytics.master_logger import MasterLogger
             MasterLogger.log_event("SCAN_MANUAL", "PERSISTED", f"Saved recommendation for {best_trade['ticker']}", ticker=best_trade['ticker'], details=best_trade)
         except Exception:
             pass
-    else:
+    elif final_result.qualified:
         yield format_sse({"type": "info", "message": f"ℹ️ Identical recommendation for {best_trade['ticker']} already logged today (deduplicated - record preserved)"})
         try:
             from app.analytics.master_logger import MasterLogger
@@ -317,19 +331,19 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
             pass
 
     # 10. Dispatch Telegram Notification
-    if was_saved and best_trade['prob_up'] >= 60.0:
+    if was_saved and calibrated_conviction >= 60.0:
         dir_text = "BULLISH BUY" if best_trade['is_bullish'] else "BEARISH SHORT"
         tg_msg = (
             f"🎯 <b>INTRADAY AI TRADE CALL: {best_trade['ticker']}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📈 <b>Action:</b> {dir_text}\n"
-            f"🧠 <b>Calibrated Conviction:</b> {best_trade['prob_up']:.1f}%\n"
-            f"💵 <b>Entry:</b> ₹{best_trade['entry']:.2f}\n"
+            f"🧠 <b>Calibrated Conviction:</b> {calibrated_conviction:.1f}%\n"
+            f"💵 <b>Entry (Live LTP):</b> ₹{best_trade['entry']:.2f} ({best_trade['entry_price_source']})\n"
             f"🛑 <b>Stop Loss:</b> ₹{best_trade['sl']:.2f}\n"
             f"🎯 <b>Target 1:</b> ₹{best_trade['tp1']:.2f}\n"
             f"🎯 <b>Target 2:</b> ₹{best_trade['tp2']:.2f}\n"
             f"🌐 <b>Macro Alignment:</b> {best_trade.get('telemetry', {}).get('macro_trend', 'NORMAL')}\n"
-            f"📡 <b>Source:</b> MANUAL SCAN\n"
+            f"📡 <b>Source:</b> MANUAL SCAN (LEGACY ENGINE)\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<i>{best_trade.get('meta_learner_msg', 'AI Multi-Model Consensus')}</i>"
         )
@@ -345,10 +359,12 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
         except Exception as e:
             logger.warning(f"Telegram notification error: {e}")
     else:
-        if not was_saved:
+        if not final_result.qualified:
+            reason = f"Safety gate rejected: {final_result.rejection_reason}"
+        elif not was_saved:
             reason = "Trade call already broadcasted today (duplicate suppressed)"
         else:
-            reason = f"Calibrated confidence ({best_trade['prob_up']:.1f}%) below 60.0% alert gate"
+            reason = f"Calibrated confidence ({calibrated_conviction:.1f}%) below 60.0% alert gate"
         yield format_sse({"type": "info", "message": f"ℹ️ Telegram alert suppressed: {reason}"})
         try:
             from app.analytics.master_logger import MasterLogger
@@ -358,7 +374,7 @@ async def run_ml_scan(custom_list=None, universe_preset: str = "NIFTY_500"):
 
     best_trade['telegram_sent'] = bool(was_saved and best_trade['prob_up'] >= 60.0)
     best_trade['was_saved'] = was_saved
-    best_trade['history'] = evaluate_ml_history(force_refresh=True)
+    best_trade['history'] = evaluate_ml_history(force_refresh=True, engine='LEGACY')
 
     elapsed = (datetime.now() - start_time).total_seconds()
     try:
@@ -417,3 +433,23 @@ async def delete_ml_history(trade_id: int):
     conn.commit()
     conn.close()
     return {"status": "success", "message": f"Trade {trade_id} deleted."}
+
+@router.post("/intraday/squareoff")
+def trigger_intraday_squareoff(force: bool = False):
+    """
+    Manually triggers 15:15 IST automated square-off for open Legacy Intraday trades.
+    If force=True, executes even on non-trading days or outside normal trading hours.
+    """
+    from app.analytics.intraday_squareoff import execute_intraday_squareoff
+    result = execute_intraday_squareoff(force=force)
+    return {"status": "success", "data": result}
+
+@router.post("/intraday/reconcile")
+def trigger_intraday_reconciliation():
+    """
+    Manually triggers reconciliation of overdue Legacy Intraday trades from prior dates or past 15:15 IST.
+    """
+    from app.analytics.intraday_squareoff import reconcile_overdue_intraday_positions
+    result = reconcile_overdue_intraday_positions()
+    return {"status": "success", "data": result}
+

@@ -148,21 +148,42 @@ def parse_option_chain_data(
     pe_strikes = []
     all_strikes = []
 
+    strikes_dict = {}
     for item in data_list:
         strike = item.get('strikePrice', 0)
         all_strikes.append(strike)
+        s_entry = {}
 
         if 'CE' in item:
             ce = item['CE']
             ce_oi = ce.get('openInterest', 0)
             total_ce_oi += ce_oi
             ce_strikes.append((strike, ce_oi, ce.get('changeinOpenInterest', 0)))
+            s_entry['CE'] = {
+                'lastPrice': float(ce.get('lastPrice', 0.0) or 0.0),
+                'bid': float(ce.get('bidprice', 0.0) or 0.0),
+                'ask': float(ce.get('askPrice', 0.0) or 0.0),
+                'oi': int(ce_oi or 0),
+                'iv': float(ce.get('impliedVolatility', 0.0) or 0.0),
+                'identifier': ce.get('identifier')
+            }
 
         if 'PE' in item:
             pe = item['PE']
             pe_oi = pe.get('openInterest', 0)
             total_pe_oi += pe_oi
             pe_strikes.append((strike, pe_oi, pe.get('changeinOpenInterest', 0)))
+            s_entry['PE'] = {
+                'lastPrice': float(pe.get('lastPrice', 0.0) or 0.0),
+                'bid': float(pe.get('bidprice', 0.0) or 0.0),
+                'ask': float(pe.get('askPrice', 0.0) or 0.0),
+                'oi': int(pe_oi or 0),
+                'iv': float(pe.get('impliedVolatility', 0.0) or 0.0),
+                'identifier': pe.get('identifier')
+            }
+
+        if s_entry:
+            strikes_dict[strike] = s_entry
 
     # 1. Put-Call Ratio
     pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi > 0 else 1.0
@@ -204,6 +225,7 @@ def parse_option_chain_data(
         "buildup": buildup,
         "expiry_dates": all_expiries[:8],
         "selected_expiry": selected_expiry,
+        "strikes_data": strikes_dict,
         "is_live_nse": True
     }
 

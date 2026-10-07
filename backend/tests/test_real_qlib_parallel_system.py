@@ -251,7 +251,8 @@ class TestRealQlibParallelSystem(unittest.TestCase):
     # 17. No legacy fallback
     def test_17_no_legacy_fallback_when_model_missing(self):
         with tempfile.TemporaryDirectory() as empty_dir:
-            with patch("app.qlib_engine.model_registry.QLIB_MODELS_BASE_DIR", empty_dir):
+            with patch("app.qlib_engine.model_registry.QLIB_MODELS_BASE_DIR", empty_dir), \
+                 patch("app.qlib_engine.india_data_adapter.IndiaMarketDataAdapter.check_freshness", return_value={"data_status": "FRESH", "data_lag_minutes": 5, "is_market_open": True}):
                 with self.assertRaises(QlibModelUnavailableError):
                     QlibScanners.run_swing_scan()
 

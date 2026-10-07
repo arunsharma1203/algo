@@ -397,7 +397,7 @@ def promote_foundation_challenger_api(req: FoundationPromoteRequest):
 @router.post("/foundation/forecast")
 def run_foundation_forecast_api(req: FoundationForecastRequest):
     """Generates point-in-time TimesFM & Chronos forecasts for a specific symbol."""
-    import yfinance as yf
+    from app.data.market_provider import fetch_candles
     try:
         clean_sym = req.symbol.strip().upper()
         if not clean_sym.endswith(('.NS', '.BO')):
@@ -405,7 +405,7 @@ def run_foundation_forecast_api(req: FoundationForecastRequest):
 
         period = "60d" if req.timeframe == "15m" else "2y"
         interval = req.timeframe
-        df = yf.download(clean_sym, period=period, interval=interval, progress=False)
+        df = fetch_candles(clean_sym, interval=interval, period=period)
 
         if df.empty:
             return {"status": "error", "message": f"No market data found for {clean_sym}."}

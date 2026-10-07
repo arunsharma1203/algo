@@ -113,6 +113,12 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup():
+    from app.qlib_engine.india_data_adapter import ensure_qlib_ready
+    try:
+        ensure_qlib_ready()
+        logger.info("✅ Microsoft Qlib runtime initialized on Qlib server startup.")
+    except Exception as e:
+        logger.warning(f"Qlib runtime startup warning: {e}")
     init_qlib_tracking_schema()
     sched = get_or_create_qlib_scheduler()
     if not sched.running:

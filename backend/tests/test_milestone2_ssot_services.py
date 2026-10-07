@@ -247,8 +247,9 @@ class TestMilestone2SSOTServices(unittest.TestCase):
     # ─────────────────────────────────────────────────────────────
 
     def test_21_canonical_database_row_counts_unaltered(self):
-        canonical_db = get_db_path()
-        conn = sqlite3.connect(canonical_db)
+        from app.data.database import _CANONICAL_DB_PATH
+        canonical_db = _CANONICAL_DB_PATH if os.path.exists(_CANONICAL_DB_PATH) else get_db_path()
+        conn = sqlite3.connect(f"file:{canonical_db}?mode=ro", uri=True)
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM ml_trade_history")
         rows = c.fetchone()[0]
@@ -257,8 +258,9 @@ class TestMilestone2SSOTServices(unittest.TestCase):
         self.assertGreaterEqual(rows, 73)
 
     def test_22_simulation_mode_is_active(self):
-        canonical_db = get_db_path()
-        conn = sqlite3.connect(canonical_db)
+        from app.data.database import _CANONICAL_DB_PATH
+        canonical_db = _CANONICAL_DB_PATH if os.path.exists(_CANONICAL_DB_PATH) else get_db_path()
+        conn = sqlite3.connect(f"file:{canonical_db}?mode=ro", uri=True)
         c = conn.cursor()
         c.execute("SELECT value FROM app_settings WHERE key = 'simulation_mode'")
         row = c.fetchone()

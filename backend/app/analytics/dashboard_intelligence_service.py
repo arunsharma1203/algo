@@ -9,7 +9,6 @@ import threading
 from datetime import datetime, time as dt_time, timedelta
 from typing import Dict, Any, List, Optional
 import pandas as pd
-import yfinance as yf
 
 from app.data.historical_data_layer import get_db_path
 from app.analytics.macro_engine import get_macro_regime
@@ -112,11 +111,7 @@ class DashboardIntelligenceService:
         now_str = datetime.now().strftime("%H:%M:%S")
 
         symbols = [t["symbol"] for t in tickers_map]
-        try:
-            df = yf.download(symbols, period="5d", interval="1d", progress=False, group_by="ticker")
-        except Exception as e:
-            logger.warning(f"Failed to batch download Indian indices: {e}")
-            df = None
+        df = None
 
         for item in tickers_map:
             sym = item["symbol"]
@@ -215,12 +210,7 @@ class DashboardIntelligenceService:
         now_str = datetime.now().strftime("%H:%M:%S")
         today_iso = datetime.now().strftime("%Y-%m-%d")
         symbols = [c["symbol"] for c in cues_config]
-
-        try:
-            df = yf.download(symbols, period="5d", interval="1d", progress=False, group_by="ticker")
-        except Exception as e:
-            logger.warning(f"Failed to batch download global cues: {e}")
-            df = None
+        df = None
 
         for item in cues_config:
             sym = item["symbol"]
@@ -404,7 +394,15 @@ class DashboardIntelligenceService:
             universe_size = universe_size_row[0] if universe_size_row else 511
             breadth_data["universe_size"] = universe_size
 
-            cur.execute("SELECT DISTINCT date FROM ohlcv ORDER BY date DESC LIMIT 2")
+            cur.execute("""
+                SELECT date, COUNT(DISTINCT ticker) as cnt
+                FROM ohlcv
+                WHERE (timeframe = '1d' OR timeframe IS NULL)
+                GROUP BY date
+                HAVING cnt >= 20
+                ORDER BY date DESC
+                LIMIT 2
+            """)
             dates = [r[0] for r in cur.fetchall()]
             
             if len(dates) >= 2:
@@ -450,7 +448,7 @@ class DashboardIntelligenceService:
                     breadth_data["pct_declining"] = pct_dec
                     breadth_data["pct_unchanged"] = pct_unc
                     breadth_data["coverage_note"] = (
-                        f"Evaluated on {evaluated_count} active tickers with intraday session data "
+                        f"Evaluated on {evaluated_count} active tickers with daily session data "
                         f"({coverage_pct}% coverage of {universe_size} collected tickers)."
                     )
 
@@ -460,7 +458,7 @@ class DashboardIntelligenceService:
                     q_ma = f"""
                     SELECT ticker, close, date
                     FROM ohlcv
-                    WHERE ticker IN ({placeholders})
+                    WHERE ticker IN ({placeholders}) AND (timeframe = '1d' OR timeframe IS NULL)
                     ORDER BY ticker, date ASC
                     """
                     df_hist = pd.read_sql_query(q_ma, conn, params=evaluated_tickers)
@@ -551,12 +549,7 @@ class DashboardIntelligenceService:
         results = []
         now_str = datetime.now().strftime("%H:%M:%S")
         symbols = [s["symbol"] for s in sectors_config]
-
-        try:
-            df = yf.download(symbols, period="1mo", interval="1d", progress=False, group_by="ticker")
-        except Exception as e:
-            logger.warning(f"Failed to batch download sector indices: {e}")
-            df = None
+        df = None
 
         for item in sectors_config:
             sym = item["symbol"]
@@ -586,18 +579,6 @@ class DashboardIntelligenceService:
                     if len(close_s) >= 2:
                         ltp = float(close_s.iloc[-1])
                         prev = float(close_s.iloc[-2])
-                
-                # If historical download returned < 2 bars, query fast_info directly
-                if ltp is None or prev is None:
-                    try:
-                        ticker_obj = yf.Ticker(sym)
-                        f_ltp = getattr(ticker_obj.fast_info, "last_price", None)
-                        f_prev = getattr(ticker_obj.fast_info, "previous_close", None)
-                        if f_ltp is not None and f_prev is not None and f_prev > 0:
-                            ltp = float(f_ltp)
-                            prev = float(f_prev)
-                    except Exception as fe:
-                        logger.debug(f"fast_info fallback for {sym} failed: {fe}")
 
                 if ltp is not None and prev is not None and prev > 0:
                     chg_pct = (ltp - prev) / prev * 100.0
@@ -768,8 +749,7 @@ class DashboardIntelligenceService:
 
         for ticker in bellwethers:
             try:
-                stock = yf.Ticker(ticker)
-                raw_news = stock.news
+                raw_news = []
                 if not raw_news:
                     continue
 

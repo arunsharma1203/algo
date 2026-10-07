@@ -18,9 +18,9 @@ async def run_backtest(req: BacktestRequest):
             from app.api.ml_history import get_ml_training_data
             hist_df = get_ml_training_data(req.ticker)
             
-            # Fetch recent live 15m to supplement
-            import yfinance as yf
-            live_df = yf.download(req.ticker, period="60d", interval="15m", progress=False)
+            import pandas as pd
+            from app.data.market_provider import fetch_candles
+            live_df = fetch_candles(req.ticker, interval="15m", period="60d")
             if not live_df.empty:
                 live_df = live_df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
                 live_df = live_df.reset_index()

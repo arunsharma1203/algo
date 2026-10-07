@@ -60,10 +60,10 @@ export default function HelpCenter() {
 
           <div className="flex items-center gap-3">
             <Link 
-              to="/" 
+              to="/consensus" 
               className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-700"
             >
-              Back to Dashboard <ChevronRight size={14} />
+              Back to Consensus Scanner <ChevronRight size={14} />
             </Link>
           </div>
         </div>

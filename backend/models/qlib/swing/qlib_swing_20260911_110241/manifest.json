@@ -15,16 +15,583 @@
   "oos_start": "2024-03-13",
   "oos_end": "2024-05-31",
   "metrics": {
-    "ic": -0.0407,
-    "rank_ic": 0.0443,
+    "ic": -0.0246,
+    "rank_ic": -0.0004,
     "trades_count": 260,
-    "wins_count": 121,
-    "losses_count": 139,
-    "win_rate": 46.54,
-    "profit_factor": 0.83,
-    "sharpe": -0.47,
-    "max_drawdown_pct": 24.42,
-    "mean_trade_pnl_pct": -0.09
+    "wins_count": 108,
+    "losses_count": 152,
+    "win_rate": 41.54,
+    "profit_factor": 0.64,
+    "sharpe": -1.2,
+    "max_drawdown_pct": 13.15,
+    "mean_trade_pnl_pct": -0.26,
+    "peak_equity": 100.38,
+    "trough_equity": 87.18,
+    "drawdown_period": {
+      "peak_date": "2024-04-01",
+      "trough_date": "2024-05-31",
+      "duration_bars": 40
+    },
+    "equity_curve": [
+      {
+        "date": "2024-03-13",
+        "equity": 100.0,
+        "drawdown_pct": 0.0
+      },
+      {
+        "date": "2024-03-13",
+        "equity": 99.707,
+        "drawdown_pct": 0.29
+      },
+      {
+        "date": "2024-03-14",
+        "equity": 99.0485,
+        "drawdown_pct": 0.95
+      },
+      {
+        "date": "2024-03-15",
+        "equity": 97.1669,
+        "drawdown_pct": 2.83
+      },
+      {
+        "date": "2024-03-18",
+        "equity": 97.9754,
+        "drawdown_pct": 2.02
+      },
+      {
+        "date": "2024-03-19",
+        "equity": 99.1826,
+        "drawdown_pct": 0.82
+      },
+      {
+        "date": "2024-03-20",
+        "equity": 99.5489,
+        "drawdown_pct": 0.45
+      },
+      {
+        "date": "2024-03-21",
+        "equity": 98.9521,
+        "drawdown_pct": 1.05
+      },
+      {
+        "date": "2024-03-22",
+        "equity": 98.7373,
+        "drawdown_pct": 1.26
+      },
+      {
+        "date": "2024-03-26",
+        "equity": 99.4511,
+        "drawdown_pct": 0.55
+      },
+      {
+        "date": "2024-03-27",
+        "equity": 99.5028,
+        "drawdown_pct": 0.5
+      },
+      {
+        "date": "2024-03-28",
+        "equity": 100.0634,
+        "drawdown_pct": 0.0
+      },
+      {
+        "date": "2024-04-01",
+        "equity": 100.3798,
+        "drawdown_pct": 0.0
+      },
+      {
+        "date": "2024-04-02",
+        "equity": 99.9134,
+        "drawdown_pct": 0.46
+      },
+      {
+        "date": "2024-04-03",
+        "equity": 99.3302,
+        "drawdown_pct": 1.05
+      },
+      {
+        "date": "2024-04-04",
+        "equity": 100.2115,
+        "drawdown_pct": 0.17
+      },
+      {
+        "date": "2024-04-05",
+        "equity": 100.2593,
+        "drawdown_pct": 0.12
+      },
+      {
+        "date": "2024-04-08",
+        "equity": 99.2531,
+        "drawdown_pct": 1.12
+      },
+      {
+        "date": "2024-04-09",
+        "equity": 97.7242,
+        "drawdown_pct": 2.65
+      },
+      {
+        "date": "2024-04-10",
+        "equity": 96.0618,
+        "drawdown_pct": 4.3
+      },
+      {
+        "date": "2024-04-12",
+        "equity": 95.277,
+        "drawdown_pct": 5.08
+      },
+      {
+        "date": "2024-04-15",
+        "equity": 94.9648,
+        "drawdown_pct": 5.39
+      },
+      {
+        "date": "2024-04-16",
+        "equity": 94.8956,
+        "drawdown_pct": 5.46
+      },
+      {
+        "date": "2024-04-18",
+        "equity": 95.7281,
+        "drawdown_pct": 4.63
+      },
+      {
+        "date": "2024-04-19",
+        "equity": 95.7134,
+        "drawdown_pct": 4.65
+      },
+      {
+        "date": "2024-04-22",
+        "equity": 96.5239,
+        "drawdown_pct": 3.84
+      },
+      {
+        "date": "2024-04-23",
+        "equity": 97.1433,
+        "drawdown_pct": 3.22
+      },
+      {
+        "date": "2024-04-24",
+        "equity": 96.0561,
+        "drawdown_pct": 4.31
+      },
+      {
+        "date": "2024-04-25",
+        "equity": 96.3462,
+        "drawdown_pct": 4.02
+      },
+      {
+        "date": "2024-04-26",
+        "equity": 96.4234,
+        "drawdown_pct": 3.94
+      },
+      {
+        "date": "2024-04-29",
+        "equity": 95.489,
+        "drawdown_pct": 4.87
+      },
+      {
+        "date": "2024-04-30",
+        "equity": 94.7531,
+        "drawdown_pct": 5.61
+      },
+      {
+        "date": "2024-05-02",
+        "equity": 92.7487,
+        "drawdown_pct": 7.6
+      },
+      {
+        "date": "2024-05-03",
+        "equity": 92.0117,
+        "drawdown_pct": 8.34
+      },
+      {
+        "date": "2024-05-06",
+        "equity": 92.2823,
+        "drawdown_pct": 8.07
+      },
+      {
+        "date": "2024-05-07",
+        "equity": 90.5036,
+        "drawdown_pct": 9.84
+      },
+      {
+        "date": "2024-05-08",
+        "equity": 91.0076,
+        "drawdown_pct": 9.34
+      },
+      {
+        "date": "2024-05-09",
+        "equity": 91.2406,
+        "drawdown_pct": 9.1
+      },
+      {
+        "date": "2024-05-10",
+        "equity": 91.5759,
+        "drawdown_pct": 8.77
+      },
+      {
+        "date": "2024-05-13",
+        "equity": 91.6084,
+        "drawdown_pct": 8.74
+      },
+      {
+        "date": "2024-05-14",
+        "equity": 91.9991,
+        "drawdown_pct": 8.35
+      },
+      {
+        "date": "2024-05-15",
+        "equity": 91.9354,
+        "drawdown_pct": 8.41
+      },
+      {
+        "date": "2024-05-16",
+        "equity": 91.464,
+        "drawdown_pct": 8.88
+      },
+      {
+        "date": "2024-05-17",
+        "equity": 91.458,
+        "drawdown_pct": 8.89
+      },
+      {
+        "date": "2024-05-21",
+        "equity": 91.5037,
+        "drawdown_pct": 8.84
+      },
+      {
+        "date": "2024-05-22",
+        "equity": 91.4932,
+        "drawdown_pct": 8.85
+      },
+      {
+        "date": "2024-05-23",
+        "equity": 91.5509,
+        "drawdown_pct": 8.8
+      },
+      {
+        "date": "2024-05-24",
+        "equity": 90.8978,
+        "drawdown_pct": 9.45
+      },
+      {
+        "date": "2024-05-27",
+        "equity": 89.9861,
+        "drawdown_pct": 10.35
+      },
+      {
+        "date": "2024-05-28",
+        "equity": 88.7577,
+        "drawdown_pct": 11.58
+      },
+      {
+        "date": "2024-05-29",
+        "equity": 89.44,
+        "drawdown_pct": 10.9
+      },
+      {
+        "date": "2024-05-30",
+        "equity": 90.6179,
+        "drawdown_pct": 9.72
+      },
+      {
+        "date": "2024-05-31",
+        "equity": 87.1819,
+        "drawdown_pct": 13.15
+      }
+    ],
+    "signal_metrics": {
+      "information_coefficient": -0.0246,
+      "rank_ic": -0.0004,
+      "trades_count": 260,
+      "raw_win_rate": 47.69,
+      "raw_profit_factor": 0.98,
+      "gross_mean_trade_pnl_pct": -0.01
+    },
+    "execution_metrics": {
+      "friction_bps": 25.0,
+      "net_trades_count": 260,
+      "net_wins_count": 108,
+      "net_losses_count": 152,
+      "net_win_rate": 41.54,
+      "net_profit_factor": 0.64,
+      "net_sharpe": -1.2,
+      "net_max_drawdown_pct": 13.15,
+      "net_mean_trade_pnl_pct": -0.26,
+      "peak_equity": 100.38,
+      "trough_equity": 87.18,
+      "drawdown_period": {
+        "peak_date": "2024-04-01",
+        "trough_date": "2024-05-31",
+        "duration_bars": 40
+      },
+      "equity_curve": [
+        {
+          "date": "2024-03-13",
+          "equity": 100.0,
+          "drawdown_pct": 0.0
+        },
+        {
+          "date": "2024-03-13",
+          "equity": 99.707,
+          "drawdown_pct": 0.29
+        },
+        {
+          "date": "2024-03-14",
+          "equity": 99.0485,
+          "drawdown_pct": 0.95
+        },
+        {
+          "date": "2024-03-15",
+          "equity": 97.1669,
+          "drawdown_pct": 2.83
+        },
+        {
+          "date": "2024-03-18",
+          "equity": 97.9754,
+          "drawdown_pct": 2.02
+        },
+        {
+          "date": "2024-03-19",
+          "equity": 99.1826,
+          "drawdown_pct": 0.82
+        },
+        {
+          "date": "2024-03-20",
+          "equity": 99.5489,
+          "drawdown_pct": 0.45
+        },
+        {
+          "date": "2024-03-21",
+          "equity": 98.9521,
+          "drawdown_pct": 1.05
+        },
+        {
+          "date": "2024-03-22",
+          "equity": 98.7373,
+          "drawdown_pct": 1.26
+        },
+        {
+          "date": "2024-03-26",
+          "equity": 99.4511,
+          "drawdown_pct": 0.55
+        },
+        {
+          "date": "2024-03-27",
+          "equity": 99.5028,
+          "drawdown_pct": 0.5
+        },
+        {
+          "date": "2024-03-28",
+          "equity": 100.0634,
+          "drawdown_pct": 0.0
+        },
+        {
+          "date": "2024-04-01",
+          "equity": 100.3798,
+          "drawdown_pct": 0.0
+        },
+        {
+          "date": "2024-04-02",
+          "equity": 99.9134,
+          "drawdown_pct": 0.46
+        },
+        {
+          "date": "2024-04-03",
+          "equity": 99.3302,
+          "drawdown_pct": 1.05
+        },
+        {
+          "date": "2024-04-04",
+          "equity": 100.2115,
+          "drawdown_pct": 0.17
+        },
+        {
+          "date": "2024-04-05",
+          "equity": 100.2593,
+          "drawdown_pct": 0.12
+        },
+        {
+          "date": "2024-04-08",
+          "equity": 99.2531,
+          "drawdown_pct": 1.12
+        },
+        {
+          "date": "2024-04-09",
+          "equity": 97.7242,
+          "drawdown_pct": 2.65
+        },
+        {
+          "date": "2024-04-10",
+          "equity": 96.0618,
+          "drawdown_pct": 4.3
+        },
+        {
+          "date": "2024-04-12",
+          "equity": 95.277,
+          "drawdown_pct": 5.08
+        },
+        {
+          "date": "2024-04-15",
+          "equity": 94.9648,
+          "drawdown_pct": 5.39
+        },
+        {
+          "date": "2024-04-16",
+          "equity": 94.8956,
+          "drawdown_pct": 5.46
+        },
+        {
+          "date": "2024-04-18",
+          "equity": 95.7281,
+          "drawdown_pct": 4.63
+        },
+        {
+          "date": "2024-04-19",
+          "equity": 95.7134,
+          "drawdown_pct": 4.65
+        },
+        {
+          "date": "2024-04-22",
+          "equity": 96.5239,
+          "drawdown_pct": 3.84
+        },
+        {
+          "date": "2024-04-23",
+          "equity": 97.1433,
+          "drawdown_pct": 3.22
+        },
+        {
+          "date": "2024-04-24",
+          "equity": 96.0561,
+          "drawdown_pct": 4.31
+        },
+        {
+          "date": "2024-04-25",
+          "equity": 96.3462,
+          "drawdown_pct": 4.02
+        },
+        {
+          "date": "2024-04-26",
+          "equity": 96.4234,
+          "drawdown_pct": 3.94
+        },
+        {
+          "date": "2024-04-29",
+          "equity": 95.489,
+          "drawdown_pct": 4.87
+        },
+        {
+          "date": "2024-04-30",
+          "equity": 94.7531,
+          "drawdown_pct": 5.61
+        },
+        {
+          "date": "2024-05-02",
+          "equity": 92.7487,
+          "drawdown_pct": 7.6
+        },
+        {
+          "date": "2024-05-03",
+          "equity": 92.0117,
+          "drawdown_pct": 8.34
+        },
+        {
+          "date": "2024-05-06",
+          "equity": 92.2823,
+          "drawdown_pct": 8.07
+        },
+        {
+          "date": "2024-05-07",
+          "equity": 90.5036,
+          "drawdown_pct": 9.84
+        },
+        {
+          "date": "2024-05-08",
+          "equity": 91.0076,
+          "drawdown_pct": 9.34
+        },
+        {
+          "date": "2024-05-09",
+          "equity": 91.2406,
+          "drawdown_pct": 9.1
+        },
+        {
+          "date": "2024-05-10",
+          "equity": 91.5759,
+          "drawdown_pct": 8.77
+        },
+        {
+          "date": "2024-05-13",
+          "equity": 91.6084,
+          "drawdown_pct": 8.74
+        },
+        {
+          "date": "2024-05-14",
+          "equity": 91.9991,
+          "drawdown_pct": 8.35
+        },
+        {
+          "date": "2024-05-15",
+          "equity": 91.9354,
+          "drawdown_pct": 8.41
+        },
+        {
+          "date": "2024-05-16",
+          "equity": 91.464,
+          "drawdown_pct": 8.88
+        },
+        {
+          "date": "2024-05-17",
+          "equity": 91.458,
+          "drawdown_pct": 8.89
+        },
+        {
+          "date": "2024-05-21",
+          "equity": 91.5037,
+          "drawdown_pct": 8.84
+        },
+        {
+          "date": "2024-05-22",
+          "equity": 91.4932,
+          "drawdown_pct": 8.85
+        },
+        {
+          "date": "2024-05-23",
+          "equity": 91.5509,
+          "drawdown_pct": 8.8
+        },
+        {
+          "date": "2024-05-24",
+          "equity": 90.8978,
+          "drawdown_pct": 9.45
+        },
+        {
+          "date": "2024-05-27",
+          "equity": 89.9861,
+          "drawdown_pct": 10.35
+        },
+        {
+          "date": "2024-05-28",
+          "equity": 88.7577,
+          "drawdown_pct": 11.58
+        },
+        {
+          "date": "2024-05-29",
+          "equity": 89.44,
+          "drawdown_pct": 10.9
+        },
+        {
+          "date": "2024-05-30",
+          "equity": 90.6179,
+          "drawdown_pct": 9.72
+        },
+        {
+          "date": "2024-05-31",
+          "equity": 87.1819,
+          "drawdown_pct": 13.15
+        }
+      ]
+    }
   },
   "artifact_path": "/Users/arunsharma/Desktop/swing trade react/backend/models/qlib/swing/qlib_swing_20260911_110241/model.pkl",
   "artifact_sha256": "ff2a99df7d40c4378f4a2273c9d6a97c00a71c5ba0ae1b88a478d2a6c6562175",

@@ -829,7 +829,7 @@ class ResearchReportPDFGenerator:
             [Paragraph("Future Forward OOS Bars", body_style),
              Paragraph(f"<b>{future_bars:,} Bars</b>", body_style),
              Paragraph("Forward Deployment Ledger", body_style),
-             Paragraph("<font color='#D97706'><b>PENDING (0 NEW BARS)</b></font>", body_style)],
+             Paragraph(f"<font color='{'#10B981' if future_bars > 0 else '#D97706'}'><b>{'ACTIVE (' + str(future_bars) + ' NEW BARS)' if future_bars > 0 else 'PENDING (0 NEW BARS)'}</b></font>", body_style)],
             [Paragraph("Completed OOS Trades", body_style),
              Paragraph(f"<b>{oos_trades:,} Trades</b>", body_style),
              Paragraph("Strict OOS Execution Count", body_style),
