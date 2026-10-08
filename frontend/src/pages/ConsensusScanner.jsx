@@ -1609,6 +1609,33 @@ export default function ConsensusScanner() {
                                   }`}>
                                     {(opp.strategy || scanResult.strategy || 'INTRADAY')} • {(opp.timeframe || ((opp.strategy || scanResult.strategy || 'INTRADAY') === 'INTRADAY' ? '15m' : '1d'))}
                                   </span>
+                                  {/* Agent Approved / Skip Concurrence Badge */}
+                                  {(() => {
+                                    const sentinel = opp.trade_sentinel || opp.details?.trade_sentinel;
+                                    if (!sentinel) return null;
+                                    if (sentinel.action === 'TAKE') {
+                                      return (
+                                        <span 
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200 shadow-2xs"
+                                          title={`Agent Approved: Trade Sentinel Concurrence (Win Prob: ${((sentinel.prob ?? 0) * 100).toFixed(0)}%, Expected Net: ${((sentinel.expected_net_return ?? 0) * 100).toFixed(2)}%)`}
+                                        >
+                                          <ShieldCheck size={12} className="text-indigo-600" />
+                                          <span>AGENT APPROVED</span>
+                                        </span>
+                                      );
+                                    } else if (sentinel.action === 'SKIP') {
+                                      return (
+                                        <span 
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-amber-50 text-amber-700 border border-amber-200 shadow-2xs"
+                                          title={`Agent Caution: Advised Skip (${sentinel.reasoning || 'Adversarial risk guardrail flagged'})`}
+                                        >
+                                          <AlertTriangle size={12} className="text-amber-600" />
+                                          <span>AGENT SKIP</span>
+                                        </span>
+                                      );
+                                    }
+                                    return null;
+                                  })()}
                                 </div>
                                 <div className="flex items-center space-x-2 text-xs font-mono mt-0.5">
                                   <span className="text-slate-500">
@@ -1709,6 +1736,33 @@ export default function ConsensusScanner() {
                                   }`}>
                                     {(cand.strategy || scanResult.strategy || 'INTRADAY')} • {(cand.timeframe || ((cand.strategy || scanResult.strategy || 'INTRADAY') === 'INTRADAY' ? '15m' : '1d'))}
                                   </span>
+                                  {/* Agent Approved / Skip Concurrence Badge */}
+                                  {(() => {
+                                    const sentinel = cand.trade_sentinel || cand.details?.trade_sentinel;
+                                    if (!sentinel) return null;
+                                    if (sentinel.action === 'TAKE') {
+                                      return (
+                                        <span 
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200 shadow-2xs"
+                                          title={`Agent Approved: Trade Sentinel Concurrence (Win Prob: ${((sentinel.prob ?? 0) * 100).toFixed(0)}%, Expected Net: ${((sentinel.expected_net_return ?? 0) * 100).toFixed(2)}%)`}
+                                        >
+                                          <ShieldCheck size={12} className="text-indigo-600" />
+                                          <span>AGENT APPROVED</span>
+                                        </span>
+                                      );
+                                    } else if (sentinel.action === 'SKIP') {
+                                      return (
+                                        <span 
+                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-amber-50 text-amber-700 border border-amber-200 shadow-2xs"
+                                          title={`Agent Caution: Advised Skip (${sentinel.reasoning || 'Adversarial risk guardrail flagged'})`}
+                                        >
+                                          <AlertTriangle size={12} className="text-amber-600" />
+                                          <span>AGENT SKIP</span>
+                                        </span>
+                                      );
+                                    }
+                                    return null;
+                                  })()}
                                 </div>
                                 <div className="flex items-center space-x-2 text-xs font-mono mt-0.5">
                                   <span className="text-slate-500">

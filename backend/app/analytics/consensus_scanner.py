@@ -1265,6 +1265,20 @@ class ConsensusScanner:
                         }
                     except Exception:
                         pass
+
+                    # Trade Sentinel Agent Shadow Observation Hook for Qlib Solo
+                    try:
+                        from agent_lab.agent_core.sentinel_agent import TradeSentinelAgent
+                        _sentinel_eval = TradeSentinelAgent.observe_and_evaluate(_q_cand, skip_llm=True)
+                        _q_cand["trade_sentinel"] = {
+                            "action": _sentinel_eval.get("action", "UNKNOWN"),
+                            "prob": _sentinel_eval.get("agent_prob", 0.5),
+                            "expected_net_return": _sentinel_eval.get("expected_net_return", 0.0),
+                            "decision_id": _sentinel_eval.get("decision_id"),
+                            "model_version": _sentinel_eval.get("model_version")
+                        }
+                    except Exception as _sentinel_err:
+                        logger.debug(f"Trade Sentinel Qlib Solo observation note: {_sentinel_err}")
                     qlib_solo.append(_q_cand)
                     shadow_candidates_to_log.append({
                         "ticker": q.get("ticker") or f"{sym}.NS",
@@ -1336,6 +1350,20 @@ class ConsensusScanner:
                         }
                     except Exception:
                         pass
+
+                    # Trade Sentinel Agent Shadow Observation Hook for Legacy Solo
+                    try:
+                        from agent_lab.agent_core.sentinel_agent import TradeSentinelAgent
+                        _sentinel_eval = TradeSentinelAgent.observe_and_evaluate(_l_cand, skip_llm=True)
+                        _l_cand["trade_sentinel"] = {
+                            "action": _sentinel_eval.get("action", "UNKNOWN"),
+                            "prob": _sentinel_eval.get("agent_prob", 0.5),
+                            "expected_net_return": _sentinel_eval.get("expected_net_return", 0.0),
+                            "decision_id": _sentinel_eval.get("decision_id"),
+                            "model_version": _sentinel_eval.get("model_version")
+                        }
+                    except Exception as _sentinel_err:
+                        logger.debug(f"Trade Sentinel Legacy Solo observation note: {_sentinel_err}")
                     legacy_solo.append(_l_cand)
                     shadow_candidates_to_log.append({
                         "ticker": l.get("ticker") or f"{sym}.NS",
