@@ -172,18 +172,21 @@ def get_or_create_scheduler() -> BackgroundScheduler:
             # 8b. Automated 1-Minute Active Consensus Trade Reconciler (09:15-15:30 IST Mon-Fri)
             try:
                 def _reconcile_consensus_trades_daemon():
-                    from app.analytics.consensus_tracker import ConsensusTracker
-                    ConsensusTracker.reconcile_open_consensus_trades(min_interval_sec=45.0)
+                    try:
+                        from app.analytics.consensus_tracker import ConsensusTracker
+                        ConsensusTracker.reconcile_open_consensus_trades(min_interval_sec=45.0)
+                    except Exception as ct_err:
+                        logger.warning(f"[ConsensusDaemon] Reconcile trades note: {ct_err}")
                     try:
                         from app.analytics.consensus_dynamic_guard import ConsensusDynamicGuard
                         ConsensusDynamicGuard.audit_active_arena_positions(session_id="default_arena_session")
-                    except Exception:
-                        pass
+                    except Exception as dg_err:
+                        logger.debug(f"[ConsensusDaemon] Dynamic guard note: {dg_err}")
                     try:
                         from app.analytics.consensus_game_engine import ConsensusGameEngine
                         ConsensusGameEngine.sync_and_dispatch_arena_alerts(session_id="default_arena_session")
-                    except Exception:
-                        pass
+                    except Exception as alert_err:
+                        logger.warning(f"[ConsensusDaemon] Game alert dispatch note: {alert_err}")
 
                 _SCHEDULER_INSTANCE.add_job(
                     _reconcile_consensus_trades_daemon,

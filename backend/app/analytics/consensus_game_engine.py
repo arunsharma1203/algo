@@ -19,6 +19,7 @@ Invariants:
 
 import os
 import math
+import time
 import json
 import sqlite3
 import logging
@@ -642,197 +643,212 @@ class ConsensusGameEngine:
         if session_id != "default_arena_session" and not session_id.startswith("test_"):
             return {"status": "NON_DEFAULT_SESSION_ALERT_SUPPRESSED", "entry_alerts_sent": 0, "exit_alerts_sent": 0}
 
-        cls.init_game_schema(conn)
-        should_close = False
-        if conn is None:
-            conn = sqlite3.connect(get_db_path(), timeout=15.0)
-            should_close = True
-
         entry_alerts_sent = 0
         exit_alerts_sent = 0
+        max_retries = 3
 
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='consensus_trade_history'")
-            if not cur.fetchone():
-                return {"status": "NO_CONSENSUS_TABLE", "entry_alerts_sent": 0, "exit_alerts_sent": 0}
+        for attempt in range(max_retries):
+            should_close = False
+            active_conn = conn
+            if active_conn is None:
+                active_conn = sqlite3.connect(get_db_path(), timeout=60.0)
+                try:
+                    active_conn.execute("PRAGMA busy_timeout = 60000;")
+                    active_conn.execute("PRAGMA journal_mode = WAL;")
+                except Exception:
+                    pass
+                should_close = True
 
-            # 1. Sync authentic trades into game state
-            cls._sync_and_progress_portfolio(session_id, conn)
+            try:
+                cls.init_game_schema(active_conn)
+                cur = active_conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='consensus_trade_history'")
+                if not cur.fetchone():
+                    return {"status": "NO_CONSENSUS_TABLE", "entry_alerts_sent": 0, "exit_alerts_sent": 0}
 
-            account_row = cur.execute("""
-                SELECT current_cash, max_positions, realized_pnl, trade_selection_mode
-                FROM consensus_game_accounts WHERE session_id = ?
-            """, (session_id,)).fetchone()
-            if not account_row:
-                cls.deploy_capital(100000.0, session_id=session_id, conn=conn)
+                # 1. Sync authentic trades into game state
+                cls._sync_and_progress_portfolio(session_id, active_conn)
+
                 account_row = cur.execute("""
                     SELECT current_cash, max_positions, realized_pnl, trade_selection_mode
                     FROM consensus_game_accounts WHERE session_id = ?
                 """, (session_id,)).fetchone()
+                if not account_row:
+                    cls.deploy_capital(100000.0, session_id=session_id, conn=active_conn)
+                    account_row = cur.execute("""
+                        SELECT current_cash, max_positions, realized_pnl, trade_selection_mode
+                        FROM consensus_game_accounts WHERE session_id = ?
+                    """, (session_id,)).fetchone()
 
-            if not account_row:
-                return {"status": "NO_ACCOUNT", "entry_alerts_sent": 0, "exit_alerts_sent": 0}
+                if not account_row:
+                    return {"status": "NO_ACCOUNT", "entry_alerts_sent": 0, "exit_alerts_sent": 0}
 
-            current_cash = float(account_row[0])
-            max_positions = int(account_row[1])
-            realized_pnl = float(account_row[2])
-            selection_mode = str(account_row[3] if len(account_row) > 3 and account_row[3] else "ALL_QUALIFIED")
+                current_cash = float(account_row[0])
+                max_positions = int(account_row[1])
+                realized_pnl = float(account_row[2])
+                selection_mode = str(account_row[3] if len(account_row) > 3 and account_row[3] else "ALL_QUALIFIED")
 
-            open_count = cur.execute("""
-                SELECT COUNT(*) FROM consensus_game_positions WHERE session_id = ? AND status = 'OPEN'
-            """, (session_id,)).fetchone()[0]
+                open_count = cur.execute("""
+                    SELECT COUNT(*) FROM consensus_game_positions WHERE session_id = ? AND status = 'OPEN'
+                """, (session_id,)).fetchone()[0]
 
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            today_str = datetime.now().strftime("%Y-%m-%d")
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                today_str = datetime.now().strftime("%Y-%m-%d")
 
-            from app.analytics.telegram_notifier import send_telegram_message
+                from app.analytics.telegram_notifier import send_telegram_message
 
-            # 2. Check unalerted OPEN positions
-            cur.execute("""
-                SELECT p.id, p.trade_ref_id, p.ticker, p.direction, p.shares, p.entry_price,
-                       p.allocated_capital, p.stop_loss, p.target_price, p.entry_time,
-                       t.composite_score, t.qlib_score, t.legacy_score, t.finbert_score, t.strategy
-                FROM consensus_game_positions p
-                LEFT JOIN consensus_trade_history t ON p.trade_ref_id = t.id
-                WHERE p.session_id = ? AND p.status = 'OPEN'
-                  AND p.trade_ref_id NOT IN (
-                      SELECT trade_ref_id FROM consensus_game_alerts
-                      WHERE session_id = ? AND alert_type = 'SLOT_ENTRY'
-                  )
-                ORDER BY p.id ASC
-            """, (session_id, session_id))
-            unalerted_open = cur.fetchall()
-
-            messages_to_send = []
-
-            for row in unalerted_open:
-                pid, ref_id, ticker, direction, shares, entry_px, alloc_cap, sl, tp, entry_t, comp_score, qlib_score, leg_score, finbert_score, strat = row
-                entry_t_str = str(entry_t or "")
-                is_today = bool(entry_t_str[:10] == today_str)
-
-                is_timed_mode = (selection_mode in ("TIMED_ANCHOR_CONFLUENCE", "TIMED_SCANS_ONLY", "TIMED_SCANS_HIGH_CONFLUENCE", "TIMED_SCAN"))
-
-                # User requirement: Only send Telegram notifications for 15-min scan trade with highest confluence; do not send for timed scans
-                if is_today and not is_timed_mode:
-                    msg = cls._format_slot_entry_message(
-                        ticker=ticker,
-                        direction=direction,
-                        shares=shares,
-                        entry_price=entry_px,
-                        allocated_capital=alloc_cap,
-                        stop_loss=sl,
-                        target_price=tp,
-                        composite_score=float(comp_score or 0.0),
-                        qlib_score=qlib_score or "N/A",
-                        legacy_score=leg_score or "N/A",
-                        finbert_score=float(finbert_score or 0.0),
-                        current_cash=current_cash,
-                        open_count=open_count,
-                        max_positions=max_positions,
-                        strategy=strat or "INTRADAY",
-                        trade_selection_mode=selection_mode
-                    )
-                    messages_to_send.append((msg, ref_id, ticker, True))
-
-                # Record in ledger to guarantee zero duplicate alerts
+                # 2. Check unalerted OPEN positions
                 cur.execute("""
-                    INSERT OR IGNORE INTO consensus_game_alerts (
-                        session_id, trade_ref_id, ticker, alert_type, sent_at, details_json
-                    ) VALUES (?, ?, ?, 'SLOT_ENTRY', ?, ?)
-                """, (
-                    session_id, ref_id, ticker, now_str,
-                    json.dumps({"is_live": is_today, "entry_time": entry_t, "entry_price": entry_px})
-                ))
+                    SELECT p.id, p.trade_ref_id, p.ticker, p.direction, p.shares, p.entry_price,
+                           p.allocated_capital, p.stop_loss, p.target_price, p.entry_time,
+                           t.composite_score, t.qlib_score, t.legacy_score, t.finbert_score, t.strategy
+                    FROM consensus_game_positions p
+                    LEFT JOIN consensus_trade_history t ON p.trade_ref_id = t.id
+                    WHERE p.session_id = ? AND p.status = 'OPEN'
+                      AND p.trade_ref_id NOT IN (
+                          SELECT trade_ref_id FROM consensus_game_alerts
+                          WHERE session_id = ? AND alert_type = 'SLOT_ENTRY'
+                      )
+                    ORDER BY p.id ASC
+                """, (session_id, session_id))
+                unalerted_open = cur.fetchall()
 
-            # 3. Check unalerted CLOSED positions
-            cur.execute("""
-                SELECT p.id, p.trade_ref_id, p.ticker, p.direction, p.shares, p.entry_price,
-                       p.exit_price, p.gross_pnl_rupees, p.fees_rupees, p.net_pnl_rupees,
-                       p.pnl_pct, p.outcome, p.entry_time, p.exit_time
-                FROM consensus_game_positions p
-                WHERE p.session_id = ? AND p.status = 'CLOSED'
-                  AND p.trade_ref_id NOT IN (
-                      SELECT trade_ref_id FROM consensus_game_alerts
-                      WHERE session_id = ? AND alert_type = 'SLOT_EXIT'
-                  )
-                ORDER BY p.id ASC
-            """, (session_id, session_id))
-            unalerted_closed = cur.fetchall()
+                messages_to_send = []
 
-            for row in unalerted_closed:
-                pid, ref_id, ticker, direction, shares, entry_px, exit_px, gross_pnl, fees, net_pnl, pnl_pct, outcome, entry_t, exit_t = row
-                
-                # Check if this trade was ever alerted on entry
-                was_entry_alerted = cur.execute("""
-                    SELECT 1 FROM consensus_game_alerts WHERE session_id = ? AND trade_ref_id = ? AND alert_type = 'SLOT_ENTRY'
-                """, (session_id, ref_id)).fetchone() is not None
-                
-                # Strict live-day check: The position MUST have exited TODAY to qualify for a live exit alert
-                is_exit_today = bool(exit_t and str(exit_t)[:10] == today_str)
+                for row in unalerted_open:
+                    pid, ref_id, ticker, direction, shares, entry_px, alloc_cap, sl, tp, entry_t, comp_score, qlib_score, leg_score, finbert_score, strat = row
+                    entry_t_str = str(entry_t or "")
+                    is_today = bool(entry_t_str[:10] == today_str)
 
-                is_timed_mode = (selection_mode in ("TIMED_ANCHOR_CONFLUENCE", "TIMED_SCANS_ONLY", "TIMED_SCANS_HIGH_CONFLUENCE", "TIMED_SCAN"))
-                
-                # Dispatch exit push alert ONLY IF:
-                # 1. The trade actually closed TODAY (preventing stale historical/yesterday exit ghost alerts), AND
-                # 2. The trade was either alerted upon entry OR entered today in live trading, AND
-                # 3. Not in timed anchor scan mode
-                if is_exit_today and (was_entry_alerted or str(entry_t)[:10] == today_str) and not is_timed_mode:
-                    msg = cls._format_slot_exit_message(
-                        ticker=ticker,
-                        direction=direction,
-                        shares=shares,
-                        entry_price=entry_px,
-                        exit_price=float(exit_px or entry_px),
-                        gross_pnl=float(gross_pnl or 0.0),
-                        fee=float(fees or 0.0),
-                        net_pnl=float(net_pnl or 0.0),
-                        pnl_pct=float(pnl_pct or 0.0),
-                        outcome=str(outcome or "MANUAL EXIT"),
-                        current_cash=current_cash,
-                        realized_pnl=realized_pnl,
-                        open_count=open_count,
-                        max_positions=max_positions
-                    )
-                    messages_to_send.append((msg, ref_id, ticker, False))
+                    is_timed_mode = (selection_mode in ("TIMED_ANCHOR_CONFLUENCE", "TIMED_SCANS_ONLY", "TIMED_SCANS_HIGH_CONFLUENCE", "TIMED_SCAN"))
 
-                # Record in ledger
+                    # User requirement: Only send Telegram notifications for 15-min scan trade with highest confluence; do not send for timed scans
+                    if is_today and not is_timed_mode:
+                        msg = cls._format_slot_entry_message(
+                            ticker=ticker,
+                            direction=direction,
+                            shares=shares,
+                            entry_price=entry_px,
+                            allocated_capital=alloc_cap,
+                            stop_loss=sl,
+                            target_price=tp,
+                            composite_score=float(comp_score or 0.0),
+                            qlib_score=qlib_score or "N/A",
+                            legacy_score=leg_score or "N/A",
+                            finbert_score=float(finbert_score or 0.0),
+                            current_cash=current_cash,
+                            open_count=open_count,
+                            max_positions=max_positions,
+                            strategy=strat or "INTRADAY",
+                            trade_selection_mode=selection_mode
+                        )
+                        messages_to_send.append((msg, ref_id, ticker, True))
+
+                    # Record in ledger to guarantee zero duplicate alerts
+                    cur.execute("""
+                        INSERT OR IGNORE INTO consensus_game_alerts (
+                            session_id, trade_ref_id, ticker, alert_type, sent_at, details_json
+                        ) VALUES (?, ?, ?, 'SLOT_ENTRY', ?, ?)
+                    """, (
+                        session_id, ref_id, ticker, now_str,
+                        json.dumps({"is_live": is_today, "entry_time": entry_t, "entry_price": entry_px})
+                    ))
+
+                # 3. Check unalerted CLOSED positions
                 cur.execute("""
-                    INSERT OR IGNORE INTO consensus_game_alerts (
-                        session_id, trade_ref_id, ticker, alert_type, sent_at, details_json
-                    ) VALUES (?, ?, ?, 'SLOT_EXIT', ?, ?)
-                """, (
-                    session_id, ref_id, ticker, now_str,
-                    json.dumps({"is_live": is_exit_today, "exit_time": exit_t, "outcome": outcome, "net_pnl": net_pnl})
-                ))
+                    SELECT p.id, p.trade_ref_id, p.ticker, p.direction, p.shares, p.entry_price,
+                           p.exit_price, p.gross_pnl_rupees, p.fees_rupees, p.net_pnl_rupees,
+                           p.pnl_pct, p.outcome, p.entry_time, p.exit_time
+                    FROM consensus_game_positions p
+                    WHERE p.session_id = ? AND p.status = 'CLOSED'
+                      AND p.trade_ref_id NOT IN (
+                          SELECT trade_ref_id FROM consensus_game_alerts
+                          WHERE session_id = ? AND alert_type = 'SLOT_EXIT'
+                      )
+                    ORDER BY p.id ASC
+                """, (session_id, session_id))
+                unalerted_closed = cur.fetchall()
 
-            # Commit all database transactions first to release all SQLite locks
-            conn.commit()
+                for row in unalerted_closed:
+                    pid, ref_id, ticker, direction, shares, entry_px, exit_px, gross_pnl, fees, net_pnl, pnl_pct, outcome, entry_t, exit_t = row
+                    
+                    # Check if this trade was ever alerted on entry
+                    was_entry_alerted = cur.execute("""
+                        SELECT 1 FROM consensus_game_alerts WHERE session_id = ? AND trade_ref_id = ? AND alert_type = 'SLOT_ENTRY'
+                    """, (session_id, ref_id)).fetchone() is not None
+                    
+                    # Strict live-day check: The position MUST have exited TODAY to qualify for a live exit alert
+                    is_exit_today = bool(exit_t and str(exit_t)[:10] == today_str)
 
-            # Dispatch queued Telegram alerts after releasing DB transaction locks
-            for msg, ref_id, ticker, is_entry in messages_to_send:
-                try:
-                    send_telegram_message(msg)
-                    if is_entry:
-                        entry_alerts_sent += 1
-                        logger.info(f"[ConsensusGameAlert] SLOT_ENTRY alert sent for {ticker} (#{ref_id})")
-                    else:
-                        exit_alerts_sent += 1
-                        logger.info(f"[ConsensusGameAlert] SLOT_EXIT alert sent for {ticker} (#{ref_id}) - exit")
-                except Exception as ex:
-                    logger.warning(f"[ConsensusGameAlert] Failed to dispatch alert: {ex}")
+                    is_timed_mode = (selection_mode in ("TIMED_ANCHOR_CONFLUENCE", "TIMED_SCANS_ONLY", "TIMED_SCANS_HIGH_CONFLUENCE", "TIMED_SCAN"))
+                    
+                    # Dispatch exit push alert ONLY IF:
+                    # 1. The trade actually closed TODAY (preventing stale historical/yesterday exit ghost alerts), AND
+                    # 2. The trade was either alerted upon entry OR entered today in live trading, AND
+                    # 3. Not in timed anchor scan mode
+                    if is_exit_today and (was_entry_alerted or str(entry_t)[:10] == today_str) and not is_timed_mode:
+                        msg = cls._format_slot_exit_message(
+                            ticker=ticker,
+                            direction=direction,
+                            shares=shares,
+                            entry_price=entry_px,
+                            exit_price=float(exit_px or entry_px),
+                            gross_pnl=float(gross_pnl or 0.0),
+                            fee=float(fees or 0.0),
+                            net_pnl=float(net_pnl or 0.0),
+                            pnl_pct=float(pnl_pct or 0.0),
+                            outcome=str(outcome or "MANUAL EXIT"),
+                            current_cash=current_cash,
+                            realized_pnl=realized_pnl,
+                            open_count=open_count,
+                            max_positions=max_positions
+                        )
+                        messages_to_send.append((msg, ref_id, ticker, False))
 
-            return {
-                "status": "SUCCESS",
-                "entry_alerts_sent": entry_alerts_sent,
-                "exit_alerts_sent": exit_alerts_sent
-            }
-        except Exception as e:
-            logger.error(f"[ConsensusGameAlert] Error dispatching arena alerts: {e}", exc_info=True)
-            return {"status": "ERROR", "error": str(e), "entry_alerts_sent": 0, "exit_alerts_sent": 0}
-        finally:
-            if should_close:
-                conn.close()
+                    # Record in ledger
+                    cur.execute("""
+                        INSERT OR IGNORE INTO consensus_game_alerts (
+                            session_id, trade_ref_id, ticker, alert_type, sent_at, details_json
+                        ) VALUES (?, ?, ?, 'SLOT_EXIT', ?, ?)
+                    """, (
+                        session_id, ref_id, ticker, now_str,
+                        json.dumps({"is_live": is_exit_today, "exit_time": exit_t, "outcome": outcome, "net_pnl": net_pnl})
+                    ))
+
+                # Commit all database transactions first to release all SQLite locks
+                active_conn.commit()
+
+                # Dispatch queued Telegram alerts after releasing DB transaction locks
+                for msg, ref_id, ticker, is_entry in messages_to_send:
+                    try:
+                        send_telegram_message(msg)
+                        if is_entry:
+                            entry_alerts_sent += 1
+                            logger.info(f"[ConsensusGameAlert] SLOT_ENTRY alert sent for {ticker} (#{ref_id})")
+                        else:
+                            exit_alerts_sent += 1
+                            logger.info(f"[ConsensusGameAlert] SLOT_EXIT alert sent for {ticker} (#{ref_id}) - exit")
+                    except Exception as ex:
+                        logger.warning(f"[ConsensusGameAlert] Failed to dispatch alert: {ex}")
+
+                return {
+                    "status": "SUCCESS",
+                    "entry_alerts_sent": entry_alerts_sent,
+                    "exit_alerts_sent": exit_alerts_sent
+                }
+            except sqlite3.OperationalError as op_err:
+                if "locked" in str(op_err).lower() and attempt < max_retries - 1:
+                    logger.warning(f"[ConsensusGameAlert] Database locked on attempt {attempt+1}/{max_retries}, retrying in {(attempt+1)*0.3}s: {op_err}")
+                    time.sleep((attempt + 1) * 0.3)
+                    continue
+                logger.error(f"[ConsensusGameAlert] OperationalError dispatching arena alerts: {op_err}", exc_info=True)
+                return {"status": "ERROR", "error": str(op_err), "entry_alerts_sent": 0, "exit_alerts_sent": 0}
+            except Exception as e:
+                logger.error(f"[ConsensusGameAlert] Error dispatching arena alerts: {e}", exc_info=True)
+                return {"status": "ERROR", "error": str(e), "entry_alerts_sent": 0, "exit_alerts_sent": 0}
+            finally:
+                if should_close and active_conn:
+                    active_conn.close()
 
     @classmethod
     def _sync_and_progress_portfolio(
@@ -1048,6 +1064,7 @@ class ConsensusGameEngine:
 
             entry_t = str(ts).replace("T", " ")[:19]
             norm_exit_t = str(exit_time).replace("T", " ")[:19] if exit_time else None
+            trade_details_json = trade[16] if len(trade) > 16 else None
 
             # 1. Point-in-Time Slot Release: Retire active holdings whose exit_time <= candidate entry_t
             still_active = []
@@ -1056,6 +1073,15 @@ class ConsensusGameEngine:
                     current_cash += (pos["cost"] + pos["net_pnl"])
                     total_realized_pnl += pos["net_pnl"]
                     last_exit_by_ticker[pos["ticker"]] = pos["exit_time"]
+
+                    pos_det = {}
+                    if pos.get("details_json"):
+                        try:
+                            pos_det = json.loads(pos["details_json"])
+                        except Exception:
+                            pass
+                    pos_det["composite_score"] = pos.get("score")
+                    pos_det["auth_trade_id"] = pos.get("tid")
 
                     cur.execute("""
                         INSERT INTO consensus_game_positions (
@@ -1071,7 +1097,7 @@ class ConsensusGameEngine:
                         pos["entry_t"], pos["exit_px"], pos["exit_time"],
                         pos["gross_pnl"], pos["fee"], pos["net_pnl"],
                         pos["actual_pnl_pct"], pos["outcome"],
-                        json.dumps({"composite_score": pos["score"], "auth_trade_id": pos["tid"]})
+                        json.dumps(pos_det)
                     ))
 
                     eq_at_exit = current_cash + sum(p["cost"] for p in still_active)
@@ -1158,7 +1184,8 @@ class ConsensusGameEngine:
                 "entry_px": entry_px, "cost": cost, "sl": sl, "tp": tp, "entry_t": entry_t,
                 "status": status, "exit_px": exit_px, "exit_time": norm_exit_t,
                 "gross_pnl": gross_pnl, "fee": fee, "net_pnl": net_pnl,
-                "actual_pnl_pct": actual_pnl_pct, "outcome": outcome, "score": score
+                "actual_pnl_pct": actual_pnl_pct, "outcome": outcome, "score": score,
+                "details_json": trade_details_json
             }
             active_positions.append(pos_record)
 
@@ -1197,6 +1224,15 @@ class ConsensusGameEngine:
                 current_cash += (pos["cost"] + pos["net_pnl"])
                 total_realized_pnl += pos["net_pnl"]
 
+                pos_det = {}
+                if pos.get("details_json"):
+                    try:
+                        pos_det = json.loads(pos["details_json"])
+                    except Exception:
+                        pass
+                pos_det["composite_score"] = pos["score"]
+                pos_det["auth_trade_id"] = pos["tid"]
+
                 cur.execute("""
                     INSERT INTO consensus_game_positions (
                         session_id, trade_ref_id, ticker, direction, shares,
@@ -1211,7 +1247,7 @@ class ConsensusGameEngine:
                     pos["entry_t"], pos["exit_px"], pos["exit_time"],
                     pos["gross_pnl"], pos["fee"], pos["net_pnl"],
                     pos["actual_pnl_pct"], pos["outcome"],
-                    json.dumps({"composite_score": pos["score"], "auth_trade_id": pos["tid"]})
+                    json.dumps(pos_det)
                 ))
 
                 cur.execute("""
@@ -1233,6 +1269,15 @@ class ConsensusGameEngine:
                 g_reasons = prev_guard.get("guard_reasons")
                 g_audit = prev_guard.get("last_guard_audit")
 
+                pos_det = {}
+                if pos.get("details_json"):
+                    try:
+                        pos_det = json.loads(pos["details_json"])
+                    except Exception:
+                        pass
+                pos_det["composite_score"] = pos["score"]
+                pos_det["auth_trade_id"] = pos["tid"]
+
                 cur.execute("""
                     INSERT INTO consensus_game_positions (
                         session_id, trade_ref_id, ticker, direction, shares,
@@ -1246,7 +1291,7 @@ class ConsensusGameEngine:
                     session_id, pos["tid"], pos["ticker"], pos["direction"], pos["shares"],
                     pos["entry_px"], pos["cost"], pos["sl"], pos["tp"],
                     pos["entry_t"],
-                    json.dumps({"composite_score": pos["score"], "auth_trade_id": pos["tid"]}),
+                    json.dumps(pos_det),
                     t_sl, g_score, g_action, g_reasons, g_audit
                 ))
 
@@ -1406,8 +1451,8 @@ class ConsensusGameEngine:
                     "unrealized_pnl_rupees": round(pos_unrealized, 2),
                     "unrealized_pnl_pct": round(pnl_pct, 2),
                     "target_dist_pct": round(target_dist_pct, 2),
-                    "sl_dist_pct": round(sl_dist_pct, 2),
-                    "details": json.loads(details_raw) if details_raw else {}
+                    "details": json.loads(details_raw) if details_raw else {},
+                    "trade_sentinel": (json.loads(details_raw).get("trade_sentinel") if details_raw and isinstance(json.loads(details_raw), dict) else None)
                 })
 
             total_equity = round(cash + sum(p["allocated_capital"] + p["unrealized_pnl_rupees"] for p in open_positions), 2)
@@ -1790,7 +1835,20 @@ class ConsensusGameEngine:
             cols = [c[0] for c in cur.description]
             rows = cur.fetchall()
 
-            return [dict(zip(cols, r)) for r in rows]
+            pos_list = []
+            for r in rows:
+                p_dict = dict(zip(cols, r))
+                if p_dict.get("details_json"):
+                    try:
+                        p_det = json.loads(p_dict["details_json"])
+                        if isinstance(p_det, dict):
+                            p_dict["details"] = p_det
+                            if "trade_sentinel" in p_det:
+                                p_dict["trade_sentinel"] = p_det["trade_sentinel"]
+                    except Exception:
+                        pass
+                pos_list.append(p_dict)
+            return pos_list
         finally:
             if should_close:
                 conn.close()

@@ -811,7 +811,7 @@ class ConsensusTracker:
                     "ticker": r[2],
                     "cum_pnl": cum
                 })
-                trade_list.append({
+                t_item = {
                     "id": r[0],
                     "timestamp": r[1],
                     "ticker": r[2],
@@ -821,7 +821,17 @@ class ConsensusTracker:
                     "outcome": r[6],
                     "profit_pct": pnl,
                     "score": r[8]
-                })
+                }
+                if len(r) > 14 and r[14]:
+                    try:
+                        det = json.loads(r[14])
+                        if isinstance(det, dict):
+                            t_item["details"] = det
+                            if "trade_sentinel" in det:
+                                t_item["trade_sentinel"] = det["trade_sentinel"]
+                    except Exception:
+                        pass
+                trade_list.append(t_item)
 
             return {
                 "total_trades": total_trades,
@@ -877,8 +887,12 @@ class ConsensusTracker:
                 if d.get("details_json"):
                     try:
                         det = json.loads(d["details_json"])
-                        if isinstance(det, dict) and "meta_learner_v2" in det:
-                            d["meta_learner_v2"] = det["meta_learner_v2"]
+                        if isinstance(det, dict):
+                            d["details"] = det
+                            if "meta_learner_v2" in det:
+                                d["meta_learner_v2"] = det["meta_learner_v2"]
+                            if "trade_sentinel" in det:
+                                d["trade_sentinel"] = det["trade_sentinel"]
                     except Exception:
                         pass
                 results.append(d)
