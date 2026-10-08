@@ -516,22 +516,48 @@ class OptionDB:
                 return False
 
     @classmethod
-    def update_trade_extrema(cls, trade_id: str, peak_price: float, trough_price: float) -> bool:
-        """Updates peak and trough prices on an open trade."""
+    def update_trade_extrema(
+        cls,
+        trade_id: str,
+        peak_price: float,
+        trough_price: float,
+        mfe_pct: Optional[float] = None,
+        mae_pct: Optional[float] = None
+    ) -> bool:
+        """Updates peak and trough prices, plus MFE/MAE excursions on an open trade."""
         with _DB_LOCK:
             try:
                 conn = cls.get_connection()
                 with conn:
-                    conn.execute("""
-                        UPDATE option_sniffer_paper_trades
-                        SET peak_price = ?, trough_price = ?
-                        WHERE trade_id = ?
-                    """, (peak_price, trough_price, trade_id))
+                    if mfe_pct is not None or mae_pct is not None:
+                        conn.execute("""
+                            UPDATE option_sniffer_paper_trades
+                            SET peak_price = ?, trough_price = ?, mfe_pct = ?, mae_pct = ?
+                            WHERE trade_id = ?
+                        """, (peak_price, trough_price, mfe_pct, mae_pct, trade_id))
+                    else:
+                        conn.execute("""
+                            UPDATE option_sniffer_paper_trades
+                            SET peak_price = ?, trough_price = ?
+                            WHERE trade_id = ?
+                        """, (peak_price, trough_price, trade_id))
                 conn.close()
                 return True
             except Exception as e:
                 logger.error(f"[OptionDB] Failed to update trade extrema for {trade_id}: {e}")
                 return False
+
+    @classmethod
+    def update_open_trade_metrics(
+        cls,
+        trade_id: str,
+        peak_price: float,
+        trough_price: float,
+        mfe_pct: float,
+        mae_pct: float
+    ) -> bool:
+        """Updates peak, trough, MFE, and MAE for an active open trade."""
+        return cls.update_trade_extrema(trade_id, peak_price, trough_price, mfe_pct=mfe_pct, mae_pct=mae_pct)
 
     @classmethod
     def get_open_paper_trades(cls) -> List[Dict[str, Any]]:

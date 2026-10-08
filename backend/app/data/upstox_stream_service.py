@@ -101,36 +101,8 @@ class UpstoxStreamService:
         # Frozen snapshot storage for active consensus scans
         self._latest_frozen_snapshot: Optional[Dict[str, Any]] = None
 
-        # Registered feed message listeners (e.g. Option Stream Manager)
-        self._feed_listeners: List[Any] = []
-
         self._initialized = True
         logger.info("[UpstoxStreamService] Initialized continuous streaming service singleton.")
-
-    def register_feed_listener(self, listener: Any) -> None:
-        """Registers an external feed callback listener (e.g. Option Stream Manager)."""
-        with self._lock:
-            if not hasattr(self, "_feed_listeners"):
-                self._feed_listeners = []
-            if listener not in self._feed_listeners:
-                self._feed_listeners.append(listener)
-        logger.info(f"[UpstoxStreamService] Registered external feed listener: {getattr(listener, '__name__', type(listener))}")
-
-    def subscribe_additional_keys(self, new_keys: List[str]) -> None:
-        """Dynamically subscribes additional instrument keys to running MarketDataStreamerV3."""
-        if not new_keys:
-            return
-        with self._lock:
-            for k in new_keys:
-                if k not in self._key_to_symbol:
-                    self._key_to_symbol[k] = k
-        if self._streamer and self._is_connected:
-            try:
-                self._streamer.subscribe(new_keys, mode="full")
-                logger.info(f"[UpstoxStreamService] Subscribed {len(new_keys)} additional keys to WebSocket V3.")
-            except Exception as e:
-                logger.warning(f"[UpstoxStreamService] Could not dynamically subscribe keys: {e}")
-
 
     # ──────────────────────────────────────────────────────────────────────────
     # UNIVERSE & INSTRUMENT KEY RESOLUTION
@@ -309,15 +281,6 @@ class UpstoxStreamService:
         if not feeds or not isinstance(feeds, dict):
             return
 
-        # Dispatch to registered external feed listeners (e.g. Option Sniffer)
-        with self._lock:
-            listeners = list(self._feed_listeners) if hasattr(self, "_feed_listeners") else []
-        for listener in listeners:
-            try:
-                listener(feeds)
-            except Exception as le:
-                logger.debug(f"[UpstoxStreamService] Listener error: {le}")
-
         now_dt = datetime.now()
 
         for ikey, feed_obj in feeds.items():
@@ -477,7 +440,6 @@ class UpstoxStreamService:
             return 0
 
         rows_to_insert = []
-        candidate_tokens = []
         now_iso = datetime.now().isoformat()
 
         with self._lock:
@@ -539,44 +501,31 @@ class UpstoxStreamService:
                         "upstox_ws",
                         now_iso
                     ))
-                    candidate_tokens.append(flush_token)
+                    self._flushed_slots.add(flush_token)
 
         if not rows_to_insert:
             return 0
 
-        # Persist to canonical SQLite in single high-speed transaction with retry
-        db_p = get_db_path()
-        persisted = False
-        for attempt in range(3):
-            try:
-                conn = sqlite3.connect(db_p, timeout=20.0)
-                conn.execute("PRAGMA busy_timeout = 20000;")
-                cur = conn.cursor()
-                cur.executemany("""
-                    INSERT OR REPLACE INTO ohlcv (
-                        ticker, date, open, high, low, close, volume, timeframe, source, hoard_timestamp
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """, rows_to_insert)
-                conn.commit()
-                conn.close()
-                persisted = True
-                break
-            except Exception as e:
-                logger.warning(f"[UpstoxStreamService] SQLite persist attempt {attempt + 1} failed: {e}")
-                time.sleep(0.5)
-
-        if persisted:
-            with self._lock:
-                for token in candidate_tokens:
-                    self._flushed_slots.add(token)
+        # Persist to canonical SQLite in single high-speed transaction
+        try:
+            db_p = get_db_path()
+            conn = sqlite3.connect(db_p, timeout=15.0)
+            cur = conn.cursor()
+            cur.executemany("""
+                INSERT OR REPLACE INTO ohlcv (
+                    ticker, date, open, high, low, close, volume, timeframe, source, hoard_timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """, rows_to_insert)
+            conn.commit()
+            conn.close()
 
             logger.info(
                 f"[UpstoxStreamService] Persisted {len(rows_to_insert)} completed 15m bars "
                 f"to SQLite across full universe (zero REST quota consumed)."
             )
             return len(rows_to_insert)
-        else:
-            logger.error(f"[UpstoxStreamService] CRITICAL: Failed to persist {len(rows_to_insert)} 15m bars to SQLite after 3 attempts.")
+        except Exception as e:
+            logger.error(f"[UpstoxStreamService] Failed persisting 15m bars to SQLite: {e}")
             return 0
 
     # ──────────────────────────────────────────────────────────────────────────

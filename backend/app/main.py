@@ -172,13 +172,21 @@ def get_or_create_scheduler() -> BackgroundScheduler:
             # 8b. Automated 1-Minute Active Consensus Trade Reconciler (09:15-15:30 IST Mon-Fri)
             try:
                 def _reconcile_consensus_trades_daemon():
-                    from app.analytics.consensus_tracker import ConsensusTracker
-                    ConsensusTracker.reconcile_open_consensus_trades(min_interval_sec=45.0)
+                    try:
+                        from app.analytics.consensus_tracker import ConsensusTracker
+                        ConsensusTracker.reconcile_open_consensus_trades(min_interval_sec=45.0)
+                    except Exception as ct_err:
+                        logger.warning(f"[ConsensusDaemon] Reconcile trades note: {ct_err}")
                     try:
                         from app.analytics.consensus_dynamic_guard import ConsensusDynamicGuard
                         ConsensusDynamicGuard.audit_active_arena_positions(session_id="default_arena_session")
-                    except Exception:
-                        pass
+                    except Exception as dg_err:
+                        logger.debug(f"[ConsensusDaemon] Dynamic guard note: {dg_err}")
+                    try:
+                        from app.analytics.consensus_game_engine import ConsensusGameEngine
+                        ConsensusGameEngine.sync_and_dispatch_arena_alerts(session_id="default_arena_session")
+                    except Exception as alert_err:
+                        logger.warning(f"[ConsensusDaemon] Game alert dispatch note: {alert_err}")
 
                 _SCHEDULER_INSTANCE.add_job(
                     _reconcile_consensus_trades_daemon,
@@ -251,6 +259,31 @@ def get_or_create_scheduler() -> BackgroundScheduler:
                 logger.info("✅ Automated daily post-market Telegram summary daemon registered.")
             except Exception as e:
                 logger.error(f"Failed to register post-market Telegram summary daemon: {e}")
+
+            # 12. Automated Trade Sentinel Autonomous Background Agent (Runs every 30s)
+            try:
+                def _run_trade_sentinel_daemon():
+                    try:
+                        import sys
+                        from pathlib import Path
+                        workspace_root = Path(__file__).resolve().parent.parent.parent
+                        if str(workspace_root) not in sys.path:
+                            sys.path.insert(0, str(workspace_root))
+                        from agent_lab.agent_core.sentinel_agent import TradeSentinelAgent
+                        TradeSentinelAgent.run_autonomous_cycle()
+                    except Exception as err:
+                        logger.debug(f"[TradeSentinelDaemon] Cycle error: {err}")
+
+                _SCHEDULER_INSTANCE.add_job(
+                    _run_trade_sentinel_daemon,
+                    'interval',
+                    seconds=30,
+                    id='trade_sentinel_autonomous_cycle',
+                    replace_existing=True
+                )
+                logger.info("✅ Automated Trade Sentinel autonomous research daemon registered (30s heartbeat).")
+            except Exception as e:
+                logger.error(f"Failed to register Trade Sentinel autonomous daemon: {e}")
 
             logger.info("✅ APScheduler initialized with unique job IDs and duplicate protection.")
 
@@ -462,6 +495,14 @@ app.include_router(consensus_game_router, prefix="/api", tags=["consensus_game"]
 
 from app.api.option_sniffer_api import router as option_sniffer_router
 app.include_router(option_sniffer_router)
+
+try:
+    from app.api.trade_agent import router as trade_agent_router
+    app.include_router(trade_agent_router, prefix="/api", tags=["trade_agent"])
+except Exception as _agent_err:
+    logger.error(f"Trade Sentinel router registration deferred: {_agent_err}")
+
+
 
 @app.get("/")
 def read_root():

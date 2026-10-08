@@ -30,7 +30,9 @@ import {
   Zap,
   Info,
   HelpCircle,
-  LogOut
+  LogOut,
+  ShieldCheck,
+  Bot
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -1028,6 +1030,32 @@ export default function ConsensusGameArena() {
                       }`}>
                         {pos.direction || 'BUY'}
                       </span>
+                      {(() => {
+                        const sentinel = pos.trade_sentinel || pos.details?.trade_sentinel;
+                        if (!sentinel) return null;
+                        if (sentinel.action === 'TAKE') {
+                          return (
+                            <span 
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200 shadow-2xs"
+                              title={`Agent Approved: Trade Sentinel Concurrence (Win Prob: ${((sentinel.prob ?? 0) * 100).toFixed(0)}%, Expected Net: ${((sentinel.expected_net_return ?? 0) * 100).toFixed(2)}%)`}
+                            >
+                              <ShieldCheck size={11} className="text-indigo-600" />
+                              <span>AGENT APPROVED</span>
+                            </span>
+                          );
+                        } else if (sentinel.action === 'SKIP') {
+                          return (
+                            <span 
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-50 text-amber-700 border border-amber-200 shadow-2xs"
+                              title={`Agent Caution: Advised Skip (${sentinel.reasoning || 'Adversarial risk guardrail flagged'})`}
+                            >
+                              <AlertTriangle size={11} className="text-amber-600" />
+                              <span>AGENT SKIP</span>
+                            </span>
+                          );
+                        }
+                        return null;
+                      })()}
                     </div>
 
                     {/* Live Status Badge */}
@@ -1126,6 +1154,22 @@ export default function ConsensusGameArena() {
                       <span>Target: {(pos.target_dist_pct || 0) > 0 ? `${pos.target_dist_pct}% away` : 'Reached'}</span>
                     </div>
                   </div>
+
+                  {/* Trade Sentinel Audit Pill */}
+                  {(() => {
+                    const sentinel = pos.trade_sentinel || pos.details?.trade_sentinel;
+                    if (!sentinel) return null;
+                    return (
+                      <div className="flex items-center justify-between text-[10px] bg-slate-100/80 border border-slate-200/80 rounded-lg px-2.5 py-1 text-slate-600 font-mono">
+                        <span className="flex items-center gap-1 font-bold text-indigo-700">
+                          <Bot size={12} />
+                          <span>Sentinel: {sentinel.action}</span>
+                        </span>
+                        <span>Win Prob: {sentinel.prob != null ? `${(Number(sentinel.prob) * 100).toFixed(0)}%` : '—'}</span>
+                        <span>Exp Net: {sentinel.expected_net_return != null ? `${(Number(sentinel.expected_net_return) * 100).toFixed(2)}%` : '—'}</span>
+                      </div>
+                    );
+                  })()}
 
                   {/* Manual Exit / Square Off Button */}
                   <div className="pt-2 border-t border-slate-200/60">
@@ -1387,7 +1431,8 @@ export default function ConsensusGameArena() {
                   status: 'OPEN',
                   entry_time: pos.entry_time,
                   exit_time: null,
-                  isOpen: true
+                  isOpen: true,
+                  trade_sentinel: pos.trade_sentinel || pos.details?.trade_sentinel
                 }));
 
                 const closedTrades = (calendarData?.days || [])
@@ -1416,6 +1461,25 @@ export default function ConsensusGameArena() {
                           {isOpen && (
                             <span className="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse" title="Active in slot" />
                           )}
+                          {(() => {
+                            const sentinel = trade.trade_sentinel || trade.details?.trade_sentinel;
+                            if (sentinel?.action === 'TAKE') {
+                              return (
+                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200" title="Agent Approved">
+                                  <ShieldCheck size={9} className="text-indigo-600" />
+                                  <span>APP</span>
+                                </span>
+                              );
+                            } else if (sentinel?.action === 'SKIP') {
+                              return (
+                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-50 text-amber-700 border border-amber-200" title="Agent Skip Flagged">
+                                  <AlertTriangle size={9} className="text-amber-600" />
+                                  <span>SKIP</span>
+                                </span>
+                              );
+                            }
+                            return null;
+                          })()}
                         </td>
                         <td className="py-3">
                           <span

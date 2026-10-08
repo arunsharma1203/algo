@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Target, Activity, Search, BookmarkPlus, FolderOpen, BrainCircuit, Database, Network, Settings, TrendingUp, Zap, Menu, X, ShieldCheck, HelpCircle, Cpu, Crosshair, Radio } from 'lucide-react';
+import { LayoutDashboard, Target, Activity, Search, BookmarkPlus, FolderOpen, BrainCircuit, Database, Network, Settings, TrendingUp, Zap, Menu, X, ShieldCheck, HelpCircle, Cpu, Crosshair, Radio, Bot } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import CustomStrategy from './pages/CustomStrategy';
 import StrategyLibrary from './pages/StrategyLibrary';
@@ -19,9 +19,11 @@ import AutonomousResearchLab from './pages/AutonomousResearchLab';
 import QlibControlRoom from './pages/QlibControlRoom';
 import ConsensusScanner from './pages/ConsensusScanner';
 import OptionSniffer from './pages/OptionSniffer';
+import TradeAgent from './pages/TradeAgent';
 import { LiveIndicatorProvider } from './context/LiveIndicatorContext';
 import { API_BASE } from './services/api';
 import ErrorBoundary from './components/common/ErrorBoundary';
+
 
 
 function LinkItem({ to, aliases = [], icon: Icon, label, onClick }) {
@@ -258,6 +260,13 @@ function App() {
                 <span className="text-[8px] px-1.5 py-0.5 bg-amber-900/60 text-amber-300 rounded border border-amber-500/40 font-mono">PAPER ONLY</span>
               </div>
               <LinkItem to="/option-sniffer" aliases={['/option-buying', '/options-sniffer', '/options']} icon={Radio} label="Option Sniffer" onClick={() => setMobileNavOpen(false)} />
+
+              <div className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider my-3 px-2 flex items-center justify-between">
+                <span>Autonomous AI Agent</span>
+                <span className="text-[8px] px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300 rounded border border-indigo-500/40 font-mono">SHADOW</span>
+              </div>
+              <LinkItem to="/trade-agent" aliases={['/agent', '/sentinel']} icon={Bot} label="🤖 Trade Agent" onClick={() => setMobileNavOpen(false)} />
+
               
               <div className="mt-auto pt-6">
                 <div className="border-t border-gray-800 pt-4">
@@ -346,6 +355,10 @@ function App() {
                   <Route path="/option-buying" element={<OptionSniffer />} />
                   <Route path="/options-sniffer" element={<OptionSniffer />} />
                   <Route path="/options" element={<OptionSniffer />} />
+                  <Route path="/trade-agent" element={<TradeAgent />} />
+                  <Route path="/agent" element={<TradeAgent />} />
+                  <Route path="/sentinel" element={<TradeAgent />} />
+
 
                   {/* ── BACKWARD-COMPATIBILITY ROUTE WRAPPERS ─────────────── */}
                   <Route path="/smart-scanner" element={<SmartScanner />} />

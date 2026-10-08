@@ -18,8 +18,9 @@ import {
   Award,
   Layers,
   DollarSign,
-  ChevronRight,
-  Info
+  Info,
+  Target,
+  Shield
 } from 'lucide-react';
 import { API_BASE } from '../services/api';
 
@@ -168,21 +169,25 @@ export default function OptionSniffer() {
         <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
           <div className="flex items-center justify-between mb-2">
             <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Today's Paper P&L</span>
-            <span className="text-[10px] font-mono text-slate-400">Net Friction</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded font-bold ${
+              (pnl.today_total_net_pnl ?? pnl.today_net_pnl ?? 0) >= 0 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-rose-50 text-rose-700 border border-rose-200'
+            }`}>
+              {(pnl.unrealized_net_pnl || 0) !== 0 ? 'LIVE MTM' : 'NET FRICTION'}
+            </span>
           </div>
           <div className="flex items-baseline space-x-2">
             <span className={`text-xl font-black ${
-              (pnl.today_net_pnl || 0) >= 0 ? 'text-emerald-600' : 'text-rose-600'
+              (pnl.today_total_net_pnl ?? pnl.today_net_pnl ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-600'
             }`}>
-              ₹{(pnl.today_net_pnl || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+              {(pnl.today_total_net_pnl ?? pnl.today_net_pnl ?? 0) >= 0 ? '+' : ''}₹{(pnl.today_total_net_pnl ?? pnl.today_net_pnl ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </span>
             <span className="text-xs text-slate-400 font-mono">
-              ({pnl.today_wins || 0}/{pnl.today_closed_trades || 0} wins)
+              ({pnl.today_wins || 0}/{pnl.today_closed_trades || 0} closed)
             </span>
           </div>
           <div className="text-[11px] text-slate-500 mt-2 font-mono flex items-center justify-between">
-            <span>Win Rate: {pnl.win_rate_pct || 0}%</span>
-            <span>PF: {pnl.profit_factor || 1.0}</span>
+            <span>MTM: ₹{(pnl.unrealized_net_pnl || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })} ({paperTrades.open_trades?.length || 0} open)</span>
+            <span>Realized: ₹{(pnl.today_realized_net_pnl ?? pnl.today_net_pnl ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
           </div>
         </div>
 
@@ -438,51 +443,192 @@ export default function OptionSniffer() {
         <div className="space-y-6">
           {/* Active Open Paper Positions */}
           <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs">
-            <div className="flex items-center justify-between mb-3 border-b border-slate-100 pb-2">
-              <div className="flex items-center space-x-2">
-                <Activity size={16} className="text-indigo-600" />
-                <h3 className="text-sm font-bold text-slate-900">Active Open Paper Positions ({paperTrades.open_trades?.length || 0})</h3>
+            <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-600">
+                  <Activity size={15} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Active Open Paper Positions ({paperTrades.open_trades?.length || 0})
+                  </h3>
+                  <p className="text-[11px] text-slate-400 font-mono">
+                    Real-Time Mark-to-Market Valuation · Exit Liquidity Strictly Executed at BID
+                  </p>
+                </div>
               </div>
-              <span className="text-xs text-slate-400 font-mono">Live Mark-to-Market (SELL @ BID)</span>
+              <div className="flex items-center space-x-2">
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping mr-1.5" />
+                  Live Order Book Active
+                </span>
+              </div>
             </div>
 
             {(!paperTrades.open_trades || paperTrades.open_trades.length === 0) ? (
               <div className="text-center py-8 text-xs text-slate-400 font-mono">
-                No open paper positions. Engine enters strictly when model P &ge; 58% and Net Return &ge; +3.0%.
+                No open paper positions. Engine enters strictly when model P &ge; 44% and Net Return &ge; +2.0%.
               </div>
             ) : (
-              <div className="space-y-3">
-                {paperTrades.open_trades.map((tr, idx) => (
-                  <div key={idx} className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-mono">
-                    <div>
-                      <div className="flex items-center space-x-2">
-                        <span className="font-bold text-slate-900 text-sm">{tr.trading_symbol}</span>
-                        <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-bold">
-                          {tr.option_type}
-                        </span>
-                        <span className="text-[10px] text-slate-400">Qty: {tr.quantity}</span>
-                      </div>
-                      <div className="text-[11px] text-slate-500 mt-1">
-                        Entry: ₹{tr.entry_ask?.toFixed(2)} (ASK) • Open since: {tr.entry_time?.slice(11, 19)}
-                      </div>
-                    </div>
+              <div className="space-y-4">
+                {paperTrades.open_trades.map((tr, idx) => {
+                  const entryPrice = tr.entry_ask || tr.entry_price_used || 0;
+                  const currentBid = tr.current_bid || entryPrice;
+                  const currentLtp = tr.current_ltp || currentBid;
+                  const netPnl = tr.unrealized_net_pnl ?? 0;
+                  const isProfit = netPnl >= 0;
+                  const pnlPct = tr.unrealized_pnl_pct ?? 0;
+                  const netPnlPct = tr.unrealized_net_pnl_pct ?? 0;
+                  const profitDistPct = Math.min(Math.max(pnlPct, 0), 35.0);
+                  const lossDistPct = Math.min(Math.max(-pnlPct, 0), 20.0);
+                  const holdingMins = Math.floor((tr.holding_duration_seconds || 0) / 60);
 
-                    <div className="flex items-center space-x-4 text-right">
-                      <div>
-                        <span className="text-[10px] text-slate-400 block uppercase">Peak MFE</span>
-                        <span className="text-emerald-700 font-bold">+{tr.mfe_pct || 0}%</span>
+                  return (
+                    <div key={idx} className="bg-slate-50/80 border border-slate-200 rounded-xl p-4 space-y-3.5 font-mono shadow-2xs">
+                      {/* Row 1: Contract Header & Live MTM Value */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-2 border-b border-slate-200/60">
+                        <div className="flex items-center space-x-2.5">
+                          <span className={`px-2 py-0.5 rounded text-[11px] font-black ${
+                            tr.option_type === 'CE'
+                              ? 'bg-blue-100 text-blue-800 border border-blue-200'
+                              : 'bg-amber-100 text-amber-800 border border-amber-200'
+                          }`}>
+                            {tr.option_type}
+                          </span>
+                          <div>
+                            <span className="font-bold text-slate-900 text-sm">{tr.trading_symbol}</span>
+                            <div className="text-[11px] text-slate-500 mt-0.5 flex items-center space-x-2">
+                              <span>Qty: <strong className="text-slate-700">{tr.quantity}</strong></span>
+                              <span>•</span>
+                              <span>Entry ASK: <strong className="text-slate-700">₹{entryPrice.toFixed(2)}</strong></span>
+                              <span>•</span>
+                              <span>Holding: <strong className="text-slate-700">{holdingMins}m / 45m</strong></span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Live Quotes & Unrealized PnL Pill */}
+                        <div className="flex items-center space-x-3 text-right">
+                          <div>
+                            <div className="text-[10px] text-slate-400 font-semibold flex items-center justify-end gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              <span>LIVE BID</span>
+                            </div>
+                            <div className="text-sm font-black text-slate-900">
+                              ₹{currentBid.toFixed(2)}
+                            </div>
+                            <div className="text-[10px] text-slate-400">
+                              LTP: ₹{currentLtp.toFixed(2)}
+                            </div>
+                          </div>
+
+                          <div className={`px-3 py-1.5 rounded-xl border flex flex-col items-end ${
+                            isProfit
+                              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700'
+                              : 'bg-rose-500/10 border-rose-500/30 text-rose-700'
+                          }`}>
+                            <span className="text-[10px] uppercase font-bold tracking-wider">Unrealized Net</span>
+                            <span className="text-sm font-black">
+                              {isProfit ? '+' : ''}₹{netPnl.toFixed(2)}
+                            </span>
+                            <span className="text-[10px] font-semibold">
+                              {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}% ({netPnlPct >= 0 ? '+' : ''}{netPnlPct.toFixed(2)}% net)
+                            </span>
+                          </div>
+                        </div>
                       </div>
-                      <div>
-                        <span className="text-[10px] text-slate-400 block uppercase">Trough MAE</span>
-                        <span className="text-rose-700 font-bold">{tr.mae_pct || 0}%</span>
+
+                      {/* Row 2: Target & Stop Loss Levels with Visual Payoff Progress Bar */}
+                      <div className="space-y-1.5 pt-0.5">
+                        <div className="flex items-center justify-between text-[11px] font-bold">
+                          <span className="text-rose-600 flex items-center space-x-1">
+                            <Shield size={12} />
+                            <span>SL: ₹{(tr.stop_loss_price || (entryPrice * 0.8)).toFixed(2)} (-{tr.stop_loss_pct || 20}%)</span>
+                          </span>
+                          <span className="text-slate-400 font-semibold flex items-center gap-1 text-[10px]">
+                            <span>Payoff Track</span>
+                            <span className="font-mono text-slate-500">
+                              ({isProfit ? `+${profitDistPct.toFixed(1)}% to TP` : `-${lossDistPct.toFixed(1)}% to SL`})
+                            </span>
+                          </span>
+                          <span className="text-emerald-600 flex items-center space-x-1">
+                            <Target size={12} />
+                            <span>TGT: ₹{(tr.target_price || (entryPrice * 1.35)).toFixed(2)} (+{tr.target_pct || 35}%)</span>
+                          </span>
+                        </div>
+
+                        {/* Centered Bidirectional Gauge: Middle is Entry (50%) */}
+                        <div className="w-full bg-slate-200/90 h-3 rounded-full overflow-hidden relative shadow-inner">
+                          {/* Center zero line marker (Entry) */}
+                          <div className="absolute left-1/2 top-0 bottom-0 w-[2px] bg-slate-500 z-10 -translate-x-1/2" title="Entry Price" />
+
+                          {/* Profit bar extending from center (50%) to the right */}
+                          {isProfit && (
+                            <div
+                              className="absolute top-0 bottom-0 left-1/2 h-full transition-all duration-500 rounded-r-full"
+                              style={{
+                                width: `${(profitDistPct / 35.0) * 50}%`,
+                                background: 'linear-gradient(to right, #10b981, #047857)'
+                              }}
+                            />
+                          )}
+
+                          {/* Loss bar extending from center (50%) to the left */}
+                          {!isProfit && (
+                            <div
+                              className="absolute top-0 bottom-0 right-1/2 h-full transition-all duration-500 rounded-l-full"
+                              style={{
+                                width: `${(lossDistPct / 20.0) * 50}%`,
+                                background: 'linear-gradient(to left, #f43f5e, #9f1239)'
+                              }}
+                            />
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium">
+                          <span className="text-rose-600/80">
+                            {(tr.sl_distance_pct || 0) > 0 ? `+${tr.sl_distance_pct}% buffer` : 'Breached SL'}
+                          </span>
+                          <span className="text-slate-500 font-mono text-[9px]">ENTRY @ ₹{entryPrice.toFixed(2)}</span>
+                          <span className="text-emerald-600/80">
+                            {(tr.tp_distance_pct || 0) > 0 ? `${tr.tp_distance_pct}% to Target` : 'Target Reached'}
+                          </span>
+                        </div>
                       </div>
-                      <div className="bg-white border border-slate-200 px-3 py-1.5 rounded-lg">
-                        <span className="text-[10px] text-slate-400 block uppercase">Status</span>
-                        <span className="font-bold text-indigo-700">SURVEILLANCE</span>
+
+                      {/* Row 3: Friction, Trailing Ratchet & Extrema Badges */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-slate-600">
+                        {/* Trailing Stop Status */}
+                        <div className="flex items-center space-x-1.5">
+                          <span className="font-bold uppercase text-slate-400 text-[9px]">Trailing Ratchet:</span>
+                          {tr.trailing_stop_active ? (
+                            <span className="font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                              ARMED @ ₹{tr.trailing_stop_price?.toFixed(2)} (-10% from peak)
+                            </span>
+                          ) : (
+                            <span className="text-slate-500">
+                              Arms at +15% MFE (Peak: +{tr.mfe_pct || 0}%)
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Friction */}
+                        <div className="flex items-center space-x-1.5">
+                          <span className="text-slate-400">Gross: ₹{tr.unrealized_gross_pnl?.toFixed(2) || '0.00'}</span>
+                          <span>•</span>
+                          <span className="text-slate-400">Friction: ₹{tr.unrealized_charges?.toFixed(2) || '0.00'}</span>
+                        </div>
+
+                        {/* Peak MFE / Trough MAE */}
+                        <div className="flex items-center space-x-2 font-mono">
+                          <span className="text-emerald-700 font-bold">MFE: +{tr.mfe_pct || 0}%</span>
+                          <span className="text-slate-300">|</span>
+                          <span className="text-rose-700 font-bold">MAE: {tr.mae_pct || 0}%</span>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
