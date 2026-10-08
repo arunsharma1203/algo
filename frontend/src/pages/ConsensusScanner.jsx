@@ -30,8 +30,7 @@ import {
   Newspaper,
   Compass,
   HelpCircle,
-  Check,
-  Bot
+  Check
 } from 'lucide-react';
 import { 
   ResponsiveContainer, 
@@ -1017,33 +1016,6 @@ export default function ConsensusScanner() {
                                     }`}>
                                       {stratBadge} • {tfBadge}
                                     </span>
-                                    {/* Agent Approved / Skip Concurrence Badge */}
-                                    {(() => {
-                                      const sentinel = trade.trade_sentinel || trade.details?.trade_sentinel;
-                                      if (!sentinel) return null;
-                                      if (sentinel.action === 'TAKE') {
-                                        return (
-                                          <span 
-                                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200 shadow-2xs"
-                                            title={`Agent Approved: Trade Sentinel Concurrence (Win Prob: ${((sentinel.prob ?? 0) * 100).toFixed(0)}%, Expected Net: ${((sentinel.expected_net_return ?? 0) * 100).toFixed(2)}%)`}
-                                          >
-                                            <ShieldCheck size={12} className="text-indigo-600" />
-                                            <span>AGENT APPROVED</span>
-                                          </span>
-                                        );
-                                      } else if (sentinel.action === 'SKIP') {
-                                        return (
-                                          <span 
-                                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black bg-amber-50 text-amber-700 border border-amber-200 shadow-2xs"
-                                            title={`Agent Caution: Advised Skip (${sentinel.reasoning || 'Adversarial risk guardrail flagged'})`}
-                                          >
-                                            <AlertTriangle size={12} className="text-amber-600" />
-                                            <span>AGENT SKIP</span>
-                                          </span>
-                                        );
-                                      }
-                                      return null;
-                                    })()}
                                   </div>
                                   <p className="text-xs text-slate-500 font-mono mt-0.5">
                                     Blended Entry: ₹{trade.blended_entry} • R:R 1:{trade.risk_reward_ratio}
@@ -1399,60 +1371,6 @@ export default function ConsensusScanner() {
                                       Targets and stop bounds dynamically expand with market volatility, locking in R:R ≥ 1:{trade.risk_reward_ratio}.
                                     </div>
                                   </div>
-
-                                  {/* Row 5: Trade Sentinel Adversarial Audit Card */}
-                                  {(() => {
-                                    const sentinel = trade.trade_sentinel || trade.details?.trade_sentinel;
-                                    if (!sentinel) return null;
-                                    const isTake = sentinel.action === 'TAKE';
-                                    return (
-                                      <div className={`p-3 rounded-xl border text-xs space-y-1.5 transition-all ${
-                                        isTake 
-                                          ? 'bg-indigo-50/70 border-indigo-200 text-indigo-950' 
-                                          : 'bg-amber-50/70 border-amber-200 text-amber-950'
-                                      }`}>
-                                        <div className="flex items-center justify-between font-bold">
-                                          <div className="flex items-center space-x-1.5">
-                                            <Bot size={15} className={isTake ? 'text-indigo-600' : 'text-amber-600'} />
-                                            <span className="text-[11px] font-black tracking-wide uppercase">
-                                              Trade Sentinel Adversarial Audit & Concurrence
-                                            </span>
-                                          </div>
-                                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-black ${
-                                            isTake ? 'bg-indigo-600 text-white' : 'bg-amber-500 text-white'
-                                          }`}>
-                                            {isTake ? <ShieldCheck size={11} /> : <AlertTriangle size={11} />}
-                                            {isTake ? 'AGENT APPROVED (TAKE)' : 'AGENT CAUTION (SKIP)'}
-                                          </span>
-                                        </div>
-                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 font-mono text-[10px]">
-                                          <div className="bg-white/80 p-1.5 rounded border border-slate-200/80">
-                                            <span className="text-slate-500 block">Agent Action</span>
-                                            <span className={`font-black ${isTake ? 'text-indigo-700' : 'text-amber-700'}`}>{sentinel.action}</span>
-                                          </div>
-                                          <div className="bg-white/80 p-1.5 rounded border border-slate-200/80">
-                                            <span className="text-slate-500 block">Win Probability</span>
-                                            <span className="font-bold text-slate-800">{((sentinel.prob ?? 0.5) * 100).toFixed(1)}%</span>
-                                          </div>
-                                          <div className="bg-white/80 p-1.5 rounded border border-slate-200/80">
-                                            <span className="text-slate-500 block">Expected Net Return</span>
-                                            <span className={`font-bold ${((sentinel.expected_net_return ?? 0) >= 0) ? 'text-emerald-700' : 'text-rose-700'}`}>
-                                              {((sentinel.expected_net_return ?? 0) * 100).toFixed(2)}%
-                                            </span>
-                                          </div>
-                                          <div className="bg-white/80 p-1.5 rounded border border-slate-200/80">
-                                            <span className="text-slate-500 block">Model Policy</span>
-                                            <span className="text-slate-600 truncate block">{sentinel.model_version || 'sentinel_v2_offline'}</span>
-                                          </div>
-                                        </div>
-                                        {sentinel.reasoning && (
-                                          <p className="text-[10px] text-slate-600 italic pt-0.5">
-                                            Reasoning: {sentinel.reasoning}
-                                          </p>
-                                        )}
-                                      </div>
-                                    );
-                                  })()}
                                 </div>
 
                               </div>
@@ -2052,30 +1970,9 @@ export default function ConsensusScanner() {
 
                             {/* Ticker */}
                             <td className="py-2.5 px-3">
-                              <div className="flex items-center space-x-1.5">
-                                <span className="font-black text-slate-900 text-xs">
-                                  {t.ticker || (t.symbol ? `${t.symbol}.NS` : '—')}
-                                </span>
-                                {(() => {
-                                  const sentinel = t.trade_sentinel || t.details?.trade_sentinel;
-                                  if (sentinel?.action === 'TAKE') {
-                                    return (
-                                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200" title={`Agent Approved (Win Prob: ${((sentinel.prob ?? 0) * 100).toFixed(0)}%)`}>
-                                        <ShieldCheck size={9} className="text-indigo-600" />
-                                        <span>APP</span>
-                                      </span>
-                                    );
-                                  } else if (sentinel?.action === 'SKIP') {
-                                    return (
-                                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-50 text-amber-700 border border-amber-200" title={`Agent Skip Flagged (${sentinel.reasoning || 'Adversarial risk guardrail flagged'})`}>
-                                        <AlertTriangle size={9} className="text-amber-600" />
-                                        <span>SKIP</span>
-                                      </span>
-                                    );
-                                  }
-                                  return null;
-                                })()}
-                              </div>
+                              <span className="font-black text-slate-900 text-xs">
+                                {t.ticker || (t.symbol ? `${t.symbol}.NS` : '—')}
+                              </span>
                             </td>
 
                             {/* Strategy */}
@@ -2623,30 +2520,7 @@ export default function ConsensusScanner() {
                     {historyData.trades.map((t) => (
                       <tr key={t.id} className="hover:bg-slate-50/80">
                         <td className="py-2.5 px-3 text-slate-600">{t.timestamp}</td>
-                        <td className="py-2.5 px-3 font-bold text-slate-900">
-                          <div className="flex items-center space-x-1.5">
-                            <span>{t.ticker}</span>
-                            {(() => {
-                              const sentinel = t.trade_sentinel || t.details?.trade_sentinel;
-                              if (sentinel?.action === 'TAKE') {
-                                return (
-                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-black bg-indigo-50 text-indigo-700 border border-indigo-200" title={`Agent Approved (Win Prob: ${((sentinel.prob ?? 0) * 100).toFixed(0)}%)`}>
-                                    <ShieldCheck size={9} className="text-indigo-600" />
-                                    <span>APP</span>
-                                  </span>
-                                );
-                              } else if (sentinel?.action === 'SKIP') {
-                                return (
-                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-black bg-amber-50 text-amber-700 border border-amber-200" title={`Agent Skip Flagged (${sentinel.reasoning || 'Adversarial risk guardrail flagged'})`}>
-                                    <AlertTriangle size={9} className="text-amber-600" />
-                                    <span>SKIP</span>
-                                  </span>
-                                );
-                              }
-                              return null;
-                            })()}
-                          </div>
-                        </td>
+                        <td className="py-2.5 px-3 font-bold text-slate-900">{t.ticker}</td>
                         <td className="py-2.5 px-3">
                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                             t.direction === 'BUY' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
