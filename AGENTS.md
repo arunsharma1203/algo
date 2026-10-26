@@ -26,4 +26,7 @@
 - **Zero Agentic Arm/Disarm Rights**: AI assistants and automated tools are strictly prohibited from arming or disarming live/real broker trading (via PIN bypass, automated curl, script, or API invocation).
 - **Sole User Ownership**: The right to arm or disarm the system belongs exclusively and solely to the human USER through the interactive UI confirmation modal. AI assistants must never autonomously call the `/live/arm` or `/live/disarm` endpoints or forge the 4-digit security PIN.
 
+## 7. Mandatory GitHub Backup on Code Changes (CRITICAL RULE)
+- **Automatic Post-Change GitHub Synchronization**: Whenever any changes, bug fixes, feature upgrades, or refactorings are made to the application codebase, the assistant must always verify that all changes are cleanly committed and backed up to GitHub (`git push origin <active_branch>`) after verification, guaranteeing zero code loss, zero rollback risk, and an authoritative synchronized cloud backup at all times.
+
 
