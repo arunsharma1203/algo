@@ -356,6 +356,15 @@ def on_startup():
     except Exception as e:
         logger.warning(f"Option Sniffer startup warning: {e}")
 
+    # Reconcile Upstox Broker State & Active Live Order Intents on Startup
+    try:
+        from app.analytics.option_sniffer.option_live_adapter import get_option_live_adapter
+        adapter = get_option_live_adapter()
+        rec_res = adapter.startup_reconcile()
+        logger.info(f"✅ Option Live Adapter startup reconciliation completed: {rec_res}")
+    except Exception as e:
+        logger.warning(f"Option Live Adapter startup reconciliation warning: {e}")
+
 @app.on_event("shutdown")
 def on_shutdown():
     from app.analytics.process_lifecycle_manager import ProcessLifecycleManager

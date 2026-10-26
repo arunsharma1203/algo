@@ -60,6 +60,9 @@ class OptionStreamManager:
         # Option live quotes: instrument_key -> {ltp, bid, ask, ...}
         self._option_quotes: Dict[str, Dict[str, Any]] = {}
 
+        # In-memory short-lived cache for underlying 1m OHLCV bars: "NIFTY" -> (fetch_time, df)
+        self._history_cache: Dict[str, Tuple[float, Any]] = {}
+
         # Telemetry
         self._total_ticks_received: int = 0
         self._last_tick_time: float = 0.0
@@ -323,6 +326,54 @@ class OptionStreamManager:
                 now_ms = int(time.time() * 1000)
                 quote["quote_age_ms"] = max(0, now_ms - quote["timestamp_ms"])
             return quote
+
+    def get_underlying_history_df(self, underlying: str = "NIFTY", limit: int = 60) -> Optional[Any]:
+        """
+        Retrieves recent continuous 1-minute OHLCV bars for the underlying index
+        from continuous_index_ohlcv SQLite table.
+        Cached for 1.5 seconds to eliminate SQLite contention during rapid surveillance sweeps.
+        """
+        u_upper = underlying.upper().strip()
+        now = time.time()
+
+        with self._lock:
+            cached = getattr(self, "_history_cache", {}).get(u_upper)
+            if cached:
+                cached_time, cached_df = cached
+                if (now - cached_time) < 1.5:
+                    return cached_df
+
+        try:
+            import pandas as pd
+            conn = OptionDB.get_connection()
+            query = """
+                SELECT timestamp, open, high, low, close, volume
+                FROM continuous_index_ohlcv
+                WHERE ticker = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """
+            df = pd.read_sql_query(query, conn, params=(u_upper, limit))
+            conn.close()
+
+            if df is not None and not df.empty:
+                df = df.iloc[::-1].reset_index(drop=True)
+                # Ensure float numeric casting for OHLCV
+                for col in ["open", "high", "low", "close", "volume"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+            else:
+                df = None
+
+            with self._lock:
+                if not hasattr(self, "_history_cache"):
+                    self._history_cache = {}
+                self._history_cache[u_upper] = (now, df)
+
+            return df
+        except Exception as e:
+            logger.debug(f"[OptionStreamManager] get_underlying_history_df error for {u_upper}: {e}")
+            return None
 
     def get_option_quote(self, instrument_key: str) -> Optional[Dict[str, Any]]:
         """Retrieves point-in-time option quote with strict validation."""
@@ -597,3 +648,9 @@ class OptionStreamManager:
                 "underlying_quotes": {k: v.get("spot_ltp") for k, v in self._underlying_quotes.items()},
             }
             return telemetry
+
+
+def get_stream_manager() -> OptionStreamManager:
+    """Returns singleton instance of OptionStreamManager."""
+    return OptionStreamManager()
+

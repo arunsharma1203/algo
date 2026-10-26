@@ -105,23 +105,33 @@ class UpstoxRateLimiter:
             except Exception as e:
                 logger.debug(f"Could not clear circuit cooldown in db: {e}")
 
-    def acquire(self, timeout: float = 10.0) -> bool:
+    def acquire(self, timeout: float = 10.0, is_emergency: bool = False) -> bool:
         """
         Blocks if needed to satisfy per-second or per-minute rate limits and enforces 150ms pacing.
         Fast-rejects with UpstoxRateLimitExceeded if circuit breaker is open or 30-minute quota is reached.
+        Emergency requests (e.g. panic exit, stop loss placement, order cancellation) are granted immediate priority
+        and bypass routine pacing and circuit breaker lockouts.
         """
         start_wait = time.time()
         while True:
             with self._lock:
                 now = time.time()
 
-                # 1. Circuit Breaker Fast-Reject: NEVER hit the network if cooling down!
-                if self.is_circuit_open():
+                # 1. Circuit Breaker Fast-Reject: NEVER hit the network if cooling down (unless emergency exit)
+                if self.is_circuit_open() and not is_emergency:
                     remaining = self.get_circuit_remaining_seconds()
                     self._rejected_count += 1
                     raise UpstoxRateLimitExceeded(
                         f"Upstox Circuit Breaker is OPEN (cooling down for {remaining}s to protect token). Failover engaged."
                     )
+
+                if is_emergency:
+                    # Emergency bypass: granted immediately to ensure protective exits are never blocked
+                    self._last_request_time = time.time()
+                    self._history.append(now)
+                    self._total_requests += 1
+                    logger.warning("[UpstoxRateLimiter] 🚨 EMERGENCY API SLOT GRANTED (Priority Bypass).")
+                    return True
 
                 # Prune history older than 1800s (30 mins)
                 cutoff_30m = now - 1800.0
@@ -481,6 +491,11 @@ def get_upstox_token() -> str:
     """Returns the active Upstox access or market token string."""
     cfg = get_upstox_config()
     return (cfg.get("access_token") or cfg.get("market_token") or "").strip()
+
+def get_upstox_algo_token() -> str:
+    """Returns the active Upstox Algo Trading (Read + Trade) token string, falling back to market token."""
+    cfg = get_upstox_config()
+    return (cfg.get("algo_token") or cfg.get("access_token") or cfg.get("market_token") or "").strip()
 
 _last_auth_alert_time: float = 0.0
 ALERT_COOLDOWN_SECONDS: int = 3600  # 1 hour cooldown between alerts to prevent spam

@@ -1,6 +1,4 @@
 """
-Option Sniffer: Comprehensive Unit & Integration Test Suite.
-
 Verifies:
   1. Additive Database Isolation (all 7 tables exist, zero production table alterations).
   2. Rate Governor Hard Limits (8/sec, 64/min, 1600/30min preserved).
@@ -40,6 +38,8 @@ from app.analytics.option_sniffer.option_constants import (
     MIN_EXPECTED_NET_RETURN_PCT,
     SIGNAL_COOLDOWN_SECONDS,
     calculate_option_trade_costs,
+    is_option_trading_window,
+    is_option_entry_window,
 )
 from app.analytics.option_sniffer.option_db import (
     OptionDB,
@@ -383,7 +383,8 @@ class TestOptionConstantsAndCostModeling(unittest.TestCase):
             buy_price=100.0,
             sell_price=120.0,
             quantity=65,
-            apply_slippage=True
+            apply_slippage=True,
+            trade_date="LEGACY"
         )
 
         # 1. Brokerage: ₹20 buy + ₹20 sell = ₹40.00
@@ -520,6 +521,9 @@ class TestSignalEngineTenGates(unittest.TestCase):
         }
         self.engine = OptionSignalEngine(model=self.mock_model)
         self.engine._COOLDOWNS.clear()
+        self.engine._DIRECTION_SL_COOLDOWNS.clear()
+        self.engine._PORTFOLIO_LOSS_HISTORY.clear()
+        OptionSignalEngine._INTROSPECTION_FROZEN_UNTIL = 0.0
 
         # Base valid contract and quotes
         self.contract = {
@@ -629,7 +633,7 @@ class TestSignalEngineTenGates(unittest.TestCase):
             "expected_net_return_pct": 4.0,
             "raw_score": 0.60,
         }
-        res = self.engine.evaluate_contract(self.contract, self.valid_quote, self.valid_underlying)
+        res = self.engine.evaluate_contract(self.contract, self.valid_quote, self.valid_underlying, enforce_regime_gate=False)
 
         self.assertEqual(res["status"], STATE_WATCH)
         self.assertTrue(any("Low probability" in r for r in res["rejection_reasons"]))
@@ -642,7 +646,7 @@ class TestSignalEngineTenGates(unittest.TestCase):
             "expected_net_return_pct": MIN_EXPECTED_NET_RETURN_PCT - 0.5,  # Below hurdle
             "raw_score": 0.65,
         }
-        res = self.engine.evaluate_contract(self.contract, self.valid_quote, self.valid_underlying)
+        res = self.engine.evaluate_contract(self.contract, self.valid_quote, self.valid_underlying, enforce_regime_gate=False)
 
         self.assertEqual(res["status"], STATE_WATCH)
         self.assertTrue(any("Insufficient net edge" in r for r in res["rejection_reasons"]))
@@ -650,7 +654,7 @@ class TestSignalEngineTenGates(unittest.TestCase):
     @patch("app.analytics.option_sniffer.option_signal_engine.send_telegram_message")
     def test_successful_active_transition_and_cooldown(self, mock_tg):
         """When all gates pass: transitions to ACTIVE, dispatches Telegram, and enters cooldown."""
-        res1 = self.engine.evaluate_contract(self.contract, self.valid_quote, self.valid_underlying)
+        res1 = self.engine.evaluate_contract(self.contract, self.valid_quote, self.valid_underlying, enforce_regime_gate=False)
 
         self.assertEqual(res1["status"], STATE_ACTIVE)
         self.assertTrue(res1["hurdles_passed"])
@@ -658,7 +662,7 @@ class TestSignalEngineTenGates(unittest.TestCase):
         mock_tg.assert_called_once()
 
         # Immediate re-evaluation must be gated by cooldown (stays in QUALIFIED)
-        res2 = self.engine.evaluate_contract(self.contract, self.valid_quote, self.valid_underlying)
+        res2 = self.engine.evaluate_contract(self.contract, self.valid_quote, self.valid_underlying, enforce_regime_gate=False)
         self.assertEqual(res2["status"], STATE_QUALIFIED)
         self.assertTrue(any("Signal cooldown active" in r for r in res2["rejection_reasons"]))
 
@@ -983,6 +987,920 @@ class TestProductionIntegrity(unittest.TestCase):
         self.assertEqual(q["ask"], 325.5)
         self.assertTrue(q["is_valid"])
         self.assertLessEqual(q["quote_age_ms"], 1000)
+
+
+class TestOptionSessionCutoffAt1515(unittest.TestCase):
+    """Verifies that Option Sniffer strictly respects the 15:15 IST intraday cutoff."""
+
+    def setUp(self):
+        self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.temp_db_path = self.temp_db.name
+        self.temp_db.close()
+
+        self.db_patcher = patch("app.analytics.option_sniffer.option_db.get_db_path", return_value=self.temp_db_path)
+        self.mock_get_db_path = self.db_patcher.start()
+        init_option_sniffer_tables()
+
+    def tearDown(self):
+        self.db_patcher.stop()
+        if os.path.exists(self.temp_db_path):
+            os.unlink(self.temp_db_path)
+
+    def test_trading_window_helper_boundaries(self):
+        """Verifies is_option_trading_window for weekday times."""
+        # Active session: Wednesday 11:00 AM IST
+        wed_active = datetime(2026, 10, 7, 11, 0, 0)
+        self.assertTrue(is_option_trading_window(wed_active))
+
+        # Pre-market: Wednesday 09:14 AM IST
+        wed_pre = datetime(2026, 10, 7, 9, 14, 59)
+        self.assertFalse(is_option_trading_window(wed_pre))
+
+        # Right at cutoff: Wednesday 15:15:00 IST
+        wed_cutoff = datetime(2026, 10, 7, 15, 15, 0)
+        self.assertFalse(is_option_trading_window(wed_cutoff))
+
+        # Past cutoff: Wednesday 15:30:00 IST
+        wed_past = datetime(2026, 10, 7, 15, 30, 0)
+        self.assertFalse(is_option_trading_window(wed_past))
+
+        # Post-market: Wednesday 16:00:00 IST
+        wed_eod = datetime(2026, 10, 7, 16, 0, 0)
+        self.assertFalse(is_option_trading_window(wed_eod))
+
+        # Weekend: Saturday 11:00 AM IST
+        sat_active_time = datetime(2026, 10, 10, 11, 0, 0)
+        self.assertFalse(is_option_trading_window(sat_active_time))
+
+    def test_open_trades_square_off_at_1515(self):
+        """At 15:15:00 IST or later, all open paper trades square off with SESSION_END_SQUAREOFF."""
+        signal = {
+            "signal_id": "sig_sq_test",
+            "instrument_key": "NSE_FO|999",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+            "option_bid": 100.0,
+            "option_ask": 100.0,
+            "model_version": "v1.0",
+            "signal_version": "v1.0",
+            "data_freshness": "REAL_TIME",
+        }
+        OptionPaperExecution.open_trade(signal)
+
+        # 1. At 15:14:59 IST: Trade remains OPEN
+        time_before_cutoff = datetime(2026, 10, 7, 15, 14, 59)
+        quote = {"instrument_key": "NSE_FO|999", "bid": 101.0, "ask": 102.0, "ltp": 101.5}
+        res_before = OptionPaperExecution.update_open_trades(
+            {quote["instrument_key"]: quote},
+            as_of_time=time_before_cutoff
+        )
+        self.assertEqual(len(res_before), 0)
+        self.assertEqual(len(OptionDB.get_open_paper_trades()), 1)
+
+        # 2. At 15:15:00 IST: Trade must square off
+        time_at_cutoff = datetime(2026, 10, 7, 15, 15, 0)
+        res_cutoff = OptionPaperExecution.update_open_trades(
+            {quote["instrument_key"]: quote},
+            as_of_time=time_at_cutoff
+        )
+        self.assertEqual(len(res_cutoff), 1)
+        self.assertEqual(res_cutoff[0]["status"], "CLOSED")
+        self.assertEqual(res_cutoff[0]["exit_reason"], "SESSION_END_SQUAREOFF")
+        self.assertEqual(len(OptionDB.get_open_paper_trades()), 0)
+
+    def test_open_trades_square_off_post_market(self):
+        """If trades were somehow open at 16:00 IST, they must square off with SESSION_END_SQUAREOFF."""
+        signal = {
+            "signal_id": "sig_pm_test",
+            "instrument_key": "NSE_FO|998",
+            "trading_symbol": "BANKNIFTY26OCT54000PE",
+            "underlying": "BANKNIFTY",
+            "strike": 54000.0,
+            "expiry": "2026-10-29",
+            "option_type": "PE",
+            "lot_size": 15,
+            "option_bid": 200.0,
+            "option_ask": 200.0,
+            "model_version": "v1.0",
+            "signal_version": "v1.0",
+            "data_freshness": "REAL_TIME",
+        }
+        OptionPaperExecution.open_trade(signal)
+
+        quote = {"instrument_key": "NSE_FO|998", "bid": 202.0, "ask": 204.0, "ltp": 203.0}
+        post_market_time = datetime(2026, 10, 7, 16, 0, 0)
+        res = OptionPaperExecution.update_open_trades(
+            {quote["instrument_key"]: quote},
+            as_of_time=post_market_time
+        )
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["status"], "CLOSED")
+        self.assertEqual(res[0]["exit_reason"], "SESSION_END_SQUAREOFF")
+
+    def test_evaluate_contract_halted_at_1515(self):
+        """Signal engine must reject candidates at or after 15:15 IST when enforce_cutoff is True."""
+        mock_model = MagicMock()
+        mock_model.version = "test-v1.0"
+        engine = OptionSignalEngine(model=mock_model)
+
+        contract = {
+            "instrument_key": "NSE_FO|997",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "ltp": 120.0, "bid": 119.5, "ask": 120.5, "spread_pct": 0.83,
+            "oi": 50000, "volume": 2500, "quote_age_ms": 250, "quote_freshness": "REAL_TIME"
+        }
+        underlying = {"spot_ltp": 25020.0, "quote_age_ms": 150}
+
+        time_at_cutoff = datetime(2026, 10, 7, 15, 15, 0)
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            as_of_time=time_at_cutoff,
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Trading session cutoff passed" in r for r in res["rejection_reasons"]))
+
+    def test_open_trade_blocked_past_cutoff(self):
+        """OptionPaperExecution.open_trade returns None when called past 15:15 with enforce_cutoff=True."""
+        signal = {
+            "signal_id": "sig_blk_test",
+            "instrument_key": "NSE_FO|996",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+            "option_bid": 100.0,
+            "option_ask": 100.0,
+        }
+        time_past_cutoff = datetime(2026, 10, 7, 15, 20, 0)
+        trade_id = OptionPaperExecution.open_trade(
+            signal,
+            as_of_time=time_past_cutoff,
+            enforce_cutoff=True
+        )
+        self.assertIsNone(trade_id)
+
+
+class TestAdaptiveOptionsAndRegimeShield(unittest.TestCase):
+    """
+    Verifies Phase 1 & 2 Adaptive Options Upgrades:
+      1. Golden Entry Window (09:30 to 12:45 IST) Curfew.
+      2. Dynamic Regime Shield (Chop Defense, Bear CE Block, Bull PE Block).
+      3. Upstream Dual-Engine Concurrence & Conflict Shield.
+      4. Trailing Stop Breakeven Profit Floor (+2% lock-in after +15% MFE).
+    """
+
+    def setUp(self):
+        self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.temp_db_path = self.temp_db.name
+        self.temp_db.close()
+        self.patcher = patch("app.analytics.option_sniffer.option_db.get_db_path", return_value=self.temp_db_path)
+        self.patcher.start()
+        init_option_sniffer_tables()
+
+        self.mock_model = MagicMock()
+        self.mock_model.version = "test-model"
+        self.mock_model.predict_contract.return_value = {
+            "direction": DIRECTION_BUY_CE,
+            "calibrated_prob": 0.60,
+            "expected_net_return_pct": 5.0,
+        }
+
+    def tearDown(self):
+        self.patcher.stop()
+        if os.path.exists(self.temp_db_path):
+            try:
+                os.remove(self.temp_db_path)
+            except Exception:
+                pass
+
+    def test_is_option_entry_window_timing(self):
+        """Validates entry window helper for weekdays vs weekends and hour brackets."""
+        # Wednesday (weekday)
+        t_early = datetime(2026, 10, 7, 9, 20, 0)      # 09:20 -> False (too early)
+        t_open = datetime(2026, 10, 7, 9, 30, 0)       # 09:30 -> True (window open)
+        t_morning = datetime(2026, 10, 7, 11, 15, 0)    # 11:15 -> True
+        t_midday = datetime(2026, 10, 7, 12, 30, 0)     # 12:30 -> True (midday window)
+        t_curfew = datetime(2026, 10, 7, 13, 15, 0)     # 13:15 -> False (curfew reached)
+        t_afternoon = datetime(2026, 10, 7, 14, 30, 0)  # 14:30 -> False (decay zone)
+        t_weekend = datetime(2026, 10, 10, 10, 0, 0)    # Saturday -> False
+
+        self.assertFalse(is_option_entry_window(t_early))
+        self.assertTrue(is_option_entry_window(t_open))
+        self.assertTrue(is_option_entry_window(t_morning))
+        self.assertTrue(is_option_entry_window(t_midday))
+        self.assertFalse(is_option_entry_window(t_curfew))
+        self.assertFalse(is_option_entry_window(t_afternoon))
+        self.assertFalse(is_option_entry_window(t_weekend))
+
+    def test_entry_window_curfew_blocks_new_signals(self):
+        """New signals evaluated after 13:15 IST are halted to prevent afternoon theta decay."""
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|991",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 100.0, "ask": 101.0, "ltp": 100.5, "oi": 50000,
+            "volume": 20000, "spread_pct": 1.0, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 25020.0, "quote_age_ms": 150}
+
+        # Time at 13:20 IST (after 13:15 curfew)
+        time_at_1320 = datetime(2026, 10, 7, 13, 20, 0)
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            as_of_time=time_at_1320,
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Outside golden option entry window" in r for r in res["rejection_reasons"]))
+
+    def test_regime_shield_chop_blocks_all_options(self):
+        """CHOP / SIDEWAYS market regime dynamically halts all option buying."""
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|992",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 100.0, "ask": 101.0, "ltp": 100.5, "oi": 50000,
+            "volume": 20000, "spread_pct": 1.0, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 25020.0, "quote_age_ms": 150}
+
+        # Morning time 10:30 IST during CHOP regime
+        morning_time = datetime(2026, 10, 7, 10, 30, 0)
+        macro_chop = {"intraday_regime_verdict": "INTRADAY_NEUTRAL_CHOP"}
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            macro_context=macro_chop,
+            as_of_time=morning_time,
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("CHOP / SIDEWAYS" in r for r in res["rejection_reasons"]))
+
+    def test_regime_shield_bear_blocks_call_options(self):
+        """BEAR regime dynamically blocks CALL (CE) options."""
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|993",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 100.0, "ask": 101.0, "ltp": 100.5, "oi": 50000,
+            "volume": 20000, "spread_pct": 1.0, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 25020.0, "quote_age_ms": 150}
+
+        morning_time = datetime(2026, 10, 7, 10, 30, 0)
+        macro_bear = {"intraday_regime_verdict": "INTRADAY_STRONG_BEAR"}
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            macro_context=macro_bear,
+            as_of_time=morning_time,
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Bearish regime" in r for r in res["rejection_reasons"]))
+
+    def test_regime_shield_bull_blocks_put_options(self):
+        """BULL regime dynamically blocks PUT (PE) options."""
+        self.mock_model.predict_contract.return_value = {
+            "direction": DIRECTION_BUY_PE,
+            "calibrated_prob": 0.60,
+            "expected_net_return_pct": 5.0,
+        }
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|994",
+            "trading_symbol": "NIFTY26OCT25000PE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "PE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 100.0, "ask": 101.0, "ltp": 100.5, "oi": 50000,
+            "volume": 20000, "spread_pct": 1.0, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 25020.0, "quote_age_ms": 150}
+
+        morning_time = datetime(2026, 10, 7, 10, 30, 0)
+        macro_bull = {"intraday_regime_verdict": "INTRADAY_STRONG_BULL"}
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            macro_context=macro_bull,
+            as_of_time=morning_time,
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Bullish regime" in r for r in res["rejection_reasons"]))
+
+    def test_dual_engine_conflict_blocks_options(self):
+        """Upstream AI engine conflict blocks option signals."""
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|995",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 100.0, "ask": 101.0, "ltp": 100.5, "oi": 50000,
+            "volume": 20000, "spread_pct": 1.0, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 25020.0, "quote_age_ms": 150}
+
+        morning_time = datetime(2026, 10, 7, 10, 30, 0)
+        upstream_conflicted = {"is_conflicted": True}
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            upstream_signals=upstream_conflicted,
+            as_of_time=morning_time,
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("conflict detected" in r for r in res["rejection_reasons"]))
+
+    def test_breakeven_ratchet_floor_protects_profits(self):
+        """Trailing stop ratchet enforces +2% floor once MFE reaches +15%, locking in profit."""
+        # 1. Create open trade with entry ask = 100.0
+        signal = {
+            "signal_id": "sig_ratchet_test",
+            "instrument_key": "NSE_FO|997",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+            "option_bid": 99.0,
+            "option_ask": 100.0,
+        }
+        trade_id = OptionPaperExecution.open_trade(signal)
+        self.assertIsNotNone(trade_id)
+
+        # 2. First update: Price surges to 116.0 (MFE reaches +16.0%, triggering ratchet)
+        now = datetime(2026, 10, 16, 11, 0, 0)
+        live_quotes_surge = {
+            "NSE_FO|997": {"bid": 116.0, "ask": 117.0, "ltp": 116.0}
+        }
+        closed_surge = OptionPaperExecution.update_open_trades(live_quotes_surge, as_of_time=now)
+        self.assertEqual(len(closed_surge), 0)  # Trade still open, peak updated to 116.0
+
+        # 3. Second update: Price pulls back to 103.0 (which is <= 116 * 0.90 = 104.4, but above 102.0 floor)
+        live_quotes_pullback = {
+            "NSE_FO|997": {"bid": 103.0, "ask": 104.0, "ltp": 103.0}
+        }
+        closed_pullback = OptionPaperExecution.update_open_trades(live_quotes_pullback, as_of_time=now)
+        self.assertEqual(len(closed_pullback), 1)
+        self.assertEqual(closed_pullback[0]["exit_reason"], "TRAILING_STOP_HIT")
+        self.assertGreater(closed_pullback[0]["net_pnl"], 0.0)  # Positive net P&L guaranteed
+
+    def test_banknifty_bear_momentum_allows_pe_during_nifty_chop(self):
+        """BANKNIFTY with strong intraday bear momentum allows PE even when NIFTY is in CHOP."""
+        self.mock_model.predict_contract.return_value = {
+            "direction": DIRECTION_BUY_PE,
+            "calibrated_prob": 0.62,
+            "expected_net_return_pct": 6.5,
+        }
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|998",
+            "trading_symbol": "BANKNIFTY26OCT55000PE",
+            "underlying": "BANKNIFTY",
+            "strike": 55000.0,
+            "expiry": "2026-10-29",
+            "option_type": "PE",
+            "lot_size": 30,
+        }
+        quote = {
+            "bid": 250.0, "ask": 252.0, "ltp": 251.0, "oi": 60000,
+            "volume": 35000, "spread_pct": 0.8, "quote_age_ms": 100,
+        }
+        # BANKNIFTY down -0.78% from open (55000 vs 55430 open)
+        underlying = {"spot_ltp": 55000.0, "open": 55430.0, "close": 55400.0, "quote_age_ms": 150}
+
+        morning_time = datetime(2026, 10, 7, 10, 30, 0)
+        macro_chop = {"intraday_regime_verdict": "INTRADAY_NEUTRAL_CHOP"}
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            macro_context=macro_chop,
+            as_of_time=morning_time,
+            enforce_cutoff=True,
+            enforce_regime_gate=False
+        )
+        self.assertIn(res["status"], (STATE_QUALIFIED, STATE_ACTIVE))
+        self.assertTrue(res["hurdles_passed"])
+        self.assertEqual(res["direction"], DIRECTION_BUY_PE)
+
+    def test_banknifty_bear_momentum_blocks_ce(self):
+        """BANKNIFTY with strong intraday bear momentum blocks CE options."""
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|999",
+            "trading_symbol": "BANKNIFTY26OCT55000CE",
+            "underlying": "BANKNIFTY",
+            "strike": 55000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 30,
+        }
+        quote = {
+            "bid": 250.0, "ask": 252.0, "ltp": 251.0, "oi": 60000,
+            "volume": 35000, "spread_pct": 0.8, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 55000.0, "open": 55430.0, "close": 55400.0, "quote_age_ms": 150}
+
+        morning_time = datetime(2026, 10, 7, 10, 30, 0)
+        macro_chop = {"intraday_regime_verdict": "INTRADAY_NEUTRAL_CHOP"}
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            macro_context=macro_chop,
+            as_of_time=morning_time,
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("intraday bear momentum" in r for r in res["rejection_reasons"]))
+
+    def test_banknifty_flat_blocked_during_nifty_chop(self):
+        """BANKNIFTY when flat is guarded by macro CHOP regime."""
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|1000",
+            "trading_symbol": "BANKNIFTY26OCT55000PE",
+            "underlying": "BANKNIFTY",
+            "strike": 55000.0,
+            "expiry": "2026-10-29",
+            "option_type": "PE",
+            "lot_size": 30,
+        }
+        quote = {
+            "bid": 250.0, "ask": 252.0, "ltp": 251.0, "oi": 60000,
+            "volume": 35000, "spread_pct": 0.8, "quote_age_ms": 100,
+        }
+        # Flat drift: spot 55000, open 55020 (drift = -0.04%)
+        underlying = {"spot_ltp": 55000.0, "open": 55020.0, "close": 55010.0, "quote_age_ms": 150}
+
+        morning_time = datetime(2026, 10, 7, 10, 30, 0)
+        macro_chop = {"intraday_regime_verdict": "INTRADAY_NEUTRAL_CHOP"}
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            macro_context=macro_chop,
+            as_of_time=morning_time,
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("CHOP / SIDEWAYS" in r for r in res["rejection_reasons"]))
+
+    def test_gate_5d_heavyweight_divergence_blocks_ce(self):
+        """Gate 5D: If all tracked heavyweights (RELIANCE & HDFCBANK) are below VWAP, CALL (CE) is blocked."""
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|99901",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 120.0, "ask": 120.5, "ltp": 120.2, "oi": 50000,
+            "volume": 2500, "spread_pct": 0.4, "quote_age_ms": 100,
+        }
+        # Nifty spot is above VWAP
+        underlying = {"spot_ltp": 25150.0, "open": 25000.0, "high": 25160.0, "low": 24980.0, "close": 25140.0, "vwap": 25050.0, "quote_age_ms": 100}
+
+        # Heavyweights both slumping below VWAP
+        hw_quotes = {
+            "RELIANCE": {"spot_ltp": 2900.0, "vwap": 2950.0},
+            "HDFCBANK": {"spot_ltp": 1600.0, "vwap": 1640.0},
+        }
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            heavyweight_quotes=hw_quotes,
+            as_of_time=datetime(2026, 10, 14, 11, 0, 0),
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Gate 5D" in r and "below VWAP" in r for r in res["rejection_reasons"]))
+
+    def test_gate_5d_heavyweight_divergence_blocks_pe(self):
+        """Gate 5D: If all tracked heavyweights (RELIANCE & HDFCBANK) are above VWAP, PUT (PE) is blocked."""
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|99902",
+            "trading_symbol": "NIFTY26OCT25000PE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "PE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 120.0, "ask": 120.5, "ltp": 120.2, "oi": 50000,
+            "volume": 2500, "spread_pct": 0.4, "quote_age_ms": 100,
+        }
+        # Nifty spot is below VWAP
+        underlying = {"spot_ltp": 24850.0, "open": 25000.0, "high": 25020.0, "low": 24840.0, "close": 24860.0, "vwap": 24950.0, "quote_age_ms": 100}
+
+        # Heavyweights both rallying above VWAP
+        hw_quotes = {
+            "RELIANCE": {"spot_ltp": 3000.0, "vwap": 2950.0},
+            "HDFCBANK": {"spot_ltp": 1680.0, "vwap": 1640.0},
+        }
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            heavyweight_quotes=hw_quotes,
+            as_of_time=datetime(2026, 10, 14, 11, 0, 0),
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Gate 5D" in r and "above VWAP" in r for r in res["rejection_reasons"]))
+
+    def test_gate_5d_heavyweight_concurrence_allows_trade(self):
+        """Gate 5D: When at least one heavyweight confirms trend, trade passes Gate 5D."""
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|99901",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 120.0, "ask": 120.5, "ltp": 120.2, "oi": 50000,
+            "volume": 2500, "spread_pct": 0.4, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 25150.0, "open": 25000.0, "high": 25160.0, "low": 24980.0, "close": 25140.0, "vwap": 25050.0, "quote_age_ms": 100}
+
+        # RELIANCE is above VWAP (bullish), HDFCBANK is below VWAP
+        hw_quotes = {
+            "RELIANCE": {"spot_ltp": 3000.0, "vwap": 2950.0},
+            "HDFCBANK": {"spot_ltp": 1630.0, "vwap": 1640.0},
+        }
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            heavyweight_quotes=hw_quotes,
+            as_of_time=datetime(2026, 10, 14, 11, 0, 0),
+            enforce_cutoff=True
+        )
+        # Should not be rejected by Gate 5D
+        self.assertFalse(any("Gate 5D" in r for r in res.get("rejection_reasons", [])))
+
+    def test_gate_5d_heavyweight_divergence_blocks_ce_even_in_crbi_breakout(self):
+        """CRB-I Immunity: Heavyweight divergence must veto CE even if spot is breaking Day High."""
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|99901",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 120.0, "ask": 120.5, "ltp": 120.2, "oi": 50000,
+            "volume": 2500, "spread_pct": 0.4, "quote_age_ms": 100,
+        }
+        # Spot is at Day High + 5 pts (Day High Breakout!)
+        underlying = {
+            "spot_ltp": 25200.0, "open": 25000.0, "high": 25195.0, "low": 24980.0,
+            "close": 25200.0, "vwap": 25050.0, "quote_age_ms": 100
+        }
+
+        # Heavyweights both falling below VWAP (contrary supply overhead)
+        hw_quotes = {
+            "RELIANCE": {"spot_ltp": 2900.0, "vwap": 2950.0},
+            "HDFCBANK": {"spot_ltp": 1600.0, "vwap": 1640.0},
+        }
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            heavyweight_quotes=hw_quotes,
+            as_of_time=datetime(2026, 10, 21, 9, 30, 1),
+            enforce_cutoff=True
+        )
+        self.assertEqual(res["status"], STATE_WATCH)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Heavyweight Concurrence" in r and "below VWAP" in r for r in res["rejection_reasons"]))
+        # Verify CRB-I is NOT active when heavyweights are contrary
+        self.assertFalse(res.get("is_crbi_active", False))
+
+
+class TestPersistentCircuitBreakerAndParity(unittest.TestCase):
+    """
+    Verifies institutional-grade safeguards:
+      1. Persistent SQLite-backed 2-Loss Session Circuit Breaker.
+      2. Max Daily Drawdown Lockout (-₹2,500 ceiling).
+      3. Anti-Clustering Shield (Max 1 contract per underlying).
+      4. Cross-Index Contagion Lockout (20-minute stabilization after SL).
+      5. Runtime-to-Disk SHA-256 Parity Handshake.
+    """
+
+    def setUp(self):
+        self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.temp_db_path = self.temp_db.name
+        self.temp_db.close()
+
+        self.db_patcher = patch("app.analytics.option_sniffer.option_db.get_db_path", return_value=self.temp_db_path)
+        self.mock_get_db_path = self.db_patcher.start()
+
+        init_option_sniffer_tables()
+
+        self.mock_model = MagicMock(spec=OptionAlphaModel)
+        self.mock_model.version = "v1.0-champion-test"
+        self.mock_model.artifact_hash = "mock_hash_123"
+        self.mock_model.predict_contract.return_value = {
+            "direction": DIRECTION_BUY_CE,
+            "calibrated_prob": 0.65,
+            "expected_net_return_pct": 8.5,
+        }
+
+        # Clear engine class-level state between tests
+        OptionSignalEngine._COOLDOWNS.clear()
+        OptionSignalEngine._DIRECTION_SL_COOLDOWNS.clear()
+        OptionSignalEngine._PORTFOLIO_LOSS_HISTORY.clear()
+        OptionSignalEngine._INTROSPECTION_FROZEN_UNTIL = 0.0
+
+    def tearDown(self):
+        self.db_patcher.stop()
+        if os.path.exists(self.temp_db_path):
+            os.unlink(self.temp_db_path)
+
+    def _insert_closed_trade(self, trade_id, symbol, underlying, pnl, exit_time_str, exit_reason="STOP_LOSS"):
+        conn = sqlite3.connect(self.temp_db_path)
+        conn.execute("""
+            INSERT INTO option_sniffer_paper_trades (
+                trade_id, instrument_key, trading_symbol, underlying, option_type,
+                strike, expiry, lot_size, quantity, entry_time, entry_ask,
+                entry_price_used, exit_time, exit_price_used, status, gross_pnl, charges, net_pnl, exit_reason
+            ) VALUES (?, ?, ?, ?, 'CE', 25000, '2026-10-29', 65, 65, '2026-10-16 09:30:00', 100.0, 100.0, ?, ?, 'CLOSED', ?, 50.0, ?, ?)
+        """, (trade_id, f"NSE_FO|{trade_id}", symbol, underlying, exit_time_str, 80.0, pnl + 50.0, pnl, exit_reason))
+        conn.commit()
+        conn.close()
+
+    def _insert_open_trade(self, trade_id, symbol, underlying, mfe_pct=0.0, net_pnl_pct=0.0):
+        conn = sqlite3.connect(self.temp_db_path)
+        conn.execute("""
+            INSERT INTO option_sniffer_paper_trades (
+                trade_id, instrument_key, trading_symbol, underlying, option_type,
+                strike, expiry, lot_size, quantity, entry_time, entry_ask,
+                entry_price_used, status, mfe_pct, net_pnl_pct
+            ) VALUES (?, ?, ?, ?, 'CE', 25000, '2026-10-29', 65, 65, '2026-10-16 09:30:00', 100.0, 100.0, 'OPEN', ?, ?)
+        """, (trade_id, f"NSE_FO|{trade_id}", symbol, underlying, mfe_pct, net_pnl_pct))
+        conn.commit()
+        conn.close()
+
+    def test_daily_circuit_breaker_detects_two_consecutive_losses(self):
+        """2 consecutive losses triggers dynamic introspection pause (Tier 1)."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        self._insert_closed_trade("t1", "NIFTY26OCT25000CE", "NIFTY", -1000.0, f"{today} 09:45:00")
+        self._insert_closed_trade("t2", "NIFTY26OCT25100CE", "NIFTY", -1100.0, f"{today} 10:00:00")
+
+        eval_dt = datetime.strptime(f"{today} 10:15:00", "%Y-%m-%d %H:%M:%S")
+        telem = OptionDB.get_daily_circuit_breaker_telemetry(as_of_date=today, as_of_time=eval_dt)
+        self.assertEqual(telem["consecutive_losses"], 2)
+        self.assertTrue(telem["is_consecutive_limit_hit"])
+        self.assertTrue(telem["is_pause_active"])
+        self.assertFalse(telem["is_session_halted"])  # Hard halt reserved for -₹3,500 daily ceiling
+        self.assertIn("Dynamic Introspection Pause Active", telem["halt_reason"])
+
+    def test_daily_circuit_breaker_streak_broken_by_win(self):
+        """A winning trade breaks the consecutive loss streak."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        self._insert_closed_trade("t1", "NIFTY26OCT25000CE", "NIFTY", -1000.0, f"{today} 09:45:00")
+        self._insert_closed_trade("t2", "NIFTY26OCT25100CE", "NIFTY", +1500.0, f"{today} 10:15:00")
+
+        telem = OptionDB.get_daily_circuit_breaker_telemetry(as_of_date=today)
+        self.assertEqual(telem["consecutive_losses"], 0)
+        self.assertFalse(telem["is_consecutive_limit_hit"])
+        self.assertFalse(telem["is_pause_active"])
+        self.assertFalse(telem["is_session_halted"])
+
+    def test_daily_circuit_breaker_max_drawdown_lockout(self):
+        """Cumulative loss exceeding ₹3,500 trips hard session lockout (Tier 2)."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        self._insert_closed_trade("t1", "NIFTY26OCT25000CE", "NIFTY", -3800.0, f"{today} 09:45:00")
+
+        telem = OptionDB.get_daily_circuit_breaker_telemetry(as_of_date=today)
+        self.assertTrue(telem["is_max_loss_limit_hit"])
+        self.assertTrue(telem["is_session_halted"])
+        self.assertIn("Daily max loss ceiling reached", telem["halt_reason"])
+
+    def test_circuit_breaker_blocks_in_signal_engine_gate_9b(self):
+        """Gate 9B blocks during 30m dynamic introspection pause after 2 losses."""
+        today = "2026-10-16"
+        self._insert_closed_trade("t1", "NIFTY26OCT25000CE", "NIFTY", -1000.0, f"{today} 09:45:00")
+        self._insert_closed_trade("t2", "NIFTY26OCT25100CE", "NIFTY", -1000.0, f"{today} 10:00:00")
+
+        # Fresh engine instance simulating server restart
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|99901",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 120.0, "ask": 120.5, "ltp": 120.2, "oi": 50000,
+            "volume": 2500, "spread_pct": 0.4, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 25150.0, "open": 25000.0, "high": 25160.0, "low": 24980.0, "close": 25140.0, "vwap": 25050.0, "quote_age_ms": 100}
+
+        # Attempt to evaluate 15 minutes after 2nd loss (during 30m pause)
+        eval_dt = datetime.strptime(f"{today} 10:15:00", "%Y-%m-%d %H:%M:%S")
+        res = engine.evaluate_contract(contract, quote, underlying, as_of_time=eval_dt, enforce_cutoff=True, enforce_regime_gate=False)
+
+        self.assertNotEqual(res["status"], STATE_ACTIVE)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Dynamic Introspection Pause Active" in r for r in res.get("rejection_reasons", [])))
+
+    def test_anti_clustering_shield_blocks_duplicate_underlying_position(self):
+        """Gate 9: Max 1 position per underlying prevents multi-strike cluster bleed."""
+        self._insert_open_trade("open1", "NIFTY26OCT25000CE", "NIFTY")
+
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|99902",
+            "trading_symbol": "NIFTY26OCT25050CE",
+            "underlying": "NIFTY",
+            "strike": 25050.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 120.0, "ask": 120.5, "ltp": 120.2, "oi": 50000,
+            "volume": 2500, "spread_pct": 0.4, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 25150.0, "open": 25000.0, "high": 25160.0, "low": 24980.0, "close": 25140.0, "vwap": 25050.0, "quote_age_ms": 100}
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            as_of_time=datetime(2026, 10, 16, 10, 0, 0),
+            enforce_cutoff=True,
+            enforce_regime_gate=False
+        )
+        self.assertNotEqual(res["status"], STATE_ACTIVE)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Anti-Clustering Shield" in r and "Active NIFTY position exists" in r for r in res.get("rejection_reasons", [])))
+
+    def test_cross_index_contagion_lockout(self):
+        """Gate 9C: When NIFTY hits SL, BANKNIFTY is locked out for 20 minutes."""
+        today = "2026-10-16"
+        self._insert_closed_trade("t1", "NIFTY26OCT25000CE", "NIFTY", -800.0, f"{today} 10:00:00")
+
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|99903",
+            "trading_symbol": "BANKNIFTY26OCT52000CE",
+            "underlying": "BANKNIFTY",
+            "strike": 52000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 15,
+        }
+        quote = {
+            "bid": 300.0, "ask": 301.0, "ltp": 300.5, "oi": 25000,
+            "volume": 1200, "spread_pct": 0.3, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 52100.0, "open": 51800.0, "high": 52150.0, "low": 51750.0, "close": 52090.0, "vwap": 51900.0, "quote_age_ms": 100}
+
+        # Attempt to trade 5 minutes later at 10:05:00 (< 20 mins)
+        eval_dt = datetime.strptime(f"{today} 10:05:00", "%Y-%m-%d %H:%M:%S")
+        res = engine.evaluate_contract(contract, quote, underlying, as_of_time=eval_dt, enforce_cutoff=True, enforce_regime_gate=False)
+
+        self.assertNotEqual(res["status"], STATE_ACTIVE)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Cross-Index Contagion Lockout" in r for r in res.get("rejection_reasons", [])))
+
+    def test_runtime_parity_handshake(self):
+        """OptionSnifferOrchestrator computes and verifies SHA-256 module parity."""
+        from app.analytics.option_sniffer.option_sniffer_orchestrator import OptionSnifferOrchestrator
+        parity = OptionSnifferOrchestrator.check_runtime_disk_parity()
+        self.assertTrue(parity["in_sync"])
+        self.assertEqual(parity["status"], "SYNCHRONIZED")
+        self.assertEqual(len(parity["stale_files"]), 0)
+
+    def test_smart_pyramiding_unlocks_second_contract_when_first_trade_is_winning(self):
+        """Smart Pyramiding Gate: Unlocks 2nd contract when Contract #1 has MFE >= +15% and PnL >= +2%."""
+        self._insert_open_trade("open1", "NIFTY26OCT25000CE", "NIFTY", mfe_pct=18.5, net_pnl_pct=8.2)
+
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|99904",
+            "trading_symbol": "NIFTY26OCT25050CE",
+            "underlying": "NIFTY",
+            "strike": 25050.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 120.0, "ask": 120.5, "ltp": 120.2, "oi": 50000,
+            "volume": 2500, "spread_pct": 0.4, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 25150.0, "open": 25000.0, "high": 25160.0, "low": 24980.0, "close": 25140.0, "vwap": 25050.0, "quote_age_ms": 100}
+
+        res = engine.evaluate_contract(
+            contract, quote, underlying,
+            as_of_time=datetime(2026, 10, 16, 10, 0, 0),
+            enforce_cutoff=True,
+            enforce_regime_gate=False
+        )
+        self.assertEqual(res["status"], STATE_ACTIVE)
+        self.assertTrue(res["hurdles_passed"])
+        self.assertEqual(len(res.get("rejection_reasons", [])), 0)
+
+    def test_hard_daily_circuit_breaker_halts_gate_9b_permanently(self):
+        """Gate 9B halts session permanently when daily cumulative losses breach -₹3,500."""
+        today = "2026-10-16"
+        self._insert_closed_trade("t1", "NIFTY26OCT25000CE", "NIFTY", -3600.0, f"{today} 09:45:00")
+
+        engine = OptionSignalEngine(model=self.mock_model)
+        contract = {
+            "instrument_key": "NSE_FO|99905",
+            "trading_symbol": "NIFTY26OCT25000CE",
+            "underlying": "NIFTY",
+            "strike": 25000.0,
+            "expiry": "2026-10-29",
+            "option_type": "CE",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 120.0, "ask": 120.5, "ltp": 120.2, "oi": 50000,
+            "volume": 2500, "spread_pct": 0.4, "quote_age_ms": 100,
+        }
+        underlying = {"spot_ltp": 25150.0, "open": 25000.0, "high": 25160.0, "low": 24980.0, "close": 25140.0, "vwap": 25050.0, "quote_age_ms": 100}
+
+        eval_dt = datetime.strptime(f"{today} 12:00:00", "%Y-%m-%d %H:%M:%S")
+        res = engine.evaluate_contract(contract, quote, underlying, as_of_time=eval_dt, enforce_cutoff=True, enforce_regime_gate=False)
+
+        self.assertNotEqual(res["status"], STATE_ACTIVE)
+        self.assertFalse(res["hurdles_passed"])
+        self.assertTrue(any("Daily Session Circuit Breaker Tripped" in r for r in res.get("rejection_reasons", [])))
 
 
 if __name__ == "__main__":

@@ -37,5 +37,14 @@ restore_*.py
 backend/logs/
 backend/run/
 backend/mlruns/
+mlruns/
 catboost_info/
 backend/catboost_info/
+Users/
+backend/Users/
+backend/scratch/
+agent_lab/
+*.pdf
+*.csv
+
+

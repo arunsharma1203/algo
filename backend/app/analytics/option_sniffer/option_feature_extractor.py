@@ -149,25 +149,63 @@ class OptionFeatureExtractor:
         spot_atr_pct = 0.80
         spot_vwap_dist = 0.0
 
-        if underlying_df is not None and len(underlying_df) >= 15:
+        # High/Low Intraday Excursion Tracking
+        u_open = float(underlying_quote.get("open") or spot)
+        u_high = float(underlying_quote.get("high") or spot)
+        u_low = float(underlying_quote.get("low") or spot)
+        pullback_from_high_pct = ((spot - u_high) / u_high * 100.0) if u_high > 0 else 0.0
+        rally_from_low_pct = ((spot - u_low) / u_low * 100.0) if u_low > 0 else 0.0
+
+        # Structural Intraday RSI anchored to position within Day's High/Low range and Open
+        structural_rsi = 50.0
+        if u_open > 0:
+            open_pct = (spot - u_open) / u_open * 100.0
+            if pullback_from_high_pct <= -0.22 and (rally_from_low_pct < abs(pullback_from_high_pct)):
+                structural_rsi = round(max(30.0, min(48.0, 50.0 + (pullback_from_high_pct * 35.0))), 2)
+            elif rally_from_low_pct >= 0.22:
+                structural_rsi = round(min(70.0, max(52.0, 50.0 + (rally_from_low_pct * 35.0))), 2)
+            elif u_high > u_low and ((u_high - u_low) / u_low * 100.0) >= 0.15:
+                range_pos = max(0.0, min(1.0, (spot - u_low) / (u_high - u_low)))
+                structural_rsi = round(35.0 + (range_pos * 30.0), 2)
+            elif open_pct >= 0.15:
+                structural_rsi = 56.0
+            elif open_pct <= -0.15:
+                structural_rsi = 44.0
+
+        if underlying_df is not None and len(underlying_df) >= 5:
             closes = underlying_df["close"]
             curr_c = float(closes.iloc[-1])
             if len(closes) >= 2:
                 spot_ret_1 = float((curr_c - closes.iloc[-2]) / closes.iloc[-2] * 100.0)
             if len(closes) >= 4:
                 spot_ret_3 = float((curr_c - closes.iloc[-4]) / closes.iloc[-4] * 100.0)
+            else:
+                spot_ret_3 = spot_ret_1
             if len(closes) >= 7:
                 spot_ret_6 = float((curr_c - closes.iloc[-7]) / closes.iloc[-7] * 100.0)
+            else:
+                spot_ret_6 = spot_ret_3
 
-            spot_rsi = cls.calculate_rsi(closes, period=14)
-            atr_val = cls.calculate_atr(underlying_df, period=14)
+            period_rsi = min(14, max(4, len(closes) - 1))
+            candle_rsi = cls.calculate_rsi(closes, period=period_rsi)
+            # Blend micro candle RSI (50%) with structural session RSI (50%) to prevent 3-minute micro-pauses from whipsawing RSI
+            spot_rsi = round(0.50 * candle_rsi + 0.50 * structural_rsi, 2)
+            atr_val = cls.calculate_atr(underlying_df, period=period_rsi)
             spot_atr_pct = (atr_val / curr_c * 100.0) if curr_c > 0 else 0.80
 
             vwap_val = float(underlying_quote.get("vwap") or curr_c)
             spot_vwap_dist = float((curr_c - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
         else:
-            vwap_val = float(underlying_quote.get("vwap") or spot)
+            vwap_val = float(underlying_quote.get("vwap") or (u_open if u_open > 0 else spot))
             spot_vwap_dist = float((spot - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
+            spot_rsi = structural_rsi
+            if u_open > 0:
+                if pullback_from_high_pct <= -0.22 and (rally_from_low_pct < abs(pullback_from_high_pct)):
+                    spot_ret_1 = round(pullback_from_high_pct * 0.4, 2)
+                    spot_ret_3 = round(pullback_from_high_pct * 0.7, 2)
+                elif rally_from_low_pct >= 0.22:
+                    spot_ret_1 = round(rally_from_low_pct * 0.4, 2)
+                    spot_ret_3 = round(rally_from_low_pct * 0.7, 2)
 
         # India VIX & Macro Context
         india_vix = float(macro_context.get("india_vix") or 13.5)
@@ -182,11 +220,11 @@ class OptionFeatureExtractor:
         consensus_dir = str(upstream_signals.get("consensus_direction", "NEUTRAL")).upper()
 
         # Is consensus direction aligned with this option?
-        # CE aligned with BUY; PE aligned with SELL
+        # CE aligned with BUY/BULL/BULLISH; PE aligned with SELL/BEAR/BEARISH
         aligned = 0.0
-        if (is_call and consensus_dir == "BUY") or (not is_call and consensus_dir == "SELL"):
+        if (is_call and consensus_dir in ("BUY", "BULL", "BULLISH")) or (not is_call and consensus_dir in ("SELL", "BEAR", "BEARISH")):
             aligned = 1.0
-        elif consensus_dir == "NEUTRAL":
+        elif consensus_dir in ("NEUTRAL", ""):
             aligned = 0.5
 
         features = {

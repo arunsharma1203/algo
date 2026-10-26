@@ -18,3 +18,12 @@
 ## 4. Editor Buffer & File Sync Integrity
 - **VS Code Buffer Conflict Immunity**: Disk files updated or committed by agentic operations are strictly authoritative. Dirty in-memory editor buffers must never overwrite disk files. Always discard stale unsaved editor tabs (`Revert` / `Don't Save`) when disk files are modified.
 
+## 5. Proactive Risk & Consequence Warnings & Disagreement Protocol (CRITICAL RULE)
+- **Mandatory Disagreement Advisory (Warn Before Proceeding)**: Whenever the assistant disagrees with any user prompt, instruction, premise, or feature request (whether due to technical soundness, regression risks, trading capital safety, data causal integrity, model calibration, mathematical validity, or application stability), the assistant **MUST explicitly warn the user and explain the disagreement BEFORE proceeding with execution or editing any file**. The assistant must detail the specific risks, justify the disagreement with facts/code, and propose safer, robust alternatives for the user's explicit consideration.
+- **Mandatory Consequence Advisory**: Every time the user provides a prompt, feature request, or instruction that could negatively impact application stability, trading capital, data causal integrity, model calibration, risk limits, or system goals (e.g. forward-looking bias, conflating portfolio alpha with benchmark returns, ungrounded LLM hallucinations, removing risk filters, or running unverified live orders), the assistant MUST explicitly warn the user of the potential consequences, explain the specific risks involved, and propose safer, robust alternatives before or alongside execution.
+
+## 6. Exclusive Human Authority on Real Trading Arm/Disarm (CRITICAL RULE)
+- **Zero Agentic Arm/Disarm Rights**: AI assistants and automated tools are strictly prohibited from arming or disarming live/real broker trading (via PIN bypass, automated curl, script, or API invocation).
+- **Sole User Ownership**: The right to arm or disarm the system belongs exclusively and solely to the human USER through the interactive UI confirmation modal. AI assistants must never autonomously call the `/live/arm` or `/live/disarm` endpoints or forge the 4-digit security PIN.
+
+

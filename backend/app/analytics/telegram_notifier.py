@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 from app.data.database import get_db_path
 
-def send_telegram_message(message: str) -> bool:
+def send_telegram_message(message: str, is_real_option_trade: bool = False) -> bool:
     """
     Pushes an actionable trade or risk notification to the configured Telegram chat.
     Safe failure tolerance: returns False if credentials are not configured or network fails.
@@ -17,6 +17,25 @@ def send_telegram_message(message: str) -> bool:
         if is_testing_environment() or os.environ.get("SUPPRESS_TELEGRAM") == "true":
             logger.info("[TELEGRAM ISOLATION] Test environment active. Suppressing outbound Telegram API request.")
             return True
+
+        # STRICT REAL TRADE FILTER:
+        # Deliver to Telegram ONLY if explicitly flagged or text identifies a real Upstox broker execution.
+        # Paper trades, equity scans, and scheduled reports are silenced.
+        is_real = is_real_option_trade or any(
+            marker in (message or "").upper()
+            for marker in (
+                "UPSTOX LIVE ORDER SUBMITTED",
+                "UPSTOX LIVE ORDER REJECTED",
+                "UPSTOX LIVE ORDER FILLED",
+                "UPSTOX LIVE POSITION EXITED",
+                "UPSTOX LIVE EMERGENCY SOS",
+                "UPSTOX LIVE ORDER CANCELLED",
+                "REAL BROKER",
+            )
+        )
+        if not is_real:
+            logger.debug("[TELEGRAM] Suppressed non-real notification (only real Option Sniffer trades are delivered).")
+            return False
 
         db_path = get_db_path()
         conn = sqlite3.connect(db_path, timeout=5.0)
@@ -68,7 +87,7 @@ def send_telegram_message(message: str) -> bool:
         return False
 
 
-def send_telegram_document(document_bytes: bytes, filename: str, caption: str = None) -> bool:
+def send_telegram_document(document_bytes: bytes, filename: str, caption: str = None, is_real_option_trade: bool = False) -> bool:
     """
     Dispatches a binary document (e.g. PDF Report) to the configured Telegram chat.
     Safe failure tolerance: never crashes, logs delivery or failure, and suppresses credential leakage.
@@ -78,6 +97,10 @@ def send_telegram_document(document_bytes: bytes, filename: str, caption: str = 
         if is_testing_environment() or os.environ.get("SUPPRESS_TELEGRAM") == "true":
             logger.info("[TELEGRAM ISOLATION] Test environment active. Suppressing outbound Telegram document request.")
             return True
+
+        if not is_real_option_trade:
+            logger.debug("[TELEGRAM] Suppressed document notification (only real Option Sniffer trades are delivered).")
+            return False
 
         db_path = get_db_path()
         conn = sqlite3.connect(db_path, timeout=5.0)

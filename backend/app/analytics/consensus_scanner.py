@@ -39,6 +39,7 @@ try:
         "app.api.trade_agent",
         "app.analytics.option_sniffer.option_constants",
         "app.analytics.option_sniffer.option_db",
+        "app.analytics.option_sniffer.option_microstructure_evaluator",
         "app.analytics.option_sniffer.option_paper_execution",
         "app.analytics.option_sniffer.option_sniffer_orchestrator",
         "app.api.option_sniffer_api",
@@ -47,7 +48,6 @@ try:
             _importlib.reload(_sys.modules[_m])
 except Exception:
     pass
-
 
 def normalize_symbol(symbol: str) -> str:
     """Normalizes ticker symbol across exchange variations (e.g. INFY.NS -> INFY)."""
@@ -99,48 +99,6 @@ class ConsensusScanner:
     def is_stop_requested(cls) -> bool:
         """Returns True if user has requested to cancel the active scan."""
         return cls._STOP_REQUESTED
-
-    @classmethod
-    def get_scoring_mode(cls) -> str:
-        """
-        Returns active Consensus scoring mode:
-        - 'CHALLENGER_SHADOW' (default): Baseline champion scores are authoritative for
-          production sorting/actions; Challenger scoring is computed, tracked, and logged in shadow.
-        - 'CHALLENGER_ACTIVE': Challenger scoring with restored Qlib alpha rank signal
-          is authoritative for production sorting and gating.
-        """
-        try:
-            conn = sqlite3.connect(get_db_path(), timeout=5.0)
-            cur = conn.cursor()
-            cur.execute("SELECT value FROM app_settings WHERE key = 'consensus_scoring_mode'")
-            row = cur.fetchone()
-            conn.close()
-            if row and row[0]:
-                val = str(row[0]).strip().upper()
-                if val in ("CHALLENGER_ACTIVE", "CHALLENGER_SHADOW", "BASELINE"):
-                    return val
-        except Exception:
-            pass
-        return "CHALLENGER_SHADOW"
-
-    @classmethod
-    def set_scoring_mode(cls, mode: str) -> bool:
-        """Updates active Consensus scoring mode in app_settings."""
-        m = str(mode).strip().upper()
-        if m not in ("CHALLENGER_ACTIVE", "CHALLENGER_SHADOW", "BASELINE"):
-            raise ValueError(f"Invalid scoring mode: {mode}")
-        try:
-            conn = sqlite3.connect(get_db_path(), timeout=5.0)
-            with conn:
-                conn.execute("""
-                    INSERT INTO app_settings (key, value) VALUES ('consensus_scoring_mode', ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                """, (m,))
-            conn.close()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to update consensus_scoring_mode: {e}")
-            return False
 
     @classmethod
     def _ensure_schema(cls) -> None:
@@ -219,7 +177,13 @@ class ConsensusScanner:
             ).fetchone()
             conn.close()
             if row and row[1]:
-                payload = json.loads(row[1])
+                completed_at, payload_str = row[0], row[1]
+                # Return in-memory cache if it matches the latest SQLite completed_at
+                if strat_key in cls._LATEST_SCAN_RESULTS:
+                    cached = cls._LATEST_SCAN_RESULTS[strat_key]
+                    if cached.get("completed_at") == completed_at:
+                        return cached
+                payload = json.loads(payload_str)
                 cls._LATEST_SCAN_RESULTS[strat_key] = payload
                 return payload
         except Exception as e:
@@ -515,8 +479,7 @@ class ConsensusScanner:
         cls,
         strategy: str = "INTRADAY",
         universe: str = "ALL_DATABASE_STOCKS",
-        top_k: int = 5,
-        scoring_mode: Optional[str] = None
+        top_k: int = 5
     ) -> Dict[str, Any]:
         """
         Executes parallel scans across both Qlib and Legacy engines, enriches trades with
@@ -525,7 +488,6 @@ class ConsensusScanner:
         start_time = time.time()
         scan_id = f"consensus_{strategy.lower()}_{uuid.uuid4().hex[:8]}"
         strat_upper = strategy.upper()
-        active_scoring_mode = (scoring_mode or cls.get_scoring_mode()).upper()
 
         cls._STOP_REQUESTED = False
         cls._CURRENT_TASK = asyncio.current_task()
@@ -775,34 +737,12 @@ class ConsensusScanner:
 
                     blended_entry = round((q_price + l_price) / 2.0 if (q_price and l_price) else (q_price or l_price), 2)
 
-                    # 1. Baseline heuristic Qlib score (uncalibrated sigmoid ~50.0-50.4%)
-                    q_raw_conf = float(q.get("heuristic_confidence") or q.get("confidence") or q.get("score") or q.get("recommendation_score") or 50.0)
-                    q_baseline_pct = round(q_raw_conf * 100.0, 1) if abs(q_raw_conf) <= 1.0 else round(q_raw_conf, 1)
-
-                    # 2. Honest Qlib Cross-Sectional Alpha Signal (rank_percentile in [0.0, 100.0])
-                    q_rank = q.get("rank_percentile")
-                    if q_rank is not None:
-                        q_alpha_signal = round(float(q_rank), 1)
-                    else:
-                        q_alpha_signal = float(q.get("alpha_strength") or q_baseline_pct)
-
+                    q_score = float(q.get("confidence") or q.get("score") or q.get("recommendation_score") or 0.0)
+                    q_score_pct = round(q_score * 100.0, 1) if abs(q_score) <= 1.0 else round(q_score, 1)
                     l_score_pct = round(float(l.get("confidence") or 0.0), 1)
 
-                    # Dual Scoring Paths: Baseline Champion vs Fixed Challenger
-                    baseline_raw_composite = (w_qlib * abs(q_baseline_pct)) + (w_legacy * l_score_pct)
-                    baseline_composite = round(max(0.0, baseline_raw_composite - cusum_penalty), 1)
-
-                    challenger_raw_composite = (w_qlib * q_alpha_signal) + (w_legacy * l_score_pct)
-                    challenger_composite = round(max(0.0, challenger_raw_composite - cusum_penalty), 1)
-
-                    # Authoritative composite score selection based on active scoring mode
-                    if active_scoring_mode == "CHALLENGER_ACTIVE":
-                        composite_score = challenger_composite
-                        q_active_score = q_alpha_signal
-                    else:
-                        # CHALLENGER_SHADOW / BASELINE: Baseline remains authoritative for production
-                        composite_score = baseline_composite
-                        q_active_score = q_baseline_pct
+                    raw_composite = (w_qlib * abs(q_score_pct)) + (w_legacy * l_score_pct)
+                    composite_score = round(max(0.0, raw_composite - cusum_penalty), 1)
 
                     l_explanation = l.get("explanation") or {}
                     l_base_probs = l.get("base_probs") or {}
@@ -885,7 +825,6 @@ class ConsensusScanner:
                         # 1. Statistical Conviction Floor (>= 50.0% directional edge)
                         MIN_CONVICTION_FLOOR = 50.0
                         conviction_ok = (composite_score >= MIN_CONVICTION_FLOOR) if strat_upper == "INTRADAY" else True
-                        challenger_conviction_ok = (challenger_composite >= MIN_CONVICTION_FLOOR) if strat_upper == "INTRADAY" else True
 
                         # 2. Sector Momentum Alignment Gate
                         sec_ok, sec_reason, sec_telem = (True, "Sector aligned", {})
@@ -974,7 +913,6 @@ class ConsensusScanner:
                                 runway_reason = f"Price ₹{check_px:.2f} already breached stop loss ₹{blended_sl:.2f}"
 
                         is_actionable = bool(conviction_ok and sec_ok and vwap_ok and macro_ok and target_runway_ok)
-                        challenger_is_actionable = bool(challenger_conviction_ok and sec_ok and vwap_ok and macro_ok and target_runway_ok)
                         precision_reasons = []
                         if not conviction_ok:
                             precision_reasons.append(f"Low Conviction ({composite_score:.1f}% < {MIN_CONVICTION_FLOOR}%)")
@@ -998,7 +936,7 @@ class ConsensusScanner:
                             live_open=live_open
                         )
 
-                        _cand_dict = {
+                        unanimous_trades.append({
                             "ticker": l.get("ticker") or q.get("ticker") or f"{sym}.NS",
                             "symbol": sym,
                             "direction": q_dir,
@@ -1006,11 +944,7 @@ class ConsensusScanner:
                             "trade_type": strat_upper,
                             "timeframe": "15m" if strat_upper == "INTRADAY" else "1d",
                             "confluence_status": "UNANIMOUS",
-                            "scoring_mode": active_scoring_mode,
                             "composite_score": composite_score,
-                            "baseline_composite_score": baseline_composite,
-                            "challenger_composite_score": challenger_composite,
-                            "qlib_alpha_strength": q_alpha_signal,
                             "entry_price": blended_entry,
                             "entry": blended_entry,
                             "stop_loss": blended_sl,
@@ -1024,7 +958,6 @@ class ConsensusScanner:
                             "is_actionable": is_actionable,
                             "precision_status": precision_status,
                             "precision_reasons": precision_reasons,
-                            "challenger_actionable": challenger_is_actionable,
                             "macro_aligned": macro_ok,
                             "macro_reason": macro_reason,
                             "vwap": live_vwap,
@@ -1035,14 +968,10 @@ class ConsensusScanner:
                             "sector_trend": sec_telem.get("sector_trend"),
                             "qlib_metrics": {
                                 "direction": q_dir,
-                                "score": q_active_score,
-                                "raw_prediction": q.get("raw_prediction", q_baseline_pct),
-                                "calibrated_probability": None,  # Explicitly None: uncalibrated
+                                "score": q_score_pct,
+                                "raw_prediction": q.get("raw_prediction", q_score),
+                                "calibrated_probability": q.get("calibrated_probability", q_score_pct),
                                 "rank_percentile": q.get("rank_percentile"),
-                                "alpha_strength": q_alpha_signal,
-                                "heuristic_confidence": q_baseline_pct,
-                                "challenger_score": q_alpha_signal,
-                                "baseline_score": q_baseline_pct,
                                 "rank": q.get("rank", 1),
                                 "entry": q_price,
                                 "stop_loss": q_sl,
@@ -1061,51 +990,12 @@ class ConsensusScanner:
                                 "base_probs": l_base_probs,
                                 "explanation": l_explanation
                             }
-                        }
-
-                        # Consensus Meta-Learner V2 (De Prado Meta-Labeling Challenger)
-                        try:
-                            from app.analytics.consensus_meta_learner_v2 import ConsensusMetaLearnerV2
-                            _v2_eval = ConsensusMetaLearnerV2().predict_candidate(_cand_dict)
-                            _cand_dict["meta_learner_v2"] = {
-                                "base_conviction": _v2_eval.get("base_conviction", composite_score),
-                                "meta_adjustment": _v2_eval.get("meta_adjustment", 0.0),
-                                "final_conviction": _v2_eval.get("final_conviction", composite_score),
-                                "calibrated_probability": _v2_eval.get("calibrated_probability"),
-                                "group_attributions": _v2_eval.get("group_attributions", {}),
-                                "status": _v2_eval.get("status", "UNAVAILABLE")
-                            }
-                        except Exception as _v2_err:
-                            logger.debug(f"Meta-Learner V2 evaluation note: {_v2_err}")
-                            _cand_dict["meta_learner_v2"] = {
-                                "base_conviction": composite_score,
-                                "meta_adjustment": 0.0,
-                                "final_conviction": composite_score,
-                                "group_attributions": {},
-                                "status": "ERROR"
-                            }
-
-                        # Trade Sentinel Agent Shadow Observation Hook (Ultra-fast quantitative prior, <1ms)
-                        try:
-                            from agent_lab.agent_core.sentinel_agent import TradeSentinelAgent
-                            _sentinel_eval = TradeSentinelAgent.observe_and_evaluate(_cand_dict, skip_llm=True)
-                            _cand_dict["trade_sentinel"] = {
-                                "action": _sentinel_eval.get("action", "UNKNOWN"),
-                                "prob": _sentinel_eval.get("agent_prob", 0.5),
-                                "expected_net_return": _sentinel_eval.get("expected_net_return", 0.0),
-                                "decision_id": _sentinel_eval.get("decision_id"),
-                                "model_version": _sentinel_eval.get("model_version")
-                            }
-                        except Exception as _sentinel_err:
-                            logger.debug(f"Trade Sentinel shadow observation note: {_sentinel_err}")
-
-                        unanimous_trades.append(_cand_dict)
-
+                        })
                         shadow_candidates_to_log.append({
                             "ticker": l.get("ticker") or q.get("ticker") or f"{sym}.NS",
                             "symbol": sym,
                             "qlib_direction": q_dir,
-                            "qlib_score": q_active_score,
+                            "qlib_score": q_score_pct,
                             "qlib_price": q_price,
                             "legacy_direction": l_dir,
                             "legacy_confidence": l_score_pct,
@@ -1114,11 +1004,6 @@ class ConsensusScanner:
                             "action_taken": "TRADED_UNANIMOUS" if is_actionable else "FILTERED_PRECISION_GATE",
                             "entry_ref_price": blended_entry,
                             "details": {
-                                "scoring_mode": active_scoring_mode,
-                                "baseline_composite": baseline_composite,
-                                "challenger_composite": challenger_composite,
-                                "qlib_alpha_signal": q_alpha_signal,
-                                "challenger_actionable": challenger_is_actionable,
                                 "risk_reward_ratio": rr_ratio,
                                 "blended_sl": blended_sl,
                                 "blended_tp": blended_tp,
@@ -1137,24 +1022,16 @@ class ConsensusScanner:
                             "confluence_status": "CONFLICT",
                             "warning": "Directional conflict: Quantitative alpha and momentum indicators disagree. High risk of whipsaw.",
                             "qlib_direction": q_dir,
-                            "qlib_score": q_active_score,
+                            "qlib_score": q_score_pct,
                             "legacy_direction": l_dir,
                             "legacy_confidence": l_score_pct,
                             "entry": blended_entry,
                             "entry_price": blended_entry,
-                            "scoring_mode": active_scoring_mode,
-                            "baseline_composite_score": baseline_composite,
-                            "challenger_composite_score": challenger_composite,
                             "qlib_metrics": {
                                 "direction": q_dir,
-                                "score": q_active_score,
-                                "raw_prediction": q.get("raw_prediction", q_baseline_pct),
+                                "score": q_score_pct,
+                                "raw_prediction": q.get("raw_prediction", q_score),
                                 "rank_percentile": q.get("rank_percentile"),
-                                "alpha_strength": q_alpha_signal,
-                                "heuristic_confidence": q_baseline_pct,
-                                "challenger_score": q_alpha_signal,
-                                "baseline_score": q_baseline_pct,
-                                "calibrated_probability": None,
                                 "entry": q_price,
                                 "stop_loss": q.get("stop_loss") or q.get("sl"),
                                 "target_price": q.get("target_price") or q.get("tp")
@@ -1175,7 +1052,7 @@ class ConsensusScanner:
                             "ticker": l.get("ticker") or q.get("ticker") or f"{sym}.NS",
                             "symbol": sym,
                             "qlib_direction": q_dir,
-                            "qlib_score": q_active_score,
+                            "qlib_score": q_score_pct,
                             "qlib_price": q_price,
                             "legacy_direction": l_dir,
                             "legacy_confidence": l_score_pct,
@@ -1183,24 +1060,14 @@ class ConsensusScanner:
                             "composite_score": composite_score,
                             "action_taken": "CONFLICT_BLOCKED",
                             "entry_ref_price": blended_entry,
-                            "details": {
-                                "warning": "Directional conflict",
-                                "scoring_mode": active_scoring_mode,
-                                "baseline_composite": baseline_composite,
-                                "challenger_composite": challenger_composite,
-                                "qlib_alpha_signal": q_alpha_signal
-                            }
+                            "details": {"warning": "Directional conflict"}
                         })
 
                 elif has_qlib:
                     q = qlib_map[sym]
                     q_dir = normalize_direction(q.get("direction"))
-                    q_raw_conf = float(q.get("heuristic_confidence") or q.get("confidence") or q.get("score") or q.get("recommendation_score") or 50.0)
-                    q_baseline_pct = round(q_raw_conf * 100.0, 1) if abs(q_raw_conf) <= 1.0 else round(q_raw_conf, 1)
-                    q_rank = q.get("rank_percentile")
-                    q_alpha_signal = round(float(q_rank), 1) if q_rank is not None else float(q.get("alpha_strength") or q_baseline_pct)
-                    q_active_score = q_alpha_signal if active_scoring_mode == "CHALLENGER_ACTIVE" else q_baseline_pct
-
+                    q_score = float(q.get("score") or q.get("recommendation_score") or 0.0)
+                    q_score_pct = round(q_score * 100.0, 1) if abs(q_score) <= 1.0 else round(q_score, 1)
                     orig_q_entry = float(q.get("entry_price") or q.get("entry") or 0.0)
                     q_entry = orig_q_entry
                     q_sl = float(q.get("stop_loss") or q.get("sl") or 0.0)
@@ -1221,7 +1088,7 @@ class ConsensusScanner:
                                 q_sl = round(q_entry * (1.0 + max(0.003, risk_pct)), 2)
                                 q_tp = round(q_entry * (1.0 - max(0.005, reward_pct)), 2)
 
-                    _q_cand = {
+                    qlib_solo.append({
                         "ticker": q.get("ticker") or f"{sym}.NS",
                         "symbol": sym,
                         "direction": q_dir,
@@ -1229,17 +1096,10 @@ class ConsensusScanner:
                         "trade_type": strat_upper,
                         "timeframe": "15m" if strat_upper == "INTRADAY" else "1d",
                         "source": "QLIB_SOLO",
-                        "scoring_mode": active_scoring_mode,
-                        "score": q_active_score,
-                        "composite_score": q_active_score,
-                        "baseline_composite_score": q_baseline_pct,
-                        "challenger_composite_score": q_alpha_signal,
-                        "qlib_alpha_strength": q_alpha_signal,
-                        "raw_prediction": q.get("raw_prediction", q_baseline_pct),
-                        "calibrated_probability": None,
+                        "score": q_score_pct,
+                        "raw_prediction": q.get("raw_prediction", q_score),
+                        "calibrated_probability": q.get("calibrated_probability", q_score_pct),
                         "rank_percentile": q.get("rank_percentile"),
-                        "alpha_strength": q_alpha_signal,
-                        "heuristic_confidence": q_baseline_pct,
                         "rank": q.get("rank", 1),
                         "entry": q_entry,
                         "entry_price": q_entry,
@@ -1251,48 +1111,20 @@ class ConsensusScanner:
                         "model_id": q.get("model_id"),
                         "model_hash": q.get("model_hash"),
                         "pnl_status": q.get("pnl_status", "FRESH")
-                    }
-                    try:
-                        from app.analytics.consensus_meta_learner_v2 import ConsensusMetaLearnerV2
-                        _v2_eval = ConsensusMetaLearnerV2().predict_candidate(_q_cand)
-                        _q_cand["meta_learner_v2"] = {
-                            "base_conviction": _v2_eval.get("base_conviction", q_active_score),
-                            "meta_adjustment": _v2_eval.get("meta_adjustment", 0.0),
-                            "final_conviction": _v2_eval.get("final_conviction", q_active_score),
-                            "calibrated_probability": _v2_eval.get("calibrated_probability"),
-                            "group_attributions": _v2_eval.get("group_attributions", {}),
-                            "status": _v2_eval.get("status", "UNAVAILABLE")
-                        }
-                    except Exception:
-                        pass
-
-                    # Trade Sentinel Agent Shadow Observation Hook for Qlib Solo
-                    try:
-                        from agent_lab.agent_core.sentinel_agent import TradeSentinelAgent
-                        _sentinel_eval = TradeSentinelAgent.observe_and_evaluate(_q_cand, skip_llm=True)
-                        _q_cand["trade_sentinel"] = {
-                            "action": _sentinel_eval.get("action", "UNKNOWN"),
-                            "prob": _sentinel_eval.get("agent_prob", 0.5),
-                            "expected_net_return": _sentinel_eval.get("expected_net_return", 0.0),
-                            "decision_id": _sentinel_eval.get("decision_id"),
-                            "model_version": _sentinel_eval.get("model_version")
-                        }
-                    except Exception as _sentinel_err:
-                        logger.debug(f"Trade Sentinel Qlib Solo observation note: {_sentinel_err}")
-                    qlib_solo.append(_q_cand)
+                    })
                     shadow_candidates_to_log.append({
                         "ticker": q.get("ticker") or f"{sym}.NS",
                         "symbol": sym,
                         "qlib_direction": q_dir,
-                        "qlib_score": q_active_score,
+                        "qlib_score": q_score_pct,
                         "qlib_price": q_entry,
                         "legacy_direction": None,
                         "legacy_confidence": None,
                         "legacy_price": None,
-                        "composite_score": q_active_score,
+                        "composite_score": q_score_pct,
                         "action_taken": "SOLO_QLIB",
                         "entry_ref_price": q_entry,
-                        "details": {"rank": q.get("rank", 1), "alpha_strength": q_alpha_signal}
+                        "details": {"rank": q.get("rank", 1)}
                     })
 
                 elif has_legacy:
@@ -1314,7 +1146,7 @@ class ConsensusScanner:
                             l_tp1 = round(l_tp1 + delta, 2)
                             l_tp2 = round(l_tp2 + delta, 2) if l_tp2 > 0 else round(l_tp1 * 1.01, 2)
 
-                    _l_cand = {
+                    legacy_solo.append({
                         "ticker": l.get("ticker") or f"{sym}.NS",
                         "symbol": sym,
                         "direction": l_dir,
@@ -1323,7 +1155,6 @@ class ConsensusScanner:
                         "timeframe": "15m" if strat_upper == "INTRADAY" else "1d",
                         "source": "LEGACY_SOLO",
                         "confidence": l_score_pct,
-                        "composite_score": l_score_pct,
                         "raw_confidence": l.get("raw_confidence", l_score_pct),
                         "entry": l_entry,
                         "entry_price": l_entry,
@@ -1336,35 +1167,7 @@ class ConsensusScanner:
                         "base_probs": l.get("base_probs", {}),
                         "explanation": l.get("explanation", {}),
                         "timestamp": l.get("timestamp") or datetime.now().isoformat()
-                    }
-                    try:
-                        from app.analytics.consensus_meta_learner_v2 import ConsensusMetaLearnerV2
-                        _v2_eval = ConsensusMetaLearnerV2().predict_candidate(_l_cand)
-                        _l_cand["meta_learner_v2"] = {
-                            "base_conviction": _v2_eval.get("base_conviction", l_score_pct),
-                            "meta_adjustment": _v2_eval.get("meta_adjustment", 0.0),
-                            "final_conviction": _v2_eval.get("final_conviction", l_score_pct),
-                            "calibrated_probability": _v2_eval.get("calibrated_probability"),
-                            "group_attributions": _v2_eval.get("group_attributions", {}),
-                            "status": _v2_eval.get("status", "UNAVAILABLE")
-                        }
-                    except Exception:
-                        pass
-
-                    # Trade Sentinel Agent Shadow Observation Hook for Legacy Solo
-                    try:
-                        from agent_lab.agent_core.sentinel_agent import TradeSentinelAgent
-                        _sentinel_eval = TradeSentinelAgent.observe_and_evaluate(_l_cand, skip_llm=True)
-                        _l_cand["trade_sentinel"] = {
-                            "action": _sentinel_eval.get("action", "UNKNOWN"),
-                            "prob": _sentinel_eval.get("agent_prob", 0.5),
-                            "expected_net_return": _sentinel_eval.get("expected_net_return", 0.0),
-                            "decision_id": _sentinel_eval.get("decision_id"),
-                            "model_version": _sentinel_eval.get("model_version")
-                        }
-                    except Exception as _sentinel_err:
-                        logger.debug(f"Trade Sentinel Legacy Solo observation note: {_sentinel_err}")
-                    legacy_solo.append(_l_cand)
+                    })
                     shadow_candidates_to_log.append({
                         "ticker": l.get("ticker") or f"{sym}.NS",
                         "symbol": sym,
@@ -1395,31 +1198,6 @@ class ConsensusScanner:
                     pass
 
             elapsed = round(time.time() - start_time, 2)
-            previous_active_trades = []
-            previous_active_scan_at = None
-            if len(unanimous_trades) == 0:
-                try:
-                    conn_prev = sqlite3.connect(get_db_path(), timeout=10.0)
-                    cur_prev = conn_prev.cursor()
-                    cur_prev.execute("""
-                        SELECT details_json, timestamp FROM consensus_trade_history
-                        WHERE strategy = ? AND status = 'OPEN'
-                        ORDER BY id DESC LIMIT ?
-                    """, (strat_upper, top_k))
-                    prev_rows = cur_prev.fetchall()
-                    for pr in prev_rows:
-                        if pr[0]:
-                            try:
-                                d_prev = json.loads(pr[0])
-                                previous_active_trades.append(d_prev)
-                                if not previous_active_scan_at:
-                                    previous_active_scan_at = pr[1]
-                            except Exception:
-                                pass
-                    conn_prev.close()
-                except Exception as prev_err:
-                    logger.debug(f"Could not load previous active trades: {prev_err}")
-
             result_payload = {
                 "scan_id": scan_id,
                 "strategy": strat_upper,
@@ -1461,18 +1239,9 @@ class ConsensusScanner:
                 },
                 "unanimous_trades": unanimous_trades[:top_k],
                 "consensus_trades": unanimous_trades[:top_k],
-                "previous_active_trades": previous_active_trades,
-                "previous_active_scan_at": previous_active_scan_at,
                 "conflicting_trades": conflicting_trades[:top_k],
                 "qlib_solo": qlib_solo[:top_k],
                 "legacy_solo": legacy_solo[:top_k],
-                "scoring_mode": active_scoring_mode,
-                "challenger_evaluation": {
-                    "mode": active_scoring_mode,
-                    "status": "ACTIVE" if active_scoring_mode == "CHALLENGER_ACTIVE" else "SHADOW_MONITORING",
-                    "challenger_qualified_count": sum(1 for t in unanimous_trades if t.get("challenger_actionable", False)),
-                    "baseline_qualified_count": sum(1 for t in unanimous_trades if t.get("is_actionable", False))
-                },
                 "active_weights": active_weights,
                 "cusum_risk_gate": {
                     "penalty_applied": cusum_penalty > 0,
@@ -1516,24 +1285,6 @@ class ConsensusScanner:
                     logger.debug(f"[ConsensusScanner] Arena alert dispatch error: {alert_err}")
             except Exception as pe:
                 logger.warning(f"Failed to persist unanimous trades or shadow candidates: {pe}")
-
-            # Asynchronously enrich top actionable candidates with deep adversarial LLM reasoning in background
-            # Non-blocking: returns scan results immediately to frontend without 7-minute delay
-            if unanimous_trades:
-                try:
-                    top_candidates = [t for t in unanimous_trades[:top_k] if t.get("is_actionable", True)]
-                    if top_candidates:
-                        async def _enrich_top_candidates_bg(cands_to_eval):
-                            for c in cands_to_eval:
-                                try:
-                                    from agent_lab.agent_core.sentinel_agent import TradeSentinelAgent
-                                    await asyncio.to_thread(TradeSentinelAgent.observe_and_evaluate, c, False)
-                                except Exception as _bg_err:
-                                    logger.debug(f"Background Sentinel LLM enrichment note: {_bg_err}")
-
-                        asyncio.create_task(_enrich_top_candidates_bg(top_candidates))
-                except Exception as bg_disp_err:
-                    logger.debug(f"Could not dispatch background Sentinel enrichment: {bg_disp_err}")
 
 
             MasterLogger.log_event(

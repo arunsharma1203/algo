@@ -215,6 +215,11 @@ class OptionContractDiscovery:
 
             logger.info(f"[OptionDiscovery] Monitored {matched_for_underlying} active option contracts for {underlying}.")
 
+        try:
+            OptionDB.deactivate_expired_candidates()
+        except Exception:
+            pass
+
         return monitored_contracts
 
     @classmethod

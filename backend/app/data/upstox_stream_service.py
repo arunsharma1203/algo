@@ -101,6 +101,18 @@ class UpstoxStreamService:
         # Frozen snapshot storage for active consensus scans
         self._latest_frozen_snapshot: Optional[Dict[str, Any]] = None
 
+        # External listeners and dynamic subscriptions (e.g. Option Sniffer, Index Candle Ingestion)
+        self._feed_listeners: List[Any] = []
+        self._additional_keys: Set[str] = {"NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"}
+
+        # Wire continuous index candle ingestion service (for NIFTY and BANKNIFTY continuous_index_ohlcv)
+        try:
+            from app.data.index_candle_ingestion_prototype import get_index_candle_ingestion_service
+            self.register_feed_listener(lambda feeds: get_index_candle_ingestion_service().process_feed_message({"feeds": feeds}))
+            logger.info("[UpstoxStreamService] Wired IndexCandleIngestionService feed listener for continuous_index_ohlcv.")
+        except Exception as e:
+            logger.warning(f"[UpstoxStreamService] Could not wire index candle ingestion listener: {e}")
+
         self._initialized = True
         logger.info("[UpstoxStreamService] Initialized continuous streaming service singleton.")
 
@@ -141,6 +153,34 @@ class UpstoxStreamService:
             f"with authoritative Upstox V3 keys ({len(self._key_to_symbol)} unique keys)."
         )
         return valid_symbols
+
+    def register_feed_listener(self, listener: Any) -> None:
+        """Registers a callback receiving raw feeds dict: listener(feeds)."""
+        if callable(listener):
+            with self._lock:
+                if listener not in self._feed_listeners:
+                    self._feed_listeners.append(listener)
+            logger.info(f"[UpstoxStreamService] Registered feed listener. Total listeners: {len(self._feed_listeners)}")
+
+    def subscribe_additional_keys(self, keys: List[str], mode: str = "full") -> None:
+        """Dynamically subscribes non-equity keys (e.g. options, indices) to the running WebSocket."""
+        if not keys:
+            return
+        to_add: List[str] = []
+        with self._lock:
+            for k in keys:
+                if k and k not in self._additional_keys and k not in self._key_to_symbol:
+                    self._additional_keys.add(k)
+                    to_add.append(k)
+            st = self._streamer
+            is_conn = self._is_connected
+
+        if to_add and st and is_conn:
+            try:
+                st.subscribe(to_add, mode=mode)
+                logger.info(f"[UpstoxStreamService] Dynamically subscribed {len(to_add)} additional keys to WebSocket.")
+            except Exception as sub_err:
+                logger.warning(f"[UpstoxStreamService] Dynamic subscribe note: {sub_err}")
 
     # ──────────────────────────────────────────────────────────────────────────
     # LIFECYCLE MANAGEMENT
@@ -206,9 +246,12 @@ class UpstoxStreamService:
                 cfg.access_token = token
                 client = upstox_client.ApiClient(cfg)
 
-                instrument_keys = list(self._key_to_symbol.keys())
+                with self._lock:
+                    additional = list(self._additional_keys)
+                    instrument_keys = list(dict.fromkeys(list(self._key_to_symbol.keys()) + additional))
                 logger.info(
-                    f"[UpstoxStreamService] Initializing MarketDataStreamerV3 with {len(instrument_keys)} keys (mode=full)..."
+                    f"[UpstoxStreamService] Initializing MarketDataStreamerV3 with {len(instrument_keys)} keys "
+                    f"({len(additional)} additional/options) (mode=full)..."
                 )
 
                 streamer = upstox_client.MarketDataStreamerV3(client, instrument_keys, mode="full")
@@ -252,8 +295,8 @@ class UpstoxStreamService:
                 # Keep thread alive while service is running
                 while self._is_running:
                     time.sleep(2.0)
-                    if not self._is_connected and self._last_msg_ts > 0 and (time.time() - self._last_msg_ts > 30.0):
-                        logger.warning("[UpstoxStreamService] Connection stale for > 30s. Triggering re-initialization...")
+                    if not self._is_connected and (self._last_msg_ts == 0 or (time.time() - self._last_msg_ts > 30.0)):
+                        logger.warning("[UpstoxStreamService] Connection failed or stale for > 30s. Triggering re-initialization...")
                         break
 
             except Exception as e:
@@ -280,6 +323,16 @@ class UpstoxStreamService:
         feeds = msg.get("feeds")
         if not feeds or not isinstance(feeds, dict):
             return
+
+        # Native broadcast to registered external listeners (e.g. Option Sniffer)
+        if self._feed_listeners:
+            with self._lock:
+                active_listeners = list(self._feed_listeners)
+            for listener in active_listeners:
+                try:
+                    listener(feeds)
+                except Exception as l_err:
+                    logger.debug(f"[UpstoxStreamService] Listener error: {l_err}")
 
         now_dt = datetime.now()
 

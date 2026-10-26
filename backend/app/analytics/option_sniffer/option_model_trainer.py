@@ -208,8 +208,7 @@ class OptionModelTrainer:
                     exit_mid = max(0.05, mid_price + opt_change)
                     exit_bid = round(max(0.05, exit_mid - half_spread), 2)  # SELL at BID
 
-                    lot_size = DEFAULT_LOT_SIZES.get("NIFTY", 65)
-                    cost_info = calculate_option_trade_costs(entry_ask, exit_bid, quantity=lot_size, apply_slippage=True)
+                    cost_info = calculate_option_trade_costs(entry_ask, exit_bid, quantity=lot_size, apply_slippage=True, trade_date=t_dt)
 
                     gross_pnl = (exit_bid - entry_ask) * lot_size
                     net_pnl = gross_pnl - cost_info["total_friction"]

@@ -132,10 +132,18 @@ class OptionAlphaModel:
             logger.error(f"[OptionAlphaModel] Failed to save artifact: {e}")
             return False
 
-    def predict_contract(self, features: Dict[str, float]) -> Dict[str, Any]:
+    def predict_contract(
+        self,
+        features: Dict[str, Any],
+        dynamic_sl_pct: Optional[float] = None,
+        dynamic_tgt_pct: Optional[float] = None,
+        min_prob_hurdle: Optional[float] = None,
+        is_breakout: bool = False
+    ) -> Dict[str, Any]:
         """
         Evaluates a single point-in-time option candidate contract through the 4-stage pipeline.
         Returns prediction dictionary with calibrated net edge and directional verdict.
+        Includes non-linear exhaustion damping (Z_ext and RSI governors) and accurate F&O cost modeling.
         """
         # Convert to feature vector
         feat_vector = OptionFeatureExtractor.to_feature_vector(features).reshape(1, -1)
@@ -144,6 +152,7 @@ class OptionAlphaModel:
         spread_pct = float(features.get("spread_pct", 1.0))
         delta = float(features.get("delta", 0.50))
         abs_moneyness = float(features.get("abs_moneyness", 0.0))
+        is_breakout = bool(is_breakout or features.get("is_breakout", False))
 
         raw_score = 0.50
         calibrated_prob = 0.50
@@ -156,18 +165,56 @@ class OptionAlphaModel:
         up_conf = float(features.get("upstream_consensus_conf", 50.0)) / 100.0
         rsi = float(features.get("spot_rsi", 50.0))
         vwap_dist = float(features.get("spot_vwap_dist_pct", 0.0))
+        pullback = float(features.get("pullback_from_high_pct", 0.0))
+        rally = float(features.get("rally_from_low_pct", 0.0))
+        ret3 = float(features.get("spot_ret_3", 0.0))
+        ret1 = float(features.get("spot_ret_1", 0.0))
+        spot_atr_pct = float(features.get("spot_atr_pct", 0.35) or 0.35)
+
+        spot_price = float(features.get("spot_price", 0.0) or 0.0)
+        vwap = float(features.get("vwap", 0.0) or 0.0)
+        spot_atr = float(features.get("spot_atr", 0.0) or 0.0)
+
+        # Extension Z-Score: distance from VWAP normalized by ATR
+        if spot_price > 0 and vwap > 0 and spot_atr > 0:
+            z_ext = abs(spot_price - vwap) / max(1.0, spot_atr)
+        else:
+            z_ext = abs(vwap_dist) / max(0.10, spot_atr_pct)
 
         base_edge = 0.38
         if is_call:
-            if up_align > 0.7 and rsi > 52 and vwap_dist > 0:
-                base_edge += 0.16
-            elif up_align < 0.3 or rsi < 48 or vwap_dist < -0.3:
+            if up_align > 0.7 and (rsi >= 50 or vwap_dist >= 0) and vwap_dist > -0.15:
+                # Sweet spot vs Overextension:
+                # Breakout candles crossing Day High are exempt from Z_ext penalty (initiating fresh expansion)
+                if is_breakout or z_ext <= 1.4:
+                    base_edge += 0.14
+                elif z_ext <= 2.0:
+                    base_edge += 0.06  # Mild extension
+                else:
+                    # Parabolic climax penalty (Z > 2.0)
+                    climax_pen = min(0.20, 0.10 * (z_ext - 1.8))
+                    base_edge -= climax_pen
+            elif up_align < 0.3 or rsi < 46 or vwap_dist < -0.3:
                 base_edge -= 0.12
+
+            # RSI overbought governor (if not breakout)
+            if not is_breakout and rsi > 72:
+                base_edge -= 0.10
         else:
-            if up_align > 0.7 and rsi < 48 and vwap_dist < 0:
-                base_edge += 0.16
-            elif up_align < 0.3 or rsi > 52 or vwap_dist > 0.3:
+            if up_align > 0.7 and (rsi <= 50 or vwap_dist <= 0) and vwap_dist < 0.15:
+                if is_breakout or z_ext <= 1.4:
+                    base_edge += 0.14
+                elif z_ext <= 2.0:
+                    base_edge += 0.06
+                else:
+                    climax_pen = min(0.20, 0.10 * (z_ext - 1.8))
+                    base_edge -= climax_pen
+            elif up_align < 0.3 or rsi > 54 or vwap_dist > 0.3:
                 base_edge -= 0.12
+
+            # RSI oversold governor (if not breakout)
+            if not is_breakout and rsi < 28:
+                base_edge -= 0.10
 
         # Spread friction penalty
         spread_penalty = max(0.0, (spread_pct - 1.0) * 0.03)
@@ -201,13 +248,20 @@ class OptionAlphaModel:
             calibrated_prob = round(structural_prob, 4)
 
         # Stage 4: Contract Ranking & Net Expected Return
-        # Realistic Indian option buying convex payoff profile:
-        # Take Profit Target: TARGET_GAIN_PCT (+35.0% gain)
-        # Stop Loss: STOP_LOSS_PCT (-20.0% loss)
-        # Friction deduction: Upstox brokerage (₹20/leg) + STT + turnover + GST + slippage
-        typical_win_pct = float(TARGET_GAIN_PCT)
-        typical_loss_pct = float(STOP_LOSS_PCT)
-        friction_pct = 1.8 + (spread_pct * 0.5)
+        # Dynamic or Classic payoff profile (Pillar 4: Unified Model Expectancy)
+        typical_win_pct = float(
+            dynamic_tgt_pct
+            if dynamic_tgt_pct is not None
+            else (features.get("dynamic_target_pct") or TARGET_GAIN_PCT)
+        )
+        typical_loss_pct = float(
+            dynamic_sl_pct
+            if dynamic_sl_pct is not None
+            else (features.get("dynamic_sl_pct") or STOP_LOSS_PCT)
+        )
+        # Realistic F&O statutory cost schedule (Upstox F&O)
+        # Base statutory friction is ~0.8%, plus half-spread slippage
+        friction_pct = round(max(1.5, 0.8 + (spread_pct * 0.5)), 2)
 
         expected_net_return = round(
             (calibrated_prob * typical_win_pct) - ((1.0 - calibrated_prob) * typical_loss_pct) - friction_pct,
@@ -216,12 +270,17 @@ class OptionAlphaModel:
         expected_mfe = round(typical_win_pct * (0.8 + calibrated_prob * 0.4), 1)
         expected_mae = round(-typical_loss_pct * (1.2 - calibrated_prob * 0.4), 1)
 
+        # Dynamic breakeven hurdle: P_be = (SL% + Friction%) / (TGT% + SL%)
+        total_pnl_span = typical_win_pct + typical_loss_pct
+        breakeven_prob = (typical_loss_pct + friction_pct) / total_pnl_span if total_pnl_span > 0 else 0.50
+        effective_min_prob = min_prob_hurdle if min_prob_hurdle is not None else max(MIN_CALIBRATED_PROB, round(breakeven_prob + 0.03, 4))
+
         # Directional Verdict Gate
         # Strictly enforces: NO TRADE is the default outcome unless probability and net return hurdle are surpassed
         direction = DIRECTION_NO_TRADE
         is_actionable = False
 
-        if calibrated_prob >= MIN_CALIBRATED_PROB and expected_net_return >= MIN_EXPECTED_NET_RETURN_PCT:
+        if calibrated_prob >= effective_min_prob and expected_net_return >= MIN_EXPECTED_NET_RETURN_PCT:
             direction = DIRECTION_BUY_CE if is_call else DIRECTION_BUY_PE
             is_actionable = True
 
