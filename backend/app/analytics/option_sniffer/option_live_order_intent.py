@@ -1553,7 +1553,7 @@ class OrderIntentEngine:
                 if db_ikey not in broker_open_map or broker_open_map[db_ikey] <= 0:
                     cur.execute("""
                         UPDATE option_live_order_intents
-                        SET exit_state = ?, updated_at = ?
+                        SET exit_state = ?, filled_quantity = 0, updated_at = ?
                         WHERE order_intent_id = ?;
                     """, (EXIT_CONFIRMED_FLAT, now_iso, db_intent_id))
                     reconciled_flat_count += 1

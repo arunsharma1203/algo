@@ -599,9 +599,11 @@ class OptionLiveAdapter:
                 "message": "No trades found in tradebook for today"
             }
 
-        # Parse and aggregate execution slices per order_id using volume-weighted average price (VWAP)
+        # Parse and aggregate execution slices per order_id AND per instrument_token using volume-weighted average price (VWAP)
         buys: Dict[str, Dict[str, Any]] = {}
         sells: Dict[str, Dict[str, Any]] = {}
+        buys_by_token: Dict[str, Dict[str, Any]] = {}
+        sells_by_token: Dict[str, Dict[str, Any]] = {}
 
         for t in trades:
             if not isinstance(t, dict):
@@ -611,6 +613,8 @@ class OptionLiveAdapter:
                 continue
             oid_str = str(oid).strip()
             ttype = str(t.get("transaction_type") or "").upper().strip()
+            itoken = str(t.get("instrument_token") or t.get("instrument_key") or "").strip()
+            tsym = str(t.get("trading_symbol") or t.get("tradingsymbol") or "").strip().upper()
 
             try:
                 price = float(t.get("average_price") or t.get("price") or 0.0)
@@ -629,7 +633,9 @@ class OptionLiveAdapter:
                 target_map[oid_str] = {
                     "total_qty": qty,
                     "total_val": price * qty,
-                    "trade_ids": [str(t.get("trade_id"))] if t.get("trade_id") else []
+                    "trade_ids": [str(t.get("trade_id"))] if t.get("trade_id") else [],
+                    "instrument_token": itoken,
+                    "trading_symbol": tsym
                 }
             else:
                 target_map[oid_str]["total_qty"] += qty
@@ -637,8 +643,27 @@ class OptionLiveAdapter:
                 if t.get("trade_id"):
                     target_map[oid_str]["trade_ids"].append(str(t.get("trade_id")))
 
-        for omap in (buys, sells):
-            for oid_str, info in omap.items():
+            # Multi-factor token-level aggregation (fallback when broker order IDs desync or manual exits occur)
+            token_map = buys_by_token if ttype == "BUY" else sells_by_token
+            clean_tsym = "".join(c for c in tsym if c.isalnum())
+            for token_key in filter(None, [itoken, tsym, clean_tsym]):
+                if token_key not in token_map:
+                    token_map[token_key] = {
+                        "total_qty": qty,
+                        "total_val": price * qty,
+                        "order_ids": [oid_str],
+                        "trade_ids": [str(t.get("trade_id"))] if t.get("trade_id") else []
+                    }
+                else:
+                    token_map[token_key]["total_qty"] += qty
+                    token_map[token_key]["total_val"] += price * qty
+                    if oid_str not in token_map[token_key]["order_ids"]:
+                        token_map[token_key]["order_ids"].append(oid_str)
+                    if t.get("trade_id"):
+                        token_map[token_key]["trade_ids"].append(str(t.get("trade_id")))
+
+        for omap in (buys, sells, buys_by_token, sells_by_token):
+            for k_str, info in omap.items():
                 t_qty = info["total_qty"]
                 info["avg_price"] = (info["total_val"] / t_qty) if t_qty > 0 else 0.0
 
@@ -651,7 +676,7 @@ class OptionLiveAdapter:
                 cur.execute("""
                     SELECT id, order_intent_id, broker_order_id, broker_sl_order_id, exit_broker_order_id,
                            filled_quantity, average_fill_price, exit_fill_price, gross_pnl, statutory_charges,
-                           realized_pnl, exit_state
+                           realized_pnl, exit_state, instrument_key, trading_symbol
                     FROM option_live_order_intents
                     WHERE broker_order_id IS NOT NULL AND broker_order_id NOT LIKE 'UPSTOX_%';
                 """)
@@ -659,22 +684,52 @@ class OptionLiveAdapter:
 
                 for r in rows:
                     (r_id, intent_id, b_id, sl_id, exit_id,
-                     qty, avg_fill, exit_fill, cur_gross, cur_charges, cur_pnl, exit_st) = r
+                     qty, avg_fill, exit_fill, cur_gross, cur_charges, cur_pnl, exit_st,
+                     ikey, tsym) = r
 
                     actual_buy = buys.get(str(b_id)) if b_id else None
+                    if not actual_buy and ikey and ikey in buys_by_token:
+                        actual_buy = buys_by_token[ikey]
 
                     # Sum all sell executions across both exit order and stop loss order
                     total_sell_qty = 0
                     total_sell_val = 0.0
                     sell_trade_ids = []
+                    matched_sell_order_id = None
+
                     if exit_id and str(exit_id) in sells:
                         total_sell_qty += sells[str(exit_id)]["total_qty"]
                         total_sell_val += sells[str(exit_id)]["total_val"]
                         sell_trade_ids.extend(sells[str(exit_id)]["trade_ids"])
+                        matched_sell_order_id = str(exit_id)
                     if sl_id and str(sl_id) in sells:
                         total_sell_qty += sells[str(sl_id)]["total_qty"]
                         total_sell_val += sells[str(sl_id)]["total_val"]
                         sell_trade_ids.extend(sells[str(sl_id)]["trade_ids"])
+                        matched_sell_order_id = str(sl_id)
+
+                    # Multi-Factor Fallback: If no sells matched via exit_id/sl_id, check sells by instrument_token or symbol
+                    clean_tsym = "".join(c for c in str(tsym or "") if c.isalnum()).upper()
+                    if total_sell_qty == 0:
+                        token_sell = None
+                        if ikey and ikey in sells_by_token:
+                            token_sell = sells_by_token[ikey]
+                        elif tsym and tsym in sells_by_token:
+                            token_sell = sells_by_token[tsym]
+                        elif clean_tsym and clean_tsym in sells_by_token:
+                            token_sell = sells_by_token[clean_tsym]
+                        else:
+                            for k_cand, v_cand in sells_by_token.items():
+                                if ikey and (ikey in k_cand or k_cand in ikey):
+                                    token_sell = v_cand
+                                    break
+
+                        if token_sell and token_sell.get("total_qty", 0) > 0:
+                            total_sell_qty = token_sell["total_qty"]
+                            total_sell_val = token_sell["total_val"]
+                            sell_trade_ids.extend(token_sell.get("trade_ids", []))
+                            if token_sell.get("order_ids"):
+                                matched_sell_order_id = token_sell["order_ids"][0]
 
                     has_sell_trades = total_sell_qty > 0
 
@@ -699,6 +754,10 @@ class OptionLiveAdapter:
                     elif closed_qty > 0 and closed_qty < cum_buy_qty:
                         target_exit_state = "PARTIALLY_CLOSED"
                         target_filled_qty = net_open_qty  # Residual open quantity for trailing stops
+                    elif exit_st == "CONFIRMED_FLAT":
+                        # ZERO-RESURRECTION GUARD: Never demote an already confirmed flat trade back to open/NONE
+                        target_exit_state = "CONFIRMED_FLAT"
+                        target_filled_qty = 0
                     else:
                         target_exit_state = exit_st if exit_st in ("SUBMITTED", "CANCELLED", "REJECTED") else "NONE"
                         target_filled_qty = cum_buy_qty
@@ -716,9 +775,11 @@ class OptionLiveAdapter:
                         eff_charges = float(statutory_info.get("statutory_charges", 55.0))
                         net_pnl = round(gross - eff_charges, 2)
                     else:
-                        gross = 0.0
-                        eff_charges = 0.0
-                        net_pnl = 0.0
+                        gross = cur_gross or 0.0
+                        eff_charges = cur_charges or 0.0
+                        net_pnl = cur_pnl or 0.0
+
+                    target_exit_id = matched_sell_order_id if (matched_sell_order_id and not str(matched_sell_order_id).startswith("UPSTOX_EXIT_")) else exit_id
 
                     needs_update = (
                         exit_st != target_exit_state
@@ -728,12 +789,14 @@ class OptionLiveAdapter:
                         or abs((cur_charges or 0.0) - eff_charges) > 0.01
                         or abs((cur_gross or 0.0) - gross) > 0.01
                         or (qty or 0) != target_filled_qty
+                        or (target_exit_id != exit_id)
                     )
 
                     if needs_update:
                         cur.execute("""
                             UPDATE option_live_order_intents
                             SET exit_state = ?,
+                                exit_broker_order_id = ?,
                                 filled_quantity = ?,
                                 average_fill_price = ?,
                                 exit_fill_price = ?,
@@ -742,7 +805,7 @@ class OptionLiveAdapter:
                                 realized_pnl = ?,
                                 updated_at = ?
                             WHERE id = ?;
-                        """, (target_exit_state, target_filled_qty, buy_price, cum_sell_price, gross, eff_charges, net_pnl, now_iso, r_id))
+                        """, (target_exit_state, target_exit_id, target_filled_qty, buy_price, cum_sell_price, gross, eff_charges, net_pnl, now_iso, r_id))
                         updated += 1
 
                 conn.commit()
