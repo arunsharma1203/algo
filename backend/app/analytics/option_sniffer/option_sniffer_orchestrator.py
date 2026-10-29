@@ -51,6 +51,8 @@ _CORE_MODULE_FILES = [
     "option_constants.py",
     "option_signal_engine.py",
     "option_paper_execution.py",
+    "option_live_order_intent.py",
+    "option_stream_manager.py",
     "option_sniffer_orchestrator.py",
     "option_db.py",
 ]
@@ -618,19 +620,32 @@ class OptionSnifferOrchestrator:
             except Exception:
                 duration_sec = int(t.get("holding_duration_seconds") or 0)
 
-            # Target & Stop Loss Levels (Dynamic V2 or Classic V1)
+            # Target & Stop Loss Levels (Dynamic V2 or Classic V1 with Rupee Cap)
             target_pct = float(t.get("dynamic_target_pct") or TARGET_GAIN_PCT)
-            stop_loss_pct = float(t.get("dynamic_sl_pct") or STOP_LOSS_PCT)
+            base_sl_pct = float(t.get("dynamic_sl_pct") or STOP_LOSS_PCT)
+            stop_loss_pct = OptionPaperExecution.calculate_rupee_capped_sl_pct(
+                entry_ask=entry_ask,
+                lot_size=quantity,
+                base_sl_pct=base_sl_pct,
+            )
             target_price = round(entry_ask * (1.0 + target_pct / 100.0), 2)
             stop_loss_price = round(entry_ask * (1.0 - stop_loss_pct / 100.0), 2)
 
-            # Trailing Ratchet Stop
-            ratchet_trigger_pct = min(TRAILING_STOP_TRIGGER_PCT, max(12.0, round(target_pct * 0.50, 1)))
-            trailing_stop_active = bool(mfe_pct >= ratchet_trigger_pct)
-            trailing_stop_price = round(peak_price * (1.0 - TRAILING_STOP_DISTANCE_PCT / 100.0), 2) if trailing_stop_active else None
-            breakeven_floor = round(entry_ask * (1.0 + BREAKEVEN_FLOOR_PCT / 100.0), 2)
-            effective_trail = max(trailing_stop_price, breakeven_floor) if trailing_stop_price else breakeven_floor
-            effective_stop_price = effective_trail if (trailing_stop_active and effective_trail > stop_loss_price) else stop_loss_price
+            # Chandelier & Target-Lock Trailing Stop
+            chandelier_stop = OptionPaperExecution.calculate_chandelier_stop(
+                entry_ask, peak_price, mfe_pct, target_hurdle=target_pct
+            )
+            if chandelier_stop is not None:
+                trailing_stop_active = True
+                trailing_stop_price = round(chandelier_stop, 2)
+                effective_stop_price = max(trailing_stop_price, stop_loss_price)
+            else:
+                ratchet_trigger_pct = min(TRAILING_STOP_TRIGGER_PCT, max(12.0, round(target_pct * 0.50, 1)))
+                trailing_stop_active = bool(mfe_pct >= ratchet_trigger_pct)
+                trailing_stop_price = round(peak_price * (1.0 - TRAILING_STOP_DISTANCE_PCT / 100.0), 2) if trailing_stop_active else None
+                breakeven_floor = round(entry_ask * (1.0 + BREAKEVEN_FLOOR_PCT / 100.0), 2)
+                effective_trail = max(trailing_stop_price, breakeven_floor) if trailing_stop_price else breakeven_floor
+                effective_stop_price = effective_trail if (trailing_stop_active and effective_trail > stop_loss_price) else stop_loss_price
 
             # Distance metrics
             sl_distance_pct = round(((current_bid - effective_stop_price) / effective_stop_price * 100.0), 2) if effective_stop_price > 0 else 0.0

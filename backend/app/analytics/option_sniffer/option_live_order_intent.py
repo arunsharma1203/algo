@@ -1236,9 +1236,10 @@ class OrderIntentEngine:
             current_pnl_pct = ((current_bid - entry_fill) / entry_fill) * 100.0
             intent_id = pos["order_intent_id"]
             prev_peak = self._peak_bids.get(intent_id, entry_fill)
+            prev_mfe_pct = ((prev_peak - entry_fill) / entry_fill) * 100.0 if entry_fill > 0 else 0.0
             current_peak = max(prev_peak, current_bid, entry_fill)
             self._peak_bids[intent_id] = current_peak
-            mfe_pct = ((current_peak - entry_fill) / entry_fill) * 100.0
+            mfe_pct = round(((current_peak - entry_fill) / entry_fill) * 100.0, 2)
 
             # Holding duration
             try:
@@ -1248,21 +1249,38 @@ class OrderIntentEngine:
                 duration_min = 0.0
 
             exit_reason = None
-            # Target & Ratchet thresholds (Dynamic V2 or Classic V1)
+            # Target & Ratchet thresholds (Dynamic V2, Uncapped Convex Runner, or Classic V1)
+            engine_ver = pos.get("engine_version") or OPTION_EXECUTION_ENGINE_MODE
             target_hurdle = float(pos.get("dynamic_target_pct") or DEFAULT_TARGET_PCT)
+            stop_hurdle = float(pos.get("dynamic_sl_pct") or DEFAULT_STOP_LOSS_PCT)
+            lot_qty = int(pos.get("filled_quantity") or pos.get("target_quantity") or pos.get("lot_size") or 0)
+            if lot_qty > 0 and entry_fill > 0:
+                stop_hurdle = OptionPaperExecution.calculate_rupee_capped_sl_pct(entry_fill, lot_qty, stop_hurdle)
             ratchet_trigger = min(DEFAULT_TRAILING_TRIGGER_PCT, max(12.0, round(target_hurdle * 0.50, 1)))
 
-            # 1. Take Profit Hurdle (Dynamic or Classic)
-            if current_pnl_pct >= target_hurdle:
+            is_uncapped_mode = (
+                engine_ver == "UNCAPPED_CONVEX_RUNNER"
+                or bool(pos.get("uncapped_runner"))
+                or (engine_ver == "V1_CLASSIC" and prev_mfe_pct >= DEFAULT_TRAILING_TRIGGER_PCT)
+            )
+
+            # 1. Take Profit Hurdle (Dynamic or Classic, bypassed when Uncapped Target-Lock Runner is active)
+            if not is_uncapped_mode and current_pnl_pct >= target_hurdle:
                 exit_reason = "TARGET_MET"
             # 2. Hard Stop Loss Hurdle (Backup defense in case broker exchange SL is delayed)
-            elif current_pnl_pct <= -float(pos.get("dynamic_sl_pct") or DEFAULT_STOP_LOSS_PCT):
+            elif current_pnl_pct <= -stop_hurdle:
                 exit_reason = "STOP_LOSS_HIT"
-            # 3. Trailing Stop Ratchet: If MFE reached trigger, enforce breakeven floor (+2%) or trailing from peak
+            # 3. 4-Tier Chandelier Trailing Stop & Target-Lock Ratchet (100% Parity with Paper Execution)
             elif mfe_pct >= ratchet_trigger:
+                chandelier_stop = OptionPaperExecution.calculate_chandelier_stop(
+                    entry_fill,
+                    current_peak,
+                    mfe_pct,
+                    target_hurdle=target_hurdle if is_uncapped_mode else None
+                )
                 peak_trail_stop = current_peak * (1.0 - DEFAULT_TRAILING_STEP_PCT / 100.0)
                 breakeven_floor = entry_fill * (1.0 + BREAKEVEN_FLOOR_PCT / 100.0)
-                ratchet_stop = max(peak_trail_stop, breakeven_floor)
+                ratchet_stop = max(chandelier_stop or 0.0, peak_trail_stop, breakeven_floor)
                 if current_bid <= ratchet_stop:
                     exit_reason = "TRAILING_STOP_HIT"
 

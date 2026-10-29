@@ -548,6 +548,117 @@ class TestAlphaPreservationAndReversalGate(unittest.TestCase):
         )
         self.assertEqual(exit_session_end, "SESSION_END_SQUAREOFF")
 
+    # ── SCENARIO 13: TARGET-LOCK UNCAPPED RUNNER LOCKS +34% FLOOR & TRAILS ────
+    def test_13_target_lock_uncapped_runner_locks_34pct_floor_and_trails(self):
+        """Once a progressively trailed position hits +35% target, it locks +34% floor and runs uncapped."""
+        # 1. Verify calculate_chandelier_stop with target_hurdle=35.0 at +36% MFE locks >= 134.0 (+34%)
+        stop_at_36 = OptionPaperExecution.calculate_chandelier_stop(
+            entry_ask=100.0, current_peak=136.0, mfe_pct=36.0, target_hurdle=35.0
+        )
+        self.assertEqual(stop_at_36, 134.0)
+
+        # 2. At +70% MFE (peak=170.0), Tier 4 trails 4.0% below peak (163.20 > 134.0)
+        stop_at_70 = OptionPaperExecution.calculate_chandelier_stop(
+            entry_ask=100.0, current_peak=170.0, mfe_pct=70.0, target_hurdle=35.0
+        )
+        self.assertAlmostEqual(stop_at_70, 163.20, places=2)
+
+        # 3. Progressive trade (prev_peak=125.0 -> +25% MFE) reaching 138.0 (+38%) stays OPEN to run
+        trade = {
+            "trade_id": "test_trade_13",
+            "instrument_key": "NSE_FO|12345",
+            "trading_symbol": "NIFTY 22650 CE 27 OCT 26",
+            "underlying": "NIFTY",
+            "option_type": "CE",
+            "strike": 22650.0,
+            "expiry": "2026-10-27",
+            "entry_time": "2026-10-26T09:54:00",
+            "entry_ask": 100.0,
+            "peak_price": 125.0,
+            "trough_price": 99.0,
+            "lot_size": 65,
+            "quantity": 65,
+            "status": "OPEN",
+        }
+        exit_while_rising = OptionPaperExecution.evaluate_exit_conditions(
+            trade=trade,
+            current_bid=138.0,
+            quote={"bid": 138.0, "ask": 138.5, "ltp": 138.2},
+            now_dt=datetime(2026, 10, 26, 10, 5, 0),
+        )
+        self.assertIsNone(exit_while_rising, "Progressive runner crossing +35% must stay open to capture uncapped upside")
+
+        # 4. When bid pulls back from 138.0 to 133.8 (<= 134.0 Target-Lock Floor), exits via TRAILING_STOP_HIT
+        trade["peak_price"] = 138.0
+        exit_on_pullback = OptionPaperExecution.evaluate_exit_conditions(
+            trade=trade,
+            current_bid=133.8,
+            quote={"bid": 133.8, "ask": 134.2, "ltp": 134.0},
+            now_dt=datetime(2026, 10, 26, 10, 6, 0),
+        )
+        self.assertEqual(exit_on_pullback, "TRAILING_STOP_HIT")
+
+    # ── SCENARIO 14: PER-TRADE RUPEE RISK CAP CLAMPS HIGH-NOTIONAL STOP LOSS ──
+    def test_14_per_trade_rupee_risk_cap_clamps_high_notional_stop_loss(self):
+        """High-premium strikes are clamped to ₹2,200 max risk per lot while normal strikes keep 20% SL."""
+        # Normal strike: ₹100 x 65 = ₹6,500 notional -> 20% SL is ₹1,300 (<= ₹2,200) -> stays 20.0%
+        sl_normal = OptionPaperExecution.calculate_rupee_capped_sl_pct(100.0, 65, 20.0)
+        self.assertEqual(sl_normal, 20.0)
+
+        # Expensive strike: ₹388.80 x 65 = ₹25,272 notional -> ₹2,200 / ₹25,272 = 8.71%
+        sl_expensive = OptionPaperExecution.calculate_rupee_capped_sl_pct(388.80, 65, 20.0)
+        self.assertAlmostEqual(sl_expensive, 8.71, places=2)
+        self.assertLessEqual(388.80 * 65 * (sl_expensive / 100.0), 2205.0)
+
+    # ── SCENARIO 15: DECOUPLED TICK GUARD (INSTANT HARD SL vs NO FLICKER EXIT) ─
+    def test_15_decoupled_tick_guard_triggers_hard_sl_but_ignores_profit_flicker(self):
+        """Sub-second tick guard ratchets peak and enforces hard SL, but ignores 1s profit flickers."""
+        from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+        mgr = OptionStreamManager()
+
+        trade = {
+            "trade_id": "test_tick_guard_15",
+            "signal_id": "sig_15",
+            "instrument_key": "NSE_FO|99999",
+            "trading_symbol": "NIFTY 22700 CE 03 NOV 26",
+            "underlying": "NIFTY",
+            "option_type": "CE",
+            "strike": 22700.0,
+            "expiry": "2026-11-03",
+            "lot_size": 65,
+            "quantity": 65,
+            "entry_time": "2026-10-29T10:00:00",
+            "entry_bid": 99.5,
+            "entry_ask": 100.0,
+            "entry_spot_price": 22700.0,
+            "model_version": "v1",
+            "signal_version": "v1",
+            "data_freshness": "REAL_TIME",
+            "engine_version": "V1_CLASSIC",
+            "dynamic_sl_pct": 20.0,
+            "dynamic_target_pct": 35.0,
+            "spot_atr": 40.0,
+            "delta_used": 0.5,
+        }
+        OptionDB.create_paper_trade(trade)
+
+        # 1. Sub-second spike to 130.0 (+30% MFE) updates peak_price in DB
+        mgr._evaluate_tick_protective_guards("NSE_FO|99999", {"bid": 130.0, "ask": 130.5, "ltp": 130.0})
+        open_trades = OptionDB.get_open_paper_trades()
+        self.assertEqual(len(open_trades), 1)
+        self.assertEqual(open_trades[0]["peak_price"], 130.0)
+
+        # 2. Sub-second 7% profit flicker down to 120.9 (which would breach Tier 3 4.5% trail on sweep)
+        # MUST NOT close the trade on sub-second tick!
+        mgr._evaluate_tick_protective_guards("NSE_FO|99999", {"bid": 120.9, "ask": 121.5, "ltp": 121.0})
+        open_trades_after_flicker = OptionDB.get_open_paper_trades()
+        self.assertEqual(len(open_trades_after_flicker), 1, "Sub-second profit flicker must not close runner")
+
+        # 3. Sub-second hard SL crash to 79.0 (-21% <= -20% SL) MUST immediately close the trade!
+        mgr._evaluate_tick_protective_guards("NSE_FO|99999", {"bid": 79.0, "ask": 79.5, "ltp": 79.0})
+        open_trades_after_crash = OptionDB.get_open_paper_trades()
+        self.assertEqual(len(open_trades_after_crash), 0, "Sub-second hard SL breach must close immediately")
+
 
 if __name__ == "__main__":
     unittest.main()

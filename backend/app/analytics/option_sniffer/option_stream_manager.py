@@ -313,6 +313,81 @@ class OptionStreamManager:
                 }
 
                 self._option_quotes[ikey] = quote_payload
+                if quote_payload["is_valid"]:
+                    self._evaluate_tick_protective_guards(ikey, quote_payload)
+
+    def _evaluate_tick_protective_guards(self, ikey: str, quote_payload: Dict[str, Any]) -> None:
+        """
+        Decoupled Sub-Second Tick Guard for Open Positions:
+          1. High-Water Mark Peak Ratchet: Immediately captures sub-second bid spikes into peak_price
+             so Chandelier floors ratchet upward without waiting for the 10-second sweep.
+          2. Hard Stop-Loss Emergency Exit: Immediately executes STOP_LOSS_HIT if bid drops below
+             -stop_hurdle (eliminating 10-second polling slippage on gamma drops).
+          3. Sustained Profit Trail Protection: Never triggers TRAILING_STOP_HIT on a 1-second tick
+             flicker; trailing stop evaluation remains on the 10-second surveillance sweep.
+        """
+        try:
+            from app.analytics.option_sniffer.option_db import OptionDB
+            from app.analytics.option_sniffer.option_paper_execution import OptionPaperExecution
+            from app.analytics.option_sniffer.option_constants import STOP_LOSS_PCT, to_ist_naive
+
+            open_trades = OptionDB.get_open_paper_trades()
+            if not open_trades:
+                return
+
+            current_bid = float(quote_payload.get("bid") or quote_payload.get("ltp") or 0.0)
+            if current_bid <= 0:
+                return
+
+            now_dt = to_ist_naive()
+            for trade in open_trades:
+                if trade.get("instrument_key") != ikey:
+                    continue
+
+                entry_ask = float(trade.get("entry_ask") or 0.0)
+                if entry_ask <= 0:
+                    continue
+
+                prev_peak = float(trade.get("peak_price") or entry_ask)
+                prev_trough = float(trade.get("trough_price") or entry_ask)
+                current_peak = max(prev_peak, current_bid)
+                current_trough = min(prev_trough, current_bid)
+                mfe_pct = round(((current_peak - entry_ask) / entry_ask * 100.0), 2)
+                mae_pct = round(((current_trough - entry_ask) / entry_ask * 100.0), 2)
+                current_pnl_pct = ((current_bid - entry_ask) / entry_ask) * 100.0
+
+                stop_hurdle = float(trade.get("dynamic_sl_pct") or STOP_LOSS_PCT)
+                lot_qty = int(trade.get("quantity") or trade.get("lot_size") or 0)
+                if lot_qty > 0:
+                    stop_hurdle = OptionPaperExecution.calculate_rupee_capped_sl_pct(entry_ask, lot_qty, stop_hurdle)
+
+                if current_pnl_pct <= -stop_hurdle:
+                    try:
+                        entry_dt = datetime.fromisoformat(trade["entry_time"])
+                        duration_sec = max(0, int((now_dt - entry_dt).total_seconds()))
+                    except Exception:
+                        duration_sec = 0
+                    OptionPaperExecution.close_trade(
+                        trade=trade,
+                        exit_bid=current_bid,
+                        exit_ask=float(quote_payload.get("ask") or current_bid),
+                        exit_reason="STOP_LOSS_HIT",
+                        peak_price=current_peak,
+                        trough_price=current_trough,
+                        mfe_pct=mfe_pct,
+                        mae_pct=mae_pct,
+                        duration_sec=duration_sec,
+                    )
+                elif current_peak > prev_peak or current_trough < prev_trough:
+                    OptionDB.update_trade_extrema(
+                        trade_id=trade["trade_id"],
+                        peak_price=current_peak,
+                        trough_price=current_trough,
+                        mfe_pct=mfe_pct,
+                        mae_pct=mae_pct,
+                    )
+        except Exception as te:
+            logger.debug(f"[OptionStreamManager] Tick protective guard note for {ikey}: {te}")
 
     # ──────────────────────────────────────────────────────────────────────────
     # DATA RETRIEVAL & FAIL-CLOSED GATES

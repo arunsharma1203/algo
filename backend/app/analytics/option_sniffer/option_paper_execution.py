@@ -33,6 +33,9 @@ from app.analytics.option_sniffer.option_constants import (
     CHANDELIER_DISTANCE_TIER3_PCT,
     CHANDELIER_TRIGGER_TIER4_PCT,
     CHANDELIER_DISTANCE_TIER4_PCT,
+    TARGET_LOCK_FLOOR_OFFSET_PCT,
+    CHANDELIER_DISTANCE_TIER3_5_PCT,
+    MAX_SINGLE_TRADE_LOSS_INR,
     ENABLE_4PILLAR_CANARY_ENGINE,
     MAX_HOLDING_MINUTES,
     OPTION_MODEL_VERSION,
@@ -200,6 +203,7 @@ class OptionPaperExecution:
             dyn_sl, dyn_tgt, s_atr, d_used = STOP_LOSS_PCT, TARGET_GAIN_PCT, 40.0, 0.50
 
         lot_size = int(signal.get("lot_size") or 65)
+        dyn_sl = cls.calculate_rupee_capped_sl_pct(entry_ask, lot_size, dyn_sl)
         trade_obj = {
             "trade_id": trade_id,
             "signal_id": signal.get("signal_id"),
@@ -236,27 +240,64 @@ class OptionPaperExecution:
         return None
 
     @classmethod
-    def calculate_chandelier_stop(cls, entry_ask: float, current_peak: float, mfe_pct: float) -> Optional[float]:
+    def calculate_rupee_capped_sl_pct(
+        cls,
+        entry_ask: float,
+        lot_size: int,
+        base_sl_pct: float = STOP_LOSS_PCT,
+        max_loss_inr: float = MAX_SINGLE_TRADE_LOSS_INR
+    ) -> float:
+        """
+        Clamps percentage stop-loss so a single 1-lot option trade on a high-premium strike
+        never exceeds max_loss_inr (default ₹2,200.00), protecting the ₹3,500 daily portfolio cap.
+        """
+        notional = float(entry_ask) * float(lot_size or 65)
+        if notional <= 0 or max_loss_inr <= 0:
+            return float(base_sl_pct)
+        rupee_cap_pct = round((max_loss_inr / notional) * 100.0, 2)
+        return float(min(base_sl_pct, max(8.0, rupee_cap_pct)))
+
+    @classmethod
+    def calculate_chandelier_stop(
+        cls,
+        entry_ask: float,
+        current_peak: float,
+        mfe_pct: float,
+        target_hurdle: Optional[float] = None
+    ) -> Optional[float]:
         """
         Computes continuous ATR/volatility-calibrated chandelier trailing stop.
         Dynamically tightens distance below peak as MFE expands into profit runner territory.
+        When target_hurdle is provided and mfe_pct >= target_hurdle (+35%), enforces a
+        Target-Lock guaranteed floor at (target_hurdle - TARGET_LOCK_FLOOR_OFFSET_PCT)% (+34.0%)
+        while allowing the option to continue running uncapped via Tier 3.5/4 trailing ratchets.
+        Tier 4 (Multi-Bagger >= +60%): Trail 4.0% below peak.
+        Tier 3.5 (Target-Locked Runner >= target_hurdle): Floor at target_hurdle - 1.0%, trail 5.5% below peak.
         Tier 3 (Runner >= +30%): Trail 4.5% below peak (guarantees >= +24.15% locked).
         Tier 2 (Expansion >= +22%): Trail 6.0% below peak (guarantees >= +14.68% locked).
         Tier 1 (Trend Initiation >= +15%): Trail 8.0% below peak (guarantees >= +5.80% locked).
-        Early Breakeven (>= +18.0%): Floor at Entry + 6.0%.
+        Early Breakeven (>= +15.0%): Floor at Entry + 6.0%.
         """
         min_trigger = min(EARLY_BREAKEVEN_TRIGGER_PCT, CHANDELIER_TRIGGER_TIER1_PCT)
         if mfe_pct < min_trigger:
             return None
 
-        # Breakeven floor (+6.0%) guaranteed once EARLY_BREAKEVEN_TRIGGER_PCT (+18%) is reached
+        # Breakeven floor (+6.0%) guaranteed once EARLY_BREAKEVEN_TRIGGER_PCT (+15%) is reached
         floor_stop = entry_ask * (1.0 + EARLY_BREAKEVEN_FLOOR_PCT / 100.0) if mfe_pct >= EARLY_BREAKEVEN_TRIGGER_PCT else 0.0
+
+        # Target-Lock Floor: once MFE reaches target_hurdle (e.g. +35%), lock in (target_hurdle - 1.0%) floor (+34.0%)
+        if target_hurdle is not None and target_hurdle > 0 and mfe_pct >= target_hurdle:
+            locked_target_pct = max(EARLY_BREAKEVEN_FLOOR_PCT, target_hurdle - TARGET_LOCK_FLOOR_OFFSET_PCT)
+            target_floor_stop = entry_ask * (1.0 + locked_target_pct / 100.0)
+            floor_stop = max(floor_stop, target_floor_stop)
 
         if not CHANDELIER_TRAIL_ACTIVE:
             return floor_stop if floor_stop > 0 else None
 
         if mfe_pct >= CHANDELIER_TRIGGER_TIER4_PCT:
             trail_stop = current_peak * (1.0 - CHANDELIER_DISTANCE_TIER4_PCT / 100.0)
+        elif target_hurdle is not None and target_hurdle > 0 and mfe_pct >= target_hurdle:
+            trail_stop = current_peak * (1.0 - CHANDELIER_DISTANCE_TIER3_5_PCT / 100.0)
         elif mfe_pct >= CHANDELIER_TRIGGER_TIER3_PCT:
             trail_stop = current_peak * (1.0 - CHANDELIER_DISTANCE_TIER3_PCT / 100.0)
         elif mfe_pct >= CHANDELIER_TRIGGER_TIER2_PCT:
@@ -282,8 +323,8 @@ class OptionPaperExecution:
         """
         Evaluates rule-based exit criteria for an active paper trade:
           1. Portfolio Aggregate Circuit Breaker Halt
-          2. Take Profit Target (Dynamic or Classic)
-          3. Hard Stop Loss (Dynamic or Classic)
+          2. Take Profit Target (Dynamic, Classic, or Target-Locked Uncapped Runner)
+          3. Hard Stop Loss (Dynamic, Classic, or Per-Trade Rupee Capped)
           4. Chandelier Trailing Stop & Ratchet Protection
           5. Underlying Structure Invalidation (Pillar 1: Loss Truncation)
              - Enforces 180s grace period for structural invalidation ONLY
@@ -294,7 +335,9 @@ class OptionPaperExecution:
           8. Session End Square-off (>= 15:15 IST)
         """
         entry_ask = float(trade["entry_ask"])
-        current_peak = max(float(trade.get("peak_price") or entry_ask), current_bid)
+        prev_peak = float(trade.get("peak_price") or entry_ask)
+        prev_mfe_pct = round(((prev_peak - entry_ask) / entry_ask * 100.0), 2) if entry_ask > 0 else 0.0
+        current_peak = max(prev_peak, current_bid)
         current_trough = min(float(trade.get("trough_price") or entry_ask), current_bid)
 
         mfe_pct = round(((current_peak - entry_ask) / entry_ask * 100.0), 2)
@@ -322,16 +365,25 @@ class OptionPaperExecution:
             stop_hurdle = float(trade["dynamic_sl_pct"])
             ratchet_trigger = min(TRAILING_STOP_TRIGGER_PCT, max(12.0, round(target_hurdle * 0.50, 1)))
         else:
-            target_hurdle = TARGET_GAIN_PCT
-            stop_hurdle = STOP_LOSS_PCT
+            target_hurdle = float(trade.get("dynamic_target_pct") or TARGET_GAIN_PCT)
+            stop_hurdle = float(trade.get("dynamic_sl_pct") or STOP_LOSS_PCT)
             ratchet_trigger = TRAILING_STOP_TRIGGER_PCT
 
-        # 1. Take Profit Hurdle
-        is_uncapped_mode = (engine_ver == "UNCAPPED_CONVEX_RUNNER")
+        # Enforce Per-Trade Rupee Risk Cap when lot_size or quantity is specified on the position
+        lot_qty = int(trade.get("quantity") or trade.get("lot_size") or 0)
+        if lot_qty > 0 and entry_ask > 0:
+            stop_hurdle = cls.calculate_rupee_capped_sl_pct(entry_ask, lot_qty, stop_hurdle)
+
+        # 1. Take Profit Hurdle (Uncapped Target-Lock Runner engages when UNCAPPED_CONVEX_RUNNER or progressively trailed)
+        is_uncapped_mode = (
+            engine_ver == "UNCAPPED_CONVEX_RUNNER"
+            or bool(trade.get("uncapped_runner"))
+            or (ENABLE_4PILLAR_CANARY_ENGINE and engine_ver == "V1_CLASSIC" and prev_mfe_pct >= EARLY_BREAKEVEN_TRIGGER_PCT)
+        )
         if not is_uncapped_mode and current_pnl_pct >= target_hurdle:
             return "TARGET_MET"
 
-        # 2. Hard Stop Loss Hurdle (Dynamic or Classic)
+        # 2. Hard Stop Loss Hurdle (Dynamic, Classic, or Rupee-Capped)
         elif current_pnl_pct <= -stop_hurdle:
             return "STOP_LOSS_HIT"
 
@@ -340,7 +392,12 @@ class OptionPaperExecution:
             if mfe_pct >= TRAILING_STOP_TRIGGER_PCT and current_bid <= (current_peak * (1.0 - TRAILING_STOP_DISTANCE_PCT / 100.0)):
                 return "TRAILING_STOP_HIT"
         elif mfe_pct >= min(EARLY_BREAKEVEN_TRIGGER_PCT, ratchet_trigger):
-            chandelier_stop = cls.calculate_chandelier_stop(entry_ask, current_peak, mfe_pct)
+            chandelier_stop = cls.calculate_chandelier_stop(
+                entry_ask,
+                current_peak,
+                mfe_pct,
+                target_hurdle=target_hurdle if is_uncapped_mode else None
+            )
             classic_ratchet = 0.0
             if mfe_pct >= ratchet_trigger:
                 peak_trail_stop = current_peak * (1.0 - TRAILING_STOP_DISTANCE_PCT / 100.0)

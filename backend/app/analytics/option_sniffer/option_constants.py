@@ -180,6 +180,11 @@ CHANDELIER_DISTANCE_TIER3_PCT: float = 4.5
 CHANDELIER_TRIGGER_TIER4_PCT: float = 60.0  # At >= +60% MFE (Multi-Bagger Runner), trail 4.0% below peak
 CHANDELIER_DISTANCE_TIER4_PCT: float = 4.0
 
+# Target-Lock Uncapped Runner & Per-Trade Rupee Risk Cap Constants
+TARGET_LOCK_FLOOR_OFFSET_PCT: float = 1.0    # Once MFE >= target_hurdle (+35%), lock guaranteed floor at target_hurdle - 1.0% (+34.0%)
+CHANDELIER_DISTANCE_TIER3_5_PCT: float = 5.5 # Trail 5.5% below new peaks between +35% and +60% MFE in Target-Lock Runner mode
+MAX_SINGLE_TRADE_LOSS_INR: float = 2200.0    # Hard rupee risk ceiling per 1-lot option trade (protects ₹3,500 daily ceiling)
+
 # 4-Pillar Dynamic Canary & Uncapped Convex Runner Flag
 ENABLE_4PILLAR_CANARY_ENGINE: bool = True
 OPENING_RANGE_VOL_MIN_PCT: float = 0.40     # 0.40% minimum 15m opening range (09:15-09:30) to authorize option buying
