@@ -501,7 +501,7 @@ class OptionLiveAdapter:
         now = to_ist_naive()
         today = now.strftime("%Y-%m-%d")
 
-        # 1-Day Auto-Expiration Guard: Disarm if date changed or past 15:15 IST
+        # 1-Day Auto-Expiration & Canary Guard: Disarm if date changed, past 15:15 IST, or Canary Scout tripped
         if self._is_live_armed:
             if self._armed_for_date != today:
                 logger.info("[OptionLiveAdapter] 1-day session expired due to date rollover. Reverting to Paper Mode.")
@@ -509,6 +509,15 @@ class OptionLiveAdapter:
             elif now.time() >= datetime.strptime("15:15", "%H:%M").time():
                 logger.info("[OptionLiveAdapter] Trading session cutoff (15:15 IST) reached. Reverting to Paper Mode.")
                 self._is_live_armed = False
+            else:
+                try:
+                    from app.analytics.option_sniffer.option_db import OptionDB
+                    has_paper_sl, canary_reason = OptionDB.has_paper_stop_loss_today(today)
+                    if has_paper_sl:
+                        logger.warning(f"🚨 [OptionLiveAdapter] Auto-disarming live session due to Paper Canary Stop-Loss: {canary_reason}")
+                        self._is_live_armed = False
+                except Exception:
+                    pass
 
         readiness = self.fetch_account_readiness()
         active_positions = self.get_active_live_positions()
@@ -963,7 +972,7 @@ class OptionLiveAdapter:
         if not pin or pin.strip() != self._current_pin:
             return False, "INVALID_CODE: The 4-digit verification code entered is invalid.", {}
 
-        # 2. Canary Scout & Dynamic Session Window Checks
+        # 2. Session Cutoff & Autonomous Pre-Arm Standby Evaluation
         now = datetime.now()
         now_time = now.time()
         from datetime import time as dt_time
@@ -975,22 +984,14 @@ class OptionLiveAdapter:
         earliest_dynamic_open = dt_time(9, 35)
         session_close = dt_time(15, 15)
 
-        # Microstructure & Dynamic Timing check
-        from app.analytics.option_sniffer.option_microstructure_evaluator import OptionMicrostructureEvaluator
-        ms_telemetry = OptionMicrostructureEvaluator.evaluate_microstructure_gate(dt=now)
-        is_dynamic_unlocked = ms_telemetry.get("is_unlocked", False)
-
-        if now_time < earliest_dynamic_open:
-            self._is_live_armed = False
-            return False, "CANARY_SCOUT_ACTIVE: Real trading is locked before 09:35 IST. 09:15-09:30 is reserved for Opening Range formation and 09:30-09:35 is reserved for zero-cost paper scout probing.", {}
-
-        if now_time < live_entry_open and not is_dynamic_unlocked:
-            self._is_live_armed = False
-            return False, f"CANARY_SCOUT_ACTIVE: Real trading locked before 09:45 IST. {ms_telemetry.get('unlock_reason')}", {}
-
         if now_time >= session_close:
             self._is_live_armed = False
             return False, "SESSION_CLOSED: Past 15:15 IST cutoff. Real trading cannot be armed after market close.", {}
+
+        # Microstructure & Dynamic Timing telemetry (evaluated autonomously at order dispatch)
+        from app.analytics.option_sniffer.option_microstructure_evaluator import OptionMicrostructureEvaluator
+        ms_telemetry = OptionMicrostructureEvaluator.evaluate_microstructure_gate(dt=now)
+        is_dynamic_unlocked = ms_telemetry.get("is_unlocked", False)
 
         # 3. Canary Scout Health Check (verify zero paper stop losses today)
         from app.analytics.option_sniffer.option_db import OptionDB
@@ -1010,24 +1011,45 @@ class OptionLiveAdapter:
             logger.debug(f"[OptionLiveAdapter] Live circuit breaker check note: {lcb_err}")
 
         # 5. Strict Pre-Flight Checks via Mumbai Proxy
-
         readiness = self.fetch_account_readiness(force_refresh=True)
         if not readiness.get("live_trading_eligible", False):
             self._is_live_armed = False
             blocker_text = " | ".join(readiness.get("blockers", ["Pre-flight requirements not met"]))
             return False, f"PREFLIGHT_BLOCKED: {blocker_text}", readiness
 
-        # 3. All Checks Passed — Arm for Today
+        # 6. All Checks Passed — Arm for Today (Immediate Active or Autonomous Pre-Armed Standby)
         self._is_live_armed = True
         self._armed_for_date = now.strftime("%Y-%m-%d")
         self._armed_at_epoch = time.time()
         self._armed_at_iso = now.strftime("%Y-%m-%d %H:%M:%S")
         self.start_order_reconciler_daemon()
-        logger.info(f"⚡ [OptionLiveAdapter] Real trading ARMED for session {self._armed_for_date} at {self._armed_at_iso}. Auto-expires at 15:15 IST.")
 
         # Cycle PIN for next interaction
         self.generate_new_pin()
-        return True, "ARMED_FOR_TODAY: Live trading is active for today. Position risk is capped at -₹2,000.00.", readiness
+
+        if now_time < earliest_dynamic_open:
+            logger.info(
+                f"⚡ [OptionLiveAdapter] Real trading PRE-ARMED (Autonomous Standby) for session {self._armed_for_date} at {self._armed_at_iso}. "
+                f"System will autonomously evaluate Opening Range & Canary Scout and execute at 09:35/09:45 IST (or stand down if Canary trips)."
+            )
+            return (
+                True,
+                "ARMED_FOR_TODAY (AUTONOMOUS STANDBY): Pre-armed for today. System will autonomously evaluate Opening Range & Canary Scout and execute at 09:35/09:45 IST (or take no trade if Canary trips).",
+                readiness,
+            )
+        if now_time < live_entry_open and not is_dynamic_unlocked:
+            logger.info(
+                f"⚡ [OptionLiveAdapter] Real trading PRE-ARMED (Canary Standby) for session {self._armed_for_date} at {self._armed_at_iso}. "
+                f"Waiting for 09:35 dynamic unlock or 09:45 IST (auto-stands down if Canary trips)."
+            )
+            return (
+                True,
+                f"ARMED_FOR_TODAY (CANARY STANDBY): Pre-armed for today. System will autonomously execute upon dynamic unlock or 09:45 IST (or stand down if Canary trips). [{ms_telemetry.get('unlock_reason')}]",
+                readiness,
+            )
+
+        logger.info(f"⚡ [OptionLiveAdapter] Real trading ARMED for session {self._armed_for_date} at {self._armed_at_iso}. Auto-expires at 15:15 IST.")
+        return True, "ARMED_FOR_TODAY: Live trading is active for today. Position risk is capped at -₹2,200.00.", readiness
 
     def disarm_live_trading(self) -> Tuple[bool, str]:
         """Disarms live trading and resets back to Paper Mode."""
@@ -1191,6 +1213,15 @@ class OptionLiveAdapter:
                         logger.info(f"⚡ [OptionLiveAdapter] Auto-executed {len(exits)} live exits: {exits}")
 
                 # 4. Check and dispatch automated entries (Full Autopilot ONLY when armed)
+                if self._is_live_armed:
+                    try:
+                        from app.analytics.option_sniffer.option_db import OptionDB
+                        has_sl, sl_reason = OptionDB.has_paper_stop_loss_today(to_ist_naive().strftime("%Y-%m-%d"))
+                        if has_sl:
+                            logger.warning(f"🚨 [OptionLiveAdapter] Canary Scout tripped ({sl_reason}). Auto-disarming live trading for session.")
+                            self._is_live_armed = False
+                    except Exception:
+                        pass
                 if self._is_live_armed:
                     readiness = self.fetch_account_readiness(force_refresh=False)
                     deployable = max(0.0, float(readiness.get("available_margin", 0.0)) * 0.90)
