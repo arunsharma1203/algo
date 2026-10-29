@@ -36,7 +36,7 @@ STRIKE_INTERVALS: Dict[str, float] = {
     "NIFTY": 50.0,
     "BANKNIFTY": 100.0,
 }
-MAX_OPTION_EXPIRY_DTE: float = 7.0  # Max days to expiry: intraday momentum scalping strictly rejects contracts > 7 DTE
+MAX_OPTION_EXPIRY_DTE: float = 10.0  # Max days to expiry: calibrated to safely admit weekly contracts (0-8 DTE, up to 10 on holidays) while strictly rejecting > 10 DTE far-month contracts
 
 # Standard Lot Sizes (Contract metadata provides authoritative override)
 DEFAULT_LOT_SIZES: Dict[str, int] = {

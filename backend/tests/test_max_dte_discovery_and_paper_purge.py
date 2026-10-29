@@ -103,20 +103,21 @@ class TestMaxDTEDiscoveryAndPaperPurge(unittest.TestCase):
                 pass
 
     def test_max_dte_constant_defined(self):
-        """Verifies MAX_OPTION_EXPIRY_DTE is 7.0 days."""
-        self.assertEqual(MAX_OPTION_EXPIRY_DTE, 7.0)
+        """Verifies MAX_OPTION_EXPIRY_DTE is 10.0 days."""
+        self.assertEqual(MAX_OPTION_EXPIRY_DTE, 10.0)
 
     @patch("app.analytics.option_sniffer.option_contract_discovery.OptionContractDiscovery.fetch_raw_contracts")
     def test_discovery_filters_far_month_expiries(self, mock_fetch):
         """
         Tests that OptionContractDiscovery.get_available_expiries() strictly filters
-        out expiries beyond 7 DTE while keeping weekly expiries.
+        out expiries beyond 10 DTE while keeping weekly expiries (including 8 DTE).
         """
         today = date.today()
         exp_0dte = today.strftime("%Y-%m-%d")
         exp_5dte = (today + timedelta(days=5)).strftime("%Y-%m-%d")
         exp_7dte = (today + timedelta(days=7)).strftime("%Y-%m-%d")
         exp_8dte = (today + timedelta(days=8)).strftime("%Y-%m-%d")
+        exp_12dte = (today + timedelta(days=12)).strftime("%Y-%m-%d")
         exp_25dte = (today + timedelta(days=25)).strftime("%Y-%m-%d")
 
         mock_fetch.return_value = [
@@ -124,6 +125,7 @@ class TestMaxDTEDiscoveryAndPaperPurge(unittest.TestCase):
             {"expiry": exp_5dte},
             {"expiry": exp_7dte},
             {"expiry": exp_8dte},
+            {"expiry": exp_12dte},
             {"expiry": exp_25dte},
         ]
 
@@ -131,7 +133,8 @@ class TestMaxDTEDiscoveryAndPaperPurge(unittest.TestCase):
         self.assertIn(exp_0dte, expiries)
         self.assertIn(exp_5dte, expiries)
         self.assertIn(exp_7dte, expiries)
-        self.assertNotIn(exp_8dte, expiries)
+        self.assertIn(exp_8dte, expiries)
+        self.assertNotIn(exp_12dte, expiries)
         self.assertNotIn(exp_25dte, expiries)
 
     @patch("app.analytics.option_sniffer.option_contract_discovery.OptionContractDiscovery.fetch_raw_contracts")

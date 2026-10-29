@@ -298,7 +298,8 @@ class OptionDB:
 
     @staticmethod
     def get_connection() -> sqlite3.Connection:
-        conn = sqlite3.connect(get_db_path(), timeout=15.0)
+        target_db = getattr(OptionDB, "_db_path_override", None) or get_db_path()
+        conn = sqlite3.connect(target_db, timeout=15.0)
         conn.execute("PRAGMA busy_timeout = 15000;")
         conn.row_factory = sqlite3.Row
         return conn

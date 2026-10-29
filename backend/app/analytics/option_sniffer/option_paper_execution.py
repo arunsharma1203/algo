@@ -269,6 +269,139 @@ class OptionPaperExecution:
         return max(floor_stop, trail_stop)
 
     @classmethod
+    def evaluate_exit_conditions(
+        cls,
+        trade: Dict[str, Any],
+        current_bid: float,
+        quote: Dict[str, Any],
+        now_dt: datetime,
+        underlying_quotes_map: Optional[Dict[str, Any]] = None,
+        enforce_cutoff: bool = False,
+        is_aggregate_halt: bool = False
+    ) -> Optional[str]:
+        """
+        Evaluates rule-based exit criteria for an active paper trade:
+          1. Portfolio Aggregate Circuit Breaker Halt
+          2. Take Profit Target (Dynamic or Classic)
+          3. Hard Stop Loss (Dynamic or Classic)
+          4. Chandelier Trailing Stop & Ratchet Protection
+          5. Underlying Structure Invalidation (Pillar 1: Loss Truncation)
+             - Enforces 180s grace period for structural invalidation ONLY
+             - Validates benchmark against session benchmark (or valid VWAP != spot_ltp)
+             - Requires dual confirmation: adverse spot vs benchmark AND adverse spot >= min_pts
+          6. Theta Stagnation Stop (Apex Quant Velocity Protection)
+          7. Intraday Max Holding Time (45 min)
+          8. Session End Square-off (>= 15:15 IST)
+        """
+        entry_ask = float(trade["entry_ask"])
+        current_peak = max(float(trade.get("peak_price") or entry_ask), current_bid)
+        current_trough = min(float(trade.get("trough_price") or entry_ask), current_bid)
+
+        mfe_pct = round(((current_peak - entry_ask) / entry_ask * 100.0), 2)
+        mae_pct = round(((current_trough - entry_ask) / entry_ask * 100.0), 2)
+
+        try:
+            entry_dt = datetime.fromisoformat(trade["entry_time"])
+            duration_sec = int((now_dt - entry_dt).total_seconds())
+            duration_min = duration_sec / 60.0
+        except Exception:
+            duration_sec = 0
+            duration_min = 0.0
+
+        current_pnl_pct = ((current_bid - entry_ask) / entry_ask) * 100.0
+        exit_reason = None
+
+        # 0. Portfolio Aggregate Loss Ceiling Breach -> Immediate Emergency Square-Off
+        if is_aggregate_halt:
+            return "CIRCUIT_BREAKER_HALT"
+
+        # Determine dynamic or classic exit hurdles
+        engine_ver = trade.get("engine_version") or OPTION_EXECUTION_ENGINE_MODE
+        if engine_ver == "DYNAMIC_V2" and trade.get("dynamic_target_pct") and trade.get("dynamic_sl_pct"):
+            target_hurdle = float(trade["dynamic_target_pct"])
+            stop_hurdle = float(trade["dynamic_sl_pct"])
+            ratchet_trigger = min(TRAILING_STOP_TRIGGER_PCT, max(12.0, round(target_hurdle * 0.50, 1)))
+        else:
+            target_hurdle = TARGET_GAIN_PCT
+            stop_hurdle = STOP_LOSS_PCT
+            ratchet_trigger = TRAILING_STOP_TRIGGER_PCT
+
+        # 1. Take Profit Hurdle
+        is_uncapped_mode = (engine_ver == "UNCAPPED_CONVEX_RUNNER")
+        if not is_uncapped_mode and current_pnl_pct >= target_hurdle:
+            return "TARGET_MET"
+
+        # 2. Hard Stop Loss Hurdle (Dynamic or Classic)
+        elif current_pnl_pct <= -stop_hurdle:
+            return "STOP_LOSS_HIT"
+
+        # 3. Trailing Stop / Ratchet Protection
+        elif engine_ver == "V1_CLASSIC" and not ENABLE_4PILLAR_CANARY_ENGINE:
+            if mfe_pct >= TRAILING_STOP_TRIGGER_PCT and current_bid <= (current_peak * (1.0 - TRAILING_STOP_DISTANCE_PCT / 100.0)):
+                return "TRAILING_STOP_HIT"
+        elif mfe_pct >= min(EARLY_BREAKEVEN_TRIGGER_PCT, ratchet_trigger):
+            chandelier_stop = cls.calculate_chandelier_stop(entry_ask, current_peak, mfe_pct)
+            classic_ratchet = 0.0
+            if mfe_pct >= ratchet_trigger:
+                peak_trail_stop = current_peak * (1.0 - TRAILING_STOP_DISTANCE_PCT / 100.0)
+                breakeven_floor = entry_ask * (1.0 + BREAKEVEN_FLOOR_PCT / 100.0)
+                classic_ratchet = max(peak_trail_stop, breakeven_floor)
+            elif mfe_pct >= EARLY_BREAKEVEN_TRIGGER_PCT:
+                classic_ratchet = entry_ask * (1.0 + EARLY_BREAKEVEN_FLOOR_PCT / 100.0)
+
+            effective_stop = max(chandelier_stop or 0.0, classic_ratchet)
+            if effective_stop and current_bid <= effective_stop:
+                return "TRAILING_STOP_HIT"
+
+        # 4. Underlying Structure Invalidation Exit (Pillar 1: Loss Truncation)
+        # Suppressed during 180s post-entry grace buffer to prevent microstructure noise stopouts.
+        if not exit_reason and underlying_quotes_map and duration_sec >= 180:
+            u_sym = (trade.get("underlying") or "NIFTY").upper().strip()
+            u_quote = underlying_quotes_map.get(u_sym)
+            if u_quote:
+                curr_spot = float(u_quote.get("spot_ltp") or 0.0)
+                raw_bench = u_quote.get("session_benchmark")
+                if raw_bench is None:
+                    raw_vwap = u_quote.get("vwap")
+                    if raw_vwap is not None and abs(float(raw_vwap) - curr_spot) > 0.01:
+                        raw_bench = raw_vwap
+
+                curr_benchmark = float(raw_bench) if raw_bench is not None else 0.0
+                entry_spot = float(trade.get("entry_spot_price") or 0.0)
+                is_bn = "BANK" in u_sym
+                min_pts = STRUCTURE_INVALIDATION_MIN_PTS_BANKNIFTY if is_bn else STRUCTURE_INVALIDATION_MIN_PTS_NIFTY
+
+                if curr_benchmark > 0 and entry_spot > 0:
+                    if trade.get("option_type") == "CE":
+                        if curr_spot < (curr_benchmark * (1.0 - STRUCTURE_INVALIDATION_BUFFER_PCT / 100.0)):
+                            if curr_spot <= (entry_spot - min_pts):
+                                return "STRUCTURE_INVALIDATION_BEAR"
+                    elif trade.get("option_type") == "PE":
+                        if curr_spot > (curr_benchmark * (1.0 + STRUCTURE_INVALIDATION_BUFFER_PCT / 100.0)):
+                            if curr_spot >= (entry_spot + min_pts):
+                                return "STRUCTURE_INVALIDATION_BULL"
+
+        # 5. Theta Stagnation Stop (Apex Quant Velocity Protection)
+        if not exit_reason and ENABLE_APEX_QUANT_ENGINE:
+            if (
+                duration_min >= THETA_STAGNATION_TIMEOUT_MINUTES
+                and mfe_pct < THETA_STAGNATION_MIN_MFE_PCT
+                and current_pnl_pct < 0
+            ):
+                return "STAGNATION_TIME_STOP"
+
+        # 6. Intraday Max Holding Time Exceeded (45 min)
+        if not exit_reason and duration_min >= MAX_HOLDING_MINUTES:
+            return "TIME_DECAY_EXPIRY"
+
+        # 7. Session End Square-off (>= 15:15 IST or post-market)
+        elif (enforce_cutoff or now_dt is not None) and not exit_reason and ((now_dt.hour > 15) or (now_dt.hour == 15 and now_dt.minute >= 15)):
+            if enforce_cutoff:
+                return "SESSION_END_SQUAREOFF"
+
+        return exit_reason
+
+    @classmethod
     def update_open_trades(
         cls,
         live_quotes_map: Dict[str, Dict[str, Any]],
@@ -325,106 +458,21 @@ class OptionPaperExecution:
             mfe_pct = round(((current_peak - entry_ask) / entry_ask * 100.0), 2)
             mae_pct = round(((current_trough - entry_ask) / entry_ask * 100.0), 2)
 
-            # Calculate elapsed holding time
             try:
                 entry_dt = datetime.fromisoformat(trade["entry_time"])
                 duration_sec = int((now_dt - entry_dt).total_seconds())
-                duration_min = duration_sec / 60.0
             except Exception:
                 duration_sec = 0
-                duration_min = 0.0
 
-            # Current unrealized P&L if closed now at BID
-            current_pnl_pct = ((current_bid - entry_ask) / entry_ask) * 100.0
-
-            exit_reason = None
-
-            # Portfolio Aggregate Loss Ceiling Breach -> Immediate Emergency Square-Off
-            if is_aggregate_halt:
-                exit_reason = "CIRCUIT_BREAKER_HALT"
-
-            # Determine dynamic or classic exit hurdles
-            engine_ver = trade.get("engine_version") or OPTION_EXECUTION_ENGINE_MODE
-            if engine_ver == "DYNAMIC_V2" and trade.get("dynamic_target_pct") and trade.get("dynamic_sl_pct"):
-                target_hurdle = float(trade["dynamic_target_pct"])
-                stop_hurdle = float(trade["dynamic_sl_pct"])
-                # Ratchet trigger: activates at +15% canonical trigger or halfway to target if tighter
-                ratchet_trigger = min(TRAILING_STOP_TRIGGER_PCT, max(12.0, round(target_hurdle * 0.50, 1)))
-            else:
-                target_hurdle = TARGET_GAIN_PCT
-                stop_hurdle = STOP_LOSS_PCT
-                ratchet_trigger = TRAILING_STOP_TRIGGER_PCT
-
-            # 1. Take Profit Hurdle (Uncapped in UNCAPPED_CONVEX_RUNNER mode, dynamic/static in others)
-            is_uncapped_mode = (engine_ver == "UNCAPPED_CONVEX_RUNNER")
-            if not is_uncapped_mode and current_pnl_pct >= target_hurdle:
-                exit_reason = "TARGET_MET"
-
-            # 2. Hard Stop Loss Hurdle (Dynamic or Classic)
-            elif current_pnl_pct <= -stop_hurdle:
-                exit_reason = "STOP_LOSS_HIT"
-
-            # 3. Trailing Stop / Ratchet Protection
-            elif engine_ver == "V1_CLASSIC" and not ENABLE_4PILLAR_CANARY_ENGINE:
-                if mfe_pct >= TRAILING_STOP_TRIGGER_PCT and current_bid <= (current_peak * (1.0 - TRAILING_STOP_DISTANCE_PCT / 100.0)):
-                    exit_reason = "TRAILING_STOP_HIT"
-            elif mfe_pct >= min(EARLY_BREAKEVEN_TRIGGER_PCT, ratchet_trigger):
-                chandelier_stop = cls.calculate_chandelier_stop(entry_ask, current_peak, mfe_pct)
-                # Determine effective stop combining continuous chandelier with classic ratchet
-                classic_ratchet = 0.0
-                if mfe_pct >= ratchet_trigger:
-                    peak_trail_stop = current_peak * (1.0 - TRAILING_STOP_DISTANCE_PCT / 100.0)
-                    breakeven_floor = entry_ask * (1.0 + BREAKEVEN_FLOOR_PCT / 100.0)
-                    classic_ratchet = max(peak_trail_stop, breakeven_floor)
-                elif mfe_pct >= EARLY_BREAKEVEN_TRIGGER_PCT:
-                    classic_ratchet = entry_ask * (1.0 + EARLY_BREAKEVEN_FLOOR_PCT / 100.0)
-
-                effective_stop = max(chandelier_stop or 0.0, classic_ratchet)
-                if effective_stop and current_bid <= effective_stop:
-                    exit_reason = "TRAILING_STOP_HIT"
-
-            # 4. Underlying Structure Invalidation Exit (Pillar 1: Immediate Loss Truncation)
-            # Defeats the 35.9% Reversal Trap: If underlying structure breaks, exit at BID
-            # immediately without waiting for -15% to -24% hard option stop.
-            if not exit_reason and underlying_quotes_map:
-                u_sym = (trade.get("underlying") or "NIFTY").upper().strip()
-                u_quote = underlying_quotes_map.get(u_sym)
-                if u_quote:
-                    curr_spot = float(u_quote.get("spot_ltp") or 0.0)
-                    curr_vwap = float(u_quote.get("vwap") or 0.0)
-                    entry_spot = float(trade.get("entry_spot_price") or 0.0)
-                    is_bn = "BANK" in u_sym
-                    min_pts = STRUCTURE_INVALIDATION_MIN_PTS_BANKNIFTY if is_bn else STRUCTURE_INVALIDATION_MIN_PTS_NIFTY
-
-                    if trade.get("option_type") == "CE":
-                        # Bearish Invalidation: Spot drops below VWAP by > buffer AND is below entry spot by >= min_pts
-                        if curr_vwap > 0 and curr_spot < (curr_vwap * (1.0 - STRUCTURE_INVALIDATION_BUFFER_PCT / 100.0)):
-                            if entry_spot > 0 and curr_spot <= (entry_spot - min_pts):
-                                exit_reason = "STRUCTURE_INVALIDATION_BEAR"
-                    elif trade.get("option_type") == "PE":
-                        # Bullish Invalidation: Spot rises above VWAP by > buffer AND is above entry spot by >= min_pts
-                        if curr_vwap > 0 and curr_spot > (curr_vwap * (1.0 + STRUCTURE_INVALIDATION_BUFFER_PCT / 100.0)):
-                            if entry_spot > 0 and curr_spot >= (entry_spot + min_pts):
-                                exit_reason = "STRUCTURE_INVALIDATION_BULL"
-
-            # 5. Theta Stagnation Stop (Apex Quant Velocity Protection)
-            # Exit non-moving positions (MFE < +5%) after 12 minutes at current market bid
-            # Scratching at small loss (-4% to -6%) instead of taking full -20% or -35% stop loss
-            if not exit_reason and ENABLE_APEX_QUANT_ENGINE:
-                if (
-                    duration_min >= THETA_STAGNATION_TIMEOUT_MINUTES
-                    and mfe_pct < THETA_STAGNATION_MIN_MFE_PCT
-                    and current_pnl_pct < 0
-                ):
-                    exit_reason = "STAGNATION_TIME_STOP"
-
-            # 6. Intraday Max Holding Time Exceeded (45 min)
-            if not exit_reason and duration_min >= MAX_HOLDING_MINUTES:
-                exit_reason = "TIME_DECAY_EXPIRY"
-
-            # 7. Session End Square-off (>= 15:15 IST or post-market)
-            elif (enforce_cutoff or as_of_time is not None) and not exit_reason and ((now_dt.hour > 15) or (now_dt.hour == 15 and now_dt.minute >= 15)):
-                exit_reason = "SESSION_END_SQUAREOFF"
+            exit_reason = cls.evaluate_exit_conditions(
+                trade=trade,
+                current_bid=current_bid,
+                quote=quote,
+                now_dt=now_dt,
+                underlying_quotes_map=underlying_quotes_map,
+                enforce_cutoff=(enforce_cutoff or as_of_time is not None),
+                is_aggregate_halt=is_aggregate_halt
+            )
 
             if exit_reason:
                 close_info = cls.close_trade(

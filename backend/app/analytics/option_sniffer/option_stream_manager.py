@@ -24,6 +24,7 @@ from app.analytics.option_sniffer.option_constants import (
     MIN_OI,
     MIN_VOLUME,
     MIN_BID_PRICE,
+    to_ist_naive,
 )
 from app.analytics.option_sniffer.option_db import OptionDB
 
@@ -317,15 +318,97 @@ class OptionStreamManager:
     # DATA RETRIEVAL & FAIL-CLOSED GATES
     # ──────────────────────────────────────────────────────────────────────────
 
+    def compute_session_index_benchmark(
+        self,
+        underlying: str = "NIFTY",
+        as_of_time: Optional[datetime] = None
+    ) -> Optional[float]:
+        """
+        Computes the Session Typical-Price Benchmark (TPB) for the underlying index:
+            TPB = mean((High + Low + Close) / 3)
+        across all verified completed 1-minute bars of the current trading session (09:15 to 15:30 IST).
+
+        Fail-Safe Policies:
+          - Rejects unverified, incomplete, pre-market (< 09:15), or post-market (> 15:30) bars.
+          - Requires at least 3 completed bars in the current session. Returns None if < 3 bars.
+          - Never forward-fills or substitutes spot LTP.
+          - Cached for 2.0 seconds to eliminate SQLite locking overhead during rapid sweeps.
+        """
+        u_upper = underlying.upper().strip()
+        now_dt = to_ist_naive(as_of_time) if as_of_time else datetime.now()
+        date_str = now_dt.strftime("%Y-%m-%d")
+        session_start = f"{date_str} 09:15:00"
+        session_end = f"{date_str} 15:30:00"
+        as_of_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        cutoff_str = min(session_end, as_of_str)
+
+        now_mono = time.time()
+        with self._lock:
+            cache = getattr(self, "_benchmark_cache", {}).get(u_upper)
+            if cache:
+                cache_time, cache_val = cache
+                if (now_mono - cache_time) < 2.0:
+                    return cache_val
+
+        try:
+            conn = OptionDB.get_connection()
+            query = """
+                SELECT high, low, close
+                FROM continuous_index_ohlcv
+                WHERE ticker = ?
+                  AND timestamp >= ?
+                  AND timestamp <= ?
+                  AND is_complete = 1
+                ORDER BY timestamp ASC
+            """
+            cur = conn.cursor()
+            cur.execute(query, (u_upper, session_start, cutoff_str))
+            rows = cur.fetchall()
+            conn.close()
+
+            if not rows or len(rows) < 3:
+                logger.debug(
+                    f"[OptionStreamManager] Insufficient session bars for {u_upper} benchmark "
+                    f"(count={len(rows) if rows else 0} < 3). Returning None."
+                )
+                with self._lock:
+                    if not hasattr(self, "_benchmark_cache"):
+                        self._benchmark_cache = {}
+                    self._benchmark_cache[u_upper] = (now_mono, None)
+                return None
+
+            # Arithmetic mean of typical price: (H + L + C) / 3.0
+            typical_sum = sum((float(r[0]) + float(r[1]) + float(r[2])) / 3.0 for r in rows)
+            benchmark_val = round(typical_sum / len(rows), 2)
+
+            with self._lock:
+                if not hasattr(self, "_benchmark_cache"):
+                    self._benchmark_cache = {}
+                self._benchmark_cache[u_upper] = (now_mono, benchmark_val)
+
+            return benchmark_val
+        except Exception as e:
+            logger.warning(f"[OptionStreamManager] Benchmark calculation error for {u_upper}: {e}")
+            return None
+
     def get_underlying_quote(self, underlying: str = "NIFTY") -> Optional[Dict[str, Any]]:
-        """Retrieves latest live quote for the underlying index."""
+        """Retrieves latest live quote for the underlying index with session benchmark."""
         u_upper = underlying.upper().strip()
         with self._lock:
-            quote = self._underlying_quotes.get(u_upper)
-            if quote:
+            raw_quote = self._underlying_quotes.get(u_upper)
+            if raw_quote:
                 now_ms = int(time.time() * 1000)
+                quote = dict(raw_quote)
                 quote["quote_age_ms"] = max(0, now_ms - quote["timestamp_ms"])
-            return quote
+            else:
+                quote = None
+
+        if quote:
+            benchmark = self.compute_session_index_benchmark(u_upper)
+            quote["session_benchmark"] = benchmark
+            if benchmark is not None:
+                quote["vwap"] = benchmark
+        return quote
 
     def get_underlying_history_df(self, underlying: str = "NIFTY", limit: int = 60) -> Optional[Any]:
         """
