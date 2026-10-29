@@ -26,6 +26,7 @@ from app.analytics.option_sniffer.option_constants import (
     ATM_STRIKE_WINDOW,
     STRIKE_INTERVALS,
     DEFAULT_LOT_SIZES,
+    MAX_OPTION_EXPIRY_DTE,
 )
 from app.analytics.option_sniffer.option_db import OptionDB
 
@@ -92,16 +93,29 @@ class OptionContractDiscovery:
             return cached["contracts"] if cached else []
 
     @classmethod
-    def get_available_expiries(cls, underlying: str = "NIFTY", force_refresh: bool = False) -> List[str]:
-        """Returns sorted list of future expiry dates (YYYY-MM-DD) for the underlying."""
+    def get_available_expiries(
+        cls,
+        underlying: str = "NIFTY",
+        force_refresh: bool = False,
+        max_dte: Optional[float] = None
+    ) -> List[str]:
+        """Returns sorted list of future expiry dates (YYYY-MM-DD) for the underlying within max_dte."""
         contracts = cls.fetch_raw_contracts(underlying, force_refresh=force_refresh)
-        today_str = datetime.now().strftime("%Y-%m-%d")
+        today = date.today()
+        today_str = today.strftime("%Y-%m-%d")
+        limit_dte = MAX_OPTION_EXPIRY_DTE if max_dte is None else max_dte
 
         expiries: Set[str] = set()
         for c in contracts:
             exp = c.get("expiry")
             if exp and exp >= today_str:
-                expiries.add(exp)
+                try:
+                    exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+                    dte = (exp_date - today).days
+                    if limit_dte is None or dte <= limit_dte:
+                        expiries.add(exp)
+                except Exception:
+                    pass
 
         sorted_expiries = sorted(list(expiries))
         return sorted_expiries
@@ -145,10 +159,13 @@ class OptionContractDiscovery:
                 spot = 22500.0 if underlying == "NIFTY" else 48500.0
                 logger.info(f"[OptionDiscovery] Using reference anchor spot ₹{spot} for {underlying} initialization.")
 
-            # 2. Get Expiries
+            # 2. Get Expiries (strictly capped at MAX_OPTION_EXPIRY_DTE)
             expiries = cls.get_available_expiries(underlying, force_refresh=force_refresh)
             if not expiries:
-                logger.warning(f"[OptionDiscovery] No valid expiries found for {underlying}.")
+                logger.warning(
+                    f"[OptionDiscovery] No valid expiries <= {MAX_OPTION_EXPIRY_DTE} DTE found for {underlying}. "
+                    f"Skipping {underlying} surveillance to protect against illiquid/low-gamma far-month contracts."
+                )
                 continue
 
             current_expiry = expiries[0]
@@ -216,9 +233,11 @@ class OptionContractDiscovery:
             logger.info(f"[OptionDiscovery] Monitored {matched_for_underlying} active option contracts for {underlying}.")
 
         try:
+            active_keys = [c["instrument_key"] for c in monitored_contracts]
+            OptionDB.sync_active_candidates(active_keys)
             OptionDB.deactivate_expired_candidates()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[OptionDiscovery] Candidate catalog sync note: {e}")
 
         return monitored_contracts
 

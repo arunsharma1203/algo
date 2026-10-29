@@ -377,6 +377,32 @@ class OptionDB:
                 return 0
 
     @classmethod
+    def sync_active_candidates(cls, active_instrument_keys: List[str]) -> int:
+        """
+        Idempotently synchronizes option_sniffer_candidates:
+        Ensures only current active_instrument_keys remain is_active = 1,
+        and all unmonitored or far-month contracts are marked is_active = 0.
+        """
+        with _DB_LOCK:
+            try:
+                conn = cls.get_connection()
+                with conn:
+                    if not active_instrument_keys:
+                        cur = conn.execute("UPDATE option_sniffer_candidates SET is_active = 0 WHERE is_active = 1;")
+                    else:
+                        placeholders = ",".join(["?"] * len(active_instrument_keys))
+                        cur = conn.execute(
+                            f"UPDATE option_sniffer_candidates SET is_active = 0 WHERE is_active = 1 AND instrument_key NOT IN ({placeholders});",
+                            tuple(active_instrument_keys)
+                        )
+                    count = cur.rowcount
+                conn.close()
+                return count
+            except Exception as e:
+                logger.error(f"[OptionDB] Failed to sync active candidates: {e}")
+                return 0
+
+    @classmethod
     def log_prediction(cls, pred: Dict[str, Any]) -> bool:
         """Records point-in-time option model prediction."""
         with _DB_LOCK:

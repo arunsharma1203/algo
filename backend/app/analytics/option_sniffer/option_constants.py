@@ -30,12 +30,13 @@ UNDERLYING_HEAVYWEIGHTS: Dict[str, list] = {
     "BANKNIFTY": ["HDFCBANK", "ICICIBANK"],
 }
 
-# Strike Parameters
+# Strike & Expiry Parameters
 ATM_STRIKE_WINDOW: int = 5  # Monitored: ATM-5 to ATM+5 (11 strikes per expiry)
 STRIKE_INTERVALS: Dict[str, float] = {
     "NIFTY": 50.0,
     "BANKNIFTY": 100.0,
 }
+MAX_OPTION_EXPIRY_DTE: float = 7.0  # Max days to expiry: intraday momentum scalping strictly rejects contracts > 7 DTE
 
 # Standard Lot Sizes (Contract metadata provides authoritative override)
 DEFAULT_LOT_SIZES: Dict[str, int] = {
