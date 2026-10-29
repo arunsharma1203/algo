@@ -406,8 +406,6 @@ class OptionStreamManager:
         if quote:
             benchmark = self.compute_session_index_benchmark(u_upper)
             quote["session_benchmark"] = benchmark
-            if benchmark is not None:
-                quote["vwap"] = benchmark
         return quote
 
     def get_underlying_history_df(self, underlying: str = "NIFTY", limit: int = 60) -> Optional[Any]:

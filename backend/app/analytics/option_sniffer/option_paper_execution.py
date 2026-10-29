@@ -353,32 +353,32 @@ class OptionPaperExecution:
             if effective_stop and current_bid <= effective_stop:
                 return "TRAILING_STOP_HIT"
 
-        # 4. Underlying Structure Invalidation Exit (Pillar 1: Loss Truncation)
-        # Suppressed during 180s post-entry grace buffer to prevent microstructure noise stopouts.
+        # 4. Underlying Structure Invalidation Exit (Pillar 1: Classic VWAP Invalidation)
+        # Reverted to earlier baseline behavior per quant directive:
+        # Requires genuine broker VWAP distinct from spot_ltp. When broker VWAP is unavailable
+        # or identical to spot (typical Upstox index behavior), structural exit is dormant.
+        # This completely eliminates premature 18-point whipsaw exits on healthy pullbacks,
+        # allowing winning runners to breathe while relying on the 20% hard SL, 12m stagnation stop,
+        # and ₹3,500 daily portfolio ceiling.
         if not exit_reason and underlying_quotes_map and duration_sec >= 180:
             u_sym = (trade.get("underlying") or "NIFTY").upper().strip()
             u_quote = underlying_quotes_map.get(u_sym)
             if u_quote:
                 curr_spot = float(u_quote.get("spot_ltp") or 0.0)
-                raw_bench = u_quote.get("session_benchmark")
-                if raw_bench is None:
-                    raw_vwap = u_quote.get("vwap")
-                    if raw_vwap is not None and abs(float(raw_vwap) - curr_spot) > 0.01:
-                        raw_bench = raw_vwap
-
-                curr_benchmark = float(raw_bench) if raw_bench is not None else 0.0
+                curr_vwap = float(u_quote.get("vwap") or 0.0)
                 entry_spot = float(trade.get("entry_spot_price") or 0.0)
                 is_bn = "BANK" in u_sym
                 min_pts = STRUCTURE_INVALIDATION_MIN_PTS_BANKNIFTY if is_bn else STRUCTURE_INVALIDATION_MIN_PTS_NIFTY
 
-                if curr_benchmark > 0 and entry_spot > 0:
+                # Earlier baseline: requires valid broker VWAP != spot_ltp
+                if curr_vwap > 0 and abs(curr_vwap - curr_spot) > 0.01:
                     if trade.get("option_type") == "CE":
-                        if curr_spot < (curr_benchmark * (1.0 - STRUCTURE_INVALIDATION_BUFFER_PCT / 100.0)):
-                            if curr_spot <= (entry_spot - min_pts):
+                        if curr_spot < (curr_vwap * (1.0 - STRUCTURE_INVALIDATION_BUFFER_PCT / 100.0)):
+                            if entry_spot > 0 and curr_spot <= (entry_spot - min_pts):
                                 return "STRUCTURE_INVALIDATION_BEAR"
                     elif trade.get("option_type") == "PE":
-                        if curr_spot > (curr_benchmark * (1.0 + STRUCTURE_INVALIDATION_BUFFER_PCT / 100.0)):
-                            if curr_spot >= (entry_spot + min_pts):
+                        if curr_spot > (curr_vwap * (1.0 + STRUCTURE_INVALIDATION_BUFFER_PCT / 100.0)):
+                            if entry_spot > 0 and curr_spot >= (entry_spot + min_pts):
                                 return "STRUCTURE_INVALIDATION_BULL"
 
         # 5. Theta Stagnation Stop (Apex Quant Velocity Protection)
