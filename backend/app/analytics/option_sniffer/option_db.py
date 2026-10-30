@@ -22,7 +22,7 @@ from app.analytics.option_sniffer.option_constants import (
 
 logger = logging.getLogger(__name__)
 
-_DB_LOCK = threading.RLock()
+_DB_LOCK = globals().get("_DB_LOCK") or threading.RLock()
 
 
 def init_option_sniffer_tables() -> None:

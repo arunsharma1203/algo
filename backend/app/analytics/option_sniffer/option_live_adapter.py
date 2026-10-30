@@ -61,8 +61,9 @@ def calculate_required_contract_margin(
     return round(premium_required + statutory_buffer_inr, 2)
 
 
-_ADAPTER_LOCK = threading.RLock()
-_INSTANCE: Optional["OptionLiveAdapter"] = None
+_ADAPTER_LOCK = globals().get("_ADAPTER_LOCK") or threading.RLock()
+_PREV_LIVE_ADAPTER = globals().get("_INSTANCE")
+_INSTANCE: Optional["OptionLiveAdapter"] = _PREV_LIVE_ADAPTER
 
 
 class OptionLiveAdapter:
@@ -1249,6 +1250,10 @@ class OptionLiveAdapter:
             logger.debug(f"[OptionLiveAdapter] Pending order reconciliation note: {p_err}")
             res["reconciled_pending_orders"] = 0
         return res
+
+
+if _INSTANCE is not None:
+    _INSTANCE.__class__ = OptionLiveAdapter
 
 
 def get_option_live_adapter() -> OptionLiveAdapter:

@@ -51,8 +51,8 @@ from app.analytics.option_sniffer.option_paper_execution import OptionPaperExecu
 
 logger = logging.getLogger(__name__)
 
-_INTENT_LOCK = threading.RLock()
-_EXIT_LOCKS: Dict[str, threading.Lock] = {}
+_INTENT_LOCK = globals().get("_INTENT_LOCK") or threading.RLock()
+_EXIT_LOCKS: Dict[str, threading.Lock] = globals().get("_EXIT_LOCKS") or {}
 
 # Execution States
 STATE_CREATED = "CREATED"
@@ -1445,10 +1445,10 @@ class OrderIntentEngine:
                     closes = u_df["close"]
                     ret_3m = float((closes.iloc[-1] - closes.iloc[-4]) / closes.iloc[-4] * 100.0)
                     action = cand.get("action", "")
-                    if action == "BUY_CE" and ret_3m <= -0.06:
+                    if action == "BUY_CE" and ret_3m <= -0.08:
                         logger.info(f"[Autopilot] Counter-move guard: {cand.get('trading_symbol')} CE blocked because {und} is dropping ({ret_3m:.2f}% over last 3m).")
                         continue
-                    if action == "BUY_PE" and ret_3m >= 0.06:
+                    if action == "BUY_PE" and ret_3m >= 0.08:
                         logger.info(f"[Autopilot] Counter-move guard: {cand.get('trading_symbol')} PE blocked because {und} is bouncing (+{ret_3m:.2f}% over last 3m).")
                         continue
 
@@ -2139,7 +2139,12 @@ class OrderIntentEngine:
             _EXIT_LOCKS[order_intent_id].release()
 
 
-_GLOBAL_INTENT_ENGINE: Optional[OrderIntentEngine] = None
+_PREV_INTENT_ENGINE = globals().get("_GLOBAL_INTENT_ENGINE")
+if _PREV_INTENT_ENGINE is not None:
+    _PREV_INTENT_ENGINE.__class__ = OrderIntentEngine
+    _GLOBAL_INTENT_ENGINE: Optional[OrderIntentEngine] = _PREV_INTENT_ENGINE
+else:
+    _GLOBAL_INTENT_ENGINE: Optional[OrderIntentEngine] = None
 
 
 def get_order_intent_engine() -> OrderIntentEngine:

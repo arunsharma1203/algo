@@ -784,7 +784,13 @@ class UpstoxStreamService:
             }
 
 
-_GLOBAL_STREAM_SERVICE = UpstoxStreamService()
+_PREV_STREAM_INSTANCE = getattr(globals().get("UpstoxStreamService"), "_instance", None) or globals().get("_GLOBAL_STREAM_SERVICE")
+if _PREV_STREAM_INSTANCE is not None:
+    UpstoxStreamService._instance = _PREV_STREAM_INSTANCE
+    _PREV_STREAM_INSTANCE.__class__ = UpstoxStreamService
+    _GLOBAL_STREAM_SERVICE = _PREV_STREAM_INSTANCE
+else:
+    _GLOBAL_STREAM_SERVICE = UpstoxStreamService()
 
 
 def get_stream_service() -> UpstoxStreamService:

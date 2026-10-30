@@ -79,12 +79,15 @@ _BOOT_TIMESTAMP: str = to_ist_naive().isoformat()
 
 
 
+_PREV_OSO_INSTANCE = getattr(globals().get("OptionSnifferOrchestrator"), "_instance", None)
+
+
 class OptionSnifferOrchestrator:
     """
     Singleton orchestrator managing background surveillance and paper-trading lifecycle.
     """
 
-    _instance = None
+    _instance = _PREV_OSO_INSTANCE
     _init_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
@@ -731,6 +734,12 @@ class OptionSnifferOrchestrator:
             "ablation_results": model.metadata.get("ablation_results", {}),
             "metrics": model.metadata.get("metrics", {}),
         }
+
+
+if _PREV_OSO_INSTANCE is not None:
+    _PREV_OSO_INSTANCE.__class__ = OptionSnifferOrchestrator
+    if hasattr(_PREV_OSO_INSTANCE, "signal_engine") and _PREV_OSO_INSTANCE.signal_engine is not None:
+        _PREV_OSO_INSTANCE.signal_engine.__class__ = OptionSignalEngine
 
 
 def get_option_sniffer_orchestrator() -> OptionSnifferOrchestrator:

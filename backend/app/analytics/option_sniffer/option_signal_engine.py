@@ -77,16 +77,19 @@ from app.analytics.telegram_notifier import send_telegram_message
 logger = logging.getLogger(__name__)
 
 
+_PREV_OSE_CLS = globals().get("OptionSignalEngine")
+
+
 class OptionSignalEngine:
     """Evaluates option candidate streams through strict state machine gates."""
 
-    _COOLDOWNS: Dict[str, float] = {}  # instrument_key -> last_active_signal_epoch
-    _DIRECTION_SL_COOLDOWNS: Dict[str, float] = {}  # "{underlying}_{opt_type}" -> last_sl_hit_epoch
+    _COOLDOWNS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_COOLDOWNS", {})  # instrument_key -> last_active_signal_epoch
+    _DIRECTION_SL_COOLDOWNS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_DIRECTION_SL_COOLDOWNS", {})  # "{underlying}_{opt_type}" -> last_sl_hit_epoch
     _DIRECTION_SL_COOLDOWN_SECONDS: int = 600  # 10-minute direction cooldown after Stop-Loss hit
     _MAX_CONCURRENT_OPEN_TRADES: int = 3
-    _PORTFOLIO_LOSS_HISTORY: List[float] = []  # list of recent SL epochs across portfolio
-    _INTROSPECTION_FROZEN_UNTIL: float = 0.0
-    _ACTIVE_UNDERLYING_LOCKS: Dict[str, float] = {}  # underlying -> last_open_trade_epoch (Anti-Clustering Mutex)
+    _PORTFOLIO_LOSS_HISTORY: List[float] = getattr(_PREV_OSE_CLS, "_PORTFOLIO_LOSS_HISTORY", [])  # list of recent SL epochs across portfolio
+    _INTROSPECTION_FROZEN_UNTIL: float = getattr(_PREV_OSE_CLS, "_INTROSPECTION_FROZEN_UNTIL", 0.0)
+    _ACTIVE_UNDERLYING_LOCKS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_ACTIVE_UNDERLYING_LOCKS", {})  # underlying -> last_open_trade_epoch (Anti-Clustering Mutex)
 
     @classmethod
     def record_direction_sl_cooldown(cls, underlying: str, opt_type: str, epoch: Optional[float] = None) -> None:

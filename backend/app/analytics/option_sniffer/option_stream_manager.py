@@ -31,13 +31,16 @@ from app.analytics.option_sniffer.option_db import OptionDB
 logger = logging.getLogger(__name__)
 
 
+_PREV_OSM_INSTANCE = getattr(globals().get("OptionStreamManager"), "_instance", None)
+
+
 class OptionStreamManager:
     """
     Singleton manager maintaining real-time quotes, Greeks, order book depth,
     and freshness states for all monitored option contracts and underlying indices.
     """
 
-    _instance = None
+    _instance = _PREV_OSM_INSTANCE
     _init_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
@@ -809,6 +812,10 @@ class OptionStreamManager:
                 "underlying_quotes": {k: v.get("spot_ltp") for k, v in self._underlying_quotes.items()},
             }
             return telemetry
+
+
+if _PREV_OSM_INSTANCE is not None:
+    _PREV_OSM_INSTANCE.__class__ = OptionStreamManager
 
 
 def get_stream_manager() -> OptionStreamManager:
