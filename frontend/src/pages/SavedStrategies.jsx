@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { PlayCircle, Trash2, Edit } from 'lucide-react';
 import BacktestViewer from '../components/BacktestViewer';
 
@@ -40,7 +41,7 @@ export default function SavedStrategies() {
       {savedStrategies.length === 0 ? (
         <div className="bg-white p-8 rounded-lg shadow-sm border border-gray-200 text-center">
           <p className="text-gray-500 mb-4">You haven't saved any custom strategies yet.</p>
-          <a href="/custom" className="text-blue-600 hover:underline font-medium">Create your first strategy</a>
+          <Link to="/strategy/new" className="text-blue-600 hover:underline font-medium">Create your first strategy</Link>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

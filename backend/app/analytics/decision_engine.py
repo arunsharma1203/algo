@@ -80,6 +80,10 @@ class QualificationResult:
     price_source: str = "Candle Close"
     price_timestamp: str = ""
     price_is_fresh: bool = False
+    entry_price_source: str = "Candle Close"
+    entry_price_timestamp: str = ""
+    entry_price_age_ms: Optional[int] = None
+    quote_freshness: str = "UNKNOWN"
 
     atr_pct: float = 0.0
     volume_ratio: float = 1.0
@@ -91,7 +95,10 @@ class QualificationResult:
 
 
 # ─── Intraday features ────────────────────────────────────────────────
-INTRADAY_FEATURES = ['rsi', 'macd', 'macd_diff', 'adx', 'returns']
+INTRADAY_FEATURES = [
+    'rsi', 'macd', 'macd_diff', 'adx', 'returns',
+    'vwap_deviation', 'orb_breakout', 'ema_alignment', 'volume_surge', 'time_of_day'
+]
 SWING_FEATURES = ['rsi', 'macd', 'macd_diff', 'adx', 'atr']
 
 
@@ -105,6 +112,8 @@ def evaluate_ticker(
     macro_state: Optional[Dict[str, Any]] = None,
     qualification_threshold: float = 0.0,
     skip_enrichment: bool = False,
+    is_simulation: bool = False,
+    allow_candle_close: bool = False,
 ) -> QualificationResult:
     """
     Authoritative shared decision engine.
@@ -136,6 +145,7 @@ def evaluate_ticker(
         "svc": False,
         "ensemble": False,
         "nlp_vader": "SKIPPED",
+        "nlp_finbert": "SKIPPED",
         "fno": "SKIPPED",
         "timesfm": "SKIPPED",
         "chronos": "SKIPPED",
@@ -147,7 +157,7 @@ def evaluate_ticker(
         "qualified": False,
     }
 
-    features = SWING_FEATURES if trade_type == "SWING" else INTRADAY_FEATURES
+    features = champion_meta.get("features") or (SWING_FEATURES if trade_type == "SWING" else INTRADAY_FEATURES)
     champ_v = champion_meta.get("version", "v1.0-champion")
     min_rows = 60 if trade_type == "SWING" else 30
     timeframe = "1d" if trade_type == "SWING" else "15m"
@@ -182,6 +192,68 @@ def evaluate_ticker(
             df_work['high'], df_work['low'], df_work['close'], window=14
         ).average_true_range()
         df_work['returns'] = df_work['close'].pct_change()
+
+        # Compute normalized time_of_day for intraday awareness
+        try:
+            dt_raw = df_work['datetime'] if 'datetime' in df_work.columns else df_work.index
+            dt_s = pd.to_datetime(dt_raw)
+            if isinstance(dt_s, pd.DatetimeIndex):
+                minutes_from_open = (dt_s.hour * 60 + dt_s.minute) - (9 * 60 + 15)
+                date_s = pd.Series(dt_s.date, index=df_work.index)
+            else:
+                minutes_from_open = (dt_s.dt.hour * 60 + dt_s.dt.minute) - (9 * 60 + 15)
+                date_s = pd.Series(dt_s.dt.date.values, index=df_work.index)
+            df_work['time_of_day'] = np.clip(minutes_from_open / 375.0, 0.0, 1.0)
+        except Exception:
+            df_work['time_of_day'] = 0.5
+            date_s = pd.Series(df_work.index.astype(str), index=df_work.index)
+            minutes_from_open = pd.Series(100, index=df_work.index)
+
+        # Structural Feature 1: Session VWAP Deviation (Normalized by ATR)
+        try:
+            typical_price = (df_work['high'] + df_work['low'] + df_work['close']) / 3.0
+            vol = df_work['volume'] if 'volume' in df_work.columns else pd.Series(1.0, index=df_work.index)
+            pv = typical_price * vol
+            cum_pv = pv.groupby(date_s).cumsum()
+            cum_vol = vol.groupby(date_s).cumsum()
+            vwap = cum_pv / np.maximum(cum_vol, 1.0)
+            df_work['vwap_deviation'] = np.clip((df_work['close'] - vwap) / np.maximum(df_work['atr'], 1e-4), -5.0, 5.0)
+        except Exception:
+            df_work['vwap_deviation'] = 0.0
+
+        # Structural Feature 2: Opening Range Breakout (ORB 30m: 09:15-09:45 IST)
+        try:
+            orb_mask = minutes_from_open < 30
+            orb_high = df_work['high'].where(orb_mask).groupby(date_s).transform('max')
+            orb_low = df_work['low'].where(orb_mask).groupby(date_s).transform('min')
+            df_work['orb_breakout'] = np.where(
+                orb_mask,
+                0.0,
+                np.where(df_work['close'] > orb_high, 1.0, np.where(df_work['close'] < orb_low, -1.0, 0.0))
+            )
+        except Exception:
+            df_work['orb_breakout'] = 0.0
+
+        # Structural Feature 3: Multi-Timeframe EMA Trend Alignment (9, 21, 50)
+        try:
+            ema9 = df_work['close'].ewm(span=9, adjust=False).mean()
+            ema21 = df_work['close'].ewm(span=21, adjust=False).mean()
+            ema50 = df_work['close'].ewm(span=50, adjust=False).mean()
+            df_work['ema_alignment'] = np.where(
+                (ema9 > ema21) & (ema21 > ema50),
+                1.0,
+                np.where((ema9 < ema21) & (ema21 < ema50), -1.0, 0.0)
+            )
+        except Exception:
+            df_work['ema_alignment'] = 0.0
+
+        # Structural Feature 4: Volume Surge Ratio (Current volume / 20-bar SMA)
+        try:
+            vol = df_work['volume'] if 'volume' in df_work.columns else pd.Series(1.0, index=df_work.index)
+            vol_sma20 = vol.rolling(20).mean()
+            df_work['volume_surge'] = np.clip(vol / np.maximum(vol_sma20, 1.0), 0.1, 10.0)
+        except Exception:
+            df_work['volume_surge'] = 1.0
 
         ml_df = df_work.dropna(subset=features).copy()
         if len(ml_df) < min_rows:
@@ -264,19 +336,66 @@ def evaluate_ticker(
     price_source = "Model Candle Close"
     price_timestamp = datetime.now().strftime("%H:%M:%S IST")
     price_is_fresh = False
+    quote_age_ms = None
+    quote_freshness = "UNAVAILABLE"
 
-    if not skip_enrichment:
+    permit_candle_close = bool(allow_candle_close or is_simulation or source in ("RESEARCH", "FORWARD_SIMULATION", "HISTORICAL_TEST"))
+
+    live_quote = None
+    if not permit_candle_close:
         try:
             from app.data.market_provider import get_live_quote_with_meta
-            quote_meta = get_live_quote_with_meta(ticker)
-            live_price = quote_meta.get("price")
-            if live_price is not None and float(live_price) > 0:
-                reference_price = float(live_price)
-                price_source = quote_meta.get("source_name", "Live Market Feed")
-                price_timestamp = quote_meta.get("timestamp", price_timestamp)
-                price_is_fresh = bool(quote_meta.get("is_realtime", False))
+            live_quote = get_live_quote_with_meta(ticker)
         except Exception as e:
             logger.warning(f"Could not retrieve live quote for {ticker}: {e}")
+
+    live_price = live_quote.get("price") if live_quote else None
+    live_vwap = None
+    live_open = None
+
+    # For intraday, retrieve live Upstox quotes (VWAP, Day's Open, LTP) strictly from in-memory cache
+    # to protect Upstox rate limits by never firing individual per-ticker HTTP calls in loops.
+    if trade_type == "INTRADAY" and not is_simulation:
+        try:
+            from app.data.upstox_provider import get_cached_upstox_quote
+            q_info = get_cached_upstox_quote(ticker)
+            if q_info:
+                live_vwap = float(q_info.get("vwap", 0.0)) or None
+                live_open = float(q_info.get("open", 0.0)) or None
+                if not live_price and q_info.get("ltp"):
+                    live_price = float(q_info["ltp"])
+                    price_source = "Upstox Real-Time Feed"
+                    price_is_fresh = True
+                    quote_freshness = "REAL_TIME"
+        except Exception as e:
+            logger.debug(f"[DecisionEngine] Cached quote lookup note for {ticker}: {e}")
+
+    if live_quote and quote_freshness != "REAL_TIME":
+        price_source = live_quote.get("source_name", "Live Market Feed")
+        price_timestamp = live_quote.get("timestamp", price_timestamp)
+        price_is_fresh = bool(live_quote.get("is_realtime", False))
+        quote_age_ms = live_quote.get("age_ms")
+        quote_freshness = live_quote.get("quote_freshness", "UNKNOWN")
+
+    # Enforce strict real-time pricing integrity: only accept REAL_TIME quotes from Upstox.
+    is_live_valid = (live_price is not None and float(live_price) > 0 and quote_freshness == "REAL_TIME")
+
+    if is_live_valid:
+        entry_price = float(live_price)
+        reference_price = float(live_price)
+    elif permit_candle_close:
+        entry_price = model_candle_close
+        reference_price = model_candle_close
+        price_source = "Model Candle Close"
+        price_is_fresh = True
+        quote_freshness = "CANDLE_CLOSE"
+    else:
+        # FAIL CLOSED: Do not substitute historical candle close for live recommendations!
+        entry_price = model_candle_close
+        reference_price = model_candle_close
+        price_source = "Data Feed Offline / Stale"
+        price_is_fresh = False
+        quote_freshness = "UNAVAILABLE"
 
     entry_price = reference_price
 
@@ -313,15 +432,17 @@ def evaluate_ticker(
     chronos_dict = None
 
     if not skip_enrichment:
-        # NLP / VADER
+        # NLP / FinBERT
         try:
             from app.analytics.nlp_engine import nlp_engine
             nlp_result = nlp_engine.analyze_ticker_news(ticker)
             nlp_sentiment = nlp_result.get('score', 0)
             nlp_headline = nlp_result.get('headline', '')
             pipeline["nlp_vader"] = True
+            pipeline["nlp_finbert"] = True
         except Exception:
             pipeline["nlp_vader"] = "OFFLINE"
+            pipeline["nlp_finbert"] = "OFFLINE"
 
         # F&O — only for intraday
         if trade_type == "INTRADAY":
@@ -354,6 +475,7 @@ def evaluate_ticker(
             pipeline["chronos"] = "OFFLINE"
     else:
         pipeline["nlp_vader"] = "SKIPPED"
+        pipeline["nlp_finbert"] = "SKIPPED"
         pipeline["fno"] = "SKIPPED"
         pipeline["timesfm"] = "SKIPPED"
         pipeline["chronos"] = "SKIPPED"
@@ -387,7 +509,13 @@ def evaluate_ticker(
     calib_meta = {"status": "uncalibrated"}
     try:
         from app.analytics.calibration import calibrator
-        calibrated_score, raw_score_out, calib_meta = calibrator.calibrate(adjusted_score)
+        calib_input_type = telemetry.get("calibrator_input_type", "HEURISTIC")
+        source_sha = telemetry.get("artifact_sha256")
+        calibrated_score, raw_score_out, calib_meta = calibrator.calibrate(
+            adjusted_score,
+            input_type=calib_input_type,
+            source_model_sha=source_sha
+        )
         pipeline["calibration"] = True
     except Exception:
         pipeline["calibration"] = "FAILED"
@@ -397,11 +525,68 @@ def evaluate_ticker(
     qualified = True
     rejection_reason = None
 
-    if qualification_threshold > 0 and calibrated_score < qualification_threshold:
+    # Macro Regime Directional Gating (Suppresses counter-trend traps)
+    from app.analytics.macro_engine import is_direction_permitted
+    dir_ok, dir_reason = is_direction_permitted(direction, trade_type=trade_type, macro_state=macro_state)
+    if not dir_ok:
         qualified = False
-        rejection_reason = f"Below threshold ({calibrated_score:.1f}% < {qualification_threshold:.1f}%)"
+        rejection_reason = f"MACRO_REGIME_BLOCK: {dir_reason}"
+
+    # Sector Momentum Gating (Suppresses sector counter-trend traps)
+    sec_ok, sec_reason, sec_telem = (True, "Sector check passed", {})
+    if trade_type == "INTRADAY" and not is_simulation:
+        try:
+            from app.analytics.sector_engine import SectorEngine
+            sec_ok, sec_reason, sec_telem = SectorEngine.is_sector_aligned(ticker, direction)
+            pipeline["sector_permitted"] = sec_ok
+            if not sec_ok:
+                qualified = False
+                rejection_reason = sec_reason
+        except Exception as e:
+            logger.debug(f"[DecisionEngine] Sector check note for {ticker}: {e}")
+
+    # Live Intraday VWAP & Day's Open Gating (Institutional Flow Confirmation)
+    if qualified and trade_type == "INTRADAY" and not permit_candle_close and not is_simulation:
+        dir_norm = direction.upper().strip()
+        is_long = dir_norm in ("BUY", "BULLISH", "LONG")
+        is_short = dir_norm in ("SELL", "BEARISH", "SHORT")
+
+        if is_long:
+            if live_vwap and entry_price < (live_vwap * 0.999):
+                qualified = False
+                rejection_reason = f"INTRADAY_VWAP_BELOW: Entry ₹{entry_price:.2f} is below live VWAP ₹{live_vwap:.2f}. Long setups require price >= VWAP."
+            elif live_open and entry_price < (live_open * 0.999):
+                qualified = False
+                rejection_reason = f"INTRADAY_OPEN_BELOW: Entry ₹{entry_price:.2f} is below Day's Open ₹{live_open:.2f}. Long setups require price >= Open."
+        elif is_short:
+            if live_vwap and entry_price > (live_vwap * 1.001):
+                qualified = False
+                rejection_reason = f"INTRADAY_VWAP_ABOVE: Entry ₹{entry_price:.2f} is above live VWAP ₹{live_vwap:.2f}. Short setups require price <= VWAP."
+            elif live_open and entry_price > (live_open * 1.001):
+                qualified = False
+                rejection_reason = f"INTRADAY_OPEN_ABOVE: Entry ₹{entry_price:.2f} is above Day's Open ₹{live_open:.2f}. Short setups require price <= Open."
+
+    if qualified:
+        if not is_live_valid and not permit_candle_close:
+            qualified = False
+            rejection_reason = "LIVE_PRICE_UNAVAILABLE_OR_STALE"
+        elif trade_type == "INTRADAY" and not permit_candle_close and not is_simulation:
+            # Dynamic Runway & Cutoff Gate: Validates remaining bars vs ATR distance to target
+            from app.analytics.trading_constants import evaluate_intraday_runway
+            runway_ok, runway_reason = evaluate_intraday_runway(
+                entry_price=entry_price,
+                target_price=tp1,
+                atr_15m=latest_atr
+            )
+            if not runway_ok:
+                qualified = False
+                rejection_reason = runway_reason
+        elif qualification_threshold > 0 and calibrated_score < qualification_threshold:
+            qualified = False
+            rejection_reason = f"Below threshold ({calibrated_score:.1f}% < {qualification_threshold:.1f}%)"
 
     pipeline["qualified"] = qualified
+    pipeline["macro_permitted"] = dir_ok
 
     # Compose score (compatible with existing usage)
     score_val = calibrated_score
@@ -424,7 +609,11 @@ def evaluate_ticker(
         "calibration_meta": calib_meta,
         "nlp_sentiment": nlp_sentiment,
         "nlp_headline": nlp_headline,
+        "atr": round(latest_atr, 2),
         "atr_pct": round(atr_pct_val, 2),
+        "rsi": round(latest_rsi, 1),
+        "adx": round(latest_adx, 1),
+        "macd_diff": round(latest_macd_diff, 2),
         "volume_ratio": round(vol_ratio, 2),
         "macro_regime": telemetry.get("macro_trend", macro_state.get("nifty_trend_short", "UNKNOWN")),
         "macro_aligned": telemetry.get("macro_aligned", True),
@@ -443,16 +632,25 @@ def evaluate_ticker(
         "price_source": price_source,
         "price_timestamp": price_timestamp,
         "price_is_fresh": price_is_fresh,
+        "entry_price_source": price_source,
+        "entry_price_timestamp": price_timestamp,
+        "entry_price_age_ms": quote_age_ms,
+        "quote_freshness": quote_freshness,
+        "vwap": live_vwap,
+        "day_open": live_open,
+        "sector": sec_telem.get("sector"),
+        "sector_pct_from_open": sec_telem.get("sector_pct_from_open"),
+        "sector_trend": sec_telem.get("sector_trend"),
     }
 
     try:
         from app.analytics.master_logger import MasterLogger
         MasterLogger.log_event(
             category="DECISION_ENGINE",
-            event_type="QUALIFIED",
-            message=f"{ticker} qualified with {calibrated_score:.1f}% confidence ({direction})",
+            event_type="QUALIFIED" if qualified else "REJECTED",
+            message=f"{ticker} {'qualified' if qualified else 'rejected'}: {rejection_reason or f'{calibrated_score:.1f}% confidence ({direction})'}",
             ticker=ticker,
-            details={"confidence": calibrated_score, "trade_type": trade_type, "entry": entry_price, "source": source, "is_alertable": is_alert}
+            details={"confidence": calibrated_score, "trade_type": trade_type, "entry": entry_price, "source": source, "is_alertable": is_alert, "qualified": qualified, "rejection_reason": rejection_reason}
         )
     except Exception:
         pass
@@ -488,6 +686,10 @@ def evaluate_ticker(
         price_source=price_source,
         price_timestamp=price_timestamp,
         price_is_fresh=price_is_fresh,
+        entry_price_source=price_source,
+        entry_price_timestamp=price_timestamp,
+        entry_price_age_ms=quote_age_ms,
+        quote_freshness=quote_freshness,
         atr_pct=round(atr_pct_val, 2),
         volume_ratio=round(vol_ratio, 2),
         rsi=latest_rsi,

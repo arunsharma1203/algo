@@ -9,7 +9,6 @@ import threading
 from datetime import datetime, time as dt_time, timedelta
 from typing import Dict, Any, List, Optional
 import pandas as pd
-import yfinance as yf
 
 from app.data.historical_data_layer import get_db_path
 from app.analytics.macro_engine import get_macro_regime
@@ -112,11 +111,7 @@ class DashboardIntelligenceService:
         now_str = datetime.now().strftime("%H:%M:%S")
 
         symbols = [t["symbol"] for t in tickers_map]
-        try:
-            df = yf.download(symbols, period="5d", interval="1d", progress=False, group_by="ticker")
-        except Exception as e:
-            logger.warning(f"Failed to batch download Indian indices: {e}")
-            df = None
+        df = None
 
         for item in tickers_map:
             sym = item["symbol"]
@@ -215,12 +210,7 @@ class DashboardIntelligenceService:
         now_str = datetime.now().strftime("%H:%M:%S")
         today_iso = datetime.now().strftime("%Y-%m-%d")
         symbols = [c["symbol"] for c in cues_config]
-
-        try:
-            df = yf.download(symbols, period="5d", interval="1d", progress=False, group_by="ticker")
-        except Exception as e:
-            logger.warning(f"Failed to batch download global cues: {e}")
-            df = None
+        df = None
 
         for item in cues_config:
             sym = item["symbol"]
@@ -404,7 +394,15 @@ class DashboardIntelligenceService:
             universe_size = universe_size_row[0] if universe_size_row else 511
             breadth_data["universe_size"] = universe_size
 
-            cur.execute("SELECT DISTINCT date FROM ohlcv ORDER BY date DESC LIMIT 2")
+            cur.execute("""
+                SELECT date, COUNT(DISTINCT ticker) as cnt
+                FROM ohlcv
+                WHERE (timeframe = '1d' OR timeframe IS NULL)
+                GROUP BY date
+                HAVING cnt >= 20
+                ORDER BY date DESC
+                LIMIT 2
+            """)
             dates = [r[0] for r in cur.fetchall()]
             
             if len(dates) >= 2:
@@ -416,17 +414,19 @@ class DashboardIntelligenceService:
                     curr.close as curr_close,
                     prev.close as prev_close
                 FROM ohlcv curr
-                JOIN ohlcv prev ON curr.ticker = prev.ticker AND prev.date = ?
-                WHERE curr.date = ?
+                JOIN ohlcv prev ON curr.ticker = prev.ticker AND prev.date = ? AND (prev.timeframe = '1d' OR prev.timeframe IS NULL)
+                WHERE curr.date = ? AND (curr.timeframe = '1d' OR curr.timeframe IS NULL)
                 """
                 df_ad = pd.read_sql_query(q, conn, params=(prev_date, latest_date))
                 
                 if not df_ad.empty:
+                    df_ad = df_ad.dropna(subset=["curr_close", "prev_close"]).copy()
                     df_ad["change"] = df_ad["curr_close"] - df_ad["prev_close"]
+                    df_ad = df_ad.dropna(subset=["change"])
                     adv = int((df_ad["change"] > 0).sum())
                     dec = int((df_ad["change"] < 0).sum())
                     unc = int((df_ad["change"] == 0).sum())
-                    evaluated_count = len(df_ad)
+                    evaluated_count = adv + dec + unc
                     missing_count = max(0, universe_size - evaluated_count)
                     coverage_pct = round(evaluated_count / universe_size * 100.0, 1) if universe_size > 0 else 0.0
                     
@@ -448,7 +448,7 @@ class DashboardIntelligenceService:
                     breadth_data["pct_declining"] = pct_dec
                     breadth_data["pct_unchanged"] = pct_unc
                     breadth_data["coverage_note"] = (
-                        f"Evaluated on {evaluated_count} active tickers with intraday session data "
+                        f"Evaluated on {evaluated_count} active tickers with daily session data "
                         f"({coverage_pct}% coverage of {universe_size} collected tickers)."
                     )
 
@@ -458,7 +458,7 @@ class DashboardIntelligenceService:
                     q_ma = f"""
                     SELECT ticker, close, date
                     FROM ohlcv
-                    WHERE ticker IN ({placeholders})
+                    WHERE ticker IN ({placeholders}) AND (timeframe = '1d' OR timeframe IS NULL)
                     ORDER BY ticker, date ASC
                     """
                     df_hist = pd.read_sql_query(q_ma, conn, params=evaluated_tickers)
@@ -549,12 +549,7 @@ class DashboardIntelligenceService:
         results = []
         now_str = datetime.now().strftime("%H:%M:%S")
         symbols = [s["symbol"] for s in sectors_config]
-
-        try:
-            df = yf.download(symbols, period="1mo", interval="1d", progress=False, group_by="ticker")
-        except Exception as e:
-            logger.warning(f"Failed to batch download sector indices: {e}")
-            df = None
+        df = None
 
         for item in sectors_config:
             sym = item["symbol"]
@@ -584,18 +579,6 @@ class DashboardIntelligenceService:
                     if len(close_s) >= 2:
                         ltp = float(close_s.iloc[-1])
                         prev = float(close_s.iloc[-2])
-                
-                # If historical download returned < 2 bars, query fast_info directly
-                if ltp is None or prev is None:
-                    try:
-                        ticker_obj = yf.Ticker(sym)
-                        f_ltp = getattr(ticker_obj.fast_info, "last_price", None)
-                        f_prev = getattr(ticker_obj.fast_info, "previous_close", None)
-                        if f_ltp is not None and f_prev is not None and f_prev > 0:
-                            ltp = float(f_ltp)
-                            prev = float(f_prev)
-                    except Exception as fe:
-                        logger.debug(f"fast_info fallback for {sym} failed: {fe}")
 
                 if ltp is not None and prev is not None and prev > 0:
                     chg_pct = (ltp - prev) / prev * 100.0
@@ -634,43 +617,58 @@ class DashboardIntelligenceService:
     def get_institutional_flows(cls) -> Dict[str, Any]:
         """
         FII / DII Institutional Flow Tracker.
-        Per strict rule: If verified API is unavailable, output 'Data unavailable'. Never fabricate.
+        Backed by official NSE disclosures via FiiDiiService.
         """
-        flows_data = {
-            "fii_latest_cr": None,
-            "fii_5d_cr": None,
-            "fii_20d_cr": None,
-            "dii_latest_cr": None,
-            "dii_5d_cr": None,
-            "dii_20d_cr": None,
-            "status": "UNAVAILABLE",
-            "message": "Official exchange institutional flow feed offline",
-            "source": "NSE / NSDL Official Filings",
-            "timestamp": datetime.now().isoformat()
-        }
-
         try:
-            conn = sqlite3.connect(get_db_path(), timeout=5.0)
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='institutional_flows'")
-            if cur.fetchone():
-                cur.execute("SELECT date, fii_net, dii_net FROM institutional_flows ORDER BY date DESC LIMIT 20")
-                rows = cur.fetchall()
-                if rows:
-                    latest = rows[0]
-                    flows_data["fii_latest_cr"] = round(float(latest[1]), 2)
-                    flows_data["dii_latest_cr"] = round(float(latest[2]), 2)
-                    flows_data["fii_5d_cr"] = round(sum(float(r[1]) for r in rows[:5]), 2)
-                    flows_data["dii_5d_cr"] = round(sum(float(r[2]) for r in rows[:5]), 2)
-                    flows_data["fii_20d_cr"] = round(sum(float(r[1]) for r in rows), 2)
-                    flows_data["dii_20d_cr"] = round(sum(float(r[2]) for r in rows), 2)
-                    flows_data["status"] = "FRESH"
-                    flows_data["message"] = f"Flows updated through {latest[0]}"
-            conn.close()
-        except Exception:
-            pass
+            from app.analytics.fii_dii_service import FiiDiiService
+            flow_data = FiiDiiService.get_latest_flows(limit=20)
+            history = flow_data.get("history", [])
+            latest = history[0] if history else {}
 
-        return flows_data
+            fii_latest = latest.get("fii_net")
+            dii_latest = latest.get("dii_net")
+            fii_5d = flow_data.get("multi_day_trend", {}).get("fii_5d_net")
+            dii_5d = flow_data.get("multi_day_trend", {}).get("dii_5d_net")
+            fii_20d = round(sum(item["fii_net"] for item in history), 2) if history else None
+            dii_20d = round(sum(item["dii_net"] for item in history), 2) if history else None
+
+            return {
+                "disclosure_date": flow_data.get("disclosure_date"),
+                "fii_latest_cr": fii_latest,
+                "dii_latest_cr": dii_latest,
+                "fii_gross_buy_cr": latest.get("fii_buy"),
+                "fii_gross_sell_cr": latest.get("fii_sell"),
+                "dii_gross_buy_cr": latest.get("dii_buy"),
+                "dii_gross_sell_cr": latest.get("dii_sell"),
+                "net_institutional_cr": flow_data.get("net_institutional_total"),
+                "formatted_net_total": flow_data.get("formatted_net_total"),
+                "fii_5d_cr": fii_5d,
+                "dii_5d_cr": dii_5d,
+                "fii_20d_cr": fii_20d,
+                "dii_20d_cr": dii_20d,
+                "status": "FRESH" if fii_latest is not None else "UNAVAILABLE",
+                "message": f"Official NSE Disclosures as of {flow_data.get('disclosure_date')}",
+                "source": "NSE Official Disclosures (Cash Market)",
+                "market_sentiment": flow_data.get("market_sentiment"),
+                "summary": flow_data.get("summary"),
+                "is_real_time": False,
+                "timestamp": datetime.now().isoformat(),
+                "history": history
+            }
+        except Exception as e:
+            return {
+                "disclosure_date": None,
+                "fii_latest_cr": None,
+                "fii_5d_cr": None,
+                "fii_20d_cr": None,
+                "dii_latest_cr": None,
+                "dii_5d_cr": None,
+                "dii_20d_cr": None,
+                "status": "UNAVAILABLE",
+                "message": f"Official flow feed offline ({str(e)})",
+                "source": "NSE / NSDL Official Filings",
+                "timestamp": datetime.now().isoformat()
+            }
 
     @classmethod
     def get_volatility_risk_radar(cls, indian_markets: List[Dict[str, Any]], global_cues: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -751,8 +749,7 @@ class DashboardIntelligenceService:
 
         for ticker in bellwethers:
             try:
-                stock = yf.Ticker(ticker)
-                raw_news = stock.news
+                raw_news = []
                 if not raw_news:
                     continue
 

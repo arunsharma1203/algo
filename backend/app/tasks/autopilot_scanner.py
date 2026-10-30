@@ -1,6 +1,6 @@
 import logging
 import sqlite3
-import yfinance as yf
+import time
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -40,7 +40,8 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", univer
     global _LAST_HEAT_ALERT_TIME
     from app.analytics.autonomous_bot import is_market_open, log_alert
     
-    now = datetime.now()
+    from app.analytics.trading_constants import get_ist_now, HARD_CUTOFF_TIME_IST
+    now = get_ist_now()
     logger.info(f"⏰ [Autopilot] Executing {session_name} scheduled sweep ({universe}) at {now.strftime('%H:%M:%S')} IST...")
     
     if not is_market_open():
@@ -49,6 +50,10 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", univer
 
     if not is_autopilot_enabled():
         logger.info(f"⏸️ [Autopilot] Autopilot mode is disabled in settings. Skipping sweep.")
+        return
+
+    if now.time() >= HARD_CUTOFF_TIME_IST:
+        logger.info(f"⏸️ [Autopilot] Past 13:45 IST cutoff ({now.strftime('%H:%M')} IST). Insufficient runway for intraday setups before 15:15 square-off. Skipping sweep.")
         return
 
     # 1. Portfolio Heat Safety & Risk Ceiling Check
@@ -76,8 +81,12 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", univer
         return
 
     # 2. Load Persisted Champion Ensemble
-    champion_model = ModelManager.load_champion('intraday')
-    champion_meta = ModelManager.get_champion_metadata('intraday')
+    res = ModelManager.load_champion('intraday')
+    if isinstance(res, tuple) and len(res) == 2:
+        champion_model, champion_meta = res
+    else:
+        champion_model = res
+        champion_meta = ModelManager.get_champion_metadata('intraday')
     if not champion_model:
         logger.error("[Autopilot] Aborting sweep: Champion intraday model could not be loaded.")
         return
@@ -110,7 +119,8 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", univer
         try:
             # Wrap per-ticker download so one bad ticker (e.g. TATAMOTORS.NS) doesn't kill the sweep
             try:
-                df = yf.download(ticker, period="60d", interval="15m", progress=False)
+                from app.data.data_gateway import DataGateway
+                df = DataGateway.get_ohlcv(ticker, timeframe="15m", period="60d", use_cache=True, fetch_incremental=True)
             except Exception as dl_err:
                 ticker_errors.append((ticker, f"Download error: {dl_err}"))
                 logger.warning(f"[Autopilot] Data acquisition failed for {ticker}: {dl_err}")
@@ -134,6 +144,7 @@ def run_scheduled_autopilot_sweep(session_name: str = "Morning Momentum", univer
                 macro_state=macro,
                 qualification_threshold=0.0,
                 skip_enrichment=False,
+                allow_candle_close=True
             )
 
             if not result.qualified:

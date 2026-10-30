@@ -52,13 +52,6 @@ export default function IntradayScanner() {
 
     try {
       let url = `${API_BASE}/ml/intraday-scan?universe=${selectedUniverse}`;
-      if (selectedUniverse === 'WATCHLIST' || selectedUniverse === 'ALL_COLLECTED') {
-        const savedWatchlist = localStorage.getItem('watchlist');
-        const customTickers = savedWatchlist ? JSON.parse(savedWatchlist).join(',') : '';
-        if (customTickers) {
-          url += `&custom_tickers=${customTickers}`;
-        }
-      }
       const response = await fetch(url);
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
@@ -216,14 +209,45 @@ export default function IntradayScanner() {
                       </span>
                       <h2 className="text-2xl font-black tracking-tight">{result.ticker}</h2>
                     </div>
-                    <div className="mt-1 flex items-baseline space-x-2">
+                    <div className="mt-1 flex flex-wrap items-baseline gap-2">
                       <span className="text-2xl font-black">{result.entry != null ? `₹${Number(result.entry).toFixed(2)}` : '-'}</span>
-                      <span className="text-xs text-purple-200 font-medium">
-                        {result.price_is_fresh ? '● Live LTP' : 'Reference Entry'}
-                      </span>
-                      {result.model_candle_close != null && (
-                        <span className="text-[10px] text-purple-300 font-mono">
-                          (Candle: ₹{Number(result.model_candle_close).toFixed(2)})
+                      {(() => {
+                        const isUpstox = result.entry_price_source === 'UPSTOX';
+                        const isRealTime = result.quote_freshness === 'REAL_TIME' || (result.price_is_fresh && isUpstox);
+                        const isDelayed = result.quote_freshness === 'DELAYED' || result.entry_price_source === 'YAHOO';
+                        
+                        let badgeColor = "bg-emerald-500/20 text-emerald-200 border-emerald-400/40";
+                        let label = "Live Market LTP";
+                        let subLabel = "";
+
+                        if (isRealTime) {
+                          badgeColor = "bg-emerald-500/25 text-emerald-200 border-emerald-400/50";
+                          label = "Upstox Real-Time LTP";
+                          if (result.entry_price_age_ms !== undefined && result.entry_price_age_ms !== null) {
+                            subLabel = ` (${result.entry_price_age_ms}ms)`;
+                          }
+                        } else if (isDelayed) {
+                          badgeColor = "bg-amber-500/25 text-amber-200 border-amber-400/50";
+                          label = "Yahoo (15m Delay)";
+                        } else if (result.price_is_fresh) {
+                          badgeColor = "bg-emerald-500/20 text-emerald-200 border-emerald-400/40";
+                          label = "Fresh Live LTP";
+                        } else {
+                          badgeColor = "bg-slate-500/25 text-slate-300 border-slate-400/40";
+                          label = "Reference Price";
+                        }
+
+                        return (
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold border ${badgeColor}`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${isRealTime ? 'bg-emerald-400 animate-pulse' : isDelayed ? 'bg-amber-400' : 'bg-slate-400'}`}></span>
+                            {label}{subLabel}
+                          </span>
+                        );
+                      })()}
+
+                      {result.model_candle_close != null && Math.abs(Number(result.entry) - Number(result.model_candle_close)) > 0.01 && (
+                        <span className="text-[10px] text-purple-200/80 font-mono bg-purple-900/30 px-1.5 py-0.5 rounded border border-purple-400/20" title="Model Candle Close vs Authoritative Entry Price">
+                          Candle: ₹{Number(result.model_candle_close).toFixed(2)} (Δ {Number(result.entry) > Number(result.model_candle_close) ? '+' : ''}{(Number(result.entry) - Number(result.model_candle_close)).toFixed(2)})
                         </span>
                       )}
                     </div>

@@ -53,11 +53,13 @@ class QuantRiskEngine:
 
         returns = closed_df['profit_pct'].values
         
-        # P&L calculations
         gross_pnl = float(np.sum(returns))
         # Incorporate transaction friction (slippage + statutory taxes ~0.10% per round trip)
         friction_per_trade = 0.10
         net_pnl = float(gross_pnl - (total_closed * friction_per_trade))
+        clamped_returns = np.clip(returns, -100.0, None)
+        compounded_growth = float(np.prod(1.0 + (clamped_returns - friction_per_trade) / 100.0) - 1.0) * 100.0 if len(returns) > 0 else 0.0
+        avg_trade_pnl = round(float(np.mean(returns - friction_per_trade)), 2) if len(returns) > 0 else 0.0
 
         wins = returns[returns > 0]
         losses = returns[returns < 0]
@@ -148,6 +150,9 @@ class QuantRiskEngine:
             "total_open": total_open,
             "gross_pnl_pct": round(gross_pnl, 2),
             "net_pnl_pct": round(net_pnl, 2),
+            "cumulative_return_points": round(net_pnl, 2),
+            "compounded_growth_pct": round(compounded_growth, 2),
+            "avg_trade_pnl_pct": avg_trade_pnl,
             "win_rate_pct": round(win_rate, 2),
             "loss_rate_pct": round(loss_rate, 2),
             "profit_factor": round(profit_factor, 2) if profit_factor != float('inf') else "∞ (No Losses)",
@@ -328,6 +333,9 @@ class QuantRiskEngine:
             "total_open": total_open,
             "gross_pnl_pct": 0.0,
             "net_pnl_pct": 0.0,
+            "cumulative_return_points": 0.0,
+            "compounded_growth_pct": 0.0,
+            "avg_trade_pnl_pct": 0.0,
             "win_rate_pct": 0.0,
             "loss_rate_pct": 0.0,
             "profit_factor": "INSUFFICIENT DATA",

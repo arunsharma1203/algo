@@ -2,7 +2,7 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 from app.analytics.foundation_models.base import TimeSeriesFoundationModel, ForecastResult
 from app.data.validator import DataValidationError
@@ -24,50 +24,47 @@ class ChronosAdapter(TimeSeriesFoundationModel):
         self._init_error = None
 
     def load_model(self) -> bool:
-        """Attempts to load Chronos-2 from official repository."""
+        """Attempts to load genuine Chronos-2 from Amazon official repository."""
         if self._is_loaded and self.pipeline is not None:
             return True
 
         try:
             import torch
-            if torch.cuda.is_available():
-                self._device = "cuda"
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
                 self._device = "mps"
+            elif torch.cuda.is_available():
+                self._device = "cuda"
             else:
                 self._device = "cpu"
 
             try:
-                # Try Chronos2Pipeline first (Chronos-2)
                 from chronos import Chronos2Pipeline
+                logger.info(f"Loading genuine Chronos-2 checkpoint ({self.model_version})...")
                 self.pipeline = Chronos2Pipeline.from_pretrained(
                     self.model_version,
                     device_map=self._device,
-                    torch_dtype=torch.bfloat16 if self._device == "cuda" else torch.float32
+                    dtype=torch.float32
                 )
                 self._is_loaded = True
-                logger.info(f"Chronos-2 ({self.model_version}) loaded successfully on {self._device}.")
+                self._checkpoint_info = {
+                    "checkpoint": self.model_version,
+                    "architecture": "Chronos2Pipeline",
+                    "device": self._device,
+                    "engine": "genuine-chronos-2"
+                }
+                logger.info(f"Genuine Chronos-2 ({self.model_version}) loaded successfully on {self._device}.")
                 return True
-            except (ImportError, Exception):
-                try:
-                    # Fallback to standard ChronosPipeline / ChronosBolt
-                    from chronos import ChronosPipeline
-                    self.pipeline = ChronosPipeline.from_pretrained(
-                        "amazon/chronos-bolt-small",
-                        device_map=self._device,
-                        torch_dtype=torch.float32
-                    )
-                    self._is_loaded = True
-                    logger.info(f"Chronos-Bolt loaded successfully on {self._device}.")
-                    return True
-                except Exception as e2:
-                    self._init_error = f"Chronos loading: {e2}"
-                    self._is_loaded = False
-                    return False
+            except ImportError as ie:
+                self._init_error = f"chronos package not installed: {ie}"
+                self._is_loaded = False
+                logger.warning(self._init_error)
+                return False
 
         except Exception as e:
-            self._init_error = str(e)
+            self._init_error = f"Chronos-2 loading failed: {e}"
             self._is_loaded = False
+            logger.error(self._init_error)
+            return False
             logger.warning(f"Chronos loading warning: {e}")
             return False
 
@@ -162,19 +159,30 @@ class ChronosAdapter(TimeSeriesFoundationModel):
         if self.is_available() and self.pipeline is not None:
             try:
                 import torch
-                context_tensor = torch.tensor(prices[-512:], dtype=torch.float32).unsqueeze(0)
+                context_tensor = torch.tensor(prices[-512:], dtype=torch.float32)
                 
                 # Predict quantiles: 10th (downside), 50th (median), 90th (upside)
                 quantiles, mean_forecast = self.pipeline.predict_quantiles(
-                    context=context_tensor,
+                    inputs=[context_tensor],
                     prediction_length=horizon_bars,
                     quantile_levels=[0.1, 0.5, 0.9]
                 )
                 
-                q10 = float(quantiles[0, :, 0][-1])
-                q50 = float(quantiles[0, :, 1][-1])
-                q90 = float(quantiles[0, :, 2][-1])
-                expected_price = float(mean_forecast[0][-1]) if mean_forecast is not None else q50
+                q_tensor = quantiles[0]  # shape: (1, horizon, 3) or (horizon, 3)
+                if q_tensor.dim() == 3:
+                    q_tensor = q_tensor[0]
+                
+                q10 = float(q_tensor[-1, 0])
+                q50 = float(q_tensor[-1, 1])
+                q90 = float(q_tensor[-1, 2])
+                
+                if mean_forecast is not None and len(mean_forecast) > 0:
+                    mf_tensor = mean_forecast[0]
+                    if mf_tensor.dim() == 2:
+                        mf_tensor = mf_tensor[0]
+                    expected_price = float(mf_tensor[-1])
+                else:
+                    expected_price = q50
 
                 expected_ret = ((expected_price - current_price) / current_price) * 100.0
                 median_ret = ((q50 - current_price) / current_price) * 100.0
@@ -186,7 +194,7 @@ class ChronosAdapter(TimeSeriesFoundationModel):
                 uncertainty = ((q90 - q10) / current_price) * 100.0
 
                 direction = "BULLISH" if median_ret > 0.5 else ("BEARISH" if median_ret < -0.5 else "NEUTRAL")
-                forecast_path = [float(p) for p in quantiles[0, :, 1]]
+                forecast_path = [float(p) for p in q_tensor[:, 1]]
 
                 return ForecastResult(
                     model_name="chronos_2",
@@ -208,7 +216,7 @@ class ChronosAdapter(TimeSeriesFoundationModel):
                 )
 
             except Exception as e:
-                logger.warning(f"Chronos inference runtime note for {symbol}: {e}")
+                logger.warning(f"Chronos-2 inference runtime error for {symbol}: {e}")
                 return ForecastResult(
                     model_name="chronos_2",
                     model_version=self.model_version,
@@ -231,8 +239,69 @@ class ChronosAdapter(TimeSeriesFoundationModel):
             horizon_bars=horizon_bars,
             expected_return_pct=0.0,
             status="unavailable",
-            error_message="Chronos model engine is currently offline/unloaded."
+            error_message="Chronos-2 model engine is currently offline/unloaded."
         )
+
+    def forecast_batch(
+        self,
+        batch_inputs: List[Tuple[str, np.ndarray]],
+        horizon_bars: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Executes fast vectorized batch inference for multiple series in a single forward pass.
+        batch_inputs: List of (identifier, price_array)
+        """
+        if not self.is_available():
+            raise RuntimeError("Chronos-2 model is not loaded.")
+
+        import torch
+        inputs_list = []
+        current_prices = []
+        identifiers = []
+
+        for ident, p_arr in batch_inputs:
+            p_clean = np.asarray(p_arr, dtype=np.float32)
+            context = p_clean[-512:] if len(p_clean) > 512 else p_clean
+            inputs_list.append(torch.tensor(context, dtype=torch.float32))
+            current_prices.append(float(context[-1]))
+            identifiers.append(ident)
+
+        quantiles, mean_forecast = self.pipeline.predict_quantiles(
+            inputs=inputs_list,
+            prediction_length=horizon_bars,
+            quantile_levels=[0.1, 0.5, 0.9]
+        )
+
+        results = []
+        for i, ident in enumerate(identifiers):
+            q_tensor = quantiles[i]
+            if q_tensor.dim() == 3:
+                q_tensor = q_tensor[0]
+            q10 = float(q_tensor[-1, 0])
+            q50 = float(q_tensor[-1, 1])
+            q90 = float(q_tensor[-1, 2])
+            curr = current_prices[i]
+            
+            exp_ret = ((q50 - curr) / curr) * 100.0 if curr > 0 else 0.0
+            uncertainty = ((q90 - q10) / curr) * 100.0 if curr > 0 else 0.0
+            downside = abs(min(0.0, ((q10 - curr) / curr) * 100.0)) if curr > 0 else 0.0
+            upside = max(0.0, ((q90 - curr) / curr) * 100.0) if curr > 0 else 0.0
+            
+            results.append({
+                "identifier": ident,
+                "current_price": curr,
+                "expected_return_pct": round(exp_ret, 4),
+                "median_return_pct": round(exp_ret, 4),
+                "lower_quantile_pct": round(((q10 - curr) / curr) * 100.0, 4) if curr > 0 else 0.0,
+                "upper_quantile_pct": round(((q90 - curr) / curr) * 100.0, 4) if curr > 0 else 0.0,
+                "uncertainty_score": round(uncertainty, 4),
+                "downside_risk_pct": round(downside, 4),
+                "upside_potential_pct": round(upside, 4),
+                "forecast_path": [float(p) for p in q_tensor[:, 1]],
+                "model_version": self.model_version
+            })
+
+        return results
 
     def get_model_info(self) -> Dict[str, Any]:
         return {
@@ -244,6 +313,7 @@ class ChronosAdapter(TimeSeriesFoundationModel):
             "supported_timeframes": ["15m", "1d"],
             "max_context_length": 512,
             "output_type": "probabilistic_quantiles",
+            "checkpoint_info": getattr(self, "_checkpoint_info", {}),
             "init_error": self._init_error
         }
 

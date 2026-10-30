@@ -1,7 +1,11 @@
 import sqlite3
 import os
-from typing import Dict, List, Any, Optional
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional, Tuple, Set
 from app.api.intraday_ml import INDIAN_STOCK_UNIVERSE
+
+logger = logging.getLogger(__name__)
 
 # 1. Production Live Universe (52 Large-Cap & Liquid Momentum Equities)
 # PRESERVED UNTOUCHED FOR LIVE SCANNING
@@ -48,6 +52,87 @@ if os.path.exists(NIFTY_500_JSON_PATH):
 else:
     NIFTY_500_UNIVERSE = list(RESEARCH_100_UNIVERSE)
 
+# 5a. NSE 1000 Universe (1,000 Liquid Equities from Nifty Total Market + Active Equities)
+NSE_1000_JSON_PATH = os.path.join(os.path.dirname(__file__), "nse1000_tickers.json")
+if os.path.exists(NSE_1000_JSON_PATH):
+    try:
+        import json
+        with open(NSE_1000_JSON_PATH, "r") as f:
+            NSE_1000_UNIVERSE = json.load(f)
+    except Exception:
+        NSE_1000_UNIVERSE = list(NIFTY_500_UNIVERSE)
+else:
+    NSE_1000_UNIVERSE = list(NIFTY_500_UNIVERSE)
+
+def resolve_nse_1000(force_refresh: bool = False) -> List[str]:
+    """
+    Dynamically resolves the authoritative NSE 1,000 equity universe.
+    Uses cached nse1000_tickers.json if available and fresh.
+    Can refresh online directly from official NSE constituent archives.
+    """
+    global NSE_1000_UNIVERSE
+    if not force_refresh and NSE_1000_UNIVERSE and len(NSE_1000_UNIVERSE) == 1000:
+        return list(NSE_1000_UNIVERSE)
+
+    if os.path.exists(NSE_1000_JSON_PATH) and not force_refresh:
+        try:
+            import json
+            with open(NSE_1000_JSON_PATH, "r") as f:
+                loaded = json.load(f)
+            if len(loaded) == 1000:
+                NSE_1000_UNIVERSE = loaded
+                return list(NSE_1000_UNIVERSE)
+        except Exception:
+            pass
+
+    # Online dynamic discovery from official NSE archives
+    try:
+        import urllib.request, csv, io, json
+        headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
+
+        req = urllib.request.Request('https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv', headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            tot_csv = resp.read().decode('utf-8')
+        reader = csv.reader(io.StringIO(tot_csv))
+        header = [h.strip() for h in next(reader)]
+        sym_idx = header.index('Symbol')
+        tot_symbols = [r[sym_idx].strip() + '.NS' for r in reader if len(r) > sym_idx and r[sym_idx].strip()]
+
+        req2 = urllib.request.Request('https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv', headers=headers)
+        with urllib.request.urlopen(req2, timeout=10) as resp:
+            eq_csv = resp.read().decode('utf-8')
+        reader2 = csv.reader(io.StringIO(eq_csv))
+        header2 = [h.strip() for h in next(reader2)]
+        sym_idx2 = header2.index('SYMBOL')
+        ser_idx2 = header2.index('SERIES')
+        eq_symbols = [r[sym_idx2].strip() + '.NS' for r in reader2 if len(r) > max(sym_idx2, ser_idx2) and r[ser_idx2].strip() == 'EQ']
+
+        seen = set()
+        ordered_1000 = []
+        for s in tot_symbols:
+            if s not in seen and not s.startswith(('CACHE_', 'TEMP_', 'DUMMY_')):
+                seen.add(s)
+                ordered_1000.append(s)
+            if len(ordered_1000) == 1000:
+                break
+        if len(ordered_1000) < 1000:
+            for s in eq_symbols:
+                if s not in seen and not s.startswith(('CACHE_', 'TEMP_', 'DUMMY_')):
+                    seen.add(s)
+                    ordered_1000.append(s)
+                if len(ordered_1000) == 1000:
+                    break
+
+        if len(ordered_1000) == 1000:
+            with open(NSE_1000_JSON_PATH, "w") as f:
+                json.dump(ordered_1000, f, indent=2)
+            NSE_1000_UNIVERSE = ordered_1000
+            return list(NSE_1000_UNIVERSE)
+    except Exception as e:
+        logger.warning(f"[UniverseConfig] Online NSE 1000 resolution failed ({e}). Using local fallback.")
+
+    return list(NSE_1000_UNIVERSE)
+
 # 5b. Autopilot Priority Universe (20 High-Volume Liquid Equities)
 # INTENTIONALLY A SMALLER OPERATIONAL POOL FOR HIGH-FREQUENCY AUTONOMOUS EXECUTION
 AUTOPILOT_PRIORITY_20_UNIVERSE = [
@@ -57,13 +142,50 @@ AUTOPILOT_PRIORITY_20_UNIVERSE = [
     "BAJFINANCE.NS", "JSWSTEEL.NS", "TATASTEEL.NS", "POWERGRID.NS", "NTPC.NS"
 ]
 
+# 5c. Liquid Sector Universes
+BANK_NIFTY_UNIVERSE = [
+    "HDFCBANK.NS", "ICICIBANK.NS", "SBIN.NS", "KOTAKBANK.NS", "AXISBANK.NS",
+    "INDUSINDBK.NS", "BANKBARODA.NS", "PNB.NS", "AUBANK.NS", "FEDERALBNK.NS",
+    "BANDHANBNK.NS", "IDFCFIRSTB.NS"
+]
+
+NIFTY_IT_UNIVERSE = [
+    "TCS.NS", "INFY.NS", "HCLTECH.NS", "WIPRO.NS", "TECHM.NS",
+    "LTIM.NS", "PERSISTENT.NS", "COFORGE.NS", "MPHASIS.NS", "LTTS.NS"
+]
+
 # 6. Preset Definitions
 UNIVERSE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "WATCHLIST": {
+        "name": "User Custom Watchlist (Backend SQLite)",
+        "tickers": [], # Dynamically loaded from user_watchlist table
+        "description": "User's personal operational watchlist stored authoritatively in local backend SQLite database.",
+        "survivorship_bias": "USER DEFINED"
+    },
+    "BANK_NIFTY": {
+        "name": "NIFTY Bank (12 Liquid Banking Heavyweights)",
+        "tickers": BANK_NIFTY_UNIVERSE,
+        "description": "The liquid benchmark banking constituents of the Nifty Bank index.",
+        "survivorship_bias": "LOW-MODERATE"
+    },
+    "NIFTY_IT": {
+        "name": "NIFTY IT (10 Technology Leaders)",
+        "tickers": NIFTY_IT_UNIVERSE,
+        "description": "The premier technology leaders and IT software export constituents.",
+        "survivorship_bias": "LOW-MODERATE"
+    },
     "NIFTY_500": {
         "name": "NIFTY 500 (500 Stocks - Broad Market)",
         "tickers": NIFTY_500_UNIVERSE,
         "description": "The 500 top liquid constituents of the NSE Nifty 500 index covering 95% of Indian equity market cap.",
         "survivorship_bias": "LOW-MODERATE — Broad index constituents."
+    },
+    "NIFTY_500_ESTABLISHED": {
+        "name": "NIFTY 500 Established Equities (Dynamic >=1200 Bars)",
+        "tickers": [], # Dynamically resolved from canonical SQLite via resolve_nifty_500_established()
+        "min_bars": 1200,
+        "description": "The dynamic universe of NIFTY 500 equities with >= 1,200 daily bars, strictly positive closing prices, and fresh data in canonical SQLite.",
+        "survivorship_bias": "LOW-MODERATE — Established broad-market constituents with mature historical depth."
     },
     "BENCHMARK_5": {
         "name": "Production Training Benchmark (5 Heavyweights)",
@@ -95,6 +217,12 @@ UNIVERSE_PRESETS: Dict[str, Dict[str, Any]] = {
         "description": "Broad 100-stock liquid universe for multi-asset research and portfolio walk-forward testing.",
         "survivorship_bias": "MODERATE-HIGH — Retrospective selection of current 100 liquid stocks."
     },
+    "ALL_DATABASE_STOCKS": {
+        "name": "All Database Stocks (Authoritative Local DB)",
+        "tickers": [], # Dynamically populated from SQLite database
+        "description": "All unique valid stocks available in the authoritative local SQLite database meeting minimum bar criteria.",
+        "survivorship_bias": "NONE / CANONICAL DB — All validated local equity assets."
+    },
     "ALL_117": {
         "name": "All Locally Available Equities (Dynamic Local DB - Legacy Alias)",
         "tickers": [], # Dynamically populated from database
@@ -107,19 +235,231 @@ UNIVERSE_PRESETS: Dict[str, Dict[str, Any]] = {
         "description": "Comprehensive union of Nifty 500 constituents, custom watchlists, and all cached local database equities.",
         "survivorship_bias": "MINIMAL — Maximum available Indian equity breadth."
     },
+    "FNO_UNIVERSE": {
+        "name": "NSE Derivatives Universe (Authoritative F&O Equities)",
+        "tickers": [], # Dynamically discovered via resolve_fno_universe()
+        "description": "The authoritative dynamic universe of Indian equities permitted by SEBI and NSE for trading in the F&O segment.",
+        "survivorship_bias": "MINIMAL — Authoritative active NSE F&O segment constituents."
+    },
     "CUSTOM": {
         "name": "Custom User-Selected Universe",
         "tickers": [],
         "description": "User-defined custom basket of stocks.",
         "survivorship_bias": "USER DEFINED"
+    },
+    "NSE_1000": {
+        "name": "NSE 1,000 (1,000 Stocks - Broad Market)",
+        "tickers": NSE_1000_UNIVERSE,
+        "description": "The 1,000 top liquid constituents of the NSE Indian equity universe (Nifty Total Market + active equities).",
+        "survivorship_bias": "LOW — Broad multi-cap representation across 98% of Indian equity turnover."
+    },
+    "NIFTY_1000": {
+        "name": "NSE 1,000 (1,000 Stocks - Broad Market)",
+        "tickers": NSE_1000_UNIVERSE,
+        "description": "Alias for NSE_1000.",
+        "survivorship_bias": "LOW"
     }
 }
+
+def resolve_all_database_stocks(
+    timeframe: str = "1d",
+    min_bars: int = 60
+) -> Dict[str, Any]:
+    """
+    Authoritative dynamic universe resolver: discovers ALL unique, valid stocks
+    in the authoritative local SQLite database (ohlcv table).
+    
+    Returns:
+      {
+        "discovered_count": int,
+        "valid_count": int,
+        "scan_ready_count": int,
+        "scan_ready_symbols": List[str],
+        "valid_symbols": List[str],
+        "insufficient_bar_symbols": List[str],
+        "invalid_symbols": List[str]
+      }
+    """
+    try:
+        from app.data.database import get_canonical_db_path
+        db_path = get_canonical_db_path()
+        if not os.path.exists(db_path):
+            return {
+                "discovered_count": len(LIVE_UNIVERSE),
+                "valid_count": len(LIVE_UNIVERSE),
+                "scan_ready_count": len(LIVE_UNIVERSE),
+                "scan_ready_symbols": list(LIVE_UNIVERSE),
+                "valid_symbols": list(LIVE_UNIVERSE),
+                "insufficient_bar_symbols": [],
+                "invalid_symbols": []
+            }
+
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        cur = conn.cursor()
+        if timeframe == "1d":
+            query = "SELECT ticker, COUNT(*) FROM ohlcv WHERE timeframe = '1d' OR timeframe IS NULL GROUP BY ticker ORDER BY ticker"
+        else:
+            query = f"SELECT ticker, COUNT(*) FROM ohlcv WHERE timeframe = '{timeframe}' GROUP BY ticker ORDER BY ticker"
+        cur.execute(query)
+        rows = cur.fetchall()
+        conn.close()
+
+        discovered_count = len(rows)
+        valid_symbols = []
+        scan_ready_symbols = []
+        insufficient_symbols = []
+        invalid_symbols = []
+
+        for raw_ticker, cnt in rows:
+            ok, canonical_sym, err = validate_ticker(raw_ticker)
+            if ok:
+                valid_symbols.append(canonical_sym)
+                if cnt >= min_bars:
+                    scan_ready_symbols.append(canonical_sym)
+                else:
+                    insufficient_symbols.append(canonical_sym)
+            else:
+                invalid_symbols.append(raw_ticker)
+
+        # Deduplicate preserving order
+        valid_symbols = list(dict.fromkeys(valid_symbols))
+        scan_ready_symbols = list(dict.fromkeys(scan_ready_symbols))
+
+        return {
+            "discovered_count": discovered_count,
+            "valid_count": len(valid_symbols),
+            "scan_ready_count": len(scan_ready_symbols),
+            "scan_ready_symbols": scan_ready_symbols,
+            "valid_symbols": valid_symbols,
+            "insufficient_bar_symbols": insufficient_symbols,
+            "invalid_symbols": invalid_symbols
+        }
+    except Exception as e:
+        logger.error(f"[UniverseConfig] Failed resolving all database stocks: {e}")
+        return {
+            "discovered_count": len(LIVE_UNIVERSE),
+            "valid_count": len(LIVE_UNIVERSE),
+            "scan_ready_count": len(LIVE_UNIVERSE),
+            "scan_ready_symbols": list(LIVE_UNIVERSE),
+            "valid_symbols": list(LIVE_UNIVERSE),
+            "insufficient_bar_symbols": [],
+            "invalid_symbols": []
+        }
+
+def resolve_nifty_500_established(
+    min_bars: int = 1200,
+    freshness_cutoff_days: int = 15
+) -> Dict[str, Any]:
+    """
+    Dynamically discovers established NIFTY 500 equities from the canonical SQLite database.
+    Requires:
+      - >= min_bars daily trading bars (default 1,200 bars = ~5 years)
+      - Fresh data (latest bar within freshness_cutoff_days of canonical max date)
+      - Strictly positive closing prices (min_close > 0)
+      - Valid exchange ticker syntax and universe registration
+    
+    Returns:
+      {
+        "symbols": List[str], # sorted list of eligible tickers e.g. ["RELIANCE.NS", ...]
+        "eligible_count": int,
+        "rejected_count": int,
+        "rejections": Dict[str, str], # ticker -> rejection reason
+        "min_bars": int,
+        "freshness_cutoff": str,
+        "overall_max_date": str
+      }
+    """
+    try:
+        from app.data.database import get_canonical_db_path
+        db_path = get_canonical_db_path()
+        if not os.path.exists(db_path):
+            return {
+                "symbols": list(LIVE_UNIVERSE),
+                "eligible_count": len(LIVE_UNIVERSE),
+                "rejected_count": 0,
+                "rejections": {},
+                "min_bars": min_bars,
+                "freshness_cutoff": "",
+                "overall_max_date": ""
+            }
+
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        cur = conn.cursor()
+
+        cur.execute("SELECT MAX(date) FROM ohlcv WHERE timeframe = '1d' OR timeframe IS NULL")
+        row = cur.fetchone()
+        overall_max_str = str(row[0]) if row and row[0] else ""
+
+        cutoff_str = ""
+        if overall_max_str:
+            try:
+                dt_max = datetime.fromisoformat(overall_max_str.split()[0])
+                cutoff_dt = dt_max - timedelta(days=freshness_cutoff_days)
+                cutoff_str = cutoff_dt.strftime("%Y-%m-%d")
+            except Exception:
+                cutoff_str = ""
+
+        cur.execute("""
+            SELECT ticker, COUNT(*), MIN(date), MAX(date), MIN(close)
+            FROM ohlcv
+            WHERE timeframe = '1d' OR timeframe IS NULL
+            GROUP BY ticker
+            ORDER BY ticker
+        """)
+        rows = cur.fetchall()
+        conn.close()
+
+        eligible_symbols = []
+        rejections = {}
+
+        for raw_ticker, cnt, min_d, max_d, min_c in rows:
+            ok, canonical_sym, err = validate_ticker(raw_ticker)
+            if not ok:
+                rejections[raw_ticker] = f"INVALID_SYMBOL ({err})"
+                continue
+
+            if cnt < min_bars:
+                rejections[canonical_sym] = f"INSUFFICIENT_BARS ({cnt} < {min_bars})"
+                continue
+
+            if cutoff_str and max_d and str(max_d).split()[0] < cutoff_str:
+                rejections[canonical_sym] = f"STALE_DATA (latest {max_d} < cutoff {cutoff_str})"
+                continue
+
+            if min_c is None or min_c <= 0:
+                rejections[canonical_sym] = f"NON_POSITIVE_CLOSE (min={min_c})"
+                continue
+
+            eligible_symbols.append(canonical_sym)
+
+        eligible_symbols = sorted(list(dict.fromkeys(eligible_symbols)))
+
+        return {
+            "symbols": eligible_symbols,
+            "eligible_count": len(eligible_symbols),
+            "rejected_count": len(rejections),
+            "rejections": rejections,
+            "min_bars": min_bars,
+            "freshness_cutoff": cutoff_str,
+            "overall_max_date": overall_max_str
+        }
+    except Exception as e:
+        logger.error(f"[UniverseConfig] Failed resolving NIFTY 500 established universe: {e}")
+        return {
+            "symbols": list(LIVE_UNIVERSE),
+            "eligible_count": len(LIVE_UNIVERSE),
+            "rejected_count": 0,
+            "rejections": {"ERROR": str(e)},
+            "min_bars": min_bars,
+            "freshness_cutoff": "",
+            "overall_max_date": ""
+        }
 
 def get_available_db_tickers() -> List[str]:
     """Retrieves all distinct tickers with daily data in the local canonical database."""
     try:
-        from app.data.historical_data_layer import get_db_path
-        db_path = get_db_path()
+        from app.data.database import get_canonical_db_path
+        db_path = get_canonical_db_path()
         if not os.path.exists(db_path):
             return list(LIVE_UNIVERSE)
         conn = sqlite3.connect(db_path, timeout=5.0)
@@ -134,6 +474,61 @@ def get_available_db_tickers() -> List[str]:
 def get_universe(name: str = "BENCHMARK_5", custom_tickers: Optional[List[str]] = None) -> Dict[str, Any]:
     """Retrieves universe configuration and survivorship bias disclosures."""
     clean_name = name.strip().upper()
+    if clean_name in ("ALL_DATABASE_STOCKS", "ALL_DB", "DATABASE_ALL"):
+        res = resolve_all_database_stocks(timeframe="1d", min_bars=60)
+        symbols = res["scan_ready_symbols"] if res["scan_ready_symbols"] else res["valid_symbols"]
+        return {
+            "name": f"All Database Stocks ({res['scan_ready_count']} Scan Ready / {res['discovered_count']} Discovered)",
+            "tickers": symbols,
+            "discovered_count": res["discovered_count"],
+            "valid_count": res["valid_count"],
+            "scan_ready_count": res["scan_ready_count"],
+            "description": "All unique valid stocks available in the authoritative local SQLite database meeting minimum bar criteria.",
+            "survivorship_bias": "NONE / CANONICAL DB — All validated local equity assets."
+        }
+    if clean_name in ("WATCHLIST", "USER_WATCHLIST"):
+        if custom_tickers:
+            tickers = [t if t.endswith(('.NS', '.BO')) else f"{t}.NS" for t in custom_tickers if t]
+        else:
+            try:
+                from app.api.watchlist import get_persisted_watchlist_tickers
+                tickers = get_persisted_watchlist_tickers()
+            except Exception:
+                tickers = list(BENCHMARK_5_UNIVERSE)
+        return {
+            "name": f"User Watchlist ({len(tickers)} Symbols - Backend SQLite)",
+            "tickers": tickers,
+            "description": "User's personal operational watchlist stored authoritatively in local backend SQLite database.",
+            "survivorship_bias": "USER DEFINED"
+        }
+    if clean_name in ("NIFTY_BANK", "BANK_NIFTY"):
+        return UNIVERSE_PRESETS["BANK_NIFTY"]
+    if clean_name in ("NIFTY_IT", "IT"):
+        return UNIVERSE_PRESETS["NIFTY_IT"]
+    if clean_name in ("FNO_UNIVERSE", "FNO", "NSE_FNO"):
+        from app.qlib_engine.fno_universe import resolve_fno_universe
+        res = resolve_fno_universe()
+        symbols = [f"{s}.NS" for s in res.get("symbols", [])]
+        return {
+            "name": f"NSE Derivatives Universe ({res.get('discovered_count', len(symbols))} Underlyings)",
+            "tickers": symbols,
+            "discovered_count": res.get("discovered_count", len(symbols)),
+            "source": res.get("source", "NSE_OFFICIAL"),
+            "description": "The authoritative dynamic universe of Indian equities permitted by SEBI and NSE for trading in the F&O segment.",
+            "survivorship_bias": "MINIMAL — Authoritative active NSE F&O segment constituents."
+        }
+    if clean_name in ("NIFTY_500_ESTABLISHED", "NIFTY_ESTABLISHED", "NIFTY500_ESTABLISHED", "ESTABLISHED_500"):
+        res = resolve_nifty_500_established()
+        return {
+            "name": f"NIFTY 500 Established Equities ({res['eligible_count']} Eligible Stocks, >=1200 Bars)",
+            "tickers": res["symbols"],
+            "discovered_count": res["eligible_count"] + res["rejected_count"],
+            "eligible_count": res["eligible_count"],
+            "rejected_count": res["rejected_count"],
+            "rejections": res["rejections"],
+            "description": "Dynamic universe of NIFTY 500 equities with >= 1,200 daily bars, strictly positive closing prices, and fresh data in canonical SQLite.",
+            "survivorship_bias": "LOW-MODERATE — Established broad-market constituents with mature historical depth."
+        }
     if clean_name == "CUSTOM" and custom_tickers:
         return {
             "name": f"Custom Basket ({len(custom_tickers)} Symbols)",
@@ -190,28 +585,218 @@ def get_universe_coverage(name: str = "NIFTY_500", custom_tickers: Optional[List
         "all_db_symbols": sorted(list(db_tickers_set))
     }
 
+_CACHED_KNOWN_SYMBOLS: Optional[set] = None
+
+def get_authoritative_universe_symbols() -> set:
+    """
+    Returns the authoritative set of recognized NSE/BSE symbols across all defined universes.
+    Caches the result in-memory with lazy reload.
+    """
+    global _CACHED_KNOWN_SYMBOLS
+    if _CACHED_KNOWN_SYMBOLS is not None:
+        return _CACHED_KNOWN_SYMBOLS
+
+    symbols = set()
+    if NSE_1000_UNIVERSE:
+        symbols.update(NSE_1000_UNIVERSE)
+    if NIFTY_500_UNIVERSE:
+        symbols.update(NIFTY_500_UNIVERSE)
+    if LIVE_UNIVERSE:
+        symbols.update(LIVE_UNIVERSE)
+    if RESEARCH_100_UNIVERSE:
+        symbols.update(RESEARCH_100_UNIVERSE)
+    if BANK_NIFTY_UNIVERSE:
+        symbols.update(BANK_NIFTY_UNIVERSE)
+    if NIFTY_IT_UNIVERSE:
+        symbols.update(NIFTY_IT_UNIVERSE)
+    
+    db_syms = get_available_db_tickers()
+    if db_syms:
+        symbols.update(db_syms)
+
+    _CACHED_KNOWN_SYMBOLS = symbols
+    return _CACHED_KNOWN_SYMBOLS
+
+def invalidate_universe_cache() -> None:
+    """Resets the cached symbol set so newly ingested database symbols are recognized."""
+    global _CACHED_KNOWN_SYMBOLS
+    _CACHED_KNOWN_SYMBOLS = None
+
+def normalize_ticker(ticker: str) -> str:
+    """
+    Authoritative single-source-of-truth ticker normalizer.
+    Converts string to uppercase, strips whitespace, preserves indices (^NSEI, ^INDIAVIX),
+    and appends .NS default suffix if no .BO or .NS suffix is present.
+    """
+    if not ticker or not isinstance(ticker, str):
+        return ""
+    t = ticker.strip().upper()
+    if not t:
+        return ""
+    if t.startswith("^"):
+        return t
+    if t.endswith((".NS", ".BO")):
+        return t
+    return f"{t}.NS"
+
+def validate_ticker(ticker: str) -> Tuple[bool, str, Optional[str]]:
+    """
+    Authoritative single-ticker validator.
+    Distinguishes:
+      - SYNTAX / FORMAT VALIDITY
+      - REAL / KNOWN INSTRUMENT (in authoritative 500+ Indian equity universe)
+      - INVALID / UNKNOWN INSTRUMENT (e.g. DSDSDS.NS)
+    
+    Returns:
+      (is_valid: bool, canonical_ticker: str, error_message: Optional[str])
+    """
+    import re
+    if not ticker or not isinstance(ticker, str):
+        return False, "", "Ticker symbol cannot be empty or non-string."
+
+    raw = ticker.strip().upper()
+    if not raw:
+        return False, "", "Ticker symbol cannot be blank."
+
+    # Reject mock/cache/temp leaks immediately
+    if raw.startswith(("CACHE_", "TEMP_", "MOCK_")):
+        return False, "", f"INVALID_TICKER: Mock/temporary symbol '{raw}' cannot enter research or trading."
+
+    # Allow TESTSTOCK.NS strictly for pipeline tests
+    if raw in ("TESTSTOCK.NS", "TESTSTOCK"):
+        return True, "TESTSTOCK.NS", None
+
+    # Canonicalize exchange suffix (.NS default, preserve .BO)
+    canonical = raw
+    if not (canonical.endswith(".NS") or canonical.endswith(".BO")):
+        canonical = f"{canonical}.NS"
+
+    # Syntax check
+    if not re.match(r"^[A-Z0-9_\-&]+(\.NS|\.BO)$", canonical):
+        return False, "", f"INVALID_TICKER: Syntax error in symbol '{raw}'. Does not match exchange equity format."
+
+    # Authoritative universe check (514+ symbols)
+    known = get_authoritative_universe_symbols()
+    
+    # Check exact match
+    if canonical in known:
+        return True, canonical, None
+
+    # Check without suffix (in case universe stored raw symbol)
+    base_sym = canonical.split(".")[0]
+    if base_sym in known or f"{base_sym}.NS" in known or f"{base_sym}.BO" in known:
+        resolved = f"{base_sym}.NS" if f"{base_sym}.NS" in known else canonical
+        return True, resolved, None
+
+    # Fail closed: Symbol is unknown in the authoritative universe
+    return False, "", f"INVALID_TICKER: Symbol '{canonical}' is not a recognized instrument in the authoritative universe."
+
+def validate_ticker_list(raw_tickers: Any) -> Tuple[bool, List[str], Optional[str]]:
+    """
+    Authoritative multi-ticker validator for comma-separated or list inputs.
+    FAILS CLOSED: If ANY ticker in the input list is invalid (e.g. RELIANCE,TCS,DSDSDS),
+    the entire submission is rejected with an explicit error listing all invalid tickers.
+    
+    Returns:
+      (is_valid: bool, canonical_tickers: List[str], error_message: Optional[str])
+    """
+    if raw_tickers is None:
+        return False, [], "No ticker symbols provided."
+
+    parts = []
+    if isinstance(raw_tickers, str):
+        parts = [s.strip() for s in raw_tickers.replace(";", ",").split(",") if s.strip()]
+    elif isinstance(raw_tickers, (list, tuple, set)):
+        parts = [str(s).strip() for s in raw_tickers if str(s).strip()]
+    else:
+        return False, [], f"Invalid tickers input type: {type(raw_tickers)}"
+
+    if not parts:
+        return False, [], "INVALID_TICKER: Ticker list cannot be empty."
+
+    valid_symbols = []
+    invalid_symbols = []
+
+    for item in parts:
+        ok, clean_sym, err = validate_ticker(item)
+        if ok:
+            if clean_sym not in valid_symbols:
+                valid_symbols.append(clean_sym)
+        else:
+            invalid_symbols.append(item.strip().upper())
+
+    if invalid_symbols:
+        return False, [], f"INVALID_TICKER: The following ticker(s) are unrecognized in the authoritative universe: {', '.join(invalid_symbols)}"
+
+    return True, valid_symbols, None
+
 def resolve_universe_tickers(universe_name: str = "NIFTY_500", custom_tickers: Optional[List[str]] = None, single_stock: Optional[str] = None) -> List[str]:
     """
     Authoritative universe resolution engine for the entire platform.
     Used across Intraday, Swing, Research, Walk-Forward, and Autopilot sweeps.
-    Supports NIFTY_500, NIFTY_50, BENCHMARK_5, AUTOPILOT_PRIORITY_20, LIVE_52, RESEARCH_100, ALL_COLLECTED, ALL_117, CUSTOM, and SINGLE_STOCK.
+    Supports NIFTY_500, NIFTY_50, BENCHMARK_5, AUTOPILOT_PRIORITY_20, LIVE_52, RESEARCH_100, ALL_COLLECTED, ALL_117, CUSTOM, WATCHLIST, BANK_NIFTY, NIFTY_IT, and SINGLE_STOCK.
+    FAILS CLOSED on invalid single stock or custom tickers.
     """
     clean_name = universe_name.strip().upper() if universe_name else "NIFTY_500"
     
     if clean_name in ("SINGLE_STOCK", "SINGLE") or single_stock:
         target = single_stock or (custom_tickers[0] if custom_tickers else "RELIANCE.NS")
-        clean_stock = target.strip().upper()
-        if not clean_stock.endswith((".NS", ".BO")):
-            clean_stock = f"{clean_stock}.NS"
+        ok, clean_stock, err = validate_ticker(target)
+        if not ok:
+            raise ValueError(f"Universe resolution failed: {err}")
         return [clean_stock]
         
-    if clean_name == "CUSTOM" and custom_tickers:
-        return [clean_t if clean_t.endswith(('.NS', '.BO')) else f"{clean_t}.NS" for clean_t in [t.strip().upper() for t in custom_tickers if t]]
-        
+    if clean_name in ("WATCHLIST", "USER_WATCHLIST"):
+        if custom_tickers:
+            ok, clean_list, err = validate_ticker_list(custom_tickers)
+            if not ok:
+                raise ValueError(f"Watchlist universe validation failed: {err}")
+            return clean_list
+        try:
+            from app.api.watchlist import get_persisted_watchlist_tickers
+            db_tickers = get_persisted_watchlist_tickers()
+            return db_tickers if db_tickers else list(BENCHMARK_5_UNIVERSE)
+        except Exception:
+            return list(BENCHMARK_5_UNIVERSE)
+
+    if clean_name in ("NIFTY_BANK", "BANK_NIFTY"):
+        return list(BANK_NIFTY_UNIVERSE)
+    if clean_name in ("NIFTY_IT", "IT"):
+        return list(NIFTY_IT_UNIVERSE)
+    if clean_name in ("FNO_UNIVERSE", "FNO", "NSE_FNO"):
+        from app.qlib_engine.fno_universe import resolve_fno_universe
+        res = resolve_fno_universe()
+        return [f"{s}.NS" for s in res.get("symbols", [])]
+    if clean_name in ("NSE_1000", "NIFTY_1000", "NSE1000", "NIFTY1000"):
+        return resolve_nse_1000()
+    if clean_name in ("NIFTY_500_ESTABLISHED", "NIFTY_ESTABLISHED", "NIFTY500_ESTABLISHED", "ESTABLISHED_500"):
+        res = resolve_nifty_500_established()
+        return res.get("symbols", [])
+    if clean_name in ("NIFTY_100", "RESEARCH_100"):
+        u_info = get_universe("RESEARCH_100", custom_tickers=custom_tickers)
+        return u_info.get("tickers", [])
+    if clean_name == "NIFTY_200":
+        u_500 = get_universe("NIFTY_500", custom_tickers=custom_tickers)
+        return u_500.get("tickers", [])[:200]
+
+    if clean_name == "CUSTOM":
+        if not custom_tickers:
+            raise ValueError("INVALID_TICKER: Custom universe requires non-empty custom_tickers.")
+        ok, clean_list, err = validate_ticker_list(custom_tickers)
+        if not ok:
+            raise ValueError(f"Custom universe validation failed: {err}")
+        return clean_list
+
+    if clean_name not in UNIVERSE_PRESETS and clean_name not in ("ALL_117", "ALL_COLLECTED"):
+        raise ValueError(f"INVALID_TICKER: Unknown universe preset '{clean_name}'.")
+
     u_info = get_universe(clean_name, custom_tickers=custom_tickers)
     tickers = u_info.get("tickers", [])
     if not tickers and clean_name in ("ALL_117", "ALL_COLLECTED"):
         tickers = get_available_db_tickers()
-    return tickers if tickers else list(NIFTY_500_UNIVERSE)
+    if not tickers:
+        raise ValueError(f"INVALID_TICKER: Universe '{clean_name}' resolved to zero valid symbols.")
+    return tickers
+
 
 

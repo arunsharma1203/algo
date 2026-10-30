@@ -238,36 +238,113 @@ function AITradeRiskAuditModal({ trade, onClose }) {
   );
 }
 
-export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
+export default function AITradeHistory({ tradeType, activeTimeframe, defaultFilter = 'ALL', refreshTrigger = 0 }) {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(null);
   const [selectedAuditTrade, setSelectedAuditTrade] = useState(null);
+  
+  // Interactive Timeframe Filter State (ALL, INTRADAY, SWING)
+  const initialType = (activeTimeframe || tradeType || defaultFilter || 'ALL').toUpperCase();
+  const [filterType, setFilterType] = useState(initialType);
 
   useEffect(() => {
+    if (activeTimeframe && activeTimeframe !== 'ALL') {
+      setFilterType(activeTimeframe.toUpperCase());
+    } else if (tradeType && tradeType !== 'ALL') {
+      setFilterType(tradeType.toUpperCase());
+    }
+  }, [activeTimeframe, tradeType]);
+
+  useEffect(() => {
+    let isMounted = true;
     const fetchHistory = async () => {
       try {
         const url = refreshTrigger > 0 ? `${API_BASE}/ml/history?force_refresh=true` : `${API_BASE}/ml/history`;
         const res = await axios.get(url);
-        setHistory(res.data || []);
+        if (isMounted) {
+          setHistory(res.data || []);
+          setFetchError(null);
+        }
       } catch (e) {
-        console.error(e);
+        console.error("AI Memory Vault fetch error:", e);
+        if (isMounted) {
+          setFetchError(e.response?.data?.detail || e.message || "Failed to connect to API");
+        }
       } finally {
-        setLoading(false);
+        if (isMounted) {
+          setLoading(false);
+        }
       }
     };
     fetchHistory();
     // Refresh every 60 seconds
     const interval = setInterval(fetchHistory, 60000);
-    return () => clearInterval(interval);
-  }, [tradeType, refreshTrigger]);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [refreshTrigger]);
+
+  const filteredHistory = history.filter(t => {
+    if (filterType === 'ALL') return true;
+    const tType = (t.trade_type || 'INTRADAY').toUpperCase();
+    return tType === filterType;
+  });
+
+  const intradayCount = history.filter(t => (t.trade_type || 'INTRADAY').toUpperCase() === 'INTRADAY').length;
+  const swingCount = history.filter(t => (t.trade_type || '').toUpperCase() === 'SWING').length;
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-10">
-      <div className="bg-gray-50 px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-        <h2 className="font-bold text-gray-800 flex items-center">
-          <History className="mr-2 text-indigo-500" size={20} />
-          Live AI Trade Evaluator
-        </h2>
+      <div className="bg-gray-50 px-6 py-4 border-b border-gray-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <div>
+          <h2 className="font-bold text-gray-800 flex items-center gap-2">
+            <History className="text-indigo-500" size={20} />
+            <span>Live AI Trade Evaluator</span>
+            <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
+              ⚡ {intradayCount} Intraday &nbsp;|&nbsp; 🎯 {swingCount} Swing
+            </span>
+          </h2>
+          <p className="text-xs text-gray-500 mt-0.5">Authoritative execution & performance history across Intraday (15M) and Swing (1D) timeframes</p>
+        </div>
+
+        {/* Timeframe Filter Tabs */}
+        <div className="flex items-center space-x-1.5 bg-gray-200/80 p-1 rounded-lg">
+          <button
+            onClick={() => setFilterType('ALL')}
+            className={`px-3 py-1 rounded-md text-xs font-bold transition ${
+              filterType === 'ALL'
+                ? 'bg-white text-gray-900 shadow-xs'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            ALL ({history.length})
+          </button>
+          <button
+            onClick={() => setFilterType('INTRADAY')}
+            className={`px-3 py-1 rounded-md text-xs font-bold transition flex items-center space-x-1 ${
+              filterType === 'INTRADAY'
+                ? 'bg-sky-600 text-white shadow-xs'
+                : 'text-sky-700 hover:text-sky-900'
+            }`}
+          >
+            <span>⚡ INTRADAY</span>
+            <span className="opacity-80 text-[10px]">({intradayCount})</span>
+          </button>
+          <button
+            onClick={() => setFilterType('SWING')}
+            className={`px-3 py-1 rounded-md text-xs font-bold transition flex items-center space-x-1 ${
+              filterType === 'SWING'
+                ? 'bg-indigo-600 text-white shadow-xs'
+                : 'text-indigo-700 hover:text-indigo-900'
+            }`}
+          >
+            <span>🎯 SWING</span>
+            <span className="opacity-80 text-[10px]">({swingCount})</span>
+          </button>
+        </div>
+
         {loading && <span className="text-xs text-indigo-600 font-bold animate-pulse">Syncing...</span>}
       </div>
       
@@ -275,29 +352,51 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
         <table className="min-w-full text-sm">
           <thead className="bg-white border-b border-gray-100">
             <tr>
-              <th className="px-6 py-3 text-left font-semibold text-gray-500 uppercase text-xs">Timestamp</th>
-              <th className="px-6 py-3 text-left font-semibold text-gray-500 uppercase text-xs">Symbol</th>
-              <th className="px-6 py-3 text-center font-semibold text-gray-500 uppercase text-xs">Conviction &amp; SHAP</th>
-              <th className="px-6 py-3 text-center font-semibold text-gray-500 uppercase text-xs">Engines Active</th>
-              <th className="px-6 py-3 text-right font-semibold text-gray-500 uppercase text-xs">Entry / Eff.</th>
-              <th className="px-6 py-3 text-right font-semibold text-gray-500 uppercase text-xs">Stop Loss</th>
-              <th className="px-6 py-3 text-right font-semibold text-gray-500 uppercase text-xs">Target 1</th>
-              <th className="px-6 py-3 text-right font-semibold text-gray-500 uppercase text-xs">Real P&amp;L (Net)</th>
-              <th className="px-6 py-3 text-center font-semibold text-gray-500 uppercase text-xs">Live Status</th>
+              <th className="px-5 py-3 text-left font-semibold text-gray-500 uppercase text-xs">Timestamp</th>
+              <th className="px-4 py-3 text-center font-bold text-gray-700 uppercase text-xs">Strategy Type</th>
+              <th className="px-5 py-3 text-left font-semibold text-gray-500 uppercase text-xs">Symbol</th>
+              <th className="px-4 py-3 text-center font-semibold text-gray-500 uppercase text-xs">Conviction &amp; SHAP</th>
+              <th className="px-4 py-3 text-center font-semibold text-gray-500 uppercase text-xs">Engines Active</th>
+              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-xs">Entry / Eff.</th>
+              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-xs">Stop Loss</th>
+              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-xs">Target 1</th>
+              <th className="px-5 py-3 text-right font-semibold text-gray-500 uppercase text-xs">Real P&amp;L (Net)</th>
+              <th className="px-5 py-3 text-center font-semibold text-gray-500 uppercase text-xs">Live Status</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-50">
-            {history.filter(t => !tradeType || t.trade_type === tradeType || (tradeType === 'INTRADAY' && !t.trade_type)).length === 0 && !loading && (
+            {fetchError && !loading && (
               <tr>
-                <td colSpan="9" className="px-6 py-8 text-center text-gray-400 font-medium">
-                  No trades found in the AI memory vault.
+                <td colSpan="10" className="px-6 py-8 text-center text-rose-500 font-medium">
+                  <div className="flex flex-col items-center justify-center space-y-1">
+                    <span className="font-bold">⚠️ Connection Error to AI Memory Vault</span>
+                    <span className="text-xs text-rose-400">{fetchError}</span>
+                  </div>
                 </td>
               </tr>
             )}
-            {history.filter(t => !tradeType || t.trade_type === tradeType || (tradeType === 'INTRADAY' && !t.trade_type)).map((trade, i) => (
+            {!fetchError && filteredHistory.length === 0 && !loading && (
+              <tr>
+                <td colSpan="10" className="px-6 py-8 text-center text-gray-400 font-medium">
+                  No {filterType !== 'ALL' ? filterType.toLowerCase() : ''} trades found in the AI memory vault.
+                </td>
+              </tr>
+            )}
+            {!fetchError && filteredHistory.map((trade, i) => (
               <tr key={i} className="hover:bg-gray-50 font-mono">
-                <td className="px-6 py-4 text-gray-500">{new Date(trade.timestamp).toLocaleString()}</td>
-                <td className="px-6 py-4 font-bold text-gray-800">
+                <td className="px-5 py-4 text-gray-500 text-xs">{new Date(trade.timestamp).toLocaleString()}</td>
+                <td className="px-4 py-4 text-center whitespace-nowrap">
+                  {(trade.trade_type === 'SWING') ? (
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-black bg-indigo-100 text-indigo-900 border border-indigo-300 shadow-2xs">
+                      🎯 SWING <span className="ml-1 text-[10px] font-medium text-indigo-700">(1D)</span>
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-black bg-sky-100 text-sky-900 border border-sky-300 shadow-2xs">
+                      ⚡ INTRADAY <span className="ml-1 text-[10px] font-medium text-sky-700">(15M)</span>
+                    </span>
+                  )}
+                </td>
+                <td className="px-5 py-4 font-bold text-gray-800">
                   <span className={trade.direction === 'BULLISH' ? 'text-green-600' : 'text-red-600'}>
                     {trade.ticker}
                   </span>
@@ -329,11 +428,21 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                 </td>
                 <td className="px-6 py-4 text-right">
                   <div className="text-gray-800 font-medium">{trade.entry != null ? `₹${Number(trade.entry).toFixed(2)}` : '-'}</div>
-                  {trade.current_price != null && (
-                    <div className="text-[11px] text-indigo-600 font-bold flex items-center justify-end" title={trade.price_source ? `LTP Source: ${trade.price_source} ${trade.price_timestamp || ''}` : 'Current Market Price'}>
-                      <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${trade.price_is_fresh ? 'bg-emerald-500' : 'bg-slate-400'}`}></span>
-                      LTP: ₹{Number(trade.current_price).toFixed(2)}
-                    </div>
+                  {trade.status === 'CLOSED' ? (
+                    trade.exit_price != null ? (
+                      <div className="text-[11px] text-slate-600 font-bold flex items-center justify-end" title={trade.exit_time ? `Exit Time: ${trade.exit_time}` : 'Exit Execution Price'}>
+                        Exit: ₹{Number(trade.exit_price).toFixed(2)}
+                      </div>
+                    ) : null
+                  ) : (
+                    trade.current_price != null ? (
+                      <div className="text-[11px] text-indigo-600 font-bold flex items-center justify-end" title={trade.price_source ? `LTP Source: ${trade.price_source} ${trade.price_timestamp || ''}` : 'Current Market Price'}>
+                        <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1 ${trade.price_is_fresh ? 'bg-emerald-500' : 'bg-amber-400'}`}></span>
+                        LTP: ₹{Number(trade.current_price).toFixed(2)}
+                      </div>
+                    ) : (
+                      <div className="text-[10px] text-amber-500 font-medium">LTP Pending</div>
+                    )
                   )}
                   {trade.effective_entry != null && (
                     <div className="text-[10px] text-slate-400" title={`Modeled with ${trade.slippage_pct || 0.08}% execution slippage`}>
@@ -345,7 +454,7 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                   <div className="text-red-500">{trade.sl != null ? `₹${Number(trade.sl).toFixed(2)}` : '-'}</div>
                   {trade.tightened_sl != null && trade.risk_level !== 'NORMAL' && (
                     <button 
-                      onClick={() => setSelectedAuditTrade(trade)}
+                       onClick={() => setSelectedAuditTrade(trade)}
                       className="mt-1 inline-flex items-center text-[10px] bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 font-bold px-1.5 py-0.5 rounded cursor-pointer transition shadow-2xs"
                       title="AI detected weakness: Click to view model audit"
                     >
@@ -358,9 +467,13 @@ export default function AITradeHistory({ tradeType, refreshTrigger = 0 }) {
                   {trade.tp1 != null ? `₹${Number(trade.tp1).toFixed(2)}` : '-'}
                 </td>
                 <td className="px-6 py-4 text-right font-mono">
-                  <span className={`font-bold ${Number(trade.profit_pct) > 0 ? 'text-green-600' : Number(trade.profit_pct) < 0 ? 'text-red-600' : 'text-gray-500'}`}>
-                    {trade.profit_pct != null ? `${Number(trade.profit_pct) > 0 ? '+' : ''}${Number(trade.profit_pct).toFixed(2)}%` : '-'}
-                  </span>
+                  {trade.status === 'OPEN' && (trade.profit_pct == null || trade.current_price == null) ? (
+                    <span className="text-gray-400 text-xs italic">Syncing...</span>
+                  ) : (
+                    <span className={`font-bold ${Number(trade.profit_pct) > 0 ? 'text-green-600' : Number(trade.profit_pct) < 0 ? 'text-red-600' : 'text-gray-500'}`}>
+                      {trade.profit_pct != null ? `${Number(trade.profit_pct) > 0 ? '+' : ''}${Number(trade.profit_pct).toFixed(2)}%` : '-'}
+                    </span>
+                  )}
                   {trade.slippage_drag != null && trade.slippage_drag !== 0 && (
                     <span className="block text-[9px] text-slate-400" title="Slippage Friction Drag">
                       Drag: -{Math.abs(Number(trade.slippage_drag)).toFixed(2)}%

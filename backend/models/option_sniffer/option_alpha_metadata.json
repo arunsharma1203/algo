@@ -1,0 +1,102 @@
+{
+  "version": "v1.0-champion-gbm",
+  "sha256": "b945dfca6cbdefc4aa746ba9696d9c1cc713e780dec6d4f3684979a60432cfa4",
+  "created_at": "2026-10-08T12:12:29.583186",
+  "feature_names": [
+    "spot_price",
+    "strike",
+    "is_call",
+    "moneyness",
+    "abs_moneyness",
+    "dte_days",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "iv",
+    "spread_pct",
+    "bid_ask_imbalance",
+    "log_volume",
+    "log_oi",
+    "spot_ret_1",
+    "spot_ret_3",
+    "spot_ret_6",
+    "spot_rsi",
+    "spot_atr_pct",
+    "spot_vwap_dist_pct",
+    "india_vix",
+    "macro_bullish",
+    "macro_bearish",
+    "upstream_qlib_score",
+    "upstream_legacy_score",
+    "upstream_consensus_conf",
+    "upstream_aligned"
+  ],
+  "metrics": {
+    "oos_observations": 2708,
+    "qualified_signals_count": 141,
+    "no_trade_rejections_count": 2567,
+    "win_rate_pct": 35.5,
+    "profit_factor": 0.51,
+    "total_net_pnl": -36259.56,
+    "avg_win": 768.86,
+    "avg_loss": -820.91,
+    "avg_mfe_pct": 12.0,
+    "avg_mae_pct": -12.2,
+    "roc_auc": 0.593,
+    "accuracy_pct": 71.4,
+    "brier_score": 0.1986,
+    "training_duration_sec": 19.61
+  },
+  "calibration_stats": {
+    "mean_predicted_prob": [
+      0.099,
+      0.342,
+      0.465
+    ],
+    "realized_win_rate": [
+      0.164,
+      0.337,
+      0.345
+    ],
+    "brier_score": 0.1986
+  },
+  "ablation_results": {
+    "1. Baseline (Momentum Only)": {
+      "features_count": 5,
+      "roc_auc": 0.481,
+      "accuracy_pct": 71.4,
+      "brier_score": 0.2104
+    },
+    "2. + Upstream Qlib & Legacy": {
+      "features_count": 8,
+      "roc_auc": 0.508,
+      "accuracy_pct": 69.9,
+      "brier_score": 0.2149
+    },
+    "3. + Option Moneyness & Greeks": {
+      "features_count": 10,
+      "roc_auc": 0.609,
+      "accuracy_pct": 67.6,
+      "brier_score": 0.2068
+    },
+    "4. + Volatility (IV & VIX)": {
+      "features_count": 7,
+      "roc_auc": 0.601,
+      "accuracy_pct": 68.2,
+      "brier_score": 0.2053
+    },
+    "5. + Liquidity & Spread": {
+      "features_count": 8,
+      "roc_auc": 0.601,
+      "accuracy_pct": 67.9,
+      "brier_score": 0.2035
+    },
+    "6. All Features (Full Architecture)": {
+      "features_count": 28,
+      "roc_auc": 0.592,
+      "accuracy_pct": 62.9,
+      "brier_score": 0.2144
+    }
+  }
+}

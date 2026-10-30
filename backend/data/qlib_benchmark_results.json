@@ -1,0 +1,177 @@
+{
+  "status": "SUCCESS",
+  "system_info": {
+    "cpu_count": 8,
+    "total_ram_gb": 16.0,
+    "os": "Darwin",
+    "arch": "arm64"
+  },
+  "tiers": {
+    "BOOTSTRAP_35": {
+      "tier": "BOOTSTRAP_35",
+      "display_name": "BOOTSTRAP_35 (35 Stocks)",
+      "instruments_count": 35,
+      "date_range": {
+        "start": "2016-08-29",
+        "end": "2026-09-11",
+        "trading_days": 2484
+      },
+      "temporal_splits": {
+        "train": [
+          "2016-08-29",
+          "2023-08-31",
+          60655
+        ],
+        "valid": [
+          "2023-09-08",
+          "2025-03-11",
+          12985
+        ],
+        "test": [
+          "2025-03-17",
+          "2026-09-11",
+          12722
+        ]
+      },
+      "feature_rows": {
+        "total": 86362,
+        "train": 60655,
+        "valid": 12985,
+        "test": 12722
+      },
+      "features_count": 158,
+      "missing_data_pct": 0.0,
+      "timings_seconds": {
+        "feature_generation": 25.65,
+        "dataset_preparation": 0.04,
+        "model_training": 6.75,
+        "total_elapsed": 32.44
+      },
+      "memory_mb": {
+        "start": 1560.2,
+        "peak": 1742.4,
+        "end": 1756.0,
+        "net_added": 182.2
+      },
+      "model": {
+        "family": "LGBModel",
+        "artifact_size_bytes": 11245,
+        "artifact_size_kb": 11.0,
+        "total_inference_ms": 11.91,
+        "latency_per_stock_ms": 0.34
+      },
+      "benchmarked_at": "2026-09-11T20:25:49.087833"
+    },
+    "FNO": {
+      "tier": "FNO",
+      "display_name": "FNO Derivatives (172 Stocks)",
+      "instruments_count": 172,
+      "date_range": {
+        "start": "2016-08-29",
+        "end": "2026-09-11",
+        "trading_days": 2484
+      },
+      "temporal_splits": {
+        "train": [
+          "2016-08-29",
+          "2023-08-31",
+          297937
+        ],
+        "valid": [
+          "2023-09-08",
+          "2025-03-11",
+          62128
+        ],
+        "test": [
+          "2025-03-17",
+          "2026-09-11",
+          58525
+        ]
+      },
+      "feature_rows": {
+        "total": 418590,
+        "train": 297937,
+        "valid": 62128,
+        "test": 58525
+      },
+      "features_count": 158,
+      "missing_data_pct": 0.0,
+      "timings_seconds": {
+        "feature_generation": 27.33,
+        "dataset_preparation": 0.12,
+        "model_training": 14.21,
+        "total_elapsed": 41.78
+      },
+      "memory_mb": {
+        "start": 1757.3,
+        "peak": 2736.3,
+        "end": 2520.4,
+        "net_added": 979.0
+      },
+      "model": {
+        "family": "LGBModel",
+        "artifact_size_bytes": 86064,
+        "artifact_size_kb": 84.0,
+        "total_inference_ms": 115.36,
+        "latency_per_stock_ms": 0.671
+      },
+      "benchmarked_at": "2026-09-11T20:26:31.835710"
+    },
+    "NIFTY_500_ESTABLISHED": {
+      "tier": "NIFTY_500_ESTABLISHED",
+      "display_name": "NIFTY 500 Established (414 Stocks)",
+      "instruments_count": 414,
+      "date_range": {
+        "start": "2016-08-29",
+        "end": "2026-09-11",
+        "trading_days": 2484
+      },
+      "temporal_splits": {
+        "train": [
+          "2016-08-29",
+          "2023-08-31",
+          702377
+        ],
+        "valid": [
+          "2023-09-08",
+          "2025-03-11",
+          136330
+        ],
+        "test": [
+          "2025-03-17",
+          "2026-09-11",
+          125248
+        ]
+      },
+      "feature_rows": {
+        "total": 963955,
+        "train": 702377,
+        "valid": 136330,
+        "test": 125248
+      },
+      "features_count": 158,
+      "missing_data_pct": 0.0,
+      "timings_seconds": {
+        "feature_generation": 46.86,
+        "dataset_preparation": 0.15,
+        "model_training": 19.2,
+        "total_elapsed": 66.35
+      },
+      "memory_mb": {
+        "start": 2176.6,
+        "peak": 3397.4,
+        "end": 1934.0,
+        "net_added": 1220.8
+      },
+      "model": {
+        "family": "LGBModel",
+        "artifact_size_bytes": 91528,
+        "artifact_size_kb": 89.4,
+        "total_inference_ms": 134.73,
+        "latency_per_stock_ms": 0.325
+      },
+      "benchmarked_at": "2026-09-11T20:27:40.587386"
+    }
+  },
+  "updated_at": "2026-09-11T20:27:40.681865"
+}

@@ -1,4 +1,3 @@
-import yfinance as yf
 import pandas as pd
 import sqlite3
 from datetime import datetime
@@ -59,9 +58,10 @@ def fetch_historical_data(ticker: str, start_date: str, end_date: str) -> pd.Dat
         df_cache.attrs['source'] = 'Local Database (Cache Hit)'
         return df_cache
         
-    # Not fully cached, we must fetch from YFinance
+    # Not fully cached, fetch from Upstox
     try:
-        df = yf.download(ticker, start=start_date, end=end_date)
+        from app.data.market_provider import fetch_candles
+        df = fetch_candles(ticker, interval="1d", period="1y")
         if df.empty:
             raise ValueError(f"No data found for {ticker}")
             
@@ -78,7 +78,7 @@ def fetch_historical_data(ticker: str, start_date: str, end_date: str) -> pd.Dat
                 elif col.upper() in df.columns:
                     df.rename(columns={col.upper(): col}, inplace=True)
         
-        # Save to DB with REPLACE to absolutely ensure overlaps are overwritten perfectly (foolproof)
+        # Save to DB with REPLACE to absolutely ensure overlaps are overwritten perfectly
         df_save = df.copy()
         df_save['ticker'] = ticker
         df_save['date'] = df_save['date'].astype(str)
@@ -94,7 +94,7 @@ def fetch_historical_data(ticker: str, start_date: str, end_date: str) -> pd.Dat
                     (ticker, start_date, end_date))
         conn.commit()
         
-        df.attrs['source'] = 'Yahoo Finance (Live)'
+        df.attrs['source'] = 'Upstox (Live)'
         
     except Exception as e:
         # Fallback to whatever is in the cache if YFinance is offline or fails

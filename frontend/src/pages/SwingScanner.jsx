@@ -52,13 +52,6 @@ export default function SwingScanner() {
 
     try {
       let url = `${API_BASE}/ml/swing-scan?universe=${selectedUniverse}`;
-      if (selectedUniverse === 'WATCHLIST' || selectedUniverse === 'ALL_COLLECTED') {
-        const savedWatchlist = localStorage.getItem('watchlist');
-        const customTickers = savedWatchlist ? JSON.parse(savedWatchlist).join(',') : '';
-        if (customTickers) {
-          url += `&custom_tickers=${customTickers}`;
-        }
-      }
       const response = await fetch(url);
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');

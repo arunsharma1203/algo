@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { runBacktest } from '../services/api';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import TickerSearch from './TickerSearch';
+import TickerAutocomplete from './TickerAutocomplete';
 import { useLiveIndicator } from '../context/LiveIndicatorContext';
 
 export default function BacktestViewer({ strategy }) {
@@ -66,10 +66,13 @@ export default function BacktestViewer({ strategy }) {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Ticker Symbol</label>
-          <TickerSearch 
+          <TickerAutocomplete 
             value={ticker} 
             onChange={setTicker} 
             placeholder="e.g. RELIANCE.NS" 
+            multiSelect={false}
+            showPresets={false}
+            variant="light"
           />
         </div>
         <div>

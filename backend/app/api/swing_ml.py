@@ -2,7 +2,6 @@ import json
 import time
 from datetime import datetime
 import pandas as pd
-import yfinance as yf
 import ta
 import numpy as np
 import logging
@@ -71,56 +70,32 @@ def run_swing_scan(custom_tickers: list = None, universe_preset: str = "NIFTY_50
             yield format_sse({"type": "error", "message": f"Failed to load Swing Champion model: {e}"})
             return
 
-        chunk_size = 100
-        chunks = [universe[i:i + chunk_size] for i in range(0, len(universe), chunk_size)]
-        yield format_sse({"type": "system", "message": f"Bulk fetching 2 years of daily data for {len(universe)} symbols in {len(chunks)} parallel batches...", "progress": 10})
+        from app.data.historical_data_layer import HistoricalDataLayer
+        from app.data.market_provider import fetch_candles
+        from app.analytics.decision_engine import evaluate_ticker
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        chunk_dfs = {}
-        try:
-            with ThreadPoolExecutor(max_workers=min(5, len(chunks))) as executor:
-                future_to_idx = {executor.submit(yf.download, chk, period="2y", interval="1d", progress=False): idx for idx, chk in enumerate(chunks)}
-                for fut in as_completed(future_to_idx):
-                    c_idx = future_to_idx[fut]
-                    chunk_dfs[c_idx] = fut.result()
-                    dl_pct = 10 + int((len(chunk_dfs) / len(chunks)) * 10)
-                    yield format_sse({
-                        "type": "info",
-                        "message": f"📥 Downloaded batch {len(chunk_dfs)}/{len(chunks)} ({len(chunks[c_idx])} symbols)...",
-                        "progress": dl_pct
-                    })
-        except Exception as e:
-            yield format_sse({"type": "error", "message": f"Bulk fetch failed: {str(e)}"})
-            return
-            
-        yield format_sse({"type": "system", "message": "Market data fetched. Commencing deep out-of-sample inference...", "progress": 20})
-        
+        yield format_sse({"type": "system", "message": f"Loading authoritative historical daily data for {len(universe)} symbols...", "progress": 15})
+
         best_conviction = None
         best_score = 0
         scan_history = []
         total = len(universe)
-        
+
         for idx, ticker in enumerate(universe):
             progress_pct = int(20 + ((idx + 1) / total * 70))
             try:
-                c_idx = idx // chunk_size
-                bulk_data = chunk_dfs.get(c_idx)
-                if bulk_data is None:
+                clean_t = ticker.replace(".NS", "").replace(".BO", "").strip().upper()
+                df = HistoricalDataLayer.get_historical_ohlcv(clean_t, timeframe="1d")
+                if df is None or len(df) < 100:
+                    df = fetch_candles(clean_t, interval="1d", period="2y")
+
+                if df is None or len(df) < 50:
                     continue
 
-                if isinstance(bulk_data.columns, pd.MultiIndex):
-                    try:
-                        df = bulk_data.xs(ticker, level=1, axis=1).copy()
-                    except KeyError:
-                        continue
-                else:
-                    if len(chunks[c_idx]) == 1:
-                        df = bulk_data.copy()
-                    else:
-                        continue
-                
+                # Standardize columns
+                df.columns = [str(c).lower() for c in df.columns]
+
                 # Use SHARED DECISION ENGINE for screening (skip enrichment for speed)
-                from app.analytics.decision_engine import evaluate_ticker
                 screen_result = evaluate_ticker(
                     ticker=ticker,
                     df=df,
@@ -208,8 +183,8 @@ def run_swing_scan(custom_tickers: list = None, universe_preset: str = "NIFTY_50
 
             # Report enrichment results
             pc = final_result.pipeline_components
-            if pc.get('nlp_vader') is True:
-                yield format_sse({"type": "info", "message": f"📰 VADER Sentiment: {final_result.nlp_sentiment:+}", "progress": 93})
+            if pc.get('nlp_finbert') is True or pc.get('nlp_vader') is True:
+                yield format_sse({"type": "info", "message": f"📰 FinBERT Sentiment: {final_result.nlp_sentiment:+}", "progress": 93})
             if pc.get('timesfm') is True or pc.get('chronos') is True:
                 yield format_sse({"type": "info", "message": f"🔮 Foundation Models (TimesFM: {pc.get('timesfm')}, Chronos: {pc.get('chronos')})", "progress": 95})
             if pc.get('meta_learner') is True:

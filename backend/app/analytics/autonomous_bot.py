@@ -3,7 +3,6 @@ import pandas as pd
 from datetime import datetime, time
 import time as time_module
 import logging
-import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
@@ -148,8 +147,15 @@ def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: f
             "points": 0,
             "detail": meta_msg
         },
+        "FinBERT Financial Sentiment": {
+            "name": "FinBERT News Sentiment",
+            "status": "BEARISH" if sentiment_score < -15 else ("BULLISH" if sentiment_score > 15 else "NEUTRAL"),
+            "triggered": False,
+            "points": 0,
+            "detail": f"Score: {sentiment_score:+} | Headline: \"{headline[:60]}...\"" if headline else f"Score: {sentiment_score:+}"
+        },
         "VADER Financial Sentiment": {
-            "name": "VADER News Sentiment",
+            "name": "FinBERT News Sentiment",
             "status": "BEARISH" if sentiment_score < -15 else ("BULLISH" if sentiment_score > 15 else "NEUTRAL"),
             "triggered": False,
             "points": 0,
@@ -183,6 +189,7 @@ def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: f
         if sentiment_score < -15:
             panic_level += 40
             reasons.append(f"Breaking Negative News ({sentiment_score:+} Score)")
+            _safe_set_breakdown("FinBERT Financial Sentiment", True, 40)
             _safe_set_breakdown("VADER Financial Sentiment", True, 40)
             
     elif direction == "BEARISH":
@@ -194,6 +201,7 @@ def evaluate_single_trade_risk(trade: dict, macro: dict = None, current_price: f
         if sentiment_score > 15:
             panic_level += 40
             reasons.append(f"Positive News Surge ({sentiment_score:+} Score)")
+            _safe_set_breakdown("FinBERT Financial Sentiment", True, 40)
             _safe_set_breakdown("VADER Financial Sentiment", True, 40)
 
     if meta_veto:
@@ -290,6 +298,13 @@ def active_trade_tracker(force_run: bool = False):
     except Exception as e:
         logger.error(f"Tracker failed to evaluate history: {e}")
         return
+
+    # Reconcile open dual-engine consensus trades against real-time market ticks
+    try:
+        from app.analytics.consensus_tracker import ConsensusTracker
+        ConsensusTracker.reconcile_open_consensus_trades(min_interval_sec=30.0)
+    except Exception as c_rec_err:
+        logger.debug(f"[AutonomousBot] Consensus reconciliation error in active_trade_tracker: {c_rec_err}")
         
     # Filter ONLY genuine positions (PAPER_POSITION or LIVE_POSITION)
     # Virtual recommendations (NOT_A_POSITION) must NEVER enter active position monitoring or risk tightening
