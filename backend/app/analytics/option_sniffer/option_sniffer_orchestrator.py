@@ -252,28 +252,38 @@ class OptionSnifferOrchestrator:
                 from app.analytics.consensus_scanner import ConsensusScanner
                 latest_c = ConsensusScanner.get_latest_scan("INTRADAY")
                 if latest_c:
-                    unanimous = latest_c.get("unanimous_trades") or []
-                    conflicts_count = int(latest_c.get("conflicted_count") or latest_c.get("conflicts_count") or 0)
-                    unanimous_count = len(unanimous)
+                    scan_completed_at = str(latest_c.get("completed_at") or "")
+                    is_same_day_scan = (not scan_completed_at) or scan_completed_at.startswith(today_str)
+                    if is_same_day_scan:
+                        unanimous = latest_c.get("unanimous_trades") or []
+                        summary_dict = latest_c.get("summary") if isinstance(latest_c.get("summary"), dict) else {}
+                        conflicts_count = int(
+                            latest_c.get("conflicted_count")
+                            or latest_c.get("conflicts_count")
+                            or summary_dict.get("conflict_count")
+                            or len(latest_c.get("conflicting_trades") or [])
+                            or 0
+                        )
+                        unanimous_count = len(unanimous)
 
-                    buy_votes = sum(1 for t in unanimous if str(t.get("direction", "")).upper() in ("BUY", "BULLISH"))
-                    sell_votes = sum(1 for t in unanimous if str(t.get("direction", "")).upper() in ("SELL", "BEARISH"))
+                        buy_votes = sum(1 for t in unanimous if str(t.get("direction", "")).upper() in ("BUY", "BULLISH"))
+                        sell_votes = sum(1 for t in unanimous if str(t.get("direction", "")).upper() in ("SELL", "BEARISH"))
 
-                    c_dir = "NEUTRAL"
-                    if buy_votes > sell_votes and buy_votes > 0:
-                        c_dir = "BULLISH"
-                    elif sell_votes > buy_votes and sell_votes > 0:
-                        c_dir = "BEARISH"
+                        c_dir = "NEUTRAL"
+                        if buy_votes > sell_votes and buy_votes > 0:
+                            c_dir = "BULLISH"
+                        elif sell_votes > buy_votes and sell_votes > 0:
+                            c_dir = "BEARISH"
 
-                    is_conflicted = (conflicts_count > (unanimous_count * 2)) and (conflicts_count > 5)
+                        is_conflicted = (conflicts_count > (unanimous_count * 2)) and (conflicts_count > 5)
 
-                    upstream_signals = {
-                        "consensus_direction": c_dir,
-                        "consensus_confidence": unanimous[0].get("composite_score", 50.0) if unanimous else 50.0,
-                        "unanimous_count": unanimous_count,
-                        "conflicts_count": conflicts_count,
-                        "is_conflicted": is_conflicted,
-                    }
+                        upstream_signals = {
+                            "consensus_direction": c_dir,
+                            "consensus_confidence": unanimous[0].get("composite_score", 50.0) if unanimous else 50.0,
+                            "unanimous_count": unanimous_count,
+                            "conflicts_count": conflicts_count,
+                            "is_conflicted": is_conflicted,
+                        }
             except Exception:
                 pass
 
