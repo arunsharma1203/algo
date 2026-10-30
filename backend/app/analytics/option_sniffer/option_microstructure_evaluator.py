@@ -312,39 +312,49 @@ class OptionMicrostructureEvaluator:
             day_low = float(uq.get("low") or 0.0)
             day_open = float(uq.get("open") or 0.0)
 
-            # Fallback to continuous_index_ohlcv in SQLite for exact 09:15-09:30 range if quotes cold
-            if spot_ltp <= 0 or day_open <= 0 or day_high <= 0:
-                try:
-                    from app.analytics.option_sniffer.option_db import OptionDB
-                    conn = OptionDB.get_connection()
-                    cur = conn.cursor()
-                    date_str = curr.strftime("%Y-%m-%d")
-                    row = cur.execute("""
-                        SELECT MIN(low), MAX(high), open, close
-                        FROM continuous_index_ohlcv
-                        WHERE ticker = ? AND timestamp >= ? AND timestamp <= ?;
-                    """, (underlying.upper(), f"{date_str} 09:15:00", f"{date_str} 09:30:00")).fetchone()
-                    if row and row[0] is not None:
-                        day_low = float(row[0])
-                        day_high = float(row[1])
+            or_high_15m = 0.0
+            or_low_15m = 0.0
+
+            # Always query continuous_index_ohlcv in SQLite for the true immutable 09:15-09:30 Opening Range
+            try:
+                from app.analytics.option_sniffer.option_db import OptionDB
+                conn = OptionDB.get_connection()
+                cur = conn.cursor()
+                date_str = curr.strftime("%Y-%m-%d")
+                row = cur.execute("""
+                    SELECT MIN(low), MAX(high), open, close
+                    FROM continuous_index_ohlcv
+                    WHERE ticker = ? AND timestamp >= ? AND timestamp <= ?;
+                """, (underlying.upper(), f"{date_str} 09:15:00", f"{date_str} 09:30:00")).fetchone()
+                if row and row[0] is not None and row[1] is not None:
+                    or_low_15m = float(row[0])
+                    or_high_15m = float(row[1])
+                    if day_open <= 0 and row[2] is not None:
                         day_open = float(row[2])
+                    if day_low <= 0:
+                        day_low = or_low_15m
+                    if day_high <= 0:
+                        day_high = or_high_15m
+                if spot_ltp <= 0:
                     last_row = cur.execute("""
                         SELECT close FROM continuous_index_ohlcv
                         WHERE ticker = ? AND timestamp >= ? ORDER BY timestamp DESC LIMIT 1;
                     """, (underlying.upper(), f"{date_str} 09:15:00")).fetchone()
                     if last_row and last_row[0]:
                         spot_ltp = float(last_row[0])
-                    conn.close()
-                except Exception as db_e:
-                    logger.debug(f"[MicrostructureEvaluator] SQLite OR fallback note: {db_e}")
+                conn.close()
+            except Exception as db_e:
+                logger.debug(f"[MicrostructureEvaluator] SQLite OR query note: {db_e}")
 
-            # If stream has day values, approximate OR from opening moves
+            # Anchor OR High/Low to true 09:15-09:30 window when available; fallback to day high/low
             if spot_ltp > 0 and day_open > 0:
-                result["or_high"] = day_high if day_high > 0 else round(day_open * 1.002, 2)
-                result["or_low"] = day_low if day_low > 0 else round(day_open * 0.998, 2)
+                result["or_high"] = or_high_15m if or_high_15m > 0 else (day_high if day_high > 0 else round(day_open * 1.002, 2))
+                result["or_low"] = or_low_15m if or_low_15m > 0 else (day_low if day_low > 0 else round(day_open * 0.998, 2))
 
-                range_pts = max(0.0, result["or_high"] - result["or_low"])
-                range_pct = (range_pts / result["or_low"] * 100.0) if result["or_low"] > 0 else 0.0
+                eff_high = max(result["or_high"], day_high) if day_high > 0 else result["or_high"]
+                eff_low = min(result["or_low"], day_low) if day_low > 0 else result["or_low"]
+                range_pts = max(0.0, eff_high - eff_low)
+                range_pct = (range_pts / eff_low * 100.0) if eff_low > 0 else 0.0
                 result["range_pts"] = round(range_pts, 2)
                 result["range_pct"] = round(range_pct, 2)
                 result["vol_floor_passed"] = (range_pct >= OPENING_RANGE_VOL_MIN_PCT) if OPENING_RANGE_VOL_MIN_PCT > 0 else True

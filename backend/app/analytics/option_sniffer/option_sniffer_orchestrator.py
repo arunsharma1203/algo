@@ -256,11 +256,9 @@ class OptionSnifferOrchestrator:
                     is_same_day_scan = (not scan_completed_at) or scan_completed_at.startswith(today_str)
                     if is_same_day_scan:
                         unanimous = latest_c.get("unanimous_trades") or []
-                        summary_dict = latest_c.get("summary") if isinstance(latest_c.get("summary"), dict) else {}
                         conflicts_count = int(
                             latest_c.get("conflicted_count")
                             or latest_c.get("conflicts_count")
-                            or summary_dict.get("conflict_count")
                             or len(latest_c.get("conflicting_trades") or [])
                             or 0
                         )
@@ -270,10 +268,11 @@ class OptionSnifferOrchestrator:
                         sell_votes = sum(1 for t in unanimous if str(t.get("direction", "")).upper() in ("SELL", "BEARISH"))
 
                         c_dir = "NEUTRAL"
-                        if buy_votes > sell_votes and buy_votes > 0:
-                            c_dir = "BULLISH"
-                        elif sell_votes > buy_votes and sell_votes > 0:
-                            c_dir = "BEARISH"
+                        if unanimous_count >= 2:
+                            if buy_votes > sell_votes and buy_votes > 0:
+                                c_dir = "BULLISH"
+                            elif sell_votes > buy_votes and sell_votes > 0:
+                                c_dir = "BEARISH"
 
                         is_conflicted = (conflicts_count > (unanimous_count * 2)) and (conflicts_count > 5)
 
