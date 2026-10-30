@@ -174,7 +174,7 @@ class OptionPaperExecution:
                 return None
             if not is_option_entry_window(now_dt):
                 logger.info(
-                    f"[OptionPaperExecution] Blocked open_trade outside golden entry window (09:30-14:00 IST): {signal.get('trading_symbol')}"
+                    f"[OptionPaperExecution] Blocked open_trade outside golden entry window (09:30-13:15 IST): {signal.get('trading_symbol')}"
                 )
                 return None
 

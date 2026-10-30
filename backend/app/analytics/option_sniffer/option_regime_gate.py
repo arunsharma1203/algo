@@ -29,6 +29,8 @@ from app.analytics.option_sniffer.option_constants import (
     is_option_trading_window,
     is_option_entry_window,
     MAX_DATA_STALENESS_SECONDS,
+    ENABLE_APEX_QUANT_ENGINE,
+    CRBI_RELAXED_KAUFMAN_ER,
     to_ist_naive,
 )
 from app.data.historical_data_layer import get_db_path
@@ -299,10 +301,14 @@ class OptionRegimeGate:
                         valid_bars.append(b)
 
                 if len(valid_bars) >= 2:
-                    o_first = float(valid_bars[0].get("open") or valid_bars[0].get("close"))
-                    c_last = float(valid_bars[-1].get("close"))
-                    if o_first > 0:
-                        slopes[sym] = round(((c_last - o_first) / o_first) * 100.0, 3)
+                    last_b_ts = to_ist_naive(datetime.fromisoformat(str(valid_bars[-1].get("timestamp") or valid_bars[-1].get("start_time"))))
+                    last_b_end = last_b_ts + timedelta(minutes=15)
+                    # Only use 15m heavyweight bars if the latest completed bar is not stale (> 45m old)
+                    if (as_of_time - last_b_end).total_seconds() <= 2700:
+                        o_first = float(valid_bars[0].get("open") or valid_bars[0].get("close"))
+                        c_last = float(valid_bars[-1].get("close"))
+                        if o_first > 0:
+                            slopes[sym] = round(((c_last - o_first) / o_first) * 100.0, 3)
 
         if not slopes or len(slopes) < len(hw_list):
             # If completed 15m bars are not yet accumulated (e.g. 09:15 - 09:45 IST),
@@ -461,7 +467,7 @@ class OptionRegimeGate:
 
             if not is_option_entry_window(now_dt):
                 rejection_reasons.append(
-                    f"Outside golden option entry window (09:30-14:00 IST, current {now_dt.strftime('%H:%M')} IST). Entries halted."
+                    f"Outside golden option entry window (09:30-13:15 IST, current {now_dt.strftime('%H:%M')} IST). Entries halted."
                 )
                 return {"hurdles_passed": False, "rejection_reasons": rejection_reasons, "telemetry": telemetry}
 
@@ -514,9 +520,10 @@ class OptionRegimeGate:
         er_val = compute_kaufman_er(c_arr, period=14)
         if er_val is not None:
             telemetry["kaufman_er"] = round(er_val, 3)
-            if er_val < KAUFMAN_ER_MIN_THRESHOLD:
+            active_er_min = CRBI_RELAXED_KAUFMAN_ER if (ENABLE_APEX_QUANT_ENGINE and is_breakout) else KAUFMAN_ER_MIN_THRESHOLD
+            if er_val < active_er_min:
                 rejection_reasons.append(
-                    f"Scale-Invariant Chop Shield: Kaufman ER ({er_val:.2f} < {KAUFMAN_ER_MIN_THRESHOLD:.2f}) indicates chaotic noise."
+                    f"Scale-Invariant Chop Shield: Kaufman ER ({er_val:.2f} < {active_er_min:.2f}) indicates chaotic noise."
                 )
         else:
             rejection_reasons.append("Regime Gate: Fail-Closed: Kaufman ER calculation returned None")

@@ -184,10 +184,10 @@ class OptionSignalEngine:
                 "hurdles_passed": False,
             }
 
-        # ── GATE 0A: GOLDEN ENTRY WINDOW CURFEW (09:30 - 14:00 IST) ─────────
+        # ── GATE 0A: GOLDEN ENTRY WINDOW CURFEW (09:30 - 13:15 IST) ─────────
         if (enforce_cutoff or as_of_time is not None) and not is_option_entry_window(now_dt):
             rejection_reasons.append(
-                f"Outside golden option entry window (09:30-14:00 IST, current {now_dt.strftime('%H:%M')} IST). New option entries halted to avoid afternoon theta decay."
+                f"Outside golden option entry window (09:30-13:15 IST, current {now_dt.strftime('%H:%M')} IST). New option entries halted to avoid afternoon theta decay."
             )
             return {
                 "instrument_key": ikey,
@@ -199,7 +199,8 @@ class OptionSignalEngine:
             }
 
         # ── GATE 1: DATA FRESHNESS ───────────────────────────────────────────
-        age_ms = int(quote.get("quote_age_ms") or 99999)
+        raw_age_ms = quote.get("quote_age_ms")
+        age_ms = int(raw_age_ms if raw_age_ms is not None else 99999)
         if age_ms > MAX_QUOTE_AGE_MS:
             rejection_reasons.append(f"Stale quote ({age_ms}ms > {MAX_QUOTE_AGE_MS}ms)")
 
@@ -228,7 +229,8 @@ class OptionSignalEngine:
 
         # ── GATE 5: UNDERLYING DATA INTEGRITY ────────────────────────────────
         spot_ltp = float(underlying_quote.get("spot_ltp") or 0.0)
-        u_age_ms = int(underlying_quote.get("quote_age_ms") or 99999)
+        raw_u_age_ms = underlying_quote.get("quote_age_ms")
+        u_age_ms = int(raw_u_age_ms if raw_u_age_ms is not None else 99999)
         if spot_ltp <= 0 or u_age_ms > MAX_QUOTE_AGE_MS:
             rejection_reasons.append(f"Underlying spot unavailable or stale ({u_age_ms}ms)")
 
@@ -780,7 +782,21 @@ class OptionSignalEngine:
         # Enforce strict in-memory lock so subsequent contracts in the same sweep cannot stack
         last_u_lock = self._ACTIVE_UNDERLYING_LOCKS.get(u_str, 0.0)
         has_recent_u_lock = (now_epoch - last_u_lock) < 15.0
-        paper_underlying_full = (len(u_open_trades) >= MAX_POSITIONS_PER_UNDERLYING) or (len(u_open_trades) >= 1 and has_recent_u_lock)
+        paper_same_instrument_open = any(str(t.get("instrument_key") or "") == str(ikey or "") for t in u_open_trades)
+        paper_pyramiding_blocked = False
+        if len(u_open_trades) == 1:
+            first_trade = u_open_trades[0]
+            first_mfe = float(first_trade.get("mfe_pct") or 0.0)
+            first_pnl = float(first_trade.get("net_pnl_pct") or 0.0)
+            if first_mfe < SMART_PYRAMIDING_MIN_MFE_PCT or first_pnl < 2.0:
+                paper_pyramiding_blocked = True
+
+        paper_underlying_full = (
+            (len(u_open_trades) >= MAX_POSITIONS_PER_UNDERLYING)
+            or (len(u_open_trades) >= 1 and has_recent_u_lock)
+            or paper_pyramiding_blocked
+            or paper_same_instrument_open
+        )
 
         # If live trading is armed, allow signals to activate if live capacity is available,
         # even if paper capacity is full (and vice versa). Only reject if all actionable capacity is exhausted.
@@ -795,20 +811,19 @@ class OptionSignalEngine:
                     f"Max concurrent trades reached (Paper {len(open_trades)}/{self._MAX_CONCURRENT_OPEN_TRADES}, Live {MAX_CONCURRENT_POSITIONS}/{MAX_CONCURRENT_POSITIONS})"
                 )
         else:
-            if len(u_open_trades) >= MAX_POSITIONS_PER_UNDERLYING or (has_recent_u_lock and len(u_open_trades) >= 1):
+            if len(u_open_trades) >= MAX_POSITIONS_PER_UNDERLYING or (has_recent_u_lock and len(u_open_trades) >= 1) or paper_same_instrument_open:
                 existing_syms = ", ".join(t.get('trading_symbol', u_str) for t in u_open_trades)
                 rejection_reasons.append(
                     f"Anti-Clustering Shield: Active {u_str} position exists ({existing_syms}). Max {MAX_POSITIONS_PER_UNDERLYING} position per underlying strictly enforced."
                 )
-            elif len(u_open_trades) == 1:
+            elif paper_pyramiding_blocked:
                 first_trade = u_open_trades[0]
                 first_mfe = float(first_trade.get("mfe_pct") or 0.0)
                 first_pnl = float(first_trade.get("net_pnl_pct") or 0.0)
-                if first_mfe < SMART_PYRAMIDING_MIN_MFE_PCT or first_pnl < 2.0:
-                    existing_sym = first_trade.get('trading_symbol', u_str)
-                    rejection_reasons.append(
-                        f"Anti-Clustering Shield: Active {u_str} position exists ({existing_sym}). Max {MAX_POSITIONS_PER_UNDERLYING} position per underlying strictly enforced (Pyramiding MFE {first_mfe:.1f}% < {SMART_PYRAMIDING_MIN_MFE_PCT}% or PnL {first_pnl:+.1f}% < +2.0%)."
-                    )
+                existing_sym = first_trade.get('trading_symbol', u_str)
+                rejection_reasons.append(
+                    f"Anti-Clustering Shield: Active {u_str} position exists ({existing_sym}). Max {MAX_POSITIONS_PER_UNDERLYING} position per underlying strictly enforced (Pyramiding MFE {first_mfe:.1f}% < {SMART_PYRAMIDING_MIN_MFE_PCT}% or PnL {first_pnl:+.1f}% < +2.0%)."
+                )
             if paper_capacity_reached:
                 rejection_reasons.append(
                     f"Max concurrent paper trades reached ({len(open_trades)}/{self._MAX_CONCURRENT_OPEN_TRADES})"

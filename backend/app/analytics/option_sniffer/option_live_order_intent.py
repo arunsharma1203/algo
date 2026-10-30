@@ -684,9 +684,12 @@ class OrderIntentEngine:
             if underlying_check and self.has_active_position_for_underlying(underlying_check):
                 return False, f"UNDERLYING_EXPOSURE_CAPPED: Active live position already exists for {underlying_check}. Max 1 live position per index.", None
 
-            # 7. Pre-Trade Quote Freshness Check
+            # 7. Pre-Trade Quote Freshness Check (preserve valid 0ms age; never coerce 0 to 99999 via truthiness)
             lq = live_quote if isinstance(live_quote, dict) else {}
-            quote_age_ms = int(lq.get("quote_age_ms") or signal_payload.get("quote_age_ms") or 99999)
+            raw_q_age = lq.get("quote_age_ms")
+            if raw_q_age is None:
+                raw_q_age = signal_payload.get("quote_age_ms")
+            quote_age_ms = int(raw_q_age if raw_q_age is not None else 99999)
             if quote_age_ms > MAX_EXECUTION_QUOTE_AGE_MS:
                 return False, f"QUOTE_STALE: Live quote age ({quote_age_ms}ms) exceeds execution max {MAX_EXECUTION_QUOTE_AGE_MS}ms (exceeds 1000ms execution freshness ceiling)", None
 
@@ -770,9 +773,10 @@ class OrderIntentEngine:
                     spot_atr_pct=signal_payload.get("spot_atr_pct")
                 )
             else:
-                dyn_sl_pct, dyn_tgt_pct, s_atr, d_used = DEFAULT_STOP_LOSS_PCT, DEFAULT_TARGET_PCT, 40.0, 0.50
+                dyn_sl_pct = OptionPaperExecution.calculate_rupee_capped_sl_pct(ask, lot_size, DEFAULT_STOP_LOSS_PCT)
+                dyn_tgt_pct, s_atr, d_used = DEFAULT_TARGET_PCT, 40.0, 0.50
 
-            # Enforce dynamic single-trade risk hurdle (dynamically scales to ~₹1,100 - ₹1,750, capped at ₹3,000)
+            # Enforce dynamic single-trade risk hurdle (dynamically scales to ~₹1,100 - ₹2,200, capped at ₹3,000)
             per_trade_risk = lot_size * ask * (dyn_sl_pct / 100.0)
             effective_max_risk = max(MAX_RISK_PER_TRADE_INR, 3000.0)
             if per_trade_risk > effective_max_risk:
@@ -1452,7 +1456,7 @@ class OrderIntentEngine:
                         logger.info(f"[Autopilot] Counter-move guard: {cand.get('trading_symbol')} PE blocked because {und} is bouncing (+{ret_3m:.2f}% over last 3m).")
                         continue
 
-                # 10-Minute Range Compression Check (Theta Defense)
+                # 10-Minute Range Compression Check (Theta Defense — with Strong Trend / Breakout Exemption matching OptionSignalEngine)
                 if u_df is not None and len(u_df) >= 10:
                     high_col = "high" if "high" in u_df.columns else "High"
                     low_col = "low" if "low" in u_df.columns else "Low"
@@ -1465,15 +1469,48 @@ class OrderIntentEngine:
                             range_pts = high_10m - low_10m
                             threshold_pts = 45.0 if "BANK" in und else 18.0
                             current_spot = float(u_df["close"].iloc[-1])
-                            if (range_10m_pct < 0.08 or range_pts < threshold_pts) and (low_10m <= current_spot <= high_10m):
+
+                            # Check strong underlying expansion or confirmed breakout (100% parity with OptionSignalEngine Gate 5B)
+                            u_quote = stream_mgr.get_underlying_quote(und) or {}
+                            open_col = "open" if "open" in u_df.columns else "Open"
+                            u_open = float(u_quote.get("open") or (u_df[open_col].iloc[0] if open_col in u_df.columns else current_spot))
+                            u_high = float(u_quote.get("high") or u_df[high_col].max() or current_spot)
+                            u_low = float(u_quote.get("low") or u_df[low_col].min() or current_spot)
+                            drift_from_open = ((current_spot - u_open) / u_open * 100.0) if u_open > 0 else 0.0
+                            rally_from_low = ((current_spot - u_low) / u_low * 100.0) if u_low > 0 else 0.0
+                            pullback_from_high = ((current_spot - u_high) / u_high * 100.0) if u_high > 0 else 0.0
+                            act_dir = cand.get("action", "")
+                            is_trend_exempt = bool(cand.get("is_breakout", False))
+                            if act_dir == "BUY_CE" and ((drift_from_open >= 0.30) or (rally_from_low >= 0.30) or (current_spot >= u_high - 2.0)):
+                                is_trend_exempt = True
+                            elif act_dir == "BUY_PE" and ((drift_from_open <= -0.30) or (pullback_from_high <= -0.30) or (current_spot <= u_low + 2.0)):
+                                is_trend_exempt = True
+
+                            if not is_trend_exempt and (range_10m_pct < 0.08 or range_pts < threshold_pts) and (low_10m <= current_spot <= high_10m):
                                 logger.info(f"[Autopilot] Chop Defense: {cand.get('trading_symbol')} blocked because {und} is in compressed 10m sideways consolidation ({range_10m_pct:.2f}% < 0.08%, {range_pts:.1f} pts).")
                                 continue
             except Exception as cm_err:
                 logger.debug(f"[Autopilot] Counter-move & chop check note: {cm_err}")
 
             live_quote = live_quotes_map.get(ikey)
-            # Fail-closed: if no live WebSocket quote is available in stream cache, do NOT spoof quote_age_ms
+            # If live quote is missing or its LTT age exceeds MAX_EXECUTION_QUOTE_AGE_MS (1000ms) due to 2s reconciler sleep,
+            # perform an immediate on-demand REST quote refresh from Upstox so pre-trade validation has a sub-second (0ms) live quote.
+            raw_live_age = live_quote.get("quote_age_ms") if isinstance(live_quote, dict) else None
+            if not live_quote or int(raw_live_age if raw_live_age is not None else 99999) > MAX_EXECUTION_QUOTE_AGE_MS:
+                try:
+                    from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+                    stream_mgr = OptionStreamManager()
+                    stream_mgr.refresh_quotes_via_rest()
+                    refreshed_q = stream_mgr.get_option_quote(ikey)
+                    if refreshed_q:
+                        live_quote = refreshed_q
+                        live_quotes_map[ikey] = refreshed_q
+                except Exception as rq_err:
+                    logger.debug(f"[Autopilot] On-demand quote refresh note: {rq_err}")
+
+            # Fail-closed: if no live quote is available in stream cache, do NOT spoof quote_age_ms
             if not live_quote:
+                logger.warning(f"⚠️ [Autopilot] Skipping {cand.get('trading_symbol')}: No live quote available for {ikey}.")
                 continue
 
             ok, reason, intent = self.create_and_validate_intent(
@@ -1481,6 +1518,10 @@ class OrderIntentEngine:
                 live_quote=live_quote,
                 deployable_capital=deployable_capital
             )
+
+            if not ok or not intent:
+                logger.warning(f"⚠️ [Autopilot] Live order validation blocked for {cand.get('trading_symbol')} ({cand.get('signal_id')}): {reason}")
+                continue
 
             if ok and intent:
                 exec_res = self.place_real_entry_order(intent["order_intent_id"])
