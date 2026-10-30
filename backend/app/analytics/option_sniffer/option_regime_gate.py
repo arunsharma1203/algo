@@ -219,53 +219,71 @@ class OptionRegimeGate:
         cutoff = as_of_time.strftime("%Y-%m-%d %H:%M:00")
         as_of_iso = as_of_time.isoformat()
 
-        try:
-            with sqlite3.connect(self._db_path, timeout=5.0) as conn:
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute("""
-                    SELECT ticker, timestamp, open, high, low, close, volume,
-                           is_complete, is_synthetic, is_gap, available_at
-                    FROM continuous_index_ohlcv
-                    WHERE ticker = ?
-                      AND timestamp >= ?
-                      AND timestamp < ?
-                      AND available_at <= ?
-                      AND is_point_in_time = 1
-                    ORDER BY timestamp ASC
-                """, (ticker, session_start, cutoff, as_of_iso)).fetchall()
-        except Exception as e:
-            logger.error(f"[OptionRegimeGate] Database error querying continuous_index_ohlcv: {e}")
-            return False, f"Fail-Closed: Database query failed ({e})", None
+        def _query_and_validate() -> Tuple[bool, str, Optional[pd.DataFrame]]:
+            try:
+                with sqlite3.connect(self._db_path, timeout=5.0) as conn:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute("""
+                        SELECT ticker, timestamp, open, high, low, close, volume,
+                               is_complete, is_synthetic, is_gap, available_at
+                        FROM continuous_index_ohlcv
+                        WHERE ticker = ?
+                          AND timestamp >= ?
+                          AND timestamp < ?
+                          AND available_at <= ?
+                          AND is_point_in_time = 1
+                        ORDER BY timestamp ASC
+                    """, (ticker, session_start, cutoff, as_of_iso)).fetchall()
+            except Exception as e:
+                logger.error(f"[OptionRegimeGate] Database error querying continuous_index_ohlcv: {e}")
+                return False, f"Fail-Closed: Database query failed ({e})", None
 
-        if len(rows) < min_bars:
-            return False, f"Fail-Closed: Insufficient continuous completed bars ({len(rows)} < {min_bars} required)", None
+            if len(rows) < min_bars:
+                return False, f"Fail-Closed: Insufficient continuous completed bars ({len(rows)} < {min_bars} required)", None
 
-        df = pd.DataFrame([dict(r) for r in rows])
+            df = pd.DataFrame([dict(r) for r in rows])
 
-        # Check for non-complete, synthetic, or gap bars in the required lookback window
-        recent_df = df.iloc[-min_bars:]
-        if (recent_df["is_complete"] != 1).any():
-            return False, "Fail-Closed: Incomplete or provisional candle detected in warm-up window", None
-        if (recent_df["is_synthetic"] != 0).any():
-            return False, "Fail-Closed: Synthetic carry bar detected in warm-up window; indicator invalid", None
-        if (recent_df["is_gap"] != 0).any():
-            return False, "Fail-Closed: Data gap bar detected in warm-up window; indicator invalid", None
+            # Check for non-complete, synthetic, or gap bars in the required lookback window
+            recent_df = df.iloc[-min_bars:]
+            if (recent_df["is_complete"] != 1).any():
+                return False, "Fail-Closed: Incomplete or provisional candle detected in warm-up window", None
+            if (recent_df["is_synthetic"] != 0).any():
+                return False, "Fail-Closed: Synthetic carry bar detected in warm-up window; indicator invalid", None
+            if (recent_df["is_gap"] != 0).any():
+                return False, "Fail-Closed: Data gap bar detected in warm-up window; indicator invalid", None
 
-        # Check timestamp contiguity (exactly 60s step)
-        ts_series = pd.to_datetime(recent_df["timestamp"])
-        time_diffs = ts_series.diff().dropna()
-        if not (time_diffs == pd.Timedelta(minutes=1)).all():
-            return False, "Fail-Closed: Temporal discontinuity detected in continuous index bars", None
+            # Check timestamp contiguity (exactly 60s step)
+            ts_series = pd.to_datetime(recent_df["timestamp"])
+            time_diffs = ts_series.diff().dropna()
+            if not (time_diffs == pd.Timedelta(minutes=1)).all():
+                return False, "Fail-Closed: Temporal discontinuity detected in continuous index bars", None
 
-        # Check data freshness: last completed candle cannot be older than MAX_DATA_STALENESS_SECONDS
-        last_candle_time = ts_series.iloc[-1]
-        candle_end_time = last_candle_time + timedelta(minutes=1)
-        candle_naive = candle_end_time.to_pydatetime().replace(tzinfo=None) if hasattr(candle_end_time, "tzinfo") and candle_end_time.tzinfo is not None else candle_end_time
-        staleness = (as_of_time - candle_naive).total_seconds()
-        if staleness > MAX_DATA_STALENESS_SECONDS:
-            return False, f"Fail-Closed: Index feed is stale ({staleness:.0f}s > {MAX_DATA_STALENESS_SECONDS}s max)", None
+            # Check data freshness: last completed candle cannot be older than MAX_DATA_STALENESS_SECONDS
+            last_candle_time = ts_series.iloc[-1]
+            candle_end_time = last_candle_time + timedelta(minutes=1)
+            candle_naive = candle_end_time.to_pydatetime().replace(tzinfo=None) if hasattr(candle_end_time, "tzinfo") and candle_end_time.tzinfo is not None else candle_end_time
+            staleness = (as_of_time - candle_naive).total_seconds()
+            if staleness > MAX_DATA_STALENESS_SECONDS:
+                return False, f"Fail-Closed: Index feed is stale ({staleness:.0f}s > {MAX_DATA_STALENESS_SECONDS}s max)", None
 
-        return True, "OK", df
+            return True, "OK", df
+
+        ok, msg, df_res = _query_and_validate()
+        if not ok:
+            # Self-heal live session gaps on canonical production DB (rate-limit governed: max 2 REST calls/45s)
+            try:
+                import os
+                if os.path.abspath(str(self._db_path)) == os.path.abspath(str(get_db_path())):
+                    now_ist = to_ist_naive()
+                    if session_date == now_ist.strftime("%Y-%m-%d") and abs((now_ist - as_of_time).total_seconds()) <= 180.0:
+                        from app.data.index_candle_ingestion_prototype import get_index_candle_ingestion_service
+                        repaired = get_index_candle_ingestion_service().heal_intraday_gaps_if_needed(as_of_time=as_of_time)
+                        if repaired > 0:
+                            ok, msg, df_res = _query_and_validate()
+            except Exception as heal_err:
+                logger.debug(f"[OptionRegimeGate] Live 1m gap self-heal note: {heal_err}")
+
+        return ok, msg, df_res
 
     def evaluate_heavyweight_slopes(
         self,
@@ -502,7 +520,20 @@ class OptionRegimeGate:
         telemetry["plus_di"] = round(p_di, 2)
         telemetry["minus_di"] = round(m_di, 2)
 
-        if adx_val < ADX_MIN_THRESHOLD:
+        # 3. Kaufman Efficiency Ratio (ER_15m)
+        er_val = compute_kaufman_er(c_arr, period=14)
+
+        # Fresh Directional Impulse Override:
+        # When the index breaks out of consolidation, 28-bar double-smoothed Wilder ADX(14) lags between 15.0 and 20.0
+        # for 8-12 minutes even when instantaneous directional spread (|plus_di - minus_di| >= 12.0) and Kaufman ER (>= 0.35)
+        # confirm a genuine trend impulse.
+        is_fresh_impulse_breakout = (
+            adx_val >= 15.0
+            and abs(p_di - m_di) >= 12.0
+            and (er_val is not None and er_val >= 0.35)
+        )
+
+        if adx_val < ADX_MIN_THRESHOLD and not is_fresh_impulse_breakout:
             rejection_reasons.append(
                 f"Chop Shield: Wilder ADX(14) is {adx_val:.1f} < {ADX_MIN_THRESHOLD:.1f} (market is in weak chop; option buying halted)."
             )
@@ -516,8 +547,6 @@ class OptionRegimeGate:
                 f"Direction Conflict: -DI ({m_di:.1f}) is below +DI ({p_di:.1f}); PUT (PE) entry blocked."
             )
 
-        # 3. Kaufman Efficiency Ratio (ER_15m)
-        er_val = compute_kaufman_er(c_arr, period=14)
         if er_val is not None:
             telemetry["kaufman_er"] = round(er_val, 3)
             active_er_min = CRBI_RELAXED_KAUFMAN_ER if (ENABLE_APEX_QUANT_ENGINE and is_breakout) else KAUFMAN_ER_MIN_THRESHOLD

@@ -796,6 +796,7 @@ class IndexCandleIngestionPrototype:
                                 provider_high = COALESCE(continuous_index_ohlcv.provider_high, excluded.provider_high),
                                 provider_low = COALESCE(continuous_index_ohlcv.provider_low, excluded.provider_low),
                                 provider_close = COALESCE(continuous_index_ohlcv.provider_close, excluded.provider_close),
+                                available_at = MIN(continuous_index_ohlcv.available_at, excluded.available_at),
                                 is_point_in_time = 1
                         """, (
                             ticker, bar_str, o_val, h_val, l_val, c_val, vol_val,
@@ -809,6 +810,107 @@ class IndexCandleIngestionPrototype:
         except Exception as e:
             logger.debug(f"[IndexIngestion] Intraday session gap backfill note: {e}")
         return repaired
+
+    def backfill_historical_session_gaps(self, from_date: str, to_date: str) -> int:
+        """
+        Repairs missing 1-minute index bars across historical dates [from_date, to_date]
+        using Upstox authoritative 1-minute historical candles with strict point-in-time
+        available_at = bar_timestamp + 60s.
+        """
+        repaired = 0
+        try:
+            import urllib.parse
+            from app.data.upstox_provider import get_upstox_token, upstox_request, UPSTOX_BASE_URL
+            token = get_upstox_token()
+            if not token:
+                return 0
+            headers = {
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+            }
+            now = datetime.now()
+            current_min_dt = now.replace(second=0, microsecond=0)
+
+            for inst_key, ticker in INDEX_KEYS.items():
+                encoded_key = urllib.parse.quote(inst_key, safe="")
+                url = f"{UPSTOX_BASE_URL}/historical-candle/{encoded_key}/1minute/{to_date}/{from_date}"
+                res = upstox_request("GET", url, headers=headers, timeout=10)
+                if res.status_code != 200:
+                    continue
+                candles = res.json().get("data", {}).get("candles", [])
+                if not candles:
+                    continue
+                with sqlite3.connect(self._db_path, timeout=15.0) as conn:
+                    conn.execute("PRAGMA busy_timeout = 15000")
+                    for row in candles:
+                        if len(row) < 5:
+                            continue
+                        raw_ts, o_val, h_val, l_val, c_val = row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4])
+                        vol_val = int(row[5]) if len(row) > 5 and row[5] is not None else 0
+                        bar_dt = datetime.fromisoformat(str(raw_ts)).replace(tzinfo=None, second=0, microsecond=0)
+                        if bar_dt >= current_min_dt:
+                            continue
+                        bar_str = bar_dt.strftime("%Y-%m-%d %H:%M:00")
+                        avail_str = (bar_dt + timedelta(minutes=1)).isoformat()
+                        conn.execute("""
+                            INSERT INTO continuous_index_ohlcv
+                            (ticker, timestamp, open, high, low, close, volume, tick_count, source, is_complete, is_synthetic, is_gap,
+                             provider_open, provider_high, provider_low, provider_close, local_open, local_high, local_low, local_close,
+                             discrepancy_flag, received_at, available_at, reconciled_at, version, is_point_in_time)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 100, 'PROVIDER_I1', 1, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL, 1, 1)
+                            ON CONFLICT(ticker, timestamp, version) DO UPDATE SET
+                                open = CASE WHEN continuous_index_ohlcv.tick_count <= 1 THEN excluded.open ELSE continuous_index_ohlcv.open END,
+                                high = MAX(continuous_index_ohlcv.high, excluded.high),
+                                low = MIN(continuous_index_ohlcv.low, excluded.low),
+                                close = CASE WHEN continuous_index_ohlcv.tick_count <= 1 THEN excluded.close ELSE continuous_index_ohlcv.close END,
+                                tick_count = MAX(continuous_index_ohlcv.tick_count, excluded.tick_count),
+                                source = CASE WHEN continuous_index_ohlcv.tick_count <= 1 THEN 'PROVIDER_I1' ELSE continuous_index_ohlcv.source END,
+                                is_complete = 1,
+                                is_synthetic = 0,
+                                is_gap = 0,
+                                provider_open = COALESCE(continuous_index_ohlcv.provider_open, excluded.provider_open),
+                                provider_high = COALESCE(continuous_index_ohlcv.provider_high, excluded.provider_high),
+                                provider_low = COALESCE(continuous_index_ohlcv.provider_low, excluded.provider_low),
+                                provider_close = COALESCE(continuous_index_ohlcv.provider_close, excluded.provider_close),
+                                available_at = MIN(continuous_index_ohlcv.available_at, excluded.available_at),
+                                is_point_in_time = 1
+                        """, (
+                            ticker, bar_str, o_val, h_val, l_val, c_val, vol_val,
+                            o_val, h_val, l_val, c_val, o_val, h_val, l_val, c_val,
+                            avail_str, avail_str
+                        ))
+                        repaired += 1
+                    conn.commit()
+        except Exception as e:
+            logger.debug(f"[IndexIngestion] Historical session gap backfill note: {e}")
+        return repaired
+
+    def heal_intraday_gaps_if_needed(
+        self,
+        as_of_time: Optional[datetime] = None,
+        min_interval_sec: float = 45.0
+    ) -> int:
+        """
+        Rate-limit-governed self-healing for 1-minute index bars:
+          1. Finalizes any elapsed in-memory 1-minute buckets (0 REST calls).
+          2. Enforces a strict cooldown (default 45s -> max 2 REST calls per 45s across NIFTY & BANKNIFTY)
+             so Upstox API quota (64 req/min) is never pressured.
+          3. Calls backfill_intraday_session_gaps() to repair any missing/gap 1m bars.
+        """
+        wall_dt = as_of_time or (datetime.now() - timedelta(seconds=2))
+        try:
+            self.check_and_finalize_elapsed_minutes(wall_dt)
+        except Exception:
+            pass
+
+        now_mono = time.monotonic()
+        with self._lock:
+            last_heal = getattr(self, "_last_gap_heal_mono", 0.0)
+            if (now_mono - last_heal) < min_interval_sec:
+                return 0
+            self._last_gap_heal_mono = now_mono
+
+        return self.backfill_intraday_session_gaps()
 
     # ──────────────────────────────────────────────────────────────────────────
     # AUTHENTICATION & RECONNECT HANDLING

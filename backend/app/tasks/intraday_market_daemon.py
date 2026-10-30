@@ -209,6 +209,11 @@ def run_15m_market_tick_pipeline(force_run: bool = False) -> Dict[str, Any]:
 
     # Flush completed 15m bars constructed locally from continuous 1m WebSocket stream
     ws_flushed_count = stream_svc.aggregate_and_flush_completed_bars()
+    try:
+        from app.data.index_candle_ingestion_prototype import get_index_candle_ingestion_service
+        get_index_candle_ingestion_service().heal_intraday_gaps_if_needed()
+    except Exception as _idx_heal_err:
+        logger.debug(f"[MarketDaemon] Index 1m gap self-heal note: {_idx_heal_err}")
     logger.info(
         f"[MarketDaemon] Continuous WebSocket Feed active. Flushed {ws_flushed_count} "
         f"completed 15m bars to SQLite across ~507 universe (zero REST quota consumed)."

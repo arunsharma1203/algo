@@ -149,7 +149,8 @@ class DataGateway:
         period: Optional[str] = None,
         use_cache: bool = True,
         fetch_incremental: bool = True,
-        min_rows: int = 30
+        min_rows: int = 30,
+        limit: Optional[int] = None
     ) -> pd.DataFrame:
         """
         Retrieves canonical OHLCV DataFrame for the given ticker and timeframe.
@@ -219,6 +220,9 @@ class DataGateway:
             df["datetime"] = df["date"]
         elif "datetime" in df.columns and "date" not in df.columns:
             df["date"] = df["datetime"]
+
+        if limit is not None and int(limit) > 0 and len(df) > int(limit):
+            df = df.tail(int(limit))
 
         return df
 

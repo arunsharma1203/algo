@@ -903,7 +903,8 @@ class QlibScanners:
                         if not os.path.exists(os.path.join(adapter.feat_dir, s.lower(), "close.15min.bin"))
                     )
                     coverage_gap_pct = (missing_count / max(len(clean_symbols), 1)) * 100
-                    if missing_count > max(1, len(clean_symbols) * 0.05):
+                    recently_synced = (time.monotonic() - getattr(adapter, "_last_intraday_sync_mono", 0.0)) < 120.0
+                    if not recently_synced and missing_count > max(1, len(clean_symbols) * 0.12):
                         logger.info(
                             f"[QlibScanners] Coverage gap detected: {missing_count}/{len(clean_symbols)} "
                             f"({coverage_gap_pct:.1f}%) symbols missing .15min.bin — forcing sync"

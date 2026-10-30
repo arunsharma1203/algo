@@ -193,29 +193,54 @@ class QlibVirtualTracker:
             qlib_recs = [t for t in trades if t.get("engine") == "QLIB" or t.get("source") == "QLIB_SCANNER"]
 
             # Sync finalized outcomes back to qlib_virtual_recommendations table
+            # Optimization: Query ONLY open virtual recommendations and match in O(1) in Python,
+            # updating by primary key `id` instead of executing 14,000+ unindexed full-table scans.
             db_file = get_db_path()
-            conn = sqlite3.connect(db_file)
+            conn = sqlite3.connect(db_file, timeout=15.0)
+            conn.execute("PRAGMA busy_timeout = 15000;")
             try:
-                for q in qlib_recs:
-                    if q.get("status") == "CLOSED" and q.get("outcome") not in (None, "", "OPEN"):
-                        strat = q.get("strategy") or q.get("trade_type")
-                        clean_dir = "BUY" if q.get("direction") in ("BUY", "BULLISH") else "SELL"
-                        q_ts = q.get("timestamp") or ""
-                        conn.execute("""
+                open_v_rows = conn.execute("""
+                    SELECT id, ticker, strategy, direction, substr(timestamp, 1, 10) AS ts_date
+                    FROM qlib_virtual_recommendations
+                    WHERE status = 'OPEN' OR outcome IS NULL OR outcome = 'OPEN'
+                """).fetchall()
+
+                if open_v_rows:
+                    closed_lookup = {}
+                    for q in qlib_recs:
+                        if q.get("status") == "CLOSED" and q.get("outcome") not in (None, "", "OPEN"):
+                            strat = str(q.get("strategy") or q.get("trade_type") or "").upper()
+                            clean_dir = "BUY" if q.get("direction") in ("BUY", "BULLISH") else "SELL"
+                            q_ts = str(q.get("timestamp") or "")[:10]
+                            raw_t = str(q.get("ticker") or "").upper()
+                            clean_t = raw_t.replace(".NS", "").replace(".BO", "")
+                            payload = (
+                                q.get("outcome"),
+                                q.get("profit_pct", 0.0),
+                                q.get("exit_price"),
+                                q.get("exit_time"),
+                            )
+                            closed_lookup[(raw_t, strat, clean_dir, q_ts)] = payload
+                            closed_lookup[(clean_t, strat, clean_dir, q_ts)] = payload
+
+                    updates = []
+                    for r_id, r_ticker, r_strat, r_dir, r_date in open_v_rows:
+                        t_up = str(r_ticker or "").upper()
+                        t_clean = t_up.replace(".NS", "").replace(".BO", "")
+                        s_up = str(r_strat or "").upper()
+                        d_up = "BUY" if str(r_dir or "").upper() in ("BUY", "BULLISH") else "SELL"
+                        dt_str = str(r_date or "")[:10]
+                        match = closed_lookup.get((t_up, s_up, d_up, dt_str)) or closed_lookup.get((t_clean, s_up, d_up, dt_str))
+                        if match:
+                            updates.append((match[0], match[1], match[2], match[3], r_id))
+
+                    if updates:
+                        conn.executemany("""
                             UPDATE qlib_virtual_recommendations
                             SET status = 'CLOSED', outcome = ?, pnl_pct = ?, exit_price = ?, exit_time = ?
-                            WHERE (ticker = ? OR ticker = ?) 
-                              AND strategy = ?
-                              AND direction = ?
-                              AND date(timestamp) = date(?)
-                              AND (status = 'OPEN' OR outcome IS NULL OR outcome = 'OPEN')
-                        """, (
-                            q.get("outcome"), q.get("profit_pct", 0.0),
-                            q.get("exit_price"), q.get("exit_time"),
-                            q.get("ticker"), q.get("ticker", "").replace(".NS", ""),
-                            strat, clean_dir, q_ts
-                        ))
-                conn.commit()
+                            WHERE id = ?
+                        """, updates)
+                        conn.commit()
             finally:
                 conn.close()
 

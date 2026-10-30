@@ -472,6 +472,13 @@ class UpstoxStreamService:
                 self.aggregate_and_flush_completed_bars()
             except Exception as e:
                 logger.error(f"[UpstoxStreamService] Bar flusher loop exception: {e}")
+            try:
+                from app.data.index_candle_ingestion_prototype import get_index_candle_ingestion_service
+                get_index_candle_ingestion_service().check_and_finalize_elapsed_minutes(
+                    datetime.now() - timedelta(seconds=2)
+                )
+            except Exception as idx_err:
+                logger.debug(f"[UpstoxStreamService] Index minute finalizer note: {idx_err}")
             time.sleep(5.0)
 
     def aggregate_and_flush_completed_bars(self, force_as_of: Optional[datetime] = None) -> int:

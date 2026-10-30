@@ -6,8 +6,21 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from app.data.historical_data_layer import get_db_path
 
+_ENSURED_ML_DB_PATHS = set()
+
 def ensure_ml_table():
-    conn = sqlite3.connect(get_db_path(), timeout=30.0)
+    db_p = get_db_path()
+    conn = sqlite3.connect(db_p, timeout=30.0)
+    if db_p in _ENSURED_ML_DB_PATHS:
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ml_trade_history'"
+            ).fetchone()
+            if exists:
+                conn.close()
+                return
+        except Exception:
+            pass
     for col, col_type in [
         ('trade_type', "TEXT DEFAULT 'INTRADAY'"),
         ('status', "TEXT DEFAULT 'OPEN'"),
@@ -96,6 +109,7 @@ def ensure_ml_table():
     """)
     conn.commit()
     conn.close()
+    _ENSURED_ML_DB_PATHS.add(db_p)
 
 def save_ml_trade(
     ticker, is_bullish, entry, sl, tp1, tp2, confidence,
@@ -260,6 +274,7 @@ def save_ml_trade(
 
 _EVAL_CACHE = {}
 _EVAL_CACHE_TTL = 60  # 60 seconds cache
+_FINALIZED_ROW_CACHE = {}
 
 _MARKET_DATA_CACHE = {
     'data': {},
@@ -287,6 +302,7 @@ def evaluate_ml_history(force_refresh: bool = False, engine: Optional[str] = "LE
     ensure_ml_table()
     conn = sqlite3.connect(current_db, timeout=10.0)
     conn.execute("PRAGMA busy_timeout = 10000;")
+    conn.row_factory = sqlite3.Row
 
     # Engine boundary query
     if engine == "LEGACY":
@@ -296,21 +312,28 @@ def evaluate_ml_history(force_refresh: bool = False, engine: Optional[str] = "LE
     else:
         query = "SELECT * FROM ml_trade_history ORDER BY id DESC"
 
-    df_trades = pd.read_sql_query(query, conn)
+    raw_rows = conn.execute(query).fetchall()
     conn.close()
     
-    if df_trades.empty:
+    if not raw_rows:
         _EVAL_CACHE[cache_key] = {'data': [], 'timestamp': epoch_now, 'db_path': current_db}
         return []
+
+    trade_rows = [dict(r) for r in raw_rows]
         
     # Pre-fetch Macro State once for all trades
     from app.analytics.macro_engine import get_macro_regime
     macro = get_macro_regime()
     
     # 1. Identify which tickers need fresh candle data (unfinalized OPEN trades only)
-    is_unresolved = (df_trades['status'] == 'OPEN') & (df_trades['outcome'].isna() | (df_trades['outcome'] == '') | (df_trades['outcome'] == 'OPEN'))
-    unresolved_df = df_trades[is_unresolved]
-    raw_tickers = unresolved_df['ticker'].unique().tolist() if not unresolved_df.empty else []
+    raw_tickers = []
+    seen_unresolved = set()
+    for r in trade_rows:
+        if r.get('status') == 'OPEN' and r.get('outcome') in (None, '', 'OPEN'):
+            t_val = r.get('ticker')
+            if t_val and t_val not in seen_unresolved:
+                seen_unresolved.add(t_val)
+                raw_tickers.append(t_val)
     
     # Strictly sanitize tickers to prevent downloading test artifacts or malformed symbols
     unresolved_tickers = [
@@ -356,12 +379,44 @@ def evaluate_ml_history(force_refresh: bool = False, engine: Optional[str] = "LE
             logger.warning(f"Bulk live quote fetch error in evaluate_ml_history: {e}")
             live_quotes = {}
 
+    # Recursive sanitizer to guarantee zero NaN / Inf reach JSON serializer
+    def _sanitize(obj):
+        if isinstance(obj, float):
+            return 0.0 if (math.isnan(obj) or math.isinf(obj)) else obj
+        elif isinstance(obj, dict):
+            return {k: _sanitize(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [_sanitize(x) for x in obj]
+        return obj
+
     results = []
     finalized_updates = []
     open_updates = []
 
-    for _, row in df_trades.iterrows():
+    for row in trade_rows:
         trade_id = row['id']
+        r_status = row.get('status')
+        r_outcome = row.get('outcome')
+        is_finalized_row = (r_status == 'INVALIDATED') or (
+            r_status == 'CLOSED' and r_outcome is not None and not pd.isna(r_outcome) and r_outcome not in ('OPEN', '')
+        )
+        row_cache_key = None
+        if is_finalized_row:
+            row_cache_key = (
+                current_db,
+                trade_id,
+                r_status,
+                r_outcome,
+                row.get('profit_pct'),
+                row.get('exit_price'),
+                row.get('confidence'),
+                len(row.get('explanation') or '')
+            )
+            cached_item = _FINALIZED_ROW_CACHE.get(row_cache_key)
+            if cached_item is not None:
+                results.append(cached_item)
+                continue
+
         ticker = row['ticker']
         entry_time_str = row['timestamp']
         try:
@@ -388,7 +443,7 @@ def evaluate_ml_history(force_refresh: bool = False, engine: Optional[str] = "LE
         # 2. Check if this trade is invalidated (e.g. historical cash swing short)
         if row.get('status') == 'INVALIDATED':
             outcome = row.get('outcome') or 'SWING_CASH_SHORT_DISALLOWED'
-            results.append({
+            inv_item = _sanitize({
                 "id": trade_id,
                 "timestamp": entry_time_str[:16].replace("T", " "),
                 "ticker": ticker,
@@ -420,6 +475,9 @@ def evaluate_ml_history(force_refresh: bool = False, engine: Optional[str] = "LE
                 "ai_guard_action": None,
                 "risk_level": "NORMAL"
             })
+            if row_cache_key is not None:
+                _FINALIZED_ROW_CACHE[row_cache_key] = inv_item
+            results.append(inv_item)
             continue
 
         # 3. Check if this trade is already finalized in the database
@@ -754,7 +812,7 @@ def evaluate_ml_history(force_refresh: bool = False, engine: Optional[str] = "LE
         clean_slippage_pct = _clean_float(slippage_pct, 0.0)
         clean_conf = _clean_float(row.get('confidence'), 0.0)
 
-        results.append({
+        res_item = _sanitize({
             "id": trade_id,
             "timestamp": entry_time_str[:16].replace("T", " ") if entry_time_str else "",
             "ticker": ticker,
@@ -793,6 +851,9 @@ def evaluate_ml_history(force_refresh: bool = False, engine: Optional[str] = "LE
             "model_hash": str(row.get('model_hash', '')) if pd.notna(row.get('model_hash')) else '',
             "data_timestamp": str(row.get('data_timestamp', '')) if pd.notna(row.get('data_timestamp')) else ''
         })
+        if row_cache_key is not None:
+            _FINALIZED_ROW_CACHE[row_cache_key] = res_item
+        results.append(res_item)
 
     # 3. Persist finalized trades into SQLite in a single atomic batch
     if finalized_updates:
@@ -823,17 +884,7 @@ def evaluate_ml_history(force_refresh: bool = False, engine: Optional[str] = "LE
         except Exception as e:
             logger.warning(f"Batch open price persistence error: {e}")
 
-    # Recursive sanitizer to guarantee zero NaN / Inf reach JSON serializer
-    def _sanitize(obj):
-        if isinstance(obj, float):
-            return 0.0 if (math.isnan(obj) or math.isinf(obj)) else obj
-        elif isinstance(obj, dict):
-            return {k: _sanitize(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [_sanitize(x) for x in obj]
-        return obj
-
-    clean_results = _sanitize(results)
+    clean_results = results
     _EVAL_CACHE[cache_key] = {'data': clean_results, 'timestamp': time_module.time(), 'db_path': current_db}
     return clean_results
 
