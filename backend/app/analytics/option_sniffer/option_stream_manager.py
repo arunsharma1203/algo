@@ -188,6 +188,7 @@ class OptionStreamManager:
 
         now_ms = int(time.time() * 1000)
         now_iso = datetime.now().isoformat()
+        quotes_to_guard: List[Tuple[str, Dict[str, Any]]] = []
 
         with self._lock:
             self._total_ticks_received += 1
@@ -314,7 +315,11 @@ class OptionStreamManager:
 
                 self._option_quotes[ikey] = quote_payload
                 if quote_payload["is_valid"]:
-                    self._evaluate_tick_protective_guards(ikey, quote_payload)
+                    quotes_to_guard.append((ikey, dict(quote_payload)))
+
+        # Evaluate tick protective guards outside self._lock to prevent AB-BA lock inversion with OptionDB._DB_LOCK
+        for ikey, q_copy in quotes_to_guard:
+            self._evaluate_tick_protective_guards(ikey, q_copy)
 
     def _evaluate_tick_protective_guards(self, ikey: str, quote_payload: Dict[str, Any]) -> None:
         """

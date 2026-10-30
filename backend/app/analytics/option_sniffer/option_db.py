@@ -900,8 +900,8 @@ class OptionDB:
             latch_record = cls.get_paper_circuit_breaker_latch(date_str)
             is_prior_latch_tripped = bool(latch_record and latch_record.get("halt_latch") == 1)
 
-        with _DB_LOCK:
-            try:
+        try:
+            with _DB_LOCK:
                 conn = cls.get_connection()
                 day_dt = datetime.strptime(date_str, "%Y-%m-%d").date()
                 from datetime import timedelta
@@ -932,226 +932,228 @@ class OptionDB:
                 conn.close()
 
                 closed_today = [dict(r) for r in rows]
-                total_closed = len(closed_today)
-                today_net_pnl = sum(float(t.get("net_pnl") or 0.0) for t in closed_today)
-                total_losses = sum(1 for t in closed_today if float(t.get("net_pnl") or 0.0) < 0)
-                total_wins = sum(1 for t in closed_today if float(t.get("net_pnl") or 0.0) > 0)
-
-                # Count consecutive losses starting from the most recent closed trade
-                consecutive_losses = 0
-                for t in closed_today:
-                    pnl = float(t.get("net_pnl") or 0.0)
-                    if pnl < 0:
-                        consecutive_losses += 1
-                    else:
-                        break
-
-                most_recent_loss_time = None
-                for t in closed_today:
-                    if float(t.get("net_pnl") or 0.0) < 0:
-                        most_recent_loss_time = t.get("exit_time")
-                        break
-
-                # 3. Calculate Unrealized MTM across open paper trades
-                unrealized_net_pnl = 0.0
-                data_integrity_warning = False
                 open_trades_list = [dict(r) for r in open_rows]
 
+            # Release _DB_LOCK before querying OptionStreamManager to prevent AB-BA lock inversion
+            total_closed = len(closed_today)
+            today_net_pnl = sum(float(t.get("net_pnl") or 0.0) for t in closed_today)
+            total_losses = sum(1 for t in closed_today if float(t.get("net_pnl") or 0.0) < 0)
+            total_wins = sum(1 for t in closed_today if float(t.get("net_pnl") or 0.0) > 0)
+
+            # Count consecutive losses starting from the most recent closed trade
+            consecutive_losses = 0
+            for t in closed_today:
+                pnl = float(t.get("net_pnl") or 0.0)
+                if pnl < 0:
+                    consecutive_losses += 1
+                else:
+                    break
+
+            most_recent_loss_time = None
+            for t in closed_today:
+                if float(t.get("net_pnl") or 0.0) < 0:
+                    most_recent_loss_time = t.get("exit_time")
+                    break
+
+            # 3. Calculate Unrealized MTM across open paper trades
+            unrealized_net_pnl = 0.0
+            data_integrity_warning = False
+
+            stream_mgr = None
+            try:
+                from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+                stream_mgr = OptionStreamManager()
+            except Exception:
                 stream_mgr = None
-                try:
-                    from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
-                    stream_mgr = OptionStreamManager()
-                except Exception:
-                    stream_mgr = None
 
-                for ot in open_trades_list:
-                    ikey = ot["instrument_key"]
-                    entry_ask = float(ot["entry_ask"])
-                    qty = int(ot["quantity"])
-                    q = None
-                    if live_quotes_map is not None:
-                        q = live_quotes_map.get(ikey)
-                    elif stream_mgr is not None:
-                        try:
-                            q = stream_mgr.get_option_quote(ikey)
-                        except Exception:
-                            q = None
-
-                    bid = float(q.get("bid") or q.get("ltp") or 0.0) if q else 0.0
-                    if live_quotes_map is not None and bid <= 0:
-                        data_integrity_warning = True
-                    elif bid > 0:
-                        gross_mtm = round((bid - entry_ask) * qty, 2)
-                        from app.analytics.option_sniffer.option_constants import calculate_option_trade_costs
-                        cost_est = calculate_option_trade_costs(
-                            buy_price=entry_ask,
-                            sell_price=bid,
-                            quantity=qty,
-                            apply_slippage=True,
-                            trade_date=ot.get("entry_time")
-                        )
-                        net_mtm = round(gross_mtm - cost_est["total_friction"], 2)
-                        unrealized_net_pnl += net_mtm
-
-                total_net_pnl_exposure = round(today_net_pnl + unrealized_net_pnl, 2)
-
-                # Chronological Peak-to-Trough Drawdown Calculation
-                sorted_by_exit = sorted(closed_today, key=lambda t: str(t.get("exit_time") or ""))
-                cum_pnl = 0.0
-                peak_pnl = 0.0
-                max_drawdown = 0.0
-                for t in sorted_by_exit:
-                    cum_pnl += float(t.get("net_pnl") or 0.0)
-                    if cum_pnl > peak_pnl:
-                        peak_pnl = cum_pnl
-                    dd = peak_pnl - cum_pnl
-                    if dd > max_drawdown:
-                        max_drawdown = dd
-
-                # Include open positions exposure into current peak-to-trough drawdown
-                current_total_pnl = today_net_pnl + unrealized_net_pnl
-                current_drawdown = max(0.0, peak_pnl - current_total_pnl)
-                if current_drawdown > max_drawdown:
-                    max_drawdown = current_drawdown
-
-                # ── APEX QUANT: INTRADAY PEAK-PROFIT TRAILING LOCK ──
-                is_peak_lock_tripped = False
-                peak_profit_floor = 0.0
-                if ENABLE_APEX_QUANT_ENGINE and peak_pnl >= PEAK_PROFIT_LOCK_TRIGGER_INR:
-                    peak_profit_floor = round(peak_pnl * (1.0 - PEAK_PROFIT_GIVEBACK_MAX_RATIO), 2)
-                    if (today_net_pnl <= peak_profit_floor or total_net_pnl_exposure <= peak_profit_floor) and total_closed > 0:
-                        is_peak_lock_tripped = True
-
-                is_consecutive_limit_hit = consecutive_losses >= max_consecutive_losses
-                is_realized_limit_hit = today_net_pnl <= -abs(max_daily_loss_inr)
-                is_drawdown_limit_hit = max_drawdown >= abs(max_daily_loss_inr)
-                is_exposure_limit_hit = total_net_pnl_exposure <= -abs(max_daily_loss_inr)
-                is_max_loss_limit_hit = is_realized_limit_hit or is_drawdown_limit_hit or is_exposure_limit_hit or is_prior_latch_tripped
-
-                # If restart occurred without local closed trade rows but latch was persisted
-                if is_prior_latch_tripped and total_closed == 0 and latch_record:
-                    today_net_pnl = latch_record.get("realized_pnl", 0.0)
-                    unrealized_net_pnl = latch_record.get("unrealized_pnl", 0.0)
-                    total_net_pnl_exposure = latch_record.get("total_exposure", 0.0)
-
-                # Dynamic Introspection Pause calculation
-                is_pause_active = False
-                pause_remaining_sec = 0
-                pause_unfreeze_time = None
-                if is_consecutive_limit_hit and most_recent_loss_time:
+            for ot in open_trades_list:
+                ikey = ot["instrument_key"]
+                entry_ask = float(ot["entry_ask"])
+                qty = int(ot["quantity"])
+                q = None
+                if live_quotes_map is not None:
+                    q = live_quotes_map.get(ikey)
+                elif stream_mgr is not None:
                     try:
-                        loss_dt = to_ist_naive(datetime.fromisoformat(most_recent_loss_time))
-                        elapsed_sec = (curr_dt - loss_dt).total_seconds()
-                        total_pause_sec = pause_minutes * 60
-                        if 0 <= elapsed_sec < total_pause_sec:
-                            is_pause_active = True
-                            pause_remaining_sec = int(total_pause_sec - elapsed_sec)
-                            from datetime import timedelta
-                            pause_unfreeze_time = (loss_dt + timedelta(minutes=pause_minutes)).strftime("%H:%M:%S")
-                    except Exception as pe:
-                        logger.debug(f"[OptionDB] Introspection pause parse note: {pe}")
+                        q = stream_mgr.get_option_quote(ikey)
+                    except Exception:
+                        q = None
 
-                is_session_halted = is_max_loss_limit_hit or data_integrity_warning or is_peak_lock_tripped
-                halt_reason = None
-                if is_max_loss_limit_hit:
-                    if is_prior_latch_tripped and latch_record and latch_record.get("trip_reason"):
-                        halt_reason = latch_record.get("trip_reason")
-                    elif is_realized_limit_hit:
-                        halt_reason = f"Daily max loss ceiling reached (Net: ₹{today_net_pnl:,.2f} <= -₹{max_daily_loss_inr:,.2f}). Trading permanently halted for session."
-                    elif is_exposure_limit_hit:
-                        halt_reason = f"Daily max loss ceiling reached (Total Exposure: ₹{total_net_pnl_exposure:,.2f} <= -₹{max_daily_loss_inr:,.2f} [Realized: ₹{today_net_pnl:,.2f}, Unrealized: ₹{unrealized_net_pnl:,.2f}]). Trading permanently halted for session."
-                    elif is_drawdown_limit_hit:
-                        halt_reason = f"Peak-to-trough drawdown ceiling reached (Drawdown: ₹{max_drawdown:,.2f} >= ₹{max_daily_loss_inr:,.2f} from peak ₹{peak_pnl:,.2f}). Trading permanently halted for session."
-                    if enforce_halt_latch and not is_prior_latch_tripped:
-                        cls.persist_paper_circuit_breaker_latch(
-                            session_date=date_str,
-                            realized_pnl=today_net_pnl,
-                            unrealized_pnl=unrealized_net_pnl,
-                            total_exposure=total_net_pnl_exposure,
-                            trip_reason=halt_reason,
-                            halt_latch=1
-                        )
-                elif is_peak_lock_tripped:
-                    halt_reason = (
-                        f"Peak-Profit Trailing Lock Engaged: Daily profit peaked at ₹{peak_pnl:,.2f}. "
-                        f"Session locked at ₹{today_net_pnl:,.2f} to protect 50% of morning harvest (Floor: ₹{peak_profit_floor:,.2f})."
+                bid = float(q.get("bid") or q.get("ltp") or 0.0) if q else 0.0
+                if live_quotes_map is not None and bid <= 0:
+                    data_integrity_warning = True
+                elif bid > 0:
+                    gross_mtm = round((bid - entry_ask) * qty, 2)
+                    from app.analytics.option_sniffer.option_constants import calculate_option_trade_costs
+                    cost_est = calculate_option_trade_costs(
+                        buy_price=entry_ask,
+                        sell_price=bid,
+                        quantity=qty,
+                        apply_slippage=True,
+                        trade_date=ot.get("entry_time")
                     )
-                    if enforce_halt_latch and not is_prior_latch_tripped:
-                        cls.persist_paper_circuit_breaker_latch(
-                            session_date=date_str,
-                            realized_pnl=today_net_pnl,
-                            unrealized_pnl=unrealized_net_pnl,
-                            total_exposure=total_net_pnl_exposure,
-                            trip_reason=halt_reason,
-                            halt_latch=1
-                        )
-                elif data_integrity_warning:
-                    halt_reason = f"Fail-Closed: Missing or stale quotes for {len(open_trades_list)} active open paper trade(s). Trading halted for session."
-                elif is_pause_active:
-                    halt_reason = f"Dynamic Introspection Pause Active: {consecutive_losses} consecutive losses. Paused for {pause_minutes}m ({pause_remaining_sec}s remaining until {pause_unfreeze_time} IST)."
-                elif is_consecutive_limit_hit:
-                    halt_reason = f"Introspection cooldown completed for {consecutive_losses} consecutive losses. Re-entry allowed on verified trend breakout."
+                    net_mtm = round(gross_mtm - cost_est["total_friction"], 2)
+                    unrealized_net_pnl += net_mtm
 
-                return {
-                    "date": date_str,
-                    "total_closed_today": total_closed,
-                    "wins_today": total_wins,
-                    "losses_today": total_losses,
-                    "consecutive_losses": consecutive_losses,
-                    "today_net_pnl": round(today_net_pnl, 2),
-                    "unrealized_net_pnl": round(unrealized_net_pnl, 2),
-                    "unrealized_pnl": round(unrealized_net_pnl, 2),
-                    "total_net_pnl_exposure": total_net_pnl_exposure,
-                    "peak_pnl": round(peak_pnl, 2),
-                    "max_drawdown": round(max_drawdown, 2),
-                    "is_drawdown_limit_hit": is_drawdown_limit_hit,
-                    "is_realized_limit_hit": is_realized_limit_hit,
-                    "is_exposure_limit_hit": is_exposure_limit_hit,
-                    "open_positions_count": len(open_trades_list),
-                    "is_consecutive_limit_hit": is_consecutive_limit_hit,
-                    "is_max_loss_limit_hit": is_max_loss_limit_hit,
-                    "is_pause_active": is_pause_active,
-                    "pause_remaining_sec": pause_remaining_sec,
-                    "pause_unfreeze_time": pause_unfreeze_time,
-                    "is_session_halted": is_session_halted,
-                    "halt_reason": halt_reason,
-                    "halt_latch_active": (is_max_loss_limit_hit or is_peak_lock_tripped),
-                    "is_peak_lock_tripped": is_peak_lock_tripped,
-                    "peak_profit_floor": peak_profit_floor,
-                    "most_recent_loss_time": most_recent_loss_time,
-                    "max_consecutive_losses": max_consecutive_losses,
-                    "max_daily_loss_inr": max_daily_loss_inr,
-                    "pause_minutes": pause_minutes,
-                    "is_statutory_charges_estimated": True,
-                    "charges_reconciliation_mode": "ESTIMATED_STATUTORY_SCHEDULE",
-                }
-            except Exception as e:
-                logger.error(f"[OptionDB] Failed to audit daily circuit breaker: {e}")
-                return {
-                    "date": date_str,
-                    "total_closed_today": 0,
-                    "wins_today": 0,
-                    "losses_today": 0,
-                    "consecutive_losses": 0,
-                    "today_net_pnl": 0.0,
-                    "unrealized_net_pnl": 0.0,
-                    "total_net_pnl_exposure": 0.0,
-                    "open_positions_count": 0,
-                    "is_consecutive_limit_hit": False,
-                    "is_max_loss_limit_hit": True,
-                    "is_pause_active": False,
-                    "pause_remaining_sec": 0,
-                    "pause_unfreeze_time": None,
-                    "is_session_halted": True,
-                    "halt_reason": f"Fail-Closed: Error auditing daily circuit breaker ({e})",
-                    "halt_latch_active": True,
-                    "most_recent_loss_time": None,
-                    "max_consecutive_losses": max_consecutive_losses,
-                    "max_daily_loss_inr": max_daily_loss_inr,
-                    "pause_minutes": pause_minutes,
-                    "is_statutory_charges_estimated": True,
-                    "charges_reconciliation_mode": "ESTIMATED_STATUTORY_SCHEDULE",
-                }
+            total_net_pnl_exposure = round(today_net_pnl + unrealized_net_pnl, 2)
+
+            # Chronological Peak-to-Trough Drawdown Calculation
+            sorted_by_exit = sorted(closed_today, key=lambda t: str(t.get("exit_time") or ""))
+            cum_pnl = 0.0
+            peak_pnl = 0.0
+            max_drawdown = 0.0
+            for t in sorted_by_exit:
+                cum_pnl += float(t.get("net_pnl") or 0.0)
+                if cum_pnl > peak_pnl:
+                    peak_pnl = cum_pnl
+                dd = peak_pnl - cum_pnl
+                if dd > max_drawdown:
+                    max_drawdown = dd
+
+            # Include open positions exposure into current peak-to-trough drawdown
+            current_total_pnl = today_net_pnl + unrealized_net_pnl
+            current_drawdown = max(0.0, peak_pnl - current_total_pnl)
+            if current_drawdown > max_drawdown:
+                max_drawdown = current_drawdown
+
+            # ── APEX QUANT: INTRADAY PEAK-PROFIT TRAILING LOCK ──
+            is_peak_lock_tripped = False
+            peak_profit_floor = 0.0
+            if ENABLE_APEX_QUANT_ENGINE and peak_pnl >= PEAK_PROFIT_LOCK_TRIGGER_INR:
+                peak_profit_floor = round(peak_pnl * (1.0 - PEAK_PROFIT_GIVEBACK_MAX_RATIO), 2)
+                if (today_net_pnl <= peak_profit_floor or total_net_pnl_exposure <= peak_profit_floor) and total_closed > 0:
+                    is_peak_lock_tripped = True
+
+            is_consecutive_limit_hit = consecutive_losses >= max_consecutive_losses
+            is_realized_limit_hit = today_net_pnl <= -abs(max_daily_loss_inr)
+            is_drawdown_limit_hit = max_drawdown >= abs(max_daily_loss_inr)
+            is_exposure_limit_hit = total_net_pnl_exposure <= -abs(max_daily_loss_inr)
+            is_max_loss_limit_hit = is_realized_limit_hit or is_drawdown_limit_hit or is_exposure_limit_hit or is_prior_latch_tripped
+
+            # If restart occurred without local closed trade rows but latch was persisted
+            if is_prior_latch_tripped and total_closed == 0 and latch_record:
+                today_net_pnl = latch_record.get("realized_pnl", 0.0)
+                unrealized_net_pnl = latch_record.get("unrealized_pnl", 0.0)
+                total_net_pnl_exposure = latch_record.get("total_exposure", 0.0)
+
+            # Dynamic Introspection Pause calculation
+            is_pause_active = False
+            pause_remaining_sec = 0
+            pause_unfreeze_time = None
+            if is_consecutive_limit_hit and most_recent_loss_time:
+                try:
+                    loss_dt = to_ist_naive(datetime.fromisoformat(most_recent_loss_time))
+                    elapsed_sec = (curr_dt - loss_dt).total_seconds()
+                    total_pause_sec = pause_minutes * 60
+                    if 0 <= elapsed_sec < total_pause_sec:
+                        is_pause_active = True
+                        pause_remaining_sec = int(total_pause_sec - elapsed_sec)
+                        from datetime import timedelta
+                        pause_unfreeze_time = (loss_dt + timedelta(minutes=pause_minutes)).strftime("%H:%M:%S")
+                except Exception as pe:
+                    logger.debug(f"[OptionDB] Introspection pause parse note: {pe}")
+
+            is_session_halted = is_max_loss_limit_hit or data_integrity_warning or is_peak_lock_tripped
+            halt_reason = None
+            if is_max_loss_limit_hit:
+                if is_prior_latch_tripped and latch_record and latch_record.get("trip_reason"):
+                    halt_reason = latch_record.get("trip_reason")
+                elif is_realized_limit_hit:
+                    halt_reason = f"Daily max loss ceiling reached (Net: ₹{today_net_pnl:,.2f} <= -₹{max_daily_loss_inr:,.2f}). Trading permanently halted for session."
+                elif is_exposure_limit_hit:
+                    halt_reason = f"Daily max loss ceiling reached (Total Exposure: ₹{total_net_pnl_exposure:,.2f} <= -₹{max_daily_loss_inr:,.2f} [Realized: ₹{today_net_pnl:,.2f}, Unrealized: ₹{unrealized_net_pnl:,.2f}]). Trading permanently halted for session."
+                elif is_drawdown_limit_hit:
+                    halt_reason = f"Peak-to-trough drawdown ceiling reached (Drawdown: ₹{max_drawdown:,.2f} >= ₹{max_daily_loss_inr:,.2f} from peak ₹{peak_pnl:,.2f}). Trading permanently halted for session."
+                if enforce_halt_latch and not is_prior_latch_tripped:
+                    cls.persist_paper_circuit_breaker_latch(
+                        session_date=date_str,
+                        realized_pnl=today_net_pnl,
+                        unrealized_pnl=unrealized_net_pnl,
+                        total_exposure=total_net_pnl_exposure,
+                        trip_reason=halt_reason,
+                        halt_latch=1
+                    )
+            elif is_peak_lock_tripped:
+                halt_reason = (
+                    f"Peak-Profit Trailing Lock Engaged: Daily profit peaked at ₹{peak_pnl:,.2f}. "
+                    f"Session locked at ₹{today_net_pnl:,.2f} to protect 50% of morning harvest (Floor: ₹{peak_profit_floor:,.2f})."
+                )
+                if enforce_halt_latch and not is_prior_latch_tripped:
+                    cls.persist_paper_circuit_breaker_latch(
+                        session_date=date_str,
+                        realized_pnl=today_net_pnl,
+                        unrealized_pnl=unrealized_net_pnl,
+                        total_exposure=total_net_pnl_exposure,
+                        trip_reason=halt_reason,
+                        halt_latch=1
+                    )
+            elif data_integrity_warning:
+                halt_reason = f"Fail-Closed: Missing or stale quotes for {len(open_trades_list)} active open paper trade(s). Trading halted for session."
+            elif is_pause_active:
+                halt_reason = f"Dynamic Introspection Pause Active: {consecutive_losses} consecutive losses. Paused for {pause_minutes}m ({pause_remaining_sec}s remaining until {pause_unfreeze_time} IST)."
+            elif is_consecutive_limit_hit:
+                halt_reason = f"Introspection cooldown completed for {consecutive_losses} consecutive losses. Re-entry allowed on verified trend breakout."
+
+            return {
+                "date": date_str,
+                "total_closed_today": total_closed,
+                "wins_today": total_wins,
+                "losses_today": total_losses,
+                "consecutive_losses": consecutive_losses,
+                "today_net_pnl": round(today_net_pnl, 2),
+                "unrealized_net_pnl": round(unrealized_net_pnl, 2),
+                "unrealized_pnl": round(unrealized_net_pnl, 2),
+                "total_net_pnl_exposure": total_net_pnl_exposure,
+                "peak_pnl": round(peak_pnl, 2),
+                "max_drawdown": round(max_drawdown, 2),
+                "is_drawdown_limit_hit": is_drawdown_limit_hit,
+                "is_realized_limit_hit": is_realized_limit_hit,
+                "is_exposure_limit_hit": is_exposure_limit_hit,
+                "open_positions_count": len(open_trades_list),
+                "is_consecutive_limit_hit": is_consecutive_limit_hit,
+                "is_max_loss_limit_hit": is_max_loss_limit_hit,
+                "is_pause_active": is_pause_active,
+                "pause_remaining_sec": pause_remaining_sec,
+                "pause_unfreeze_time": pause_unfreeze_time,
+                "is_session_halted": is_session_halted,
+                "halt_reason": halt_reason,
+                "halt_latch_active": (is_max_loss_limit_hit or is_peak_lock_tripped),
+                "is_peak_lock_tripped": is_peak_lock_tripped,
+                "peak_profit_floor": peak_profit_floor,
+                "most_recent_loss_time": most_recent_loss_time,
+                "max_consecutive_losses": max_consecutive_losses,
+                "max_daily_loss_inr": max_daily_loss_inr,
+                "pause_minutes": pause_minutes,
+                "is_statutory_charges_estimated": True,
+                "charges_reconciliation_mode": "ESTIMATED_STATUTORY_SCHEDULE",
+            }
+        except Exception as e:
+            logger.error(f"[OptionDB] Failed to audit daily circuit breaker: {e}")
+            return {
+                "date": date_str,
+                "total_closed_today": 0,
+                "wins_today": 0,
+                "losses_today": 0,
+                "consecutive_losses": 0,
+                "today_net_pnl": 0.0,
+                "unrealized_net_pnl": 0.0,
+                "total_net_pnl_exposure": 0.0,
+                "open_positions_count": 0,
+                "is_consecutive_limit_hit": False,
+                "is_max_loss_limit_hit": True,
+                "is_pause_active": False,
+                "pause_remaining_sec": 0,
+                "pause_unfreeze_time": None,
+                "is_session_halted": True,
+                "halt_reason": f"Fail-Closed: Error auditing daily circuit breaker ({e})",
+                "halt_latch_active": True,
+                "most_recent_loss_time": None,
+                "max_consecutive_losses": max_consecutive_losses,
+                "max_daily_loss_inr": max_daily_loss_inr,
+                "pause_minutes": pause_minutes,
+                "is_statutory_charges_estimated": True,
+                "charges_reconciliation_mode": "ESTIMATED_STATUTORY_SCHEDULE",
+            }
 
     @classmethod
     def has_paper_stop_loss_today(cls, as_of_date: Optional[str] = None) -> Tuple[bool, str]:
