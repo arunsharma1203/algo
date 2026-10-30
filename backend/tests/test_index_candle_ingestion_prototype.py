@@ -541,6 +541,52 @@ class TestIndexCandleIngestionPrototype(unittest.TestCase):
         self.assertEqual(rows[1][1], 1)
         self.assertEqual(rows[1][2], "2026-10-19T16:00:00")
 
+    def test_skewed_minute_boundary_does_not_fragment_into_one_tick_flat_bars(self):
+        """
+        Proves that when ticks for minute 09:30 arrive slightly after wall-clock 09:31:00
+        (e.g. network lag / clock skew), process_feed_message does NOT prematurely finalize
+        and overwrite the 09:30 candle into a 1-tick flat bar on every incoming tick.
+        """
+        t1_exch = datetime(2026, 10, 19, 9, 30, 50)
+        t2_exch = datetime(2026, 10, 19, 9, 30, 55)
+        t3_exch = datetime(2026, 10, 19, 9, 30, 59)
+        t4_next_min = datetime(2026, 10, 19, 9, 31, 2)
+
+        # Wall clock is already 09:31:05 while the 09:30:50..59 ticks arrive 100ms apart
+        wall_base = datetime(2026, 10, 19, 9, 31, 5)
+        for idx, (t_exch, price) in enumerate([
+            (t1_exch, 23080.0),
+            (t2_exch, 23095.0),
+            (t3_exch, 23088.0),
+        ]):
+            msg = {
+                "feeds": {
+                    "NSE_INDEX|Nifty 50": {
+                        "fullFeed": {"indexFF": {"ltpc": {"ltp": price, "ltt": int(t_exch.timestamp() * 1000)}}}
+                    }
+                }
+            }
+            fin = self.ingestion.process_feed_message(msg, wall_clock_time=wall_base + timedelta(milliseconds=idx * 100))
+            self.assertEqual(len(fin), 0, "Actively streaming 09:30 ticks must not prematurely finalize on each tick!")
+
+        # Now the first 09:31 tick arrives -> finalizes 09:30 once with all 3 ticks preserved
+        msg_next = {
+            "feeds": {
+                "NSE_INDEX|Nifty 50": {
+                    "fullFeed": {"indexFF": {"ltpc": {"ltp": 23090.0, "ltt": int(t4_next_min.timestamp() * 1000)}}}
+                }
+            }
+        }
+        fin_next = self.ingestion.process_feed_message(msg_next, wall_clock_time=wall_base + timedelta(milliseconds=400))
+        self.assertEqual(len(fin_next), 1)
+        c = fin_next[0]
+        self.assertEqual(c["timestamp"], "2026-10-19 09:30:00")
+        self.assertEqual(c["tick_count"], 3)
+        self.assertEqual(c["open"], 23080.0)
+        self.assertEqual(c["high"], 23095.0)
+        self.assertEqual(c["low"], 23080.0)
+        self.assertEqual(c["close"], 23088.0)
+
 
 if __name__ == "__main__":
     unittest.main()

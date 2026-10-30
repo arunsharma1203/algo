@@ -789,6 +789,13 @@ if _PREV_STREAM_INSTANCE is not None:
     UpstoxStreamService._instance = _PREV_STREAM_INSTANCE
     _PREV_STREAM_INSTANCE.__class__ = UpstoxStreamService
     _GLOBAL_STREAM_SERVICE = _PREV_STREAM_INSTANCE
+    try:
+        import sys
+        import importlib
+        if "app.data.index_candle_ingestion_prototype" in sys.modules:
+            importlib.reload(sys.modules["app.data.index_candle_ingestion_prototype"])
+    except Exception as _reload_err:
+        logger.debug(f"[UpstoxStreamService] IndexIngestion reload note: {_reload_err}")
 else:
     _GLOBAL_STREAM_SERVICE = UpstoxStreamService()
 

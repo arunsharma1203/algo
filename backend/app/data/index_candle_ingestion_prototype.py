@@ -85,6 +85,8 @@ class IndexCandleIngestionPrototype:
         # Per-Ticker State
         self._last_tick_time: Dict[str, float] = {}  # ticker -> local epoch sec of last price tick
         self._last_tick_timestamp_ms: Dict[str, int] = {}  # ticker -> exchange epoch ms
+        self._last_finalized_minute: Dict[str, str] = {}  # ticker -> last finalized minute_str ('YYYY-MM-DD HH:MM:00')
+        self._last_skew_log_time: Dict[str, float] = {}  # ticker -> local epoch sec of last skew warning log
         self._skew_warnings_count = 0
         self._out_of_order_count = 0
         self._total_ticks_processed = 0
@@ -194,8 +196,28 @@ class IndexCandleIngestionPrototype:
                 logger.warning(f"[IndexIngestion] Ingestion halted fail-closed (status={self._status}).")
                 return []
 
-            # 2. Check and finalize any elapsed minutes independently of tick arrivals
-            finalized_candles.extend(self.check_and_finalize_elapsed_minutes(now))
+            # 2. Check and finalize any elapsed minutes ONLY for tickers not actively receiving ticks in this frame
+            feeds = msg.get("feeds") if isinstance(msg.get("feeds"), dict) else {}
+            last_finalized_map = getattr(self, "_last_finalized_minute", None)
+            if last_finalized_map is None:
+                self._last_finalized_minute = {}
+                last_finalized_map = self._last_finalized_minute
+            last_skew_log_map = getattr(self, "_last_skew_log_time", None)
+            if last_skew_log_map is None:
+                self._last_skew_log_time = {}
+                last_skew_log_map = self._last_skew_log_time
+
+            for open_ticker in list(self._open_buckets.keys()):
+                bucket = self._open_buckets[open_ticker]
+                b_dt = bucket["minute_dt"]
+                last_t_sec = self._last_tick_time.get(open_ticker, 0.0)
+                # Only wall-clock finalize inside process_feed_message when the minute has elapsed + 2s grace
+                # AND no index ticks have arrived for this ticker in the last 2.0s of wall-clock time
+                if now >= (b_dt + timedelta(minutes=1, seconds=2)) and (now_ts - last_t_sec) >= 2.0:
+                    candle = self._finalize_bucket(open_ticker, bucket, completion_time=now)
+                    if candle:
+                        finalized_candles.append(candle)
+                    del self._open_buckets[open_ticker]
 
             # Handle non-feed frames (e.g. market_info or heartbeats)
             msg_type = msg.get("type")
@@ -203,8 +225,7 @@ class IndexCandleIngestionPrototype:
                 logger.debug(f"[IndexIngestion] Received market_info transport frame @ {now.isoformat()}")
                 return finalized_candles
 
-            feeds = msg.get("feeds")
-            if not isinstance(feeds, dict):
+            if not feeds:
                 return finalized_candles
 
             for ikey, feed_obj in feeds.items():
@@ -237,11 +258,13 @@ class IndexCandleIngestionPrototype:
                     logger.warning(f"[IndexIngestion] Rejected future tick for {ticker}: exch_ts={ltt_sec}, local_ts={now_ts}")
                     continue
 
-                # Check clock skew
+                # Check clock skew (rate-limit log spam to once per 30s per ticker)
                 skew = abs(now_ts - ltt_sec)
                 if skew > MAX_CLOCK_SKEW_SEC:
                     self._skew_warnings_count += 1
-                    logger.warning(f"[IndexIngestion] Clock skew warning for {ticker}: {skew:.2f}s divergence.")
+                    if (now_ts - last_skew_log_map.get(ticker, 0.0)) >= 30.0:
+                        last_skew_log_map[ticker] = now_ts
+                        logger.warning(f"[IndexIngestion] Clock skew warning for {ticker}: {skew:.2f}s divergence.")
 
                 # Out-of-order check
                 last_ltt = self._last_tick_timestamp_ms.get(ticker, 0)
@@ -280,6 +303,11 @@ class IndexCandleIngestionPrototype:
                 # 5. Minute Bucket Aggregator (Provisional In-Flight Bucket)
                 tick_dt = datetime.fromtimestamp(ltt_sec)
                 curr_min_str = tick_dt.strftime("%Y-%m-%d %H:%M:00")
+                # Guard against late straggler ticks reopening an already-finalized minute
+                last_fin_min = last_finalized_map.get(ticker)
+                if last_fin_min and curr_min_str <= last_fin_min:
+                    continue
+
                 bucket = self._open_buckets.get(ticker)
 
                 if bucket is None:
@@ -305,7 +333,7 @@ class IndexCandleIngestionPrototype:
                     bucket["last_price"] = ltp
                     if provider_i1:
                         bucket["provider_i1"] = provider_i1
-                else:
+                elif curr_min_str > bucket["minute_str"]:
                     # A tick from a later minute arrived -> finalize the prior bucket
                     prior_candle = self._finalize_bucket(ticker, bucket, completion_time=now)
                     if prior_candle:
@@ -452,6 +480,13 @@ class IndexCandleIngestionPrototype:
                 "version": 1,
                 "is_point_in_time": 1
             }
+
+        last_finalized_map = getattr(self, "_last_finalized_minute", None)
+        if last_finalized_map is None:
+            self._last_finalized_minute = {}
+            last_finalized_map = self._last_finalized_minute
+        if minute_str > last_finalized_map.get(ticker, ""):
+            last_finalized_map[ticker] = minute_str
 
         self._persist_candle(candle)
         self._completed_bars[ticker].append(candle)
@@ -630,30 +665,150 @@ class IndexCandleIngestionPrototype:
             }
 
     def _persist_candle(self, c: Dict[str, Any]) -> None:
-        """Atomically persists candle into continuous_index_ohlcv."""
+        """Atomically persists candle into continuous_index_ohlcv without degrading multi-tick completed bars."""
         try:
-            with sqlite3.connect(self._db_path, timeout=5.0) as conn:
-                conn.execute("""
-                    INSERT OR REPLACE INTO continuous_index_ohlcv
-                    (ticker, timestamp, open, high, low, close, volume, tick_count, source, is_complete, is_synthetic, is_gap,
-                     provider_open, provider_high, provider_low, provider_close, local_open, local_high, local_low, local_close,
-                     discrepancy_flag, received_at, available_at, reconciled_at, version, is_point_in_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    c["ticker"], c["timestamp"], c["open"], c["high"], c["low"], c["close"],
-                    c["volume"], c["tick_count"], c["source"], c["is_complete"], c["is_synthetic"], c["is_gap"],
-                    c.get("provider_open"), c.get("provider_high"), c.get("provider_low"), c.get("provider_close"),
-                    c.get("local_open"), c.get("local_high"), c.get("local_low"), c.get("local_close"),
-                    c.get("discrepancy_flag", 0),
-                    c.get("received_at", datetime.now().isoformat()),
-                    c.get("available_at", datetime.now().isoformat()),
-                    c.get("reconciled_at"),
-                    c.get("version", 1),
-                    c.get("is_point_in_time", 1)
-                ))
+            default_avail = (datetime.fromisoformat(c["timestamp"]) + timedelta(minutes=1)).isoformat() if c.get("timestamp") else datetime.now().isoformat()
+            rec_at = c.get("received_at") or default_avail
+            avail_at = c.get("available_at") or default_avail
+            with sqlite3.connect(self._db_path, timeout=15.0) as conn:
+                conn.execute("PRAGMA busy_timeout = 15000")
+                if c.get("is_synthetic", 0) == 0 and c.get("is_gap", 0) == 0:
+                    conn.execute("""
+                        INSERT INTO continuous_index_ohlcv
+                        (ticker, timestamp, open, high, low, close, volume, tick_count, source, is_complete, is_synthetic, is_gap,
+                         provider_open, provider_high, provider_low, provider_close, local_open, local_high, local_low, local_close,
+                         discrepancy_flag, received_at, available_at, reconciled_at, version, is_point_in_time)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(ticker, timestamp, version) DO UPDATE SET
+                            open = CASE WHEN excluded.tick_count >= continuous_index_ohlcv.tick_count THEN excluded.open ELSE continuous_index_ohlcv.open END,
+                            high = MAX(continuous_index_ohlcv.high, excluded.high),
+                            low = MIN(continuous_index_ohlcv.low, excluded.low),
+                            close = CASE WHEN excluded.tick_count >= continuous_index_ohlcv.tick_count THEN excluded.close ELSE continuous_index_ohlcv.close END,
+                            volume = MAX(continuous_index_ohlcv.volume, excluded.volume),
+                            tick_count = MAX(continuous_index_ohlcv.tick_count, excluded.tick_count),
+                            source = CASE WHEN excluded.tick_count >= continuous_index_ohlcv.tick_count THEN excluded.source ELSE continuous_index_ohlcv.source END,
+                            is_complete = MAX(continuous_index_ohlcv.is_complete, excluded.is_complete),
+                            is_synthetic = 0,
+                            is_gap = 0,
+                            provider_open = COALESCE(excluded.provider_open, continuous_index_ohlcv.provider_open),
+                            provider_high = COALESCE(excluded.provider_high, continuous_index_ohlcv.provider_high),
+                            provider_low = COALESCE(excluded.provider_low, continuous_index_ohlcv.provider_low),
+                            provider_close = COALESCE(excluded.provider_close, continuous_index_ohlcv.provider_close),
+                            local_open = COALESCE(excluded.local_open, continuous_index_ohlcv.local_open),
+                            local_high = MAX(COALESCE(continuous_index_ohlcv.local_high, excluded.local_high), COALESCE(excluded.local_high, continuous_index_ohlcv.local_high)),
+                            local_low = MIN(COALESCE(continuous_index_ohlcv.local_low, excluded.local_low), COALESCE(excluded.local_low, continuous_index_ohlcv.local_low)),
+                            local_close = COALESCE(excluded.local_close, continuous_index_ohlcv.local_close),
+                            discrepancy_flag = MAX(continuous_index_ohlcv.discrepancy_flag, excluded.discrepancy_flag),
+                            available_at = MIN(continuous_index_ohlcv.available_at, excluded.available_at),
+                            is_point_in_time = MAX(continuous_index_ohlcv.is_point_in_time, excluded.is_point_in_time)
+                    """, (
+                        c["ticker"], c["timestamp"], c["open"], c["high"], c["low"], c["close"],
+                        c["volume"], c["tick_count"], c["source"], c["is_complete"], c["is_synthetic"], c["is_gap"],
+                        c.get("provider_open"), c.get("provider_high"), c.get("provider_low"), c.get("provider_close"),
+                        c.get("local_open"), c.get("local_high"), c.get("local_low"), c.get("local_close"),
+                        c.get("discrepancy_flag", 0),
+                        rec_at,
+                        avail_at,
+                        c.get("reconciled_at"),
+                        c.get("version", 1),
+                        c.get("is_point_in_time", 1)
+                    ))
+                else:
+                    conn.execute("""
+                        INSERT OR REPLACE INTO continuous_index_ohlcv
+                        (ticker, timestamp, open, high, low, close, volume, tick_count, source, is_complete, is_synthetic, is_gap,
+                         provider_open, provider_high, provider_low, provider_close, local_open, local_high, local_low, local_close,
+                         discrepancy_flag, received_at, available_at, reconciled_at, version, is_point_in_time)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        c["ticker"], c["timestamp"], c["open"], c["high"], c["low"], c["close"],
+                        c["volume"], c["tick_count"], c["source"], c["is_complete"], c["is_synthetic"], c["is_gap"],
+                        c.get("provider_open"), c.get("provider_high"), c.get("provider_low"), c.get("provider_close"),
+                        c.get("local_open"), c.get("local_high"), c.get("local_low"), c.get("local_close"),
+                        c.get("discrepancy_flag", 0),
+                        rec_at,
+                        avail_at,
+                        c.get("reconciled_at"),
+                        c.get("version", 1),
+                        c.get("is_point_in_time", 1)
+                    ))
                 conn.commit()
         except Exception as e:
             logger.error(f"[IndexIngestion] Failed to persist candle for {c.get('ticker')}: {e}")
+
+    def backfill_intraday_session_gaps(self) -> int:
+        """
+        Repairs missing or 1-tick flat bars in continuous_index_ohlcv for the current session
+        using Upstox authoritative 1-minute intraday candles (strictly point-in-time for completed minutes).
+        """
+        repaired = 0
+        try:
+            import urllib.parse
+            from app.data.upstox_provider import get_upstox_token, upstox_request, UPSTOX_BASE_URL
+            token = get_upstox_token()
+            if not token:
+                return 0
+            headers = {
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+            }
+            now = datetime.now()
+            current_min_dt = now.replace(second=0, microsecond=0)
+
+            for inst_key, ticker in INDEX_KEYS.items():
+                encoded_key = urllib.parse.quote(inst_key, safe="")
+                url = f"{UPSTOX_BASE_URL}/historical-candle/intraday/{encoded_key}/1minute"
+                res = upstox_request("GET", url, headers=headers, timeout=5)
+                if res.status_code != 200:
+                    continue
+                candles = res.json().get("data", {}).get("candles", [])
+                if not candles:
+                    continue
+                with sqlite3.connect(self._db_path, timeout=15.0) as conn:
+                    conn.execute("PRAGMA busy_timeout = 15000")
+                    for row in candles:
+                        if len(row) < 5:
+                            continue
+                        raw_ts, o_val, h_val, l_val, c_val = row[0], float(row[1]), float(row[2]), float(row[3]), float(row[4])
+                        vol_val = int(row[5]) if len(row) > 5 and row[5] is not None else 0
+                        bar_dt = datetime.fromisoformat(str(raw_ts)).replace(tzinfo=None, second=0, microsecond=0)
+                        if bar_dt >= current_min_dt:
+                            continue  # Never backfill still-forming current minute
+                        bar_str = bar_dt.strftime("%Y-%m-%d %H:%M:00")
+                        avail_str = (bar_dt + timedelta(minutes=1)).isoformat()
+                        conn.execute("""
+                            INSERT INTO continuous_index_ohlcv
+                            (ticker, timestamp, open, high, low, close, volume, tick_count, source, is_complete, is_synthetic, is_gap,
+                             provider_open, provider_high, provider_low, provider_close, local_open, local_high, local_low, local_close,
+                             discrepancy_flag, received_at, available_at, reconciled_at, version, is_point_in_time)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, 100, 'PROVIDER_I1', 1, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL, 1, 1)
+                            ON CONFLICT(ticker, timestamp, version) DO UPDATE SET
+                                open = CASE WHEN continuous_index_ohlcv.tick_count <= 1 THEN excluded.open ELSE continuous_index_ohlcv.open END,
+                                high = MAX(continuous_index_ohlcv.high, excluded.high),
+                                low = MIN(continuous_index_ohlcv.low, excluded.low),
+                                close = CASE WHEN continuous_index_ohlcv.tick_count <= 1 THEN excluded.close ELSE continuous_index_ohlcv.close END,
+                                tick_count = MAX(continuous_index_ohlcv.tick_count, excluded.tick_count),
+                                source = CASE WHEN continuous_index_ohlcv.tick_count <= 1 THEN 'PROVIDER_I1' ELSE continuous_index_ohlcv.source END,
+                                is_complete = 1,
+                                is_synthetic = 0,
+                                is_gap = 0,
+                                provider_open = COALESCE(continuous_index_ohlcv.provider_open, excluded.provider_open),
+                                provider_high = COALESCE(continuous_index_ohlcv.provider_high, excluded.provider_high),
+                                provider_low = COALESCE(continuous_index_ohlcv.provider_low, excluded.provider_low),
+                                provider_close = COALESCE(continuous_index_ohlcv.provider_close, excluded.provider_close),
+                                is_point_in_time = 1
+                        """, (
+                            ticker, bar_str, o_val, h_val, l_val, c_val, vol_val,
+                            o_val, h_val, l_val, c_val, o_val, h_val, l_val, c_val,
+                            avail_str, avail_str
+                        ))
+                        repaired += 1
+                    conn.commit()
+            if repaired > 0:
+                logger.info(f"[IndexIngestion] Verified/repaired {repaired} completed 1m index candles via Upstox intraday feed.")
+        except Exception as e:
+            logger.debug(f"[IndexIngestion] Intraday session gap backfill note: {e}")
+        return repaired
 
     # ──────────────────────────────────────────────────────────────────────────
     # AUTHENTICATION & RECONNECT HANDLING
@@ -774,8 +929,11 @@ class IndexCandleIngestionPrototype:
         return recent_bars
 
 
-_INDEX_INGESTION_INSTANCE: Optional["IndexCandleIngestionPrototype"] = None
-_INDEX_INGESTION_LOCK = threading.RLock()
+_INDEX_INGESTION_LOCK = globals().get("_INDEX_INGESTION_LOCK") or threading.RLock()
+_INDEX_INGESTION_INSTANCE: Optional["IndexCandleIngestionPrototype"] = globals().get("_INDEX_INGESTION_INSTANCE")
+if _INDEX_INGESTION_INSTANCE is not None:
+    _INDEX_INGESTION_INSTANCE.__class__ = IndexCandleIngestionPrototype
+    threading.Thread(target=_INDEX_INGESTION_INSTANCE.backfill_intraday_session_gaps, name="IndexGapBackfill", daemon=True).start()
 
 
 def get_index_candle_ingestion_service(db_path: Optional[str] = None) -> "IndexCandleIngestionPrototype":
