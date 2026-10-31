@@ -8,3 +8,4 @@ Supports:
     and 4-Tier Reverse-Chandelier Premium Decay Ratchet.
 Strictly Paper-Only Sandbox (SIMULATION_ONLY = True). Zero interference with main Option Sniffer.
 """
+

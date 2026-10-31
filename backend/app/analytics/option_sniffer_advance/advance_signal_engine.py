@@ -314,3 +314,4 @@ class AdvanceSignalEngine:
             sig_payload["opened_trade_id"] = trade_id
 
         return sig_payload
+

@@ -504,6 +504,8 @@ class OptionPaperExecution:
 
         try:
             et_dt = datetime.fromisoformat(str(trade["entry_time"]))
+            if et_dt.date() != now_dt.date():
+                return False
             et_mins = et_dt.hour * 60 + et_dt.minute
             if not ((9 * 60 + 43) <= et_mins <= (11 * 60 + 30)):
                 return False

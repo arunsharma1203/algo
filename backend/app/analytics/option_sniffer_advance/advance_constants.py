@@ -148,3 +148,4 @@ def calculate_short_option_trade_costs(
         if estimated_span_margin > 0
         else 0.0,
     }
+

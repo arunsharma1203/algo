@@ -375,3 +375,4 @@ class AdvanceChainIntelligence:
             "active_strategy_mode": active_strategy_mode,
             "regime_summary": regime_summary,
         }
+

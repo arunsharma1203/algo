@@ -94,3 +94,4 @@ def trigger_advance_scan() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to run scan sweep: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+

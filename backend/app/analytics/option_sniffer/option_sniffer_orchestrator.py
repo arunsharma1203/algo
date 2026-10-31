@@ -301,7 +301,20 @@ class OptionSnifferOrchestrator:
                     f"Candidate evaluations and new trade signals halted. Open positions: {len(open_trades_raw) - len(closed_trades)}."
                 )
             else:
-                for contract in self.contracts:
+                # Prioritize ATM and Near-ATM strikes (|strike - spot_ltp| ascending) before deep-ITM/far-OTM strikes
+                # so high-convexity, capital-efficient ATM contracts are evaluated first and deep-ITM strikes
+                # never steal the underlying anti-clustering lock or consume excessive margin.
+                def _atm_priority_key(c: Dict[str, Any]):
+                    u_name = str(c.get("underlying") or "NIFTY").upper()
+                    uq_obj = underlying_quotes.get(u_name) or self.stream_manager.get_underlying_quote(u_name) or {}
+                    spot_val = float(uq_obj.get("spot_ltp") or 0.0)
+                    strike_val = float(c.get("strike") or 0.0)
+                    if spot_val > 0 and strike_val > 0:
+                        return (abs(strike_val - spot_val), strike_val)
+                    return (0.0, strike_val)
+
+                ordered_contracts = sorted(self.contracts, key=_atm_priority_key)
+                for contract in ordered_contracts:
                     ikey = contract.get("instrument_key")
                     quote = self.stream_manager.get_option_quote(ikey)
                     if not quote:
@@ -603,7 +616,10 @@ class OptionSnifferOrchestrator:
                     quote = self.stream_manager._option_quotes.get(ikey)
 
             entry_ask = float(t.get("entry_ask") or t.get("entry_price_used") or 0.0)
+            anchor_entry_ask = float(t.get("initial_entry_ask") or entry_ask)
             quantity = int(t.get("quantity") or 0)
+            base_lot_qty = int(t.get("lot_size") or quantity or 65)
+            is_scaled_in = int(t.get("scale_in_count") or 0) >= 1
 
             # Live execution prices strictly at market bid
             if quote and float(quote.get("bid") or 0.0) > 0:
@@ -615,15 +631,15 @@ class OptionSnifferOrchestrator:
                 current_bid = round(current_ltp * 0.995, 2)
                 current_ask = round(current_ltp * 1.005, 2)
             else:
-                current_bid = float(t.get("peak_price") or entry_ask)
+                current_bid = float(t.get("peak_price") or anchor_entry_ask)
                 current_ask = entry_ask
                 current_ltp = current_bid
 
-            # Extrema tracking & excursions
-            peak_price = max(float(t.get("peak_price") or entry_ask), current_bid)
-            trough_price = min(float(t.get("trough_price") or entry_ask), current_bid)
-            mfe_pct = round(((peak_price - entry_ask) / entry_ask * 100.0), 2) if entry_ask > 0 else 0.0
-            mae_pct = round(((trough_price - entry_ask) / entry_ask * 100.0), 2) if entry_ask > 0 else 0.0
+            # Extrema tracking & excursions anchored to initial Lot #1 entry ask
+            peak_price = max(float(t.get("peak_price") or anchor_entry_ask), current_bid)
+            trough_price = min(float(t.get("trough_price") or anchor_entry_ask), current_bid)
+            mfe_pct = round(((peak_price - anchor_entry_ask) / anchor_entry_ask * 100.0), 2) if anchor_entry_ask > 0 else 0.0
+            mae_pct = round(((trough_price - anchor_entry_ask) / anchor_entry_ask * 100.0), 2) if anchor_entry_ask > 0 else 0.0
 
             # Holding duration
             try:
@@ -632,21 +648,25 @@ class OptionSnifferOrchestrator:
             except Exception:
                 duration_sec = int(t.get("holding_duration_seconds") or 0)
 
-            # Target & Stop Loss Levels (Dynamic V2 or Classic V1 with Rupee Cap)
+            # Target & Stop Loss Levels (Dynamic V2 or Classic V1 with Rupee Cap on base 1-lot)
             target_pct = float(t.get("dynamic_target_pct") or TARGET_GAIN_PCT)
             base_sl_pct = float(t.get("dynamic_sl_pct") or STOP_LOSS_PCT)
             stop_loss_pct = OptionPaperExecution.calculate_rupee_capped_sl_pct(
-                entry_ask=entry_ask,
-                lot_size=quantity,
+                entry_ask=anchor_entry_ask,
+                lot_size=base_lot_qty,
                 base_sl_pct=base_sl_pct,
             )
-            target_price = round(entry_ask * (1.0 + target_pct / 100.0), 2)
-            stop_loss_price = round(entry_ask * (1.0 - stop_loss_pct / 100.0), 2)
+            target_price = round(anchor_entry_ask * (1.0 + target_pct / 100.0), 2)
+            stop_loss_price = round(anchor_entry_ask * (1.0 - stop_loss_pct / 100.0), 2)
 
             # Chandelier & Target-Lock Trailing Stop
             chandelier_stop = OptionPaperExecution.calculate_chandelier_stop(
-                entry_ask, peak_price, mfe_pct, target_hurdle=target_pct
+                anchor_entry_ask, peak_price, mfe_pct, target_hurdle=target_pct
             )
+            if is_scaled_in:
+                from app.analytics.option_sniffer.option_constants import HOUSE_MONEY_UNIFIED_FLOOR_PCT
+                hm_floor = max(anchor_entry_ask * (1.0 + HOUSE_MONEY_UNIFIED_FLOOR_PCT / 100.0), entry_ask * 1.015)
+                chandelier_stop = max(chandelier_stop or 0.0, hm_floor)
             if chandelier_stop is not None:
                 trailing_stop_active = True
                 trailing_stop_price = round(chandelier_stop, 2)

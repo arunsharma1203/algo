@@ -352,7 +352,7 @@ class OptionStreamManager:
                 if trade.get("instrument_key") != ikey:
                     continue
 
-                entry_ask = float(trade.get("entry_ask") or 0.0)
+                entry_ask = float(trade.get("initial_entry_ask") or trade.get("entry_ask") or 0.0)
                 if entry_ask <= 0:
                     continue
 
@@ -365,9 +365,9 @@ class OptionStreamManager:
                 current_pnl_pct = ((current_bid - entry_ask) / entry_ask) * 100.0
 
                 stop_hurdle = float(trade.get("dynamic_sl_pct") or STOP_LOSS_PCT)
-                lot_qty = int(trade.get("quantity") or trade.get("lot_size") or 0)
-                if lot_qty > 0:
-                    stop_hurdle = OptionPaperExecution.calculate_rupee_capped_sl_pct(entry_ask, lot_qty, stop_hurdle)
+                base_lot_qty = int(trade.get("lot_size") or trade.get("quantity") or 0)
+                if base_lot_qty > 0:
+                    stop_hurdle = OptionPaperExecution.calculate_rupee_capped_sl_pct(entry_ask, base_lot_qty, stop_hurdle)
 
                 if current_pnl_pct <= -stop_hurdle:
                     try:

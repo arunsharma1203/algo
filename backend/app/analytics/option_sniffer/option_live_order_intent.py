@@ -888,6 +888,8 @@ class OrderIntentEngine:
                 resp = requests.get(url, headers=headers, params=params, proxies=proxies, timeout=8.0)
             elif m == "POST":
                 resp = requests.post(url, headers=headers, json=payload, proxies=proxies, timeout=8.0)
+            elif m == "PUT":
+                resp = requests.put(url, headers=headers, json=payload, proxies=proxies, timeout=8.0)
             elif m == "DELETE":
                 resp = requests.delete(url, headers=headers, params=params, proxies=proxies, timeout=8.0)
             else:
@@ -899,6 +901,8 @@ class OrderIntentEngine:
                 fallback_url = f"https://api.upstox.com/v2/{cleaned_ep}"
                 if m == "POST":
                     resp = requests.post(fallback_url, headers=headers, json=payload, proxies=proxies, timeout=8.0)
+                elif m == "PUT":
+                    resp = requests.put(fallback_url, headers=headers, json=payload, proxies=proxies, timeout=8.0)
                 elif m == "DELETE":
                     resp = requests.delete(fallback_url, headers=headers, params=params, proxies=proxies, timeout=8.0)
 
@@ -1108,7 +1112,7 @@ class OrderIntentEngine:
                         })
                 continue
 
-            # 2. Check pending Entry Orders
+            # 2. Check pending Entry Orders (serialized under _INTENT_LOCK to prevent concurrent duplicate SL orders)
             b_id = intent["broker_order_id"]
             if b_id in order_map:
                 broker_order = order_map[b_id]
@@ -1116,87 +1120,111 @@ class OrderIntentEngine:
                 fill_price = float(broker_order.get("average_price") or 0.0)
                 filled_qty = int(broker_order.get("filled_quantity") or 0)
 
-                with self._get_db_conn() as conn:
-                    cur = conn.cursor()
-                    if status == "complete":
-                        cur.execute("""
-                            UPDATE option_live_order_intents
-                            SET state = ?, average_fill_price = ?, filled_quantity = ?, updated_at = ?
-                            WHERE order_intent_id = ?;
-                        """, (STATE_FILLED, fill_price, filled_qty, now_iso, intent["order_intent_id"]))
-                        conn.commit()
-                        # Automatically place linked broker Stop Loss order
-                        sl_res = self.place_broker_stop_loss_order(intent["order_intent_id"], fill_price, filled_qty)
-                        try:
-                            from app.analytics.telegram_notifier import send_telegram_message
-                            sl_id = sl_res.get("broker_sl_order_id", "PENDING")
-                            sl_trig = sl_res.get("stop_loss_trigger", 0.0)
-                            fill_msg = (
-                                f"<b>✅ UPSTOX LIVE ORDER FILLED</b>\n"
-                                f"<b>{intent.get('trading_symbol')}</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━━\n"
-                                f"• <b>Contract:</b> {intent.get('trading_symbol')}\n"
-                                f"• <b>Fill Price:</b> <b>₹{fill_price:.2f}</b>\n"
-                                f"• <b>Quantity:</b> {filled_qty}\n"
-                                f"• <b>Linked SL Trigger:</b> ₹{sl_trig:.2f}\n"
-                                f"• <b>Broker SL ID:</b> <code>{sl_id}</code>\n"
-                                f"━━━━━━━━━━━━━━━━━━━\n"
-                                f"<i>⚡ Live order active on exchange with protection</i>"
-                            )
-                            send_telegram_message(fill_msg, is_real_option_trade=True)
-                        except Exception as fe:
-                            logger.debug(f"[OptionLiveOrderIntent] Telegram fill alert note: {fe}")
-                        updated_records.append({"order_intent_id": intent["order_intent_id"], "state": STATE_FILLED, "sl_result": sl_res})
-                    elif status == "cancelled":
-                        if filled_qty > 0:
-                            # Partial execution completed, remainder cancelled
+                with _INTENT_LOCK:
+                    with self._get_db_conn() as conn:
+                        cur = conn.cursor()
+                        cur.execute(
+                            "SELECT state, broker_sl_order_id, filled_quantity FROM option_live_order_intents WHERE order_intent_id = ?;",
+                            (intent["order_intent_id"],)
+                        )
+                        latest_row = cur.fetchone()
+                        latest_state = latest_row[0] if latest_row else intent["state"]
+                        existing_sl_id = latest_row[1] if latest_row else intent.get("broker_sl_order_id")
+
+                        if status == "complete":
+                            if latest_state == STATE_FILLED and existing_sl_id:
+                                # Already reconciled and protected by concurrent caller thread
+                                continue
                             cur.execute("""
                                 UPDATE option_live_order_intents
                                 SET state = ?, average_fill_price = ?, filled_quantity = ?, updated_at = ?
                                 WHERE order_intent_id = ?;
                             """, (STATE_FILLED, fill_price, filled_qty, now_iso, intent["order_intent_id"]))
                             conn.commit()
-                            sl_res = self.place_broker_stop_loss_order(intent["order_intent_id"], fill_price, filled_qty)
-                            updated_records.append({
-                                "order_intent_id": intent["order_intent_id"],
-                                "state": STATE_FILLED,
-                                "partial_remainder_cancelled": True,
-                                "sl_result": sl_res
-                            })
-                        else:
-                            cur.execute("""
-                                UPDATE option_live_order_intents
-                                SET state = ?, updated_at = ?
-                                WHERE order_intent_id = ?;
-                            """, (STATE_CANCELLED, now_iso, intent["order_intent_id"]))
-                            conn.commit()
-                            updated_records.append({"order_intent_id": intent["order_intent_id"], "state": STATE_CANCELLED})
-                    elif status in ("partially filled", "partial"):
-                        if filled_qty > 0:
-                            cur.execute("""
-                                UPDATE option_live_order_intents
-                                SET state = ?, average_fill_price = ?, filled_quantity = ?, updated_at = ?
-                                WHERE order_intent_id = ?;
-                            """, (STATE_PARTIALLY_FILLED, fill_price, filled_qty, now_iso, intent["order_intent_id"]))
-                            conn.commit()
-                            if not intent.get("broker_sl_order_id"):
-                                sl_res = self.place_broker_stop_loss_order(intent["order_intent_id"], fill_price, filled_qty)
+                            # Place linked broker Stop Loss order (or modify existing partial-fill SL in-place with ₹0 extra margin)
+                            if existing_sl_id:
+                                sl_res = self.modify_broker_stop_loss_order(
+                                    intent["order_intent_id"], existing_sl_id, fill_price, filled_qty
+                                )
                             else:
-                                sl_res = {"status": "SL_ALREADY_EXISTS"}
-                            updated_records.append({
-                                "order_intent_id": intent["order_intent_id"],
-                                "state": STATE_PARTIALLY_FILLED,
-                                "sl_result": sl_res
-                            })
-                    elif status == "rejected":
-                        rej_msg = broker_order.get("status_message", "Exchange rejected")
-                        cur.execute("""
-                            UPDATE option_live_order_intents
-                            SET state = ?, rejection_reason = ?, updated_at = ?
-                            WHERE order_intent_id = ?;
-                        """, (STATE_REJECTED, rej_msg, now_iso, intent["order_intent_id"]))
-                        conn.commit()
-                        updated_records.append({"order_intent_id": intent["order_intent_id"], "state": STATE_REJECTED})
+                                sl_res = self.place_broker_stop_loss_order(intent["order_intent_id"], fill_price, filled_qty)
+                            try:
+                                from app.analytics.telegram_notifier import send_telegram_message
+                                sl_id = sl_res.get("broker_sl_order_id", existing_sl_id or "PENDING")
+                                sl_trig = sl_res.get("stop_loss_trigger") or sl_res.get("trigger_price") or 0.0
+                                fill_msg = (
+                                    f"<b>✅ UPSTOX LIVE ORDER FILLED</b>\n"
+                                    f"<b>{intent.get('trading_symbol')}</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━\n"
+                                    f"• <b>Contract:</b> {intent.get('trading_symbol')}\n"
+                                    f"• <b>Fill Price:</b> <b>₹{fill_price:.2f}</b>\n"
+                                    f"• <b>Quantity:</b> {filled_qty}\n"
+                                    f"• <b>Linked SL Trigger:</b> ₹{sl_trig:.2f}\n"
+                                    f"• <b>Broker SL ID:</b> <code>{sl_id}</code>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━\n"
+                                    f"<i>⚡ Live order active on exchange with protection</i>"
+                                )
+                                send_telegram_message(fill_msg, is_real_option_trade=True)
+                            except Exception as fe:
+                                logger.debug(f"[OptionLiveOrderIntent] Telegram fill alert note: {fe}")
+                            updated_records.append({"order_intent_id": intent["order_intent_id"], "state": STATE_FILLED, "sl_result": sl_res})
+                        elif status == "cancelled":
+                            if filled_qty > 0:
+                                if latest_state == STATE_FILLED and existing_sl_id:
+                                    continue
+                                # Partial execution completed, remainder cancelled
+                                cur.execute("""
+                                    UPDATE option_live_order_intents
+                                    SET state = ?, average_fill_price = ?, filled_quantity = ?, updated_at = ?
+                                    WHERE order_intent_id = ?;
+                                """, (STATE_FILLED, fill_price, filled_qty, now_iso, intent["order_intent_id"]))
+                                conn.commit()
+                                if existing_sl_id:
+                                    sl_res = self.modify_broker_stop_loss_order(
+                                        intent["order_intent_id"], existing_sl_id, fill_price, filled_qty
+                                    )
+                                else:
+                                    sl_res = self.place_broker_stop_loss_order(intent["order_intent_id"], fill_price, filled_qty)
+                                updated_records.append({
+                                    "order_intent_id": intent["order_intent_id"],
+                                    "state": STATE_FILLED,
+                                    "partial_remainder_cancelled": True,
+                                    "sl_result": sl_res
+                                })
+                            else:
+                                cur.execute("""
+                                    UPDATE option_live_order_intents
+                                    SET state = ?, updated_at = ?
+                                    WHERE order_intent_id = ?;
+                                """, (STATE_CANCELLED, now_iso, intent["order_intent_id"]))
+                                conn.commit()
+                                updated_records.append({"order_intent_id": intent["order_intent_id"], "state": STATE_CANCELLED})
+                        elif status in ("partially filled", "partial"):
+                            if filled_qty > 0:
+                                cur.execute("""
+                                    UPDATE option_live_order_intents
+                                    SET state = ?, average_fill_price = ?, filled_quantity = ?, updated_at = ?
+                                    WHERE order_intent_id = ?;
+                                """, (STATE_PARTIALLY_FILLED, fill_price, filled_qty, now_iso, intent["order_intent_id"]))
+                                conn.commit()
+                                if not existing_sl_id:
+                                    sl_res = self.place_broker_stop_loss_order(intent["order_intent_id"], fill_price, filled_qty)
+                                else:
+                                    sl_res = {"status": "SL_ALREADY_EXISTS", "broker_sl_order_id": existing_sl_id}
+                                updated_records.append({
+                                    "order_intent_id": intent["order_intent_id"],
+                                    "state": STATE_PARTIALLY_FILLED,
+                                    "sl_result": sl_res
+                                })
+                        elif status == "rejected":
+                            rej_msg = broker_order.get("status_message", "Exchange rejected")
+                            cur.execute("""
+                                UPDATE option_live_order_intents
+                                SET state = ?, rejection_reason = ?, updated_at = ?
+                                WHERE order_intent_id = ?;
+                            """, (STATE_REJECTED, rej_msg, now_iso, intent["order_intent_id"]))
+                            conn.commit()
+                            updated_records.append({"order_intent_id": intent["order_intent_id"], "state": STATE_REJECTED})
         return updated_records
 
     def check_and_execute_live_exits(self, live_quotes_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1768,24 +1796,22 @@ class OrderIntentEngine:
                     "order_intent_id": order_intent_id
                 }
 
-    def place_broker_stop_loss_order(
+    def modify_broker_stop_loss_order(
         self,
         order_intent_id: str,
+        broker_sl_order_id: str,
         filled_price: float,
         filled_qty: int,
-        sl_pct: float = DEFAULT_STOP_LOSS_PCT
+        sl_pct: float = DEFAULT_STOP_LOSS_PCT,
+        custom_trigger_price: Optional[float] = None
     ) -> Dict[str, Any]:
         """
-        Places linked Stop-Loss Limit order with Upstox broker anchored strictly to actual fill price.
-        If Stop-Loss order placement fails or is rejected, engages Emergency Fail-Closed Protocol:
-          1. Immediately disarms live trading.
-          2. Auto-liquidates the unprotected position at market to prevent unmanaged loss.
-          3. Logs critical alert.
+        Modifies an existing resting Upstox Stop-Loss order in-place via PUT /v2/order/modify.
+        Uses the exact same order slot on the exchange so Upstox RMS requires ₹0 extra margin
+        when updating partial-to-full quantity or ratcheting trailing stop floors.
         """
-        from app.analytics.option_sniffer.option_live_adapter import get_option_live_adapter
-        adapter = get_option_live_adapter()
-        if not adapter._is_live_armed:
-            return {"status": "BLOCKED", "reason": "LIVE_TRADING_NOT_ARMED"}
+        if not broker_sl_order_id or str(broker_sl_order_id).startswith("UPSTOX_"):
+            return {"status": "SIMULATED_MODIFIED", "broker_sl_order_id": broker_sl_order_id}
 
         with self._get_db_conn() as conn:
             cur = conn.cursor()
@@ -1796,46 +1822,146 @@ class OrderIntentEngine:
             intent = dict(row)
 
         effective_sl_pct = float(intent.get("dynamic_sl_pct") or sl_pct)
-        trigger_price = align_to_nse_tick(round(filled_price * (1.0 - (effective_sl_pct / 100.0)), 1))
+        if filled_qty > 0 and filled_price > 0:
+            effective_sl_pct = OptionPaperExecution.calculate_rupee_capped_sl_pct(
+                filled_price, filled_qty, effective_sl_pct
+            )
+        if custom_trigger_price is not None and custom_trigger_price > 0:
+            trigger_price = align_to_nse_tick(round(custom_trigger_price, 1))
+        else:
+            trigger_price = align_to_nse_tick(round(filled_price * (1.0 - (effective_sl_pct / 100.0)), 1))
         limit_price = align_to_nse_tick(round(trigger_price * 0.985, 1))
 
-        sl_tag = sanitize_upstox_tag(f"SL-{order_intent_id}")
-        payload = {
+        mod_payload = {
+            "order_id": str(broker_sl_order_id),
             "quantity": int(filled_qty),
-            "product": "I",
             "validity": "DAY",
             "price": float(limit_price),
-            "tag": sl_tag,
-            "instrument_token": str(intent["instrument_key"]),
             "order_type": "SL",
-            "transaction_type": "SELL",
             "disclosed_quantity": 0,
             "trigger_price": float(trigger_price),
-            "is_amo": False
         }
-
-        success, status_code, data = self._call_upstox_broker_api("POST", "/order/place", payload=payload, is_emergency=True)
+        success, status_code, data = self._call_upstox_broker_api(
+            "PUT", "/order/modify", payload=mod_payload, is_emergency=True
+        )
         now_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        with self._get_db_conn() as conn:
-            cur = conn.cursor()
-            if success and data.get("status") == "success":
-                sl_order_id = data.get("data", {}).get("order_id", f"UPSTOX_SL_{int(time.time()*1000)}")
+        if success and isinstance(data, dict) and data.get("status") == "success":
+            with self._get_db_conn() as conn:
+                cur = conn.cursor()
                 cur.execute("""
                     UPDATE option_live_order_intents
-                    SET stop_loss_trigger = ?, stop_loss_limit = ?, broker_sl_order_id = ?, updated_at = ?
+                    SET stop_loss_trigger = ?, stop_loss_limit = ?, updated_at = ?
                     WHERE order_intent_id = ?;
-                """, (trigger_price, limit_price, sl_order_id, now_iso, order_intent_id))
+                """, (trigger_price, limit_price, now_iso, order_intent_id))
                 conn.commit()
-                return {"status": "PLACED", "broker_sl_order_id": sl_order_id, "trigger_price": trigger_price}
-            else:
-                err = str(data)
-                logger.critical(f"🚨 [OptionLiveOrderIntent] Broker Stop Loss FAILED for {order_intent_id}: {err}. Engaging Emergency Fail-Closed Liquidation.")
-                adapter.disarm_live_trading()
-                # Emergency square-off position to protect capital using realistic limit
-                fallback_bid = max(0.50, limit_price)
-                self.trigger_sos_panic_exit(order_intent_id, current_bid_price=fallback_bid)
-                return {"status": "SL_FAILED_AUTO_LIQUIDATED", "error": err}
+            return {
+                "status": "MODIFIED",
+                "broker_sl_order_id": broker_sl_order_id,
+                "trigger_price": trigger_price,
+                "stop_loss_trigger": trigger_price,
+            }
+        return {
+            "status": "SL_ALREADY_EXISTS",
+            "broker_sl_order_id": broker_sl_order_id,
+            "trigger_price": intent.get("stop_loss_trigger") or trigger_price,
+            "stop_loss_trigger": intent.get("stop_loss_trigger") or trigger_price,
+        }
+
+    def place_broker_stop_loss_order(
+        self,
+        order_intent_id: str,
+        filled_price: float,
+        filled_qty: int,
+        sl_pct: float = DEFAULT_STOP_LOSS_PCT
+    ) -> Dict[str, Any]:
+        """
+        Places linked Stop-Loss Limit order with Upstox broker anchored strictly to actual fill price.
+        Enforces strict idempotency under _INTENT_LOCK so duplicate SELL SL orders can never be dispatched
+        for the same position (which would otherwise consume naked option short margin on Upstox).
+        If Stop-Loss order placement genuinely fails, engages Emergency Fail-Closed Protocol:
+          1. Immediately disarms live trading.
+          2. Auto-liquidates the unprotected position at market to prevent unmanaged loss.
+          3. Logs critical alert.
+        """
+        from app.analytics.option_sniffer.option_live_adapter import get_option_live_adapter
+        adapter = get_option_live_adapter()
+        if not adapter._is_live_armed:
+            return {"status": "BLOCKED", "reason": "LIVE_TRADING_NOT_ARMED"}
+
+        with _INTENT_LOCK:
+            with self._get_db_conn() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT * FROM option_live_order_intents WHERE order_intent_id = ?;", (order_intent_id,))
+                row = cur.fetchone()
+                if not row:
+                    return {"status": "ERROR", "reason": "Intent not found"}
+                intent = dict(row)
+
+            # Strict Idempotency Guard: Never place a 2nd SELL SL order if one already exists!
+            existing_sl_id = intent.get("broker_sl_order_id")
+            if existing_sl_id:
+                prev_qty = int(intent.get("filled_quantity") or 0)
+                if filled_qty > prev_qty > 0:
+                    return self.modify_broker_stop_loss_order(
+                        order_intent_id, existing_sl_id, filled_price, filled_qty, sl_pct=sl_pct
+                    )
+                return {
+                    "status": "SL_ALREADY_EXISTS",
+                    "broker_sl_order_id": existing_sl_id,
+                    "trigger_price": intent.get("stop_loss_trigger"),
+                    "stop_loss_trigger": intent.get("stop_loss_trigger"),
+                }
+
+            effective_sl_pct = float(intent.get("dynamic_sl_pct") or sl_pct)
+            if filled_qty > 0 and filled_price > 0:
+                effective_sl_pct = OptionPaperExecution.calculate_rupee_capped_sl_pct(
+                    filled_price, filled_qty, effective_sl_pct
+                )
+            trigger_price = align_to_nse_tick(round(filled_price * (1.0 - (effective_sl_pct / 100.0)), 1))
+            limit_price = align_to_nse_tick(round(trigger_price * 0.985, 1))
+
+            sl_tag = sanitize_upstox_tag(f"SL-{order_intent_id}")
+            payload = {
+                "quantity": int(filled_qty),
+                "product": "I",
+                "validity": "DAY",
+                "price": float(limit_price),
+                "tag": sl_tag,
+                "instrument_token": str(intent["instrument_key"]),
+                "order_type": "SL",
+                "transaction_type": "SELL",
+                "disclosed_quantity": 0,
+                "trigger_price": float(trigger_price),
+                "is_amo": False
+            }
+
+            success, status_code, data = self._call_upstox_broker_api("POST", "/order/place", payload=payload, is_emergency=True)
+            now_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            with self._get_db_conn() as conn:
+                cur = conn.cursor()
+                if success and data.get("status") == "success":
+                    sl_order_id = data.get("data", {}).get("order_id", f"UPSTOX_SL_{int(time.time()*1000)}")
+                    cur.execute("""
+                        UPDATE option_live_order_intents
+                        SET stop_loss_trigger = ?, stop_loss_limit = ?, broker_sl_order_id = ?, updated_at = ?
+                        WHERE order_intent_id = ?;
+                    """, (trigger_price, limit_price, sl_order_id, now_iso, order_intent_id))
+                    conn.commit()
+                    return {
+                        "status": "PLACED",
+                        "broker_sl_order_id": sl_order_id,
+                        "trigger_price": trigger_price,
+                        "stop_loss_trigger": trigger_price,
+                    }
+                else:
+                    err = str(data)
+                    logger.critical(f"🚨 [OptionLiveOrderIntent] Broker Stop Loss FAILED for {order_intent_id}: {err}. Engaging Emergency Fail-Closed Liquidation.")
+                    adapter.disarm_live_trading()
+                    # Emergency square-off position to protect capital using realistic limit
+                    fallback_bid = max(0.50, limit_price)
+                    self.trigger_sos_panic_exit(order_intent_id, current_bid_price=fallback_bid)
+                    return {"status": "SL_FAILED_AUTO_LIQUIDATED", "error": err}
 
     def simulate_order_execution(
         self,
@@ -2071,6 +2197,28 @@ class OrderIntentEngine:
                             exit_success, exit_status_code, exit_data = self._call_upstox_broker_api(
                                 "POST", "/order/place", payload=exit_payload, is_emergency=True
                             )
+                            # If POST /order/place is still rejected (e.g. SL cancellation in-flight on NSE causing RMS double-margin check),
+                            # convert the resting broker_sl_order_id in-place via PUT /order/modify using ₹0 extra margin!
+                            if (
+                                (not exit_success or (isinstance(exit_data, dict) and exit_data.get("status") != "success"))
+                                and intent.get("broker_sl_order_id")
+                                and not str(intent["broker_sl_order_id"]).startswith("UPSTOX_")
+                            ):
+                                mod_exit_payload = {
+                                    "order_id": str(intent["broker_sl_order_id"]),
+                                    "quantity": int(qty_to_close),
+                                    "validity": "DAY",
+                                    "price": float(marketable_limit),
+                                    "order_type": "LIMIT",
+                                    "disclosed_quantity": 0,
+                                    "trigger_price": 0.0,
+                                }
+                                mod_ok, _, mod_data = self._call_upstox_broker_api(
+                                    "PUT", "/order/modify", payload=mod_exit_payload, is_emergency=True
+                                )
+                                if mod_ok and isinstance(mod_data, dict) and mod_data.get("status") == "success":
+                                    exit_success = True
+                                    exit_data = {"status": "success", "data": {"order_id": str(intent["broker_sl_order_id"])}}
                         if exit_success and isinstance(exit_data, dict) and exit_data.get("data", {}).get("order_id"):
                             exit_broker_ord_id = exit_data["data"]["order_id"]
                             # Retrieve actual fill price from broker order status

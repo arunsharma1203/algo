@@ -529,3 +529,4 @@ class AdvancePaperExecution:
             merged.update(close_data)
             return merged
         return None
+

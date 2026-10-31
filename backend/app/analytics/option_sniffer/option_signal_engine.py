@@ -892,7 +892,7 @@ class OptionSignalEngine:
                 f"⏳ Dynamic Introspection Pause Active: {paper_cb.get('consecutive_losses')} consecutive losses. "
                 f"Entry dispatch paused ({rem_sec}s remaining until {unfreeze_str} IST)."
             )
-        elif now_epoch < self._INTROSPECTION_FROZEN_UNTIL:
+        elif 0 < (self._INTROSPECTION_FROZEN_UNTIL - now_epoch) <= (INTROSPECTION_FREEZE_MINUTES * 60 + 60):
             rem_freeze_sec = int(self._INTROSPECTION_FROZEN_UNTIL - now_epoch)
             rejection_reasons.append(
                 f"Portfolio Introspection Freeze: Consecutive losses in memory. Entry dispatch globally frozen ({rem_freeze_sec}s remaining)."

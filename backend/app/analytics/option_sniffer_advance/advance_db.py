@@ -807,3 +807,4 @@ class AdvanceDB:
                 conn.close()
             except Exception as e:
                 logger.debug(f"[AdvanceDB] Chain snapshot note: {e}")
+
