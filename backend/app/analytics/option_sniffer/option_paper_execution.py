@@ -62,6 +62,11 @@ from app.analytics.option_sniffer.option_constants import (
     THETA_STAGNATION_TIMEOUT_MINUTES,
     THETA_STAGNATION_MIN_MFE_PCT,
     THETA_STAGNATION_EXIT_LOSS_CAP_PCT,
+    HOUSE_MONEY_SCALE_IN_ACTIVE,
+    HOUSE_MONEY_SCALE_IN_TRIGGER_MFE_PCT,
+    HOUSE_MONEY_UNIFIED_FLOOR_PCT,
+    HOUSE_MONEY_MAX_NOTIONAL_INR,
+    POST_HARVEST_MIN_MFE_PCT,
 )
 from app.analytics.option_sniffer.option_db import OptionDB
 from app.analytics.telegram_notifier import send_telegram_message
@@ -334,7 +339,8 @@ class OptionPaperExecution:
           7. Intraday Max Holding Time (45 min)
           8. Session End Square-off (>= 15:15 IST)
         """
-        entry_ask = float(trade["entry_ask"])
+        entry_ask = float(trade.get("initial_entry_ask") or trade["entry_ask"])
+        is_scaled_in = int(trade.get("scale_in_count") or 0) >= 1
         prev_peak = float(trade.get("peak_price") or entry_ask)
         prev_mfe_pct = round(((prev_peak - entry_ask) / entry_ask * 100.0), 2) if entry_ask > 0 else 0.0
         current_peak = max(prev_peak, current_bid)
@@ -369,10 +375,10 @@ class OptionPaperExecution:
             stop_hurdle = float(trade.get("dynamic_sl_pct") or STOP_LOSS_PCT)
             ratchet_trigger = TRAILING_STOP_TRIGGER_PCT
 
-        # Enforce Per-Trade Rupee Risk Cap when lot_size or quantity is specified on the position
-        lot_qty = int(trade.get("quantity") or trade.get("lot_size") or 0)
-        if lot_qty > 0 and entry_ask > 0:
-            stop_hurdle = cls.calculate_rupee_capped_sl_pct(entry_ask, lot_qty, stop_hurdle)
+        # Enforce Per-Trade Rupee Risk Cap anchored to initial 1-lot risk (so House-Money scale-in does not distort base SL)
+        base_lot_qty = int(trade.get("lot_size") or trade.get("quantity") or 0)
+        if base_lot_qty > 0 and entry_ask > 0:
+            stop_hurdle = cls.calculate_rupee_capped_sl_pct(entry_ask, base_lot_qty, stop_hurdle)
 
         # 1. Take Profit Hurdle (Uncapped Target-Lock Runner engages when UNCAPPED_CONVEX_RUNNER or progressively trailed)
         is_uncapped_mode = (
@@ -387,11 +393,11 @@ class OptionPaperExecution:
         elif current_pnl_pct <= -stop_hurdle:
             return "STOP_LOSS_HIT"
 
-        # 3. Trailing Stop / Ratchet Protection
+        # 3. Trailing Stop / Ratchet Protection (Includes Unified House-Money Floor at +8.5% when scaled in)
         elif engine_ver == "V1_CLASSIC" and not ENABLE_4PILLAR_CANARY_ENGINE:
             if mfe_pct >= TRAILING_STOP_TRIGGER_PCT and current_bid <= (current_peak * (1.0 - TRAILING_STOP_DISTANCE_PCT / 100.0)):
                 return "TRAILING_STOP_HIT"
-        elif mfe_pct >= min(EARLY_BREAKEVEN_TRIGGER_PCT, ratchet_trigger):
+        elif mfe_pct >= min(EARLY_BREAKEVEN_TRIGGER_PCT, ratchet_trigger) or is_scaled_in:
             chandelier_stop = cls.calculate_chandelier_stop(
                 entry_ask,
                 current_peak,
@@ -406,7 +412,16 @@ class OptionPaperExecution:
             elif mfe_pct >= EARLY_BREAKEVEN_TRIGGER_PCT:
                 classic_ratchet = entry_ask * (1.0 + EARLY_BREAKEVEN_FLOOR_PCT / 100.0)
 
-            effective_stop = max(chandelier_stop or 0.0, classic_ratchet)
+            blended_entry_ask = float(trade.get("entry_ask") or entry_ask)
+            house_money_floor = (
+                max(
+                    entry_ask * (1.0 + HOUSE_MONEY_UNIFIED_FLOOR_PCT / 100.0),
+                    blended_entry_ask * 1.015,
+                )
+                if is_scaled_in
+                else 0.0
+            )
+            effective_stop = max(chandelier_stop or 0.0, classic_ratchet, house_money_floor)
             if effective_stop and current_bid <= effective_stop:
                 return "TRAILING_STOP_HIT"
 
@@ -459,6 +474,82 @@ class OptionPaperExecution:
         return exit_reason
 
     @classmethod
+    def maybe_scale_in_house_money(
+        cls,
+        trade: Dict[str, Any],
+        current_bid: float,
+        quote: Dict[str, Any],
+        mfe_pct: float,
+        now_dt: datetime
+    ) -> bool:
+        """
+        Step 2 Institutional Same-Contract House-Money Scale-In:
+        When an open 1-lot trade entered during the Golden Sniper Impulse Window (09:43-11:30 IST)
+        reaches MFE >= +15.0% and is actively holding gains (>= +12.0% above initial entry),
+        scales in Lot #2 (+1 lot) on the SAME contract and locks a Unified +8.5% Breakeven Floor.
+        """
+        if not HOUSE_MONEY_SCALE_IN_ACTIVE:
+            return False
+        if int(trade.get("scale_in_count") or 0) >= 1:
+            return False
+
+        lot_size = int(trade.get("lot_size") or 65)
+        current_qty = int(trade.get("quantity") or lot_size)
+        if current_qty != lot_size:
+            return False
+
+        init_entry_ask = float(trade.get("initial_entry_ask") or trade["entry_ask"])
+        if init_entry_ask < 35.0 or (2 * lot_size * init_entry_ask) > HOUSE_MONEY_MAX_NOTIONAL_INR:
+            return False
+
+        try:
+            et_dt = datetime.fromisoformat(str(trade["entry_time"]))
+            et_mins = et_dt.hour * 60 + et_dt.minute
+            if not ((9 * 60 + 43) <= et_mins <= (11 * 60 + 30)):
+                return False
+        except Exception:
+            return False
+
+        if mfe_pct < HOUSE_MONEY_SCALE_IN_TRIGGER_MFE_PCT:
+            return False
+
+        # Ensure current price is inside the fresh breakout initiation zone (>= +12.0% and <= +19.0% above initial entry)
+        # so we never dilute blended cost basis by chasing a late parabolic spike.
+        min_active_bid = init_entry_ask * (1.0 + (HOUSE_MONEY_UNIFIED_FLOOR_PCT + 3.5) / 100.0)
+        max_initiation_bid = init_entry_ask * 1.19
+        if current_bid < min_active_bid or current_bid > max_initiation_bid:
+            return False
+
+        scale_in_price = round(float(quote.get("ask") or (current_bid * 1.0025)), 2)
+        new_qty = lot_size * 2
+        blended_entry_ask = round((init_entry_ask + scale_in_price) / 2.0, 2)
+        scale_in_time = now_dt.isoformat()
+
+        ok = OptionDB.scale_in_paper_trade(
+            trade_id=trade["trade_id"],
+            new_quantity=new_qty,
+            blended_entry_ask=blended_entry_ask,
+            initial_entry_ask=init_entry_ask,
+            scale_in_price=scale_in_price,
+            scale_in_time=scale_in_time
+        )
+        if ok:
+            trade["initial_entry_ask"] = init_entry_ask
+            trade["entry_ask"] = blended_entry_ask
+            trade["entry_price_used"] = blended_entry_ask
+            trade["quantity"] = new_qty
+            trade["scale_in_count"] = 1
+            trade["scale_in_price"] = scale_in_price
+            trade["scale_in_time"] = scale_in_time
+            logger.info(
+                f"[OptionPaperExecution] 🚀 House-Money Scale-In (Lot #2) executed on {trade['trading_symbol']}: "
+                f"Qty {lot_size} -> {new_qty} @ ₹{scale_in_price:.2f} (Initial: ₹{init_entry_ask:.2f}, Blended: ₹{blended_entry_ask:.2f}, "
+                f"Unified Floor: ₹{init_entry_ask * (1.0 + HOUSE_MONEY_UNIFIED_FLOOR_PCT / 100.0):.2f})"
+            )
+            return True
+        return False
+
+    @classmethod
     def update_open_trades(
         cls,
         live_quotes_map: Dict[str, Dict[str, Any]],
@@ -508,12 +599,12 @@ class OptionPaperExecution:
             if current_bid <= 0:
                 continue
 
-            entry_ask = float(trade["entry_ask"])
-            current_peak = max(float(trade.get("peak_price") or entry_ask), current_bid)
-            current_trough = min(float(trade.get("trough_price") or entry_ask), current_bid)
+            anchor_entry_ask = float(trade.get("initial_entry_ask") or trade["entry_ask"])
+            current_peak = max(float(trade.get("peak_price") or anchor_entry_ask), current_bid)
+            current_trough = min(float(trade.get("trough_price") or anchor_entry_ask), current_bid)
 
-            mfe_pct = round(((current_peak - entry_ask) / entry_ask * 100.0), 2)
-            mae_pct = round(((current_trough - entry_ask) / entry_ask * 100.0), 2)
+            mfe_pct = round(((current_peak - anchor_entry_ask) / anchor_entry_ask * 100.0), 2)
+            mae_pct = round(((current_trough - anchor_entry_ask) / anchor_entry_ask * 100.0), 2)
 
             try:
                 entry_dt = datetime.fromisoformat(trade["entry_time"])
@@ -541,11 +632,20 @@ class OptionPaperExecution:
                     trough_price=current_trough,
                     mfe_pct=mfe_pct,
                     mae_pct=mae_pct,
-                    duration_sec=duration_sec
+                    duration_sec=duration_sec,
+                    as_of_time=now_dt
                 )
                 if close_info:
                     closed_in_sweep.append(close_info)
             else:
+                # Check if Lot #1 qualifies for Same-Contract House-Money Scale-In (Lot #2)
+                cls.maybe_scale_in_house_money(
+                    trade=trade,
+                    current_bid=current_bid,
+                    quote=quote,
+                    mfe_pct=mfe_pct,
+                    now_dt=now_dt
+                )
                 OptionDB.update_trade_extrema(
                     trade_id=trade_id,
                     peak_price=current_peak,
@@ -567,7 +667,8 @@ class OptionPaperExecution:
         trough_price: float,
         mfe_pct: float,
         mae_pct: float,
-        duration_sec: int
+        duration_sec: int,
+        as_of_time: Optional[datetime] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Executes a paper order exit strictly at current bid price.
@@ -579,27 +680,65 @@ class OptionPaperExecution:
 
         entry_bid = float(trade.get("entry_bid") or entry_ask)
         entry_time = trade.get("entry_time")
+        is_scaled_in = int(trade.get("scale_in_count") or 0) >= 1 and float(trade.get("scale_in_price") or 0.0) > 0
 
-        # Realistic Indian F&O Upstox Transaction Costs (Effective-Dated Tariff Schedule)
-        cost_breakdown = calculate_option_trade_costs(
-            buy_price=entry_ask,
-            sell_price=exit_bid,
-            quantity=quantity,
-            apply_slippage=True,
-            trade_date=entry_time,
-            buy_bid=entry_bid,
-            buy_ask=entry_ask,
-            sell_bid=exit_bid,
-            sell_ask=exit_ask,
-        )
+        if is_scaled_in:
+            init_ask = float(trade.get("initial_entry_ask") or entry_ask)
+            scale_ask = float(trade.get("scale_in_price") or entry_ask)
+            base_lot = int(trade.get("lot_size") or (quantity // 2))
+            scale_lot = max(1, quantity - base_lot)
 
-        gross_pnl = round((exit_bid - entry_ask) * quantity, 2)
-        net_pnl = round(gross_pnl - cost_breakdown["total_friction"], 2)
-        net_pnl_pct = round((net_pnl / (entry_ask * quantity) * 100.0), 2) if (entry_ask * quantity) > 0 else 0.0
+            cost_1 = calculate_option_trade_costs(
+                buy_price=init_ask,
+                sell_price=exit_bid,
+                quantity=base_lot,
+                apply_slippage=True,
+                trade_date=entry_time,
+                buy_bid=entry_bid,
+                buy_ask=init_ask,
+                sell_bid=exit_bid,
+                sell_ask=exit_ask,
+            )
+            cost_2 = calculate_option_trade_costs(
+                buy_price=scale_ask,
+                sell_price=exit_bid,
+                quantity=scale_lot,
+                apply_slippage=True,
+                trade_date=entry_time,
+                buy_bid=scale_ask,
+                buy_ask=scale_ask,
+                sell_bid=exit_bid,
+                sell_ask=exit_ask,
+            )
+            cost_breakdown = {
+                "statutory_charges": round(cost_1["statutory_charges"] + cost_2["statutory_charges"], 2),
+                "slippage": round(cost_1["slippage"] + cost_2["slippage"], 2),
+                "total_friction": round(cost_1["total_friction"] + cost_2["total_friction"], 2),
+            }
+            gross_pnl = round(((exit_bid - init_ask) * base_lot) + ((exit_bid - scale_ask) * scale_lot), 2)
+            total_cost_basis = (init_ask * base_lot) + (scale_ask * scale_lot)
+            net_pnl = round(gross_pnl - cost_breakdown["total_friction"], 2)
+            net_pnl_pct = round((net_pnl / total_cost_basis * 100.0), 2) if total_cost_basis > 0 else 0.0
+        else:
+            # Realistic Indian F&O Upstox Transaction Costs (Effective-Dated Tariff Schedule)
+            cost_breakdown = calculate_option_trade_costs(
+                buy_price=entry_ask,
+                sell_price=exit_bid,
+                quantity=quantity,
+                apply_slippage=True,
+                trade_date=entry_time,
+                buy_bid=entry_bid,
+                buy_ask=entry_ask,
+                sell_bid=exit_bid,
+                sell_ask=exit_ask,
+            )
+            gross_pnl = round((exit_bid - entry_ask) * quantity, 2)
+            net_pnl = round(gross_pnl - cost_breakdown["total_friction"], 2)
+            net_pnl_pct = round((net_pnl / (entry_ask * quantity) * 100.0), 2) if (entry_ask * quantity) > 0 else 0.0
 
         close_data = {
             "status": "CLOSED",
-            "exit_time": to_ist_naive().isoformat(),
+            "exit_time": to_ist_naive(as_of_time).isoformat(),
             "exit_bid": exit_bid,
             "exit_ask": exit_ask,
             "exit_price_used": exit_bid,
@@ -628,6 +767,16 @@ class OptionPaperExecution:
                     )
                 except Exception as cd_err:
                     logger.debug(f"[OptionPaperExecution] Direction SL cooldown note: {cd_err}")
+            elif mfe_pct >= POST_HARVEST_MIN_MFE_PCT and net_pnl > 0:
+                try:
+                    from app.analytics.option_sniffer.option_signal_engine import OptionSignalEngine
+                    OptionSignalEngine.record_direction_harvest_cooldown(
+                        trade.get("underlying", "NIFTY"),
+                        trade.get("option_type", "CE"),
+                        as_of_time=as_of_time
+                    )
+                except Exception as hc_err:
+                    logger.debug(f"[OptionPaperExecution] Direction harvest cooldown note: {hc_err}")
             logger.info(
                 f"[OptionPaperExecution] 🛑 Paper SELL closed: {trade['trading_symbol']} "
                 f"@ BID ₹{exit_bid:.2f} | Reason: {exit_reason} | Net P&L: ₹{net_pnl:.2f} ({net_pnl_pct:+.1f}%)"

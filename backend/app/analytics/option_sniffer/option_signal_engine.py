@@ -55,6 +55,10 @@ from app.analytics.option_sniffer.option_constants import (
     MAX_DAILY_LOSS_INR,
     POST_LOSS_CONTAGION_FREEZE_SECONDS,
     MAX_POSITIONS_PER_UNDERLYING,
+    STRIKE_INTERVALS,
+    POST_HARVEST_WAVE_COOLDOWN_SECONDS,
+    POST_HARVEST_MIN_MFE_PCT,
+    PYRAMIDING_MAX_OTM_STRIKES,
     ENABLE_APEX_QUANT_ENGINE,
     CRBI_BREAKOUT_VOLUME_MIN_RATIO,
     CRBI_RELAXED_MODEL_PROB,
@@ -85,11 +89,22 @@ class OptionSignalEngine:
 
     _COOLDOWNS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_COOLDOWNS", {})  # instrument_key -> last_active_signal_epoch
     _DIRECTION_SL_COOLDOWNS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_DIRECTION_SL_COOLDOWNS", {})  # "{underlying}_{opt_type}" -> last_sl_hit_epoch
+    _DIRECTION_HARVEST_COOLDOWNS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_DIRECTION_HARVEST_COOLDOWNS", {})  # "{underlying}_{opt_type}" -> last_harvest_exit_epoch
     _DIRECTION_SL_COOLDOWN_SECONDS: int = 600  # 10-minute direction cooldown after Stop-Loss hit
     _MAX_CONCURRENT_OPEN_TRADES: int = 3
     _PORTFOLIO_LOSS_HISTORY: List[float] = getattr(_PREV_OSE_CLS, "_PORTFOLIO_LOSS_HISTORY", [])  # list of recent SL epochs across portfolio
     _INTROSPECTION_FROZEN_UNTIL: float = getattr(_PREV_OSE_CLS, "_INTROSPECTION_FROZEN_UNTIL", 0.0)
     _ACTIVE_UNDERLYING_LOCKS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_ACTIVE_UNDERLYING_LOCKS", {})  # underlying -> last_open_trade_epoch (Anti-Clustering Mutex)
+
+    @classmethod
+    def record_direction_harvest_cooldown(cls, underlying: str, opt_type: str, epoch: Optional[float] = None) -> None:
+        """Places underlying+opt_type on a 60m Post-Harvest Wave Exhaustion Cooldown after closing a >= +15% MFE winner."""
+        curr_epoch = epoch if epoch is not None else time.time()
+        key = f"{str(underlying or 'NIFTY').upper()}_{str(opt_type or 'CE').upper()}"
+        cls._DIRECTION_HARVEST_COOLDOWNS[key] = curr_epoch
+        logger.info(
+            f"[OptionSignalEngine] 🏆 Activated {POST_HARVEST_WAVE_COOLDOWN_SECONDS}s Post-Harvest Wave Exhaustion Cooldown for {key}."
+        )
 
     @classmethod
     def record_direction_sl_cooldown(cls, underlying: str, opt_type: str, epoch: Optional[float] = None) -> None:
@@ -114,6 +129,7 @@ class OptionSignalEngine:
         """Resets all in-memory class-level state (cooldowns, loss history, freeze timers)."""
         cls._COOLDOWNS.clear()
         cls._DIRECTION_SL_COOLDOWNS.clear()
+        cls._DIRECTION_HARVEST_COOLDOWNS.clear()
         cls._PORTFOLIO_LOSS_HISTORY.clear()
         cls._INTROSPECTION_FROZEN_UNTIL = 0.0
         cls._ACTIVE_UNDERLYING_LOCKS.clear()
@@ -778,21 +794,40 @@ class OptionSignalEngine:
 
         u_str = str(underlying or 'NIFTY').upper()
         u_open_trades = [t for t in open_trades if str(t.get('underlying') or '').upper() == u_str]
-        
+        u_open_lots = sum(
+            max(
+                1,
+                int(round(float(t.get("quantity") or 65) / max(1, int(t.get("lot_size") or 65))))
+                + (int(t.get("scale_in_count") or 0) if int(t.get("quantity") or 65) <= int(t.get("lot_size") or 65) else 0)
+            )
+            for t in u_open_trades
+        )
+
         # Enforce strict in-memory lock so subsequent contracts in the same sweep cannot stack
         last_u_lock = self._ACTIVE_UNDERLYING_LOCKS.get(u_str, 0.0)
         has_recent_u_lock = (now_epoch - last_u_lock) < 15.0
         paper_same_instrument_open = any(str(t.get("instrument_key") or "") == str(ikey or "") for t in u_open_trades)
         paper_pyramiding_blocked = False
-        if len(u_open_trades) == 1:
+        paper_pyramiding_otm_blocked = False
+        if len(u_open_trades) == 1 and u_open_lots < MAX_POSITIONS_PER_UNDERLYING:
             first_trade = u_open_trades[0]
             first_mfe = float(first_trade.get("mfe_pct") or 0.0)
             first_pnl = float(first_trade.get("net_pnl_pct") or 0.0)
             if first_mfe < SMART_PYRAMIDING_MIN_MFE_PCT or first_pnl < 2.0:
                 paper_pyramiding_blocked = True
+            else:
+                strike_int = float(STRIKE_INTERVALS.get(u_str, 50.0))
+                max_otm_dist = strike_int * PYRAMIDING_MAX_OTM_STRIKES
+                if spot_ltp > 0 and strike > 0:
+                    if (opt_type == "CE" and (strike - spot_ltp) > max_otm_dist) or (
+                        opt_type == "PE" and (spot_ltp - strike) > max_otm_dist
+                    ):
+                        paper_pyramiding_otm_blocked = True
+                        paper_pyramiding_blocked = True
 
         paper_underlying_full = (
             (len(u_open_trades) >= MAX_POSITIONS_PER_UNDERLYING)
+            or (u_open_lots >= MAX_POSITIONS_PER_UNDERLYING)
             or (len(u_open_trades) >= 1 and has_recent_u_lock)
             or paper_pyramiding_blocked
             or paper_same_instrument_open
@@ -811,10 +846,16 @@ class OptionSignalEngine:
                     f"Max concurrent trades reached (Paper {len(open_trades)}/{self._MAX_CONCURRENT_OPEN_TRADES}, Live {MAX_CONCURRENT_POSITIONS}/{MAX_CONCURRENT_POSITIONS})"
                 )
         else:
-            if len(u_open_trades) >= MAX_POSITIONS_PER_UNDERLYING or (has_recent_u_lock and len(u_open_trades) >= 1) or paper_same_instrument_open:
+            if len(u_open_trades) >= MAX_POSITIONS_PER_UNDERLYING or u_open_lots >= MAX_POSITIONS_PER_UNDERLYING or (has_recent_u_lock and len(u_open_trades) >= 1) or paper_same_instrument_open:
                 existing_syms = ", ".join(t.get('trading_symbol', u_str) for t in u_open_trades)
                 rejection_reasons.append(
                     f"Anti-Clustering Shield: Active {u_str} position exists ({existing_syms}). Max {MAX_POSITIONS_PER_UNDERLYING} position per underlying strictly enforced."
+                )
+            elif paper_pyramiding_otm_blocked:
+                first_trade = u_open_trades[0]
+                existing_sym = first_trade.get('trading_symbol', u_str)
+                rejection_reasons.append(
+                    f"Anti-Clustering Shield: Far-OTM pyramiding blocked on {tsym} while {existing_sym} is open (strike {strike:.0f} exceeds max OTM distance from spot {spot_ltp:.1f})."
                 )
             elif paper_pyramiding_blocked:
                 first_trade = u_open_trades[0]
@@ -922,6 +963,37 @@ class OptionSignalEngine:
                 rejection_reasons.append(
                     f"Anti-Ping-Pong Lockout: Active {rem_flip_m}m flip cooldown after recent {opp_opt_type} Stop-Loss. Reversal unconfirmed."
                 )
+
+        # Gate 10C: Post-Harvest Wave Exhaustion Guard (Prevents Top-Chasing After >= +15% MFE Winner)
+        last_harvest_epoch = self._DIRECTION_HARVEST_COOLDOWNS.get(dir_sl_key, 0.0)
+        harvest_elapsed = (now_epoch - last_harvest_epoch) if last_harvest_epoch > 0 else -1.0
+        harvest_mem_rem = (
+            int(POST_HARVEST_WAVE_COOLDOWN_SECONDS - harvest_elapsed)
+            if (as_of_time is None and 0.0 <= harvest_elapsed < POST_HARVEST_WAVE_COOLDOWN_SECONDS)
+            else 0
+        )
+        recent_harvest_db = OptionDB.get_recent_harvested_wave(
+            underlying=underlying,
+            option_type=opt_type,
+            as_of_time=now_dt,
+            min_mfe_pct=POST_HARVEST_MIN_MFE_PCT,
+            cooldown_seconds=POST_HARVEST_WAVE_COOLDOWN_SECONDS
+        )
+        if recent_harvest_db is not None:
+            rem_h_sec = int(recent_harvest_db.get("remaining_seconds") or 0)
+            rem_h_min = max(1, rem_h_sec // 60)
+            h_mfe = float(recent_harvest_db.get("mfe_pct") or POST_HARVEST_MIN_MFE_PCT)
+            h_sym = recent_harvest_db.get("trading_symbol") or f"{underlying} {opt_type}"
+            rejection_reasons.append(
+                f"Post-Harvest Wave Exhaustion Guard: Recent {h_sym} winner harvested +{h_mfe:.1f}% MFE "
+                f"({rem_h_min}m cooldown remaining to prevent top-chasing)."
+            )
+        elif harvest_mem_rem > 0:
+            rem_h_min = max(1, harvest_mem_rem // 60)
+            rejection_reasons.append(
+                f"Post-Harvest Wave Exhaustion Guard: Recent {underlying} {opt_type} winner harvested >= +{POST_HARVEST_MIN_MFE_PCT:.0f}% MFE "
+                f"({rem_h_min}m cooldown remaining to prevent top-chasing)."
+            )
 
         # Generate Signal Payload
         signal_id = f"opt_sig_{uuid.uuid4().hex[:8]}"

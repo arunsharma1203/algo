@@ -184,6 +184,14 @@ def init_option_sniffer_tables() -> None:
                 cur.execute("ALTER TABLE option_sniffer_paper_trades ADD COLUMN delta_used REAL;")
             if "entry_spot_price" not in paper_cols:
                 cur.execute("ALTER TABLE option_sniffer_paper_trades ADD COLUMN entry_spot_price REAL;")
+            if "initial_entry_ask" not in paper_cols:
+                cur.execute("ALTER TABLE option_sniffer_paper_trades ADD COLUMN initial_entry_ask REAL;")
+            if "scale_in_count" not in paper_cols:
+                cur.execute("ALTER TABLE option_sniffer_paper_trades ADD COLUMN scale_in_count INTEGER DEFAULT 0;")
+            if "scale_in_price" not in paper_cols:
+                cur.execute("ALTER TABLE option_sniffer_paper_trades ADD COLUMN scale_in_price REAL;")
+            if "scale_in_time" not in paper_cols:
+                cur.execute("ALTER TABLE option_sniffer_paper_trades ADD COLUMN scale_in_time TEXT;")
 
             # 5. Operational Events Log
             cur.execute("""
@@ -692,6 +700,130 @@ class OptionDB:
     ) -> bool:
         """Updates peak, trough, MFE, and MAE for an active open trade."""
         return cls.update_trade_extrema(trade_id, peak_price, trough_price, mfe_pct=mfe_pct, mae_pct=mae_pct)
+
+    @classmethod
+    def scale_in_paper_trade(
+        cls,
+        trade_id: str,
+        new_quantity: int,
+        blended_entry_ask: float,
+        initial_entry_ask: float,
+        scale_in_price: float,
+        scale_in_time: str
+    ) -> bool:
+        """
+        Atomically scales an open 1-lot paper trade to 2 lots (House-Money Scale-In)
+        once Lot #1 reaches >= +15% MFE.
+        """
+        with _DB_LOCK:
+            try:
+                conn = cls.get_connection()
+                with conn:
+                    cols = [c[1] for c in conn.execute("PRAGMA table_info(option_sniffer_paper_trades);").fetchall()]
+                    if "initial_entry_ask" not in cols:
+                        conn.execute("ALTER TABLE option_sniffer_paper_trades ADD COLUMN initial_entry_ask REAL;")
+                    if "scale_in_count" not in cols:
+                        conn.execute("ALTER TABLE option_sniffer_paper_trades ADD COLUMN scale_in_count INTEGER DEFAULT 0;")
+                    if "scale_in_price" not in cols:
+                        conn.execute("ALTER TABLE option_sniffer_paper_trades ADD COLUMN scale_in_price REAL;")
+                    if "scale_in_time" not in cols:
+                        conn.execute("ALTER TABLE option_sniffer_paper_trades ADD COLUMN scale_in_time TEXT;")
+
+                    cur = conn.execute("""
+                        UPDATE option_sniffer_paper_trades
+                        SET quantity = ?,
+                            entry_ask = ?,
+                            entry_price_used = ?,
+                            initial_entry_ask = COALESCE(initial_entry_ask, ?),
+                            scale_in_count = 1,
+                            scale_in_price = ?,
+                            scale_in_time = ?
+                        WHERE trade_id = ? AND status = 'OPEN' AND COALESCE(scale_in_count, 0) = 0
+                    """, (
+                        new_quantity,
+                        blended_entry_ask,
+                        blended_entry_ask,
+                        initial_entry_ask,
+                        scale_in_price,
+                        scale_in_time,
+                        trade_id
+                    ))
+                    updated = cur.rowcount > 0
+                conn.close()
+                if updated:
+                    cls.log_event(
+                        "TRADE",
+                        "SCALE_IN",
+                        f"House-Money Scale-In executed on {trade_id}: Qty -> {new_quantity}, Lot2 @ ₹{scale_in_price:.2f} (Blended ₹{blended_entry_ask:.2f})",
+                        {
+                            "trade_id": trade_id,
+                            "new_quantity": new_quantity,
+                            "initial_entry_ask": initial_entry_ask,
+                            "scale_in_price": scale_in_price,
+                            "blended_entry_ask": blended_entry_ask,
+                            "scale_in_time": scale_in_time,
+                        }
+                    )
+                return updated
+            except Exception as e:
+                logger.error(f"[OptionDB] Failed to scale in paper trade {trade_id}: {e}")
+                return False
+
+    @classmethod
+    def get_recent_harvested_wave(
+        cls,
+        underlying: str,
+        option_type: str,
+        as_of_time: Optional[datetime] = None,
+        min_mfe_pct: float = 15.0,
+        cooldown_seconds: int = 3600
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Checks if a winning trade on the same (underlying, option_type) closed during the current
+        trading session with MFE >= min_mfe_pct within cooldown_seconds before as_of_time.
+        Prevents post-harvest top-chasing on the same impulse wave.
+        """
+        now_dt = to_ist_naive(as_of_time)
+        date_str = now_dt.strftime("%Y-%m-%d")
+        u_clean = str(underlying or "NIFTY").upper().strip()
+        ot_clean = str(option_type or "CE").upper().strip()
+
+        with _DB_LOCK:
+            try:
+                conn = cls.get_connection()
+                rows = conn.execute("""
+                    SELECT trade_id, trading_symbol, underlying, option_type, entry_time, exit_time,
+                           entry_ask, exit_bid, mfe_pct, net_pnl, exit_reason
+                    FROM option_sniffer_paper_trades
+                    WHERE status = 'CLOSED'
+                      AND UPPER(underlying) = ?
+                      AND UPPER(option_type) = ?
+                      AND substr(exit_time, 1, 10) = ?
+                      AND COALESCE(mfe_pct, 0.0) >= ?
+                      AND COALESCE(net_pnl, 0.0) > 0.0
+                      AND COALESCE(exit_reason, '') != 'FAR_DTE_CATALOG_PURGE'
+                    ORDER BY exit_time DESC
+                """, (u_clean, ot_clean, date_str, float(min_mfe_pct))).fetchall()
+                conn.close()
+
+                for r in rows:
+                    d = dict(r)
+                    xt_str = str(d.get("exit_time") or "")
+                    if not xt_str:
+                        continue
+                    try:
+                        xt_dt = to_ist_naive(datetime.fromisoformat(xt_str))
+                        elapsed = (now_dt - xt_dt).total_seconds()
+                        if 0 <= elapsed < cooldown_seconds:
+                            d["elapsed_seconds"] = int(elapsed)
+                            d["remaining_seconds"] = int(cooldown_seconds - elapsed)
+                            return d
+                    except Exception:
+                        continue
+                return None
+            except Exception as e:
+                logger.debug(f"[OptionDB] get_recent_harvested_wave note: {e}")
+                return None
 
     @classmethod
     def get_open_paper_trades(cls) -> List[Dict[str, Any]]:

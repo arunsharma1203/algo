@@ -41,7 +41,7 @@ MAX_OPTION_EXPIRY_DTE: float = 10.0  # Max days to expiry: calibrated to safely 
 # Standard Lot Sizes (Contract metadata provides authoritative override)
 DEFAULT_LOT_SIZES: Dict[str, int] = {
     "NIFTY": 65,
-    "BANKNIFTY": 15,
+    "BANKNIFTY": 30,
 }
 
 # Signal State Machine Lifecycle
@@ -130,7 +130,17 @@ SMART_PYRAMIDING_MIN_MFE_PCT: float = 15.0        # +15.0% MFE required on 1st p
 MAX_CONSECUTIVE_LOSSES: int = 2                   # 2 consecutive losses triggers dynamic 30m introspection pause
 MAX_DAILY_LOSS_INR: float = 3500.0                # Hard daily net loss ceiling (-₹3,500.00 permanent session halt)
 POST_LOSS_CONTAGION_FREEZE_SECONDS: int = 1200    # 20-minute global intermarket freeze across all underlyings after any SL
-MAX_POSITIONS_PER_UNDERLYING: int = 2              # Maximum 2 positions per underlying (Contract #2 unlocked via Smart Pyramiding)
+MAX_POSITIONS_PER_UNDERLYING: int = 2              # Maximum 2 lots capacity per underlying (Lot #2 unlocked via House-Money Smart Pyramiding)
+MAX_CONCURRENT_OPEN_TRADES_CAP: int = 2            # Global portfolio concurrency cap across all monitored underlyings
+
+# Step 2: Wave-1 Sniper Discipline & Same-Contract House-Money Scale-In Constants
+POST_HARVEST_WAVE_COOLDOWN_SECONDS: int = 3600    # 60-minute direction cooldown on (underlying, option_type) after harvesting >= +15% MFE winner
+POST_HARVEST_MIN_MFE_PCT: float = 15.0            # Minimum MFE % on closed winning trade to engage post-harvest exhaustion guard
+HOUSE_MONEY_SCALE_IN_ACTIVE: bool = True          # Enables 1-lot -> 2-lot same-contract scale-in at +15% MFE in Paper Mode
+HOUSE_MONEY_SCALE_IN_TRIGGER_MFE_PCT: float = 15.0 # +15.0% MFE required on Lot #1 before scaling in Lot #2
+HOUSE_MONEY_UNIFIED_FLOOR_PCT: float = 8.5        # +8.5% floor above initial entry_ask (-5.65% on Lot #2) -> Net >= +Rs 50 free-roll
+HOUSE_MONEY_MAX_NOTIONAL_INR: float = 28500.0     # Max combined 2-lot notional to stay within Rs 30,000 capital
+PYRAMIDING_MAX_OTM_STRIKES: float = 1.5           # Blocks separate-strike OTM pyramiding > 1.5 strike intervals out-of-the-money
 
 # Market Hours & Intraday Cutoffs (IST)
 MARKET_OPEN_HOUR: int = 9
