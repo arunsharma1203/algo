@@ -19,6 +19,7 @@ import AutonomousResearchLab from './pages/AutonomousResearchLab';
 import QlibControlRoom from './pages/QlibControlRoom';
 import ConsensusScanner from './pages/ConsensusScanner';
 import OptionSniffer from './pages/OptionSniffer';
+import OptionSnifferAdvance from './pages/OptionSnifferAdvance';
 import OptionF from './pages/OptionF';
 import TradeAgent from './pages/TradeAgent';
 import { LiveIndicatorProvider } from './context/LiveIndicatorContext';
@@ -275,6 +276,7 @@ function App() {
                 </span>
               </div>
               <LinkItem to="/option-f" aliases={['/option-f']} icon={Radio} label="Option Sniffer" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem to="/option-sniffer-advance" aliases={['/option-advance', '/options-advance']} icon={Zap} label="Option Sniffer Advance" onClick={() => setMobileNavOpen(false)} />
 
               <div className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider my-3 px-2 flex items-center justify-between">
                 <span>Autonomous AI Agent</span>
@@ -371,6 +373,9 @@ function App() {
                   <Route path="/options-sniffer" element={<OptionSniffer />} />
                   <Route path="/options" element={<OptionSniffer />} />
                   <Route path="/option-f" element={<OptionF />} />
+                  <Route path="/option-sniffer-advance" element={<OptionSnifferAdvance />} />
+                  <Route path="/option-advance" element={<OptionSnifferAdvance />} />
+                  <Route path="/options-advance" element={<OptionSnifferAdvance />} />
                   <Route path="/trade-agent" element={<TradeAgent />} />
                   <Route path="/agent" element={<TradeAgent />} />
                   <Route path="/sentinel" element={<TradeAgent />} />

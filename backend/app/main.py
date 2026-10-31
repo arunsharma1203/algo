@@ -356,6 +356,14 @@ def on_startup():
     except Exception as e:
         logger.warning(f"Option Sniffer startup warning: {e}")
 
+    # Start Option Sniffer Advance Dual-Book Daemon (100% Sandboxed Paper Mode)
+    try:
+        from app.analytics.option_sniffer_advance.advance_orchestrator import get_option_sniffer_advance_orchestrator
+        get_option_sniffer_advance_orchestrator().start()
+        logger.info("✅ Option Sniffer Advance Dual-Book surveillance daemon started (PAPER SANDBOX ONLY).")
+    except Exception as e:
+        logger.warning(f"Option Sniffer Advance startup warning: {e}")
+
     # Reconcile Upstox Broker State & Active Live Order Intents on Startup
     try:
         from app.analytics.option_sniffer.option_live_adapter import get_option_live_adapter
@@ -376,6 +384,13 @@ def on_shutdown():
         logger.info("🛑 Option Sniffer surveillance daemon stopped.")
     except Exception as e:
         logger.warning(f"Option Sniffer shutdown warning: {e}")
+
+    try:
+        from app.analytics.option_sniffer_advance.advance_orchestrator import get_option_sniffer_advance_orchestrator
+        get_option_sniffer_advance_orchestrator().stop()
+        logger.info("🛑 Option Sniffer Advance surveillance daemon stopped.")
+    except Exception as e:
+        logger.warning(f"Option Sniffer Advance shutdown warning: {e}")
 
     try:
         from app.data.upstox_stream_service import get_stream_service
@@ -504,6 +519,9 @@ app.include_router(consensus_game_router, prefix="/api", tags=["consensus_game"]
 
 from app.api.option_sniffer_api import router as option_sniffer_router
 app.include_router(option_sniffer_router)
+
+from app.api.option_sniffer_advance_api import router as option_sniffer_advance_router
+app.include_router(option_sniffer_advance_router)
 
 try:
     from app.api.trade_agent import router as trade_agent_router
