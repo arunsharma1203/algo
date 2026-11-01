@@ -29,5 +29,14 @@
         "titleBar.inactiveForeground": "#e7e7e799"
     },
     "peacock.color": "#215732",
-    "files.autoSave": "off"
+    "files.autoSave": "off",
+    "git.autofetch": false,
+    "git.enableSmartCommit": false,
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/node_modules/**": true,
+        "**/backend/data/qlib_provider/**": true,
+        "**/backend/*.db*": true
+    }
 }

@@ -278,13 +278,7 @@ function App() {
               <LinkItem to="/option-f" aliases={['/option-f']} icon={Radio} label="Option Sniffer" onClick={() => setMobileNavOpen(false)} />
               <LinkItem to="/option-sniffer-advance" aliases={['/option-advance', '/options-advance']} icon={Zap} label="Option Sniffer Advance" onClick={() => setMobileNavOpen(false)} />
 
-              <div className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider my-3 px-2 flex items-center justify-between">
-                <span>Autonomous AI Agent</span>
-                <span className="text-[8px] px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300 rounded border border-indigo-500/40 font-mono">SHADOW</span>
-              </div>
-              <LinkItem to="/trade-agent" aliases={['/agent', '/sentinel']} icon={Bot} label="🤖 Trade Agent" onClick={() => setMobileNavOpen(false)} />
 
-              
               <div className="mt-auto pt-6">
                 <div className="border-t border-gray-800 pt-4">
                   <LinkItem to="/profile" icon={Settings} label="Config & Profile" onClick={() => setMobileNavOpen(false)} />

@@ -260,30 +260,9 @@ def get_or_create_scheduler() -> BackgroundScheduler:
             except Exception as e:
                 logger.error(f"Failed to register post-market Telegram summary daemon: {e}")
 
-            # 12. Automated Trade Sentinel Autonomous Background Agent (Runs every 30s)
-            try:
-                def _run_trade_sentinel_daemon():
-                    try:
-                        import sys
-                        from pathlib import Path
-                        workspace_root = Path(__file__).resolve().parent.parent.parent
-                        if str(workspace_root) not in sys.path:
-                            sys.path.insert(0, str(workspace_root))
-                        from agent_lab.agent_core.sentinel_agent import TradeSentinelAgent
-                        TradeSentinelAgent.run_autonomous_cycle()
-                    except Exception as err:
-                        logger.debug(f"[TradeSentinelDaemon] Cycle error: {err}")
-
-                _SCHEDULER_INSTANCE.add_job(
-                    _run_trade_sentinel_daemon,
-                    'interval',
-                    seconds=30,
-                    id='trade_sentinel_autonomous_cycle',
-                    replace_existing=True
-                )
-                logger.info("✅ Automated Trade Sentinel autonomous research daemon registered (30s heartbeat).")
-            except Exception as e:
-                logger.error(f"Failed to register Trade Sentinel autonomous daemon: {e}")
+            # 12. Automated Trade Sentinel Autonomous Background Agent (DECOMMISSIONED & PURGED)
+            # Purged 98 GB agent_lab directory and disabled 30s heartbeat to preserve CPU, RAM, and SSD I/O.
+            logger.info("⏸️ Automated Trade Sentinel daemon decommissioned (0 CPU/disk overhead).")
 
             logger.info("✅ APScheduler initialized with unique job IDs and duplicate protection.")
 
