@@ -62,11 +62,12 @@ class TestStep2Wave1SniperAndHouseMoneyPyramid(unittest.TestCase):
         self.assertEqual(const.DEFAULT_LOT_SIZES["BANKNIFTY"], 30)
         self.assertEqual(const.POST_HARVEST_WAVE_COOLDOWN_SECONDS, 3600)
         self.assertAlmostEqual(const.POST_HARVEST_MIN_MFE_PCT, 15.0)
-        self.assertTrue(const.HOUSE_MONEY_SCALE_IN_ACTIVE)
+        self.assertFalse(const.HOUSE_MONEY_SCALE_IN_ACTIVE)
         self.assertAlmostEqual(const.HOUSE_MONEY_SCALE_IN_TRIGGER_MFE_PCT, 15.0)
         self.assertAlmostEqual(const.HOUSE_MONEY_UNIFIED_FLOOR_PCT, 8.5)
         self.assertAlmostEqual(const.PYRAMIDING_MAX_OTM_STRIKES, 1.5)
 
+    @patch("app.analytics.option_sniffer.option_paper_execution.HOUSE_MONEY_SCALE_IN_ACTIVE", True)
     @patch("app.analytics.option_sniffer.option_paper_execution.send_telegram_message")
     def test_02_same_contract_house_money_scale_in_and_unified_floor(self, mock_tg):
         """

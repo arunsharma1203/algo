@@ -52,12 +52,16 @@ class TestAlphaPreservationAndReversalGate(unittest.TestCase):
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.temp_db.name
         self._init_test_db(self.db_path)
+        import app.analytics.option_sniffer.option_db as _opt_db_mod
         OptionDB._db_path_override = self.db_path
+        _opt_db_mod.OptionDB._db_path_override = self.db_path
         from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
         OptionStreamManager()._benchmark_cache = {}
 
     def tearDown(self):
+        import app.analytics.option_sniffer.option_db as _opt_db_mod
         OptionDB._db_path_override = None
+        _opt_db_mod.OptionDB._db_path_override = None
         if os.path.exists(self.db_path):
             try:
                 os.remove(self.db_path)

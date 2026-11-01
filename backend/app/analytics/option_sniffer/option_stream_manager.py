@@ -441,7 +441,8 @@ class OptionStreamManager:
                     return cache_val
 
         try:
-            conn = OptionDB.get_connection()
+            from app.analytics.option_sniffer.option_db import OptionDB as _ActiveOptionDB
+            conn = _ActiveOptionDB.get_connection()
             query = """
                 SELECT high, low, close
                 FROM continuous_index_ohlcv
@@ -516,7 +517,8 @@ class OptionStreamManager:
 
         try:
             import pandas as pd
-            conn = OptionDB.get_connection()
+            from app.analytics.option_sniffer.option_db import OptionDB as _ActiveOptionDB
+            conn = _ActiveOptionDB.get_connection()
             query = """
                 SELECT timestamp, open, high, low, close, volume
                 FROM continuous_index_ohlcv

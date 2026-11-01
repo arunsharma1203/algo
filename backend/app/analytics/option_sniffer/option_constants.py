@@ -136,7 +136,7 @@ MAX_CONCURRENT_OPEN_TRADES_CAP: int = 2            # Global portfolio concurrenc
 # Step 2: Wave-1 Sniper Discipline & Same-Contract House-Money Scale-In Constants
 POST_HARVEST_WAVE_COOLDOWN_SECONDS: int = 3600    # 60-minute direction cooldown on (underlying, option_type) after harvesting >= +15% MFE winner
 POST_HARVEST_MIN_MFE_PCT: float = 15.0            # Minimum MFE % on closed winning trade to engage post-harvest exhaustion guard
-HOUSE_MONEY_SCALE_IN_ACTIVE: bool = True          # Enables 1-lot -> 2-lot same-contract scale-in at +15% MFE in Paper Mode
+HOUSE_MONEY_SCALE_IN_ACTIVE: bool = False         # Disabled by default: pure 1-Lot Wave-1 Sniper preserves full Chandelier Tier 1/2 alpha
 HOUSE_MONEY_SCALE_IN_TRIGGER_MFE_PCT: float = 15.0 # +15.0% MFE required on Lot #1 before scaling in Lot #2
 HOUSE_MONEY_UNIFIED_FLOOR_PCT: float = 8.5        # +8.5% floor above initial entry_ask (-5.65% on Lot #2) -> Net >= +Rs 50 free-roll
 HOUSE_MONEY_MAX_NOTIONAL_INR: float = 28500.0     # Max combined 2-lot notional to stay within Rs 30,000 capital

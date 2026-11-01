@@ -39,6 +39,7 @@ try:
         "app.api.trade_agent",
         "app.analytics.option_sniffer.option_constants",
         "app.analytics.option_sniffer.option_db",
+        "app.analytics.option_sniffer.option_stream_manager",
         "app.analytics.option_sniffer.option_microstructure_evaluator",
         "app.analytics.option_sniffer.option_paper_execution",
         "app.analytics.option_sniffer.option_sniffer_orchestrator",

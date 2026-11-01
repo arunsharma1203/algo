@@ -301,12 +301,20 @@ def init_option_sniffer_tables() -> None:
 init_option_sniffer_tables()
 
 
+_PREV_OPTION_DB_CLASS = globals().get("OptionDB")
+
+
 class OptionDB:
     """Thread-safe accessor for all Option Sniffer persistence operations."""
+    _db_path_override = getattr(_PREV_OPTION_DB_CLASS, "_db_path_override", None)
 
     @staticmethod
     def get_connection() -> sqlite3.Connection:
-        target_db = getattr(OptionDB, "_db_path_override", None) or get_db_path()
+        target_db = (
+            getattr(OptionDB, "_db_path_override", None)
+            or getattr(_PREV_OPTION_DB_CLASS, "_db_path_override", None)
+            or get_db_path()
+        )
         conn = sqlite3.connect(target_db, timeout=15.0)
         conn.execute("PRAGMA busy_timeout = 15000;")
         conn.row_factory = sqlite3.Row
