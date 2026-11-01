@@ -530,3 +530,153 @@ class AdvancePaperExecution:
             return merged
         return None
 
+    @classmethod
+    def evaluate_subsecond_tick_guard(cls, ikey: str, quote_payload: Dict[str, Any]) -> None:
+        """
+        Decoupled Sub-Second WebSocket Tick Guard for Dual-Book Open Positions:
+          1. Book 1 (LONG_BOOK_BUY):
+             - Ratchets peak_price & mfe_pct on every sub-second bid tick so Chandelier floor locks immediately.
+             - Immediately executes STOP_LOSS_HIT if current_bid breaches rupee-capped stop loss.
+          2. Book 2 (SHORT_BOOK_SELL):
+             - Ratchets trough_price (lowest ask) & short_mfe_pct on every sub-second ask tick so
+               Reverse-Chandelier ceiling ratchets downward immediately.
+             - Immediately executes SHORT_STOP_LOSS_HIT if current_ask spikes above rupee-capped short stop loss.
+        """
+        try:
+            open_trades = AdvanceDB.get_open_trades()
+            if not open_trades:
+                return
+
+            curr_bid = float(quote_payload.get("bid") or quote_payload.get("ltp") or 0.0)
+            curr_ask = float(quote_payload.get("ask") or quote_payload.get("ltp") or curr_bid)
+            if curr_bid <= 0 or curr_ask <= 0:
+                return
+
+            now_dt = to_ist_naive()
+            for trade in open_trades:
+                if trade.get("instrument_key") != ikey:
+                    continue
+
+                trade_id = trade["trade_id"]
+                book_type = trade.get("book_type", BOOK_LONG_BUY)
+                qty = int(trade.get("quantity") or trade.get("lot_size") or 65)
+                try:
+                    entry_dt = datetime.fromisoformat(str(trade["entry_time"]).replace("T", " ")[:19])
+                    duration_sec = max(0, int((now_dt - entry_dt).total_seconds()))
+                except Exception:
+                    duration_sec = 0
+
+                if book_type == BOOK_SHORT_SELL:
+                    entry_bid = float(trade["entry_bid"])
+                    if entry_bid <= 0:
+                        continue
+                    prev_peak_ask = float(trade.get("peak_price") or entry_bid)
+                    prev_trough_ask = float(trade.get("trough_price") or entry_bid)
+                    curr_peak_ask = max(prev_peak_ask, curr_ask)
+                    curr_trough_ask = min(prev_trough_ask, curr_ask)
+
+                    short_mfe_pct = round(((entry_bid - curr_trough_ask) / entry_bid) * 100.0, 2)
+                    short_mae_pct = round(((entry_bid - curr_peak_ask) / entry_bid) * 100.0, 2)
+                    curr_decay_pct = ((entry_bid - curr_ask) / entry_bid) * 100.0
+
+                    sl_pct = cls.calculate_short_capped_sl_pct(
+                        entry_bid, qty, float(trade.get("stop_loss_pct") or SHORT_HARD_STOP_LOSS_PCT)
+                    )
+                    if curr_decay_pct <= -sl_pct:
+                        cls.close_trade(
+                            trade=trade,
+                            exit_bid=curr_bid,
+                            exit_ask=curr_ask,
+                            exit_reason="SHORT_STOP_LOSS_HIT",
+                            peak_price=curr_peak_ask,
+                            trough_price=curr_trough_ask,
+                            mfe_pct=short_mfe_pct,
+                            mae_pct=short_mae_pct,
+                            duration_sec=duration_sec,
+                            as_of_time=now_dt,
+                        )
+                    elif curr_trough_ask < prev_trough_ask or curr_peak_ask > prev_peak_ask:
+                        hard_sl_ceiling = round(entry_bid * (1.0 + sl_pct / 100.0), 2)
+                        rev_ceiling = cls.calculate_short_reverse_chandelier_ceiling(
+                            entry_bid, curr_trough_ask, short_mfe_pct
+                        )
+                        eff_ceiling = min(hard_sl_ceiling, rev_ceiling) if rev_ceiling is not None else hard_sl_ceiling
+                        cost_est = calculate_short_option_trade_costs(
+                            sell_entry_bid=entry_bid,
+                            buy_exit_ask=curr_ask,
+                            quantity=qty,
+                            trade_date=trade.get("entry_time"),
+                        )
+                        AdvanceDB.update_open_trade(
+                            trade_id=trade_id,
+                            peak_price=curr_peak_ask,
+                            trough_price=curr_trough_ask,
+                            mfe_pct=short_mfe_pct,
+                            mae_pct=short_mae_pct,
+                            trailing_stop=eff_ceiling,
+                            gross_pnl=cost_est["gross_pnl"],
+                            net_pnl=cost_est["net_pnl"],
+                            net_pnl_pct=cost_est["return_on_premium_pct"],
+                        )
+                else:
+                    entry_ask = float(trade["entry_ask"])
+                    if entry_ask <= 0:
+                        continue
+                    prev_peak_bid = float(trade.get("peak_price") or entry_ask)
+                    prev_trough_bid = float(trade.get("trough_price") or entry_ask)
+                    curr_peak_bid = max(prev_peak_bid, curr_bid)
+                    curr_trough_bid = min(prev_trough_bid, curr_bid)
+
+                    mfe_pct = round(((curr_peak_bid - entry_ask) / entry_ask) * 100.0, 2)
+                    mae_pct = round(((curr_trough_bid - entry_ask) / entry_ask) * 100.0, 2)
+                    curr_pnl_pct = ((curr_bid - entry_ask) / entry_ask) * 100.0
+
+                    sl_pct = cls.calculate_long_capped_sl_pct(
+                        entry_ask, qty, float(trade.get("stop_loss_pct") or LONG_STOP_LOSS_PCT)
+                    )
+                    if curr_pnl_pct <= -sl_pct:
+                        cls.close_trade(
+                            trade=trade,
+                            exit_bid=curr_bid,
+                            exit_ask=curr_ask,
+                            exit_reason="STOP_LOSS_HIT",
+                            peak_price=curr_peak_bid,
+                            trough_price=curr_trough_bid,
+                            mfe_pct=mfe_pct,
+                            mae_pct=mae_pct,
+                            duration_sec=duration_sec,
+                            as_of_time=now_dt,
+                        )
+                    elif curr_peak_bid > prev_peak_bid or curr_trough_bid < prev_trough_bid:
+                        hard_sl_floor = round(entry_ask * (1.0 - sl_pct / 100.0), 2)
+                        chandelier_floor = cls.calculate_long_chandelier_stop(
+                            entry_ask,
+                            curr_peak_bid,
+                            mfe_pct,
+                            float(trade.get("target_pct") or LONG_TARGET_GAIN_PCT),
+                        )
+                        eff_floor = max(hard_sl_floor, chandelier_floor) if chandelier_floor is not None else hard_sl_floor
+                        costs = calculate_option_trade_costs(
+                            buy_price=entry_ask,
+                            sell_price=curr_bid,
+                            quantity=qty,
+                            apply_slippage=True,
+                            trade_date=trade.get("entry_time"),
+                        )
+                        gross = round((curr_bid - entry_ask) * qty, 2)
+                        net = round(gross - costs["total_friction"], 2)
+                        net_pct = round((net / (entry_ask * qty)) * 100.0, 2) if (entry_ask * qty) > 0 else 0.0
+                        AdvanceDB.update_open_trade(
+                            trade_id=trade_id,
+                            peak_price=curr_peak_bid,
+                            trough_price=curr_trough_bid,
+                            mfe_pct=mfe_pct,
+                            mae_pct=mae_pct,
+                            trailing_stop=eff_floor,
+                            gross_pnl=gross,
+                            net_pnl=net,
+                            net_pnl_pct=net_pct,
+                        )
+        except Exception as e:
+            logger.debug(f"[AdvancePaperExecution] Subsecond tick guard note for {ikey}: {e}")
+

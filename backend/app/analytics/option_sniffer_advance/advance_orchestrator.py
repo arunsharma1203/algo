@@ -153,7 +153,7 @@ class OptionSnifferAdvanceOrchestrator:
     def _surveillance_loop(self) -> None:
         while self._is_running:
             try:
-                time.sleep(10.0)
+                time.sleep(3.0)
                 if not self._is_running:
                     break
                 self.run_surveillance_sweep()

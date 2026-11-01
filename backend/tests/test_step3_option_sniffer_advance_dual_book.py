@@ -349,6 +349,51 @@ class TestStep3OptionSnifferAdvanceDualBook(unittest.TestCase):
         finally:
             self.db_patcher.start()
 
+    def test_06_subsecond_websocket_tick_guard_ratchets_and_exits_both_books(self):
+        """
+        Verifies that OptionStreamManager._evaluate_tick_protective_guards() immediately
+        updates peak/trough MFE on sub-second ticks and fires immediate sub-second stop-loss
+        exits for both Book 1 (LONG_BOOK_BUY) and Book 2 (SHORT_BOOK_SELL).
+        """
+        from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+
+        # 1. Open a Short Book trade at BID 100.0 (SL is +16.0% -> 116.0)
+        short_sig = {
+            "signal_id": "sig_subsec_short",
+            "book_type": BOOK_SHORT_SELL,
+            "strategy_mode": STRATEGY_DIAGONAL_OTM_WING_SELLER,
+            "direction": "SELL_CE",
+            "instrument_key": "NSE_FO|SUBSEC_SHORT",
+            "trading_symbol": "NIFTY 22650 CE",
+            "underlying": "NIFTY",
+            "option_type": "CE",
+            "strike": 22650.0,
+            "expiry": "2026-11-03",
+            "lot_size": 65,
+            "spot_price": 22500.0,
+            "option_bid": 100.0,
+            "option_ask": 100.4,
+            "ltp": 100.2,
+        }
+        tid_s = AdvancePaperExecution.open_trade(
+            short_sig, as_of_time=datetime(2026, 10, 30, 10, 5, 0)
+        )
+        self.assertIsNotNone(tid_s)
+
+        sm = OptionStreamManager()
+        # Sub-second tick 1: Ask drops to 82.0 (+18% decay) -> trough_price must ratchet down to 82.0 immediately
+        sm._evaluate_tick_protective_guards("NSE_FO|SUBSEC_SHORT", {"bid": 81.6, "ask": 82.0, "ltp": 81.8})
+        open_trades = AdvanceDB.get_open_trades()
+        self.assertEqual(len(open_trades), 1)
+        self.assertAlmostEqual(float(open_trades[0]["trough_price"]), 82.0, places=2)
+        self.assertAlmostEqual(float(open_trades[0]["mfe_pct"]), 18.0, places=2)
+
+        # Sub-second tick 2: Ask spikes to 118.0 (-18% adverse > 16% SL) -> immediate SHORT_STOP_LOSS_HIT
+        sm._evaluate_tick_protective_guards("NSE_FO|SUBSEC_SHORT", {"bid": 117.5, "ask": 118.0, "ltp": 117.8})
+        self.assertEqual(len(AdvanceDB.get_open_trades()), 0)
+        closed_trades = AdvanceDB.get_closed_trades(limit=5)
+        self.assertEqual(closed_trades[0]["exit_reason"], "SHORT_STOP_LOSS_HIT")
+
 
 if __name__ == "__main__":
     unittest.main()

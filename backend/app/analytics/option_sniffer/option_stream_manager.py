@@ -334,6 +334,13 @@ class OptionStreamManager:
           3. Sustained Profit Trail Protection: Never triggers TRAILING_STOP_HIT on a 1-second tick
              flicker; trailing stop evaluation remains on the 10-second surveillance sweep.
         """
+        # 0. Evaluate sub-second tick protective guards for Option Sniffer Advance (Sandboxed Dual-Book)
+        try:
+            from app.analytics.option_sniffer_advance.advance_paper_execution import AdvancePaperExecution
+            AdvancePaperExecution.evaluate_subsecond_tick_guard(ikey, quote_payload)
+        except Exception as ate:
+            logger.debug(f"[OptionStreamManager] Advance tick protective guard note for {ikey}: {ate}")
+
         try:
             from app.analytics.option_sniffer.option_db import OptionDB
             from app.analytics.option_sniffer.option_paper_execution import OptionPaperExecution
