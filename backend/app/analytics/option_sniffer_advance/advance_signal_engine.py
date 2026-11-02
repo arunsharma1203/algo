@@ -81,6 +81,19 @@ class AdvanceSignalEngine:
     def reset_state(cls) -> None:
         cls._COOLDOWNS.clear()
 
+    @classmethod
+    def record_exit_cooldown(
+        cls,
+        book_type: str,
+        instrument_key: str,
+        as_of_time: Optional[datetime] = None,
+    ) -> None:
+        """Stamps per-contract cooldown on trade exit so same-sweep re-entry is impossible."""
+        if not instrument_key:
+            return
+        now_epoch = to_ist_naive(as_of_time).timestamp()
+        cls._COOLDOWNS[f"{book_type}_{instrument_key}"] = now_epoch
+
     def evaluate_contract(
         self,
         contract: Dict[str, Any],
@@ -126,10 +139,13 @@ class AdvanceSignalEngine:
             )
 
         adx_14 = float(chain_intel.get("adx_14") or 0.0)
+        plus_di = float(chain_intel.get("plus_di") or 0.0)
+        minus_di = float(chain_intel.get("minus_di") or 0.0)
         kaufman_er = float(chain_intel.get("kaufman_er") or 0.0)
         atr_ratio = float(chain_intel.get("atr_ratio") or 1.0)
         net_gex = float(chain_intel.get("net_gex") or 0.0)
         vrp = float(chain_intel.get("vrp") or 0.0)
+        rv_15m_ann = float(chain_intel.get("rv_15m_ann") or chain_intel.get("rv_15m") or 12.0)
         syn_basis = float(chain_intel.get("synthetic_basis_bps") or 0.0)
         pcr_oi = float(chain_intel.get("pcr_oi") or 1.0)
         completed_bars = int(chain_intel.get("completed_bars_count") or 0)
@@ -153,11 +169,12 @@ class AdvanceSignalEngine:
         ]
         is_long_open = len(u_open_long) > 0
         is_short_open = len(u_open_short) > 0
+        parent_long_entry_time = str(u_open_long[0].get("entry_time") or "") if is_long_open else ""
 
         long_open_elapsed_sec = 99999.0
         if is_long_open:
             try:
-                l_et = datetime.fromisoformat(str(u_open_long[0]["entry_time"]).replace("T", " ")[:19])
+                l_et = datetime.fromisoformat(parent_long_entry_time.replace("T", " ")[:19])
                 long_open_elapsed_sec = max(0.0, (now_dt - l_et).total_seconds())
             except Exception:
                 long_open_elapsed_sec = 0.0
@@ -184,7 +201,7 @@ class AdvanceSignalEngine:
         is_diagonal_otm_short = (
             is_long_open
             and (long_open_elapsed_sec >= DIAGONAL_MIN_LONG_ELAPSED_SECONDS)
-            and (otm_strikes > DIAGONAL_MIN_OTM_STRIKES)
+            and (otm_strikes >= DIAGONAL_MIN_OTM_STRIKES)
         )
 
         is_short_regime = can_short_extrinsic and (
@@ -201,7 +218,14 @@ class AdvanceSignalEngine:
                 effective_upstream["consensus_direction"] = "BULLISH" if opt_type == "CE" else "BEARISH"
                 effective_upstream.setdefault("consensus_confidence", 65.0)
             else:
-                if spot_ltp > 0 and u_open > 0:
+                if plus_di > 0 or minus_di > 0:
+                    if plus_di > minus_di:
+                        effective_upstream["consensus_direction"] = "BULLISH"
+                        effective_upstream.setdefault("consensus_confidence", 65.0)
+                    elif minus_di > plus_di:
+                        effective_upstream["consensus_direction"] = "BEARISH"
+                        effective_upstream.setdefault("consensus_confidence", 65.0)
+                elif spot_ltp > 0 and u_open > 0:
                     if spot_ltp >= u_open and spot_ltp >= (u_vwap * 0.999):
                         effective_upstream["consensus_direction"] = "BULLISH"
                         effective_upstream.setdefault("consensus_confidence", 65.0)
@@ -255,6 +279,22 @@ class AdvanceSignalEngine:
 
             if is_short_open:
                 rejection_reasons.append(f"Short Book Anti-Clustering: Active 1-Lot Short {u_sym} position already open")
+            if strategy_mode == STRATEGY_DIAGONAL_OTM_WING_SELLER and parent_long_entry_time:
+                if AdvanceDB.has_diagonal_wing_for_active_long(u_sym, parent_long_entry_time):
+                    rejection_reasons.append(
+                        f"Diagonal Wing Anti-Churn: 1 Diagonal OTM Wing already executed for active {u_sym} parent Long wave"
+                    )
+            recent_short_loss = AdvanceDB.get_recent_book_loss_cooldown(
+                book_type=BOOK_SHORT_SELL,
+                underlying=u_sym,
+                option_type=opt_type,
+                as_of_time=now_dt,
+            )
+            if recent_short_loss:
+                rejection_reasons.append(
+                    f"Short Book Post-Loss Cooldown: Recent {u_sym} {opt_type} {recent_short_loss['exit_reason']} "
+                    f"({recent_short_loss['remaining_seconds']}s cooldown remaining)"
+                )
             if cal_prob < 0.44:
                 rejection_reasons.append(f"Activity conviction below hurdle ({cal_prob:.2f} < 0.44)")
         else:
@@ -268,6 +308,30 @@ class AdvanceSignalEngine:
                 rem_m = max(1, int(recent_harvest.get("remaining_seconds", 1800)) // 60)
                 rejection_reasons.append(
                     f"Wave-1 Exhaustion Guard: Recent {u_sym} {opt_type} winner harvested +{recent_harvest.get('mfe_pct', 15.0):.1f}% MFE ({rem_m}m cooldown remaining)"
+                )
+            recent_long_loss = AdvanceDB.get_recent_book_loss_cooldown(
+                book_type=BOOK_LONG_BUY,
+                underlying=u_sym,
+                option_type=opt_type,
+                as_of_time=now_dt,
+            )
+            if recent_long_loss:
+                rejection_reasons.append(
+                    f"Long Book Post-Loss Cooldown: Recent {u_sym} {opt_type} {recent_long_loss['exit_reason']} "
+                    f"({recent_long_loss['remaining_seconds']}s cooldown remaining)"
+                )
+            if plus_di > 0 or minus_di > 0:
+                if opt_type == "CE" and minus_di > plus_di:
+                    rejection_reasons.append(
+                        f"Counter-trend Long Call blocked: -DI ({minus_di:.1f}) > +DI ({plus_di:.1f})"
+                    )
+                elif opt_type == "PE" and plus_di > minus_di:
+                    rejection_reasons.append(
+                        f"Counter-trend Long Put blocked: +DI ({plus_di:.1f}) > -DI ({minus_di:.1f})"
+                    )
+            if adx_14 > 0 and adx_14 < 16.0 and rv_15m_ann < 8.0 and vrp > 6.0:
+                rejection_reasons.append(
+                    f"Low-RV Gamma Pinning Trap blocked for Long Buying (ADX={adx_14:.1f}, RV_15m={rv_15m_ann:.1f}%, VRP=+{vrp:.1f}%)"
                 )
             if cal_prob < 0.48 or exp_net_ret < 1.5:
                 rejection_reasons.append(f"Model conviction below Long Sniper hurdle (P={cal_prob:.2f}, E[R]={exp_net_ret:.1f}%)")

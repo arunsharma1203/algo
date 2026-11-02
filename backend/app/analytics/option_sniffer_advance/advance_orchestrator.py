@@ -442,7 +442,7 @@ class OptionSnifferAdvanceOrchestrator:
                     "strategies": [
                         "CONTRACTION_THETA_SELLER (ATR_R <= 0.85, ER < 0.40)",
                         "WAVE_2_EXHAUSTION_SELLER (Post-Harvest Wave-2 Reversion or ER <= 0.20)",
-                        "DIAGONAL_OTM_WING_SELLER (Active Long >= 8m + Sell OTM Wing > 1.5 strikes)",
+                        "DIAGONAL_OTM_WING_SELLER (Active Long >= 8m + Sell OTM Wing >= 1.85 strikes)",
                     ],
                     "max_loss_cap": f"+{SHORT_HARD_STOP_LOSS_PCT:.0f}% Spike / ₹{SHORT_MAX_SINGLE_TRADE_LOSS_INR:.0f}",
                     "trailing_engine": "4-Tier Reverse-Chandelier Decay Ratchet (+10% Cost Lock -> +14%/+22%/+35%/+50% Decay)",
@@ -602,7 +602,7 @@ class OptionSnifferAdvanceOrchestrator:
             for r in cur.execute(
                 """
                 SELECT * FROM option_sniffer_paper_trades
-                WHERE entry_time >= '2026-10-19' AND status = 'CLOSED'
+                WHERE entry_time >= '2026-10-19' AND entry_time < '2026-11-01' AND status = 'CLOSED'
                 ORDER BY entry_time ASC
                 """
             ).fetchall()

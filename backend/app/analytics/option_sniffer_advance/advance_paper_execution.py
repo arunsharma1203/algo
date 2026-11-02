@@ -56,6 +56,7 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     SHORT_REV_CHANDELIER_TIER3_TRIGGER_PCT,
     SHORT_REV_CHANDELIER_TIER4_DIST_PCT,
     SHORT_REV_CHANDELIER_TIER4_TRIGGER_PCT,
+    STRATEGY_DIAGONAL_OTM_WING_SELLER,
     calculate_short_option_trade_costs,
 )
 from app.analytics.option_sniffer_advance.advance_db import AdvanceDB
@@ -262,7 +263,13 @@ class AdvancePaperExecution:
         cb = AdvanceDB.get_circuit_breaker_telemetry(as_of_time=now_dt)
         is_cb_halted = bool(cb.get("is_session_halted"))
 
-        for trade in open_trades:
+        # Evaluate Long Book before Short Book so any parent Long exit immediately reconciles its Diagonal Wing
+        ordered_open = sorted(
+            open_trades,
+            key=lambda t: 0 if t.get("book_type") == BOOK_LONG_BUY else 1,
+        )
+
+        for trade in ordered_open:
             trade_id = trade["trade_id"]
             ikey = trade["instrument_key"]
             quote = live_quotes_map.get(ikey)
@@ -320,6 +327,15 @@ class AdvancePaperExecution:
                     exit_reason = "SHORT_STOP_LOSS_HIT"
                 elif rev_chandelier_ceiling is not None and curr_ask >= rev_chandelier_ceiling:
                     exit_reason = "SHORT_REVERSE_CHANDELIER_HIT"
+                elif (
+                    str(trade.get("strategy_mode") or "") == STRATEGY_DIAGONAL_OTM_WING_SELLER
+                    and not any(
+                        t.get("book_type") == BOOK_LONG_BUY
+                        and str(t.get("underlying") or "").upper() == str(trade.get("underlying") or "").upper()
+                        for t in AdvanceDB.get_open_trades()
+                    )
+                ):
+                    exit_reason = "PARENT_LONG_EXITED_RECONCILE"
                 elif duration_min >= 15.0 and short_mfe_pct < 3.5 and curr_decay_pct < -3.0:
                     exit_reason = "SHORT_STAGNATION_EXIT"
                 elif duration_min >= MAX_HOLDING_MINUTES:
@@ -396,6 +412,8 @@ class AdvancePaperExecution:
                 elif chandelier_floor is not None and curr_bid <= chandelier_floor:
                     exit_reason = "TRAILING_STOP_HIT"
                 elif duration_min >= 12.0 and mfe_pct < 5.0 and curr_pnl_pct < 0.0:
+                    exit_reason = "STAGNATION_TIME_STOP"
+                elif duration_min >= 20.0 and mfe_pct < 8.0 and curr_pnl_pct <= -2.0:
                     exit_reason = "STAGNATION_TIME_STOP"
                 elif duration_min >= MAX_HOLDING_MINUTES:
                     exit_reason = "TIME_DECAY_EXPIRY"
@@ -525,6 +543,15 @@ class AdvancePaperExecution:
         }
 
         if AdvanceDB.close_trade(trade_id, close_data):
+            try:
+                from app.analytics.option_sniffer_advance.advance_signal_engine import AdvanceSignalEngine
+                AdvanceSignalEngine.record_exit_cooldown(
+                    book_type=book_type,
+                    instrument_key=str(trade.get("instrument_key") or ""),
+                    as_of_time=as_of_time,
+                )
+            except Exception:
+                pass
             merged = dict(trade)
             merged.update(close_data)
             return merged

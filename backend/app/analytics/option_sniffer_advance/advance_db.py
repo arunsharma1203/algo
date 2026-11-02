@@ -20,6 +20,9 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     INTROSPECTION_PAUSE_MINUTES,
     MAX_CONSECUTIVE_LOSSES,
     MAX_DAILY_COMBINED_LOSS_INR,
+    POST_SL_DIRECTIONAL_COOLDOWN_SECONDS,
+    POST_STAGNATION_COOLDOWN_SECONDS,
+    STRATEGY_DIAGONAL_OTM_WING_SELLER,
     to_ist_naive,
 )
 from app.data.historical_data_layer import get_db_path
@@ -615,6 +618,116 @@ class AdvanceDB:
             except Exception as e:
                 logger.debug(f"[AdvanceDB] Harvested wave check note: {e}")
                 return None
+
+    @classmethod
+    def get_recent_book_loss_cooldown(
+        cls,
+        book_type: str,
+        underlying: str,
+        option_type: str,
+        as_of_time: Optional[datetime] = None,
+        sl_cooldown_seconds: int = POST_SL_DIRECTIONAL_COOLDOWN_SECONDS,
+        stagnation_cooldown_seconds: int = POST_STAGNATION_COOLDOWN_SECONDS,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Checks if a recent trade on (book_type, underlying, option_type) closed as a Stop-Loss,
+        Stagnation exit, or net loss on the same session, enforcing a directional cooldown:
+          - Stop-Loss / Net Loss: 15 minutes (900s)
+          - Stagnation Time Stop: 10 minutes (600s)
+        Prevents 0.0-second immediate re-entry into the exact same contract after a stop-loss!
+        """
+        now_dt = to_ist_naive(as_of_time)
+        date_str = now_dt.strftime("%Y-%m-%d")
+        b_str = str(book_type or BOOK_LONG_BUY).upper().strip()
+        u_str = str(underlying or "NIFTY").upper().strip()
+        o_str = str(option_type or "CE").upper().strip()
+
+        with _ADVANCE_DB_LOCK:
+            try:
+                conn = cls.get_connection()
+                row = conn.execute(
+                    """
+                    SELECT trade_id, trading_symbol, exit_time, exit_reason, net_pnl
+                    FROM option_sniffer_advance_trades
+                    WHERE status = 'CLOSED'
+                      AND book_type = ?
+                      AND UPPER(underlying) = ?
+                      AND UPPER(option_type) = ?
+                      AND exit_time >= ?
+                    ORDER BY exit_time DESC LIMIT 1
+                    """,
+                    (b_str, u_str, o_str, f"{date_str} 00:00:00"),
+                ).fetchone()
+                conn.close()
+
+                if not row:
+                    return None
+
+                exit_reason = str(row["exit_reason"] or "").upper()
+                net_pnl = float(row["net_pnl"] or 0.0)
+                if "STOP_LOSS" in exit_reason:
+                    req_cd = sl_cooldown_seconds
+                elif "STAGNATION" in exit_reason:
+                    req_cd = stagnation_cooldown_seconds
+                elif net_pnl < 0 and "RECONCILE" not in exit_reason:
+                    req_cd = stagnation_cooldown_seconds
+                else:
+                    return None
+
+                exit_str = str(row["exit_time"]).replace("T", " ")[:19]
+                exit_dt = datetime.fromisoformat(exit_str)
+                elapsed = (now_dt - exit_dt).total_seconds()
+                if 0 <= elapsed < req_cd:
+                    return {
+                        "trade_id": row["trade_id"],
+                        "trading_symbol": row["trading_symbol"],
+                        "exit_time": row["exit_time"],
+                        "exit_reason": exit_reason,
+                        "net_pnl": net_pnl,
+                        "elapsed_seconds": int(elapsed),
+                        "remaining_seconds": int(req_cd - elapsed),
+                    }
+                return None
+            except Exception as e:
+                logger.debug(f"[AdvanceDB] Loss cooldown check note: {e}")
+                return None
+
+    @classmethod
+    def has_diagonal_wing_for_active_long(
+        cls,
+        underlying: str,
+        parent_long_entry_time: str,
+    ) -> bool:
+        """
+        Enforces a strict 1-Diagonal-Wing-Per-Parent-Long-Wave invariant:
+        If a DIAGONAL_OTM_WING_SELLER trade has already been opened (and closed) on `underlying`
+        at or after `parent_long_entry_time`, blocks opening a second diagonal wing for the same
+        parent Long wave.
+        """
+        u_str = str(underlying or "NIFTY").upper().strip()
+        if not parent_long_entry_time:
+            return False
+
+        with _ADVANCE_DB_LOCK:
+            try:
+                conn = cls.get_connection()
+                row = conn.execute(
+                    """
+                    SELECT trade_id
+                    FROM option_sniffer_advance_trades
+                    WHERE book_type = ?
+                      AND strategy_mode = ?
+                      AND UPPER(underlying) = ?
+                      AND entry_time >= ?
+                    LIMIT 1
+                    """,
+                    (BOOK_SHORT_SELL, STRATEGY_DIAGONAL_OTM_WING_SELLER, u_str, str(parent_long_entry_time)),
+                ).fetchone()
+                conn.close()
+                return row is not None
+            except Exception as e:
+                logger.debug(f"[AdvanceDB] Diagonal wing parent check note: {e}")
+                return False
 
     @classmethod
     def get_dual_book_pnl_summary(cls) -> Dict[str, Any]:

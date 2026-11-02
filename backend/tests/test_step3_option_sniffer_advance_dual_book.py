@@ -394,6 +394,281 @@ class TestStep3OptionSnifferAdvanceDualBook(unittest.TestCase):
         closed_trades = AdvanceDB.get_closed_trades(limit=5)
         self.assertEqual(closed_trades[0]["exit_reason"], "SHORT_STOP_LOSS_HIT")
 
+    def test_07_counter_trend_long_call_and_low_rv_pinning_blocked(self):
+        """
+        Verifies Patch 1:
+          - Blocks LONG_BOOK_BUY Call (CE) when -DI (27.7) > +DI (14.3) (reproducing Nov 2 Trade #4).
+          - Blocks LONG_BOOK_BUY Put (PE) when +DI (28.5) > -DI (12.0).
+          - Blocks LONG_BOOK_BUY during low-RV Gamma Pinning (ADX < 16, RV_15m < 8%, VRP > 6%).
+        """
+        engine = AdvanceSignalEngine()
+        t0 = datetime(2026, 11, 2, 11, 21, 11)
+
+        with patch.object(
+            engine.model,
+            "predict_contract",
+            return_value={"calibrated_prob": 0.58, "expected_net_return_pct": 12.0},
+        ):
+            ce_contract = {
+                "instrument_key": "NSE_FO|NOV2_TRADE4",
+                "trading_symbol": "NIFTY 23300 CE 03 NOV 26",
+                "underlying": "NIFTY",
+                "strike": 23300.0,
+                "option_type": "CE",
+                "lot_size": 65,
+                "expiry": "2026-11-03",
+            }
+            quote = {
+                **ce_contract,
+                "ltp": 93.8,
+                "bid": 93.6,
+                "ask": 93.95,
+                "spread_pct": 0.37,
+                "volume": 120000,
+                "oi": 450000,
+                "iv": 15.0,
+                "delta": 0.54,
+                "gamma": 0.0018,
+                "theta": -15.0,
+                "vega": 9.5,
+                "quote_age_ms": 100,
+            }
+            u_quote = {"spot_ltp": 23317.45, "open": 23310.0, "vwap": 23315.0}
+            bearish_chain_intel = {
+                "spot_price": 23317.45,
+                "completed_bars_count": 120,
+                "adx_14": 19.5,
+                "plus_di": 14.35,
+                "minus_di": 27.72,
+                "kaufman_er": 0.32,
+                "atr_ratio": 1.02,
+                "vrp": 3.5,
+                "rv_15m_ann": 11.5,
+                "net_gex": 12.0,
+                "pcr_oi": 0.95,
+                "synthetic_basis_bps": 7.96,
+            }
+            res_ce = engine.evaluate_contract(
+                contract=ce_contract,
+                quote=quote,
+                underlying_quote=u_quote,
+                chain_intel=bearish_chain_intel,
+                as_of_time=t0,
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(res_ce["status"], "ACTIVE")
+            self.assertTrue(
+                any("Counter-trend Long Call blocked" in r for r in res_ce["rejection_reasons"]),
+                f"Expected counter-trend rejection, got: {res_ce['rejection_reasons']}",
+            )
+
+            # Also verify Low-RV Gamma Pinning Trap guard (ADX=15.0 < 16, RV_15m=6.1% < 8%, VRP=8.9% > 6%)
+            pinning_intel = {
+                **bearish_chain_intel,
+                "adx_14": 15.0,
+                "plus_di": 22.0,
+                "minus_di": 18.0,
+                "kaufman_er": 0.26,
+                "rv_15m_ann": 6.08,
+                "vrp": 8.92,
+            }
+            res_pin = engine.evaluate_contract(
+                contract=ce_contract,
+                quote=quote,
+                underlying_quote=u_quote,
+                chain_intel=pinning_intel,
+                as_of_time=t0,
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(res_pin["status"], "ACTIVE")
+            self.assertTrue(
+                any("Low-RV Gamma Pinning Trap blocked" in r for r in res_pin["rejection_reasons"]),
+                f"Expected Low-RV Pinning rejection, got: {res_pin['rejection_reasons']}",
+            )
+
+    def test_08_short_book_zero_second_reentry_blocked_and_one_wing_per_parent(self):
+        """
+        Verifies Patches 2 & 3:
+          - Blocks diagonal wing < 1.85 strikes OTM (e.g. +1.61 strikes OTM).
+          - Blocks 0.0-second re-entry into SHORT_BOOK_SELL after SHORT_STOP_LOSS_HIT via:
+            1) 1-Diagonal-Wing-Per-Parent-Long-Wave lock
+            2) 15-minute Short Book Post-Loss Cooldown
+            3) Per-contract exit cooldown stamp
+        """
+        engine = AdvanceSignalEngine()
+        t_long = datetime(2026, 11, 2, 11, 51, 44)
+
+        with patch.object(
+            engine.model,
+            "predict_contract",
+            return_value={"calibrated_prob": 0.58, "expected_net_return_pct": 14.0},
+        ):
+            # 1. Open Parent Long at 11:51:44
+            long_contract = {
+                "instrument_key": "NSE_FO|PARENT_LONG",
+                "trading_symbol": "NIFTY 23300 CE",
+                "underlying": "NIFTY",
+                "strike": 23300.0,
+                "option_type": "CE",
+                "lot_size": 65,
+                "expiry": "2026-11-03",
+            }
+            long_quote = {
+                **long_contract,
+                "ltp": 75.0,
+                "bid": 74.8,
+                "ask": 75.15,
+                "spread_pct": 0.46,
+                "volume": 150000,
+                "oi": 500000,
+                "iv": 15.0,
+                "delta": 0.50,
+                "quote_age_ms": 50,
+            }
+            u_quote = {"spot_ltp": 23300.0, "open": 23280.0, "vwap": 23290.0}
+            chain_intel = {
+                "spot_price": 23300.0,
+                "completed_bars_count": 150,
+                "adx_14": 24.0,
+                "plus_di": 28.0,
+                "minus_di": 14.0,
+                "kaufman_er": 0.38,
+                "atr_ratio": 1.05,
+                "vrp": 3.0,
+                "rv_15m_ann": 12.0,
+            }
+            r_long = engine.evaluate_contract(
+                contract=long_contract,
+                quote=long_quote,
+                underlying_quote=u_quote,
+                chain_intel=chain_intel,
+                as_of_time=t_long,
+                enforce_cutoff=True,
+            )
+            self.assertEqual(r_long["status"], "ACTIVE")
+
+            # 2. At 12:00:00 (> 8m elapsed), test a +2.0 OTM wing (23400 CE when spot=23300 -> +2.0 strikes OTM >= 1.85)
+            t_wing1 = datetime(2026, 11, 2, 12, 0, 0)
+            wing_contract = {
+                "instrument_key": "NSE_FO|DIAG_WING_23400",
+                "trading_symbol": "NIFTY 23400 CE",
+                "underlying": "NIFTY",
+                "strike": 23400.0,
+                "option_type": "CE",
+                "lot_size": 65,
+                "expiry": "2026-11-03",
+            }
+            wing_quote = {
+                **wing_contract,
+                "ltp": 41.3,
+                "bid": 41.25,
+                "ask": 41.40,
+                "spread_pct": 0.36,
+                "volume": 180000,
+                "oi": 600000,
+                "iv": 15.2,
+                "delta": 0.25,
+                "quote_age_ms": 50,
+            }
+            r_wing1 = engine.evaluate_contract(
+                contract=wing_contract,
+                quote=wing_quote,
+                underlying_quote=u_quote,
+                chain_intel=chain_intel,
+                as_of_time=t_wing1,
+                enforce_cutoff=True,
+            )
+            self.assertEqual(r_wing1["status"], "ACTIVE")
+            self.assertEqual(r_wing1["strategy_mode"], STRATEGY_DIAGONAL_OTM_WING_SELLER)
+
+            # 3. At 12:09:22, Wing #1 spikes to 50.50 (+22.4% > 16% SL) and hits SHORT_STOP_LOSS_HIT
+            t_sl = datetime(2026, 11, 2, 12, 9, 22)
+            live_map = {
+                "NSE_FO|PARENT_LONG": {**long_quote, "bid": 95.0, "ask": 95.5},
+                "NSE_FO|DIAG_WING_23400": {**wing_quote, "bid": 50.35, "ask": 50.50},
+            }
+            closed = AdvancePaperExecution.update_open_trades(live_map, {"NIFTY": u_quote}, as_of_time=t_sl)
+            self.assertEqual(len(closed), 1)
+            self.assertEqual(closed[0]["exit_reason"], "SHORT_STOP_LOSS_HIT")
+
+            # 4. 0.0 seconds later (at 12:09:22), attempt to re-evaluate NIFTY 23400 CE (reproducing Trade #9!)
+            r_wing2 = engine.evaluate_contract(
+                contract=wing_contract,
+                quote={**wing_quote, "bid": 50.35, "ask": 50.50},
+                underlying_quote=u_quote,
+                chain_intel=chain_intel,
+                as_of_time=t_sl,
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(r_wing2["status"], "ACTIVE")
+            self.assertIsNone(r_wing2.get("opened_trade_id"))
+            reasons_joined = " | ".join(r_wing2["rejection_reasons"])
+            self.assertIn("Diagonal Wing Anti-Churn", reasons_joined)
+            self.assertIn("Short Book Post-Loss Cooldown", reasons_joined)
+            self.assertIn("Per-contract 5m signal cooldown active", reasons_joined)
+
+    def test_09_orphaned_diagonal_wing_reconciles_when_parent_long_exits(self):
+        """
+        Verifies Patch 4:
+        When the parent LONG_BOOK_BUY trade closes, any open DIAGONAL_OTM_WING_SELLER on that
+        underlying is automatically closed with exit_reason = 'PARENT_LONG_EXITED_RECONCILE'.
+        """
+        t0 = datetime(2026, 11, 2, 10, 30, 0)
+        AdvancePaperExecution.open_trade(
+            {
+                "signal_id": "s_long_p",
+                "book_type": BOOK_LONG_BUY,
+                "strategy_mode": STRATEGY_WAVE1_GAMMA_SNIPER,
+                "direction": "BUY_CE",
+                "instrument_key": "NSE_FO|P_LONG",
+                "trading_symbol": "NIFTY 23350 CE",
+                "underlying": "NIFTY",
+                "option_type": "CE",
+                "strike": 23350.0,
+                "expiry": "2026-11-03",
+                "lot_size": 65,
+                "spot_price": 23340.0,
+                "option_bid": 79.2,
+                "option_ask": 79.4,
+            },
+            as_of_time=t0,
+        )
+        t1 = datetime(2026, 11, 2, 10, 39, 0)
+        AdvancePaperExecution.open_trade(
+            {
+                "signal_id": "s_short_w",
+                "book_type": BOOK_SHORT_SELL,
+                "strategy_mode": STRATEGY_DIAGONAL_OTM_WING_SELLER,
+                "direction": "SELL_CE",
+                "instrument_key": "NSE_FO|W_SHORT",
+                "trading_symbol": "NIFTY 23450 CE",
+                "underlying": "NIFTY",
+                "option_type": "CE",
+                "strike": 23450.0,
+                "expiry": "2026-11-03",
+                "lot_size": 65,
+                "spot_price": 23340.0,
+                "option_bid": 38.9,
+                "option_ask": 39.1,
+            },
+            as_of_time=t1,
+        )
+        self.assertEqual(len(AdvanceDB.get_open_trades()), 2)
+
+        # At 10:43:00 (13m elapsed for parent Long -> hits STAGNATION_TIME_STOP),
+        # the diagonal wing (only 4m elapsed, flat at 37.90) must automatically reconcile and close!
+        t2 = datetime(2026, 11, 2, 10, 43, 0)
+        live_map = {
+            "NSE_FO|P_LONG": {"bid": 77.15, "ask": 77.35, "ltp": 77.25},
+            "NSE_FO|W_SHORT": {"bid": 37.70, "ask": 37.90, "ltp": 37.80},
+        }
+        closed = AdvancePaperExecution.update_open_trades(live_map, as_of_time=t2)
+        self.assertEqual(len(closed), 2)
+        reasons = {c["instrument_key"]: c["exit_reason"] for c in closed}
+        self.assertEqual(reasons["NSE_FO|P_LONG"], "STAGNATION_TIME_STOP")
+        self.assertEqual(reasons["NSE_FO|W_SHORT"], "PARENT_LONG_EXITED_RECONCILE")
+        self.assertEqual(len(AdvanceDB.get_open_trades()), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -91,7 +91,9 @@ POST_HARVEST_EXHAUSTION_ATR_RATIO_MAX: float = 0.93
 POST_HARVEST_EXHAUSTION_ER_MAX: float = 0.20
 POST_HARVEST_COOLDOWN_SECONDS: int = 3600        # 60m window after Wave-1 >= +15% MFE winner
 DIAGONAL_MIN_LONG_ELAPSED_SECONDS: int = 480     # Wait >= 8m after Wave-1 Long entry before fading far-OTM wing
-DIAGONAL_MIN_OTM_STRIKES: float = 1.5            # Candidate strike > 1.5 strikes OTM while Long ATM is open
+DIAGONAL_MIN_OTM_STRIKES: float = 1.85           # Candidate strike >= 1.85 strikes OTM while Long ATM is open
+POST_SL_DIRECTIONAL_COOLDOWN_SECONDS: int = 900  # 15m directional cooldown after Stop-Loss hit on same book/side
+POST_STAGNATION_COOLDOWN_SECONDS: int = 600      # 10m directional cooldown after Stagnation exit on same book/side
 
 # ── PORTFOLIO & CIRCUIT BREAKER SAFEGUARDS ───────────────────────────────────
 MAX_LONG_POSITIONS_PER_UNDERLYING: int = 1
