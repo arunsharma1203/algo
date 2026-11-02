@@ -1,0 +1,166 @@
+{
+  "version": "consensus_meta_learner_v2",
+  "artifact_file": "consensus_meta_learner_v2.pkl",
+  "artifact_sha256": "ecdd03efc45108e3b7a03b2360df7ee0e9aaf9140e338f569be48b4f0ebc287d",
+  "feature_count": 39,
+  "feature_names": [
+    "qlib_score_norm",
+    "legacy_conf_norm",
+    "model_agreement",
+    "score_spread",
+    "is_buy_direction",
+    "market_breadth_adv_dec",
+    "market_mean_return_1d",
+    "nifty_regime_bull",
+    "nifty_regime_bear",
+    "sector_aligned",
+    "sector_pct_from_open",
+    "stock_vs_market_rs",
+    "bull_in_bull",
+    "bull_in_bear",
+    "bear_in_bear",
+    "fno_available",
+    "fno_pcr",
+    "fno_pcr_bias_bull",
+    "fno_call_wall_dist_pct",
+    "fno_put_wall_dist_pct",
+    "news_available",
+    "finbert_sentiment_score",
+    "finbert_aligned",
+    "finbert_contradicting",
+    "ema_9_slope",
+    "ema_21_slope",
+    "ema_separation",
+    "price_vs_ema21",
+    "trend_alignment",
+    "rsi_14",
+    "distance_to_high_20",
+    "distance_to_low_20",
+    "range_position_20",
+    "distance_to_vwap",
+    "atr_14_pct",
+    "candle_body_ratio",
+    "candle_rejection_wick",
+    "close_location_val",
+    "rvol_20"
+  ],
+  "metrics": {
+    "status": "SUCCESS",
+    "train_period": "<= 2026-09-29 (685 trades)",
+    "val_period": "2026-09-29 to 2026-10-01 (86 trades)",
+    "oos_period": "> 2026-10-01 (467 trades)",
+    "feature_count": 39,
+    "baseline_champion": {
+      "trades": 467,
+      "net_pnl": -99.26,
+      "win_rate_pct": 26.3,
+      "net_expectancy": -0.213,
+      "brier_score": 0.2768
+    },
+    "meta_learner_v2": {
+      "trades": 0,
+      "net_pnl": 0.0,
+      "win_rate_pct": 0.0,
+      "net_expectancy": 0.0,
+      "brier_score": 0.2202,
+      "trades_filtered": 467,
+      "losses_avoided": 344,
+      "winners_rejected": 123,
+      "net_capital_saved": 99.26
+    },
+    "comparison": {
+      "expectancy_improvement": 0.213,
+      "net_pnl_improvement": 99.26,
+      "brier_score_improvement": 0.0566
+    },
+    "ablation": {
+      "WITHOUT_BASE_QLIB_LEGACY": {
+        "trades": 141,
+        "net_expectancy": -0.166,
+        "delta_expectancy_vs_all": 0.166
+      },
+      "WITHOUT_MARKET_REGIME": {
+        "trades": 164,
+        "net_expectancy": -0.141,
+        "delta_expectancy_vs_all": 0.141
+      },
+      "WITHOUT_SECTOR_CONTEXT": {
+        "trades": 189,
+        "net_expectancy": -0.148,
+        "delta_expectancy_vs_all": 0.148
+      },
+      "WITHOUT_RELATIVE_STRENGTH": {
+        "trades": 140,
+        "net_expectancy": -0.179,
+        "delta_expectancy_vs_all": 0.179
+      },
+      "WITHOUT_FNO_CONTEXT": {
+        "trades": 154,
+        "net_expectancy": -0.175,
+        "delta_expectancy_vs_all": 0.175
+      },
+      "WITHOUT_FINBERT_NEWS": {
+        "trades": 153,
+        "net_expectancy": -0.146,
+        "delta_expectancy_vs_all": 0.146
+      },
+      "WITHOUT_CHART_STRUCTURE": {
+        "trades": 129,
+        "net_expectancy": -0.228,
+        "delta_expectancy_vs_all": 0.228
+      }
+    },
+    "regime_breakdown": {
+      "NIFTY_BEARISH": {
+        "baseline_trades": 467,
+        "baseline_net": -99.26,
+        "baseline_expectancy": -0.213,
+        "meta_trades": 0,
+        "meta_net": 0.0,
+        "meta_expectancy": 0.0
+      }
+    },
+    "feature_coefficients": {
+      "qlib_score_norm": 0.0621,
+      "legacy_conf_norm": 0.2133,
+      "model_agreement": -0.008,
+      "score_spread": 0.1667,
+      "is_buy_direction": 0.1706,
+      "market_breadth_adv_dec": 0.0483,
+      "market_mean_return_1d": 0.7929,
+      "nifty_regime_bull": -0.8676,
+      "nifty_regime_bear": 0.8596,
+      "sector_aligned": 0.6619,
+      "sector_pct_from_open": 0.2886,
+      "stock_vs_market_rs": -0.1571,
+      "bull_in_bull": 0.2881,
+      "bull_in_bear": -0.1175,
+      "bear_in_bear": 0.9771,
+      "fno_available": -0.3221,
+      "fno_pcr": -0.1411,
+      "fno_pcr_bias_bull": 0.4059,
+      "fno_call_wall_dist_pct": -0.0174,
+      "fno_put_wall_dist_pct": -0.0869,
+      "news_available": 0.0,
+      "finbert_sentiment_score": 0.0,
+      "finbert_aligned": 0.0,
+      "finbert_contradicting": 0.0,
+      "ema_9_slope": 0.7803,
+      "ema_21_slope": 0.2701,
+      "ema_separation": -0.0153,
+      "price_vs_ema21": -0.1519,
+      "trend_alignment": 0.3293,
+      "rsi_14": -0.645,
+      "distance_to_high_20": -0.0777,
+      "distance_to_low_20": 0.1051,
+      "range_position_20": 0.7559,
+      "distance_to_vwap": -0.151,
+      "atr_14_pct": -0.4784,
+      "candle_body_ratio": -0.2079,
+      "candle_rejection_wick": -0.3195,
+      "close_location_val": -0.5968,
+      "rvol_20": -0.0703
+    }
+  },
+  "created_at": "2026-10-07T04:03:56"
+}

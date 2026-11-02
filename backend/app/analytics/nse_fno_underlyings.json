@@ -1,0 +1,726 @@
+[
+  {
+    "symbol": "AARTIIND",
+    "lot_size": 1000
+  },
+  {
+    "symbol": "ABB",
+    "lot_size": 125
+  },
+  {
+    "symbol": "ABBOTINDIA",
+    "lot_size": 40
+  },
+  {
+    "symbol": "ABCAPITAL",
+    "lot_size": 3100
+  },
+  {
+    "symbol": "ABFRL",
+    "lot_size": 2600
+  },
+  {
+    "symbol": "ACC",
+    "lot_size": 300
+  },
+  {
+    "symbol": "ADANIENT",
+    "lot_size": 300
+  },
+  {
+    "symbol": "ADANIPORTS",
+    "lot_size": 400
+  },
+  {
+    "symbol": "ALKEM",
+    "lot_size": 125
+  },
+  {
+    "symbol": "AMBUJACEM",
+    "lot_size": 900
+  },
+  {
+    "symbol": "APOLLOHOSP",
+    "lot_size": 125
+  },
+  {
+    "symbol": "APOLLOTYRE",
+    "lot_size": 1700
+  },
+  {
+    "symbol": "ASHOKLEY",
+    "lot_size": 2500
+  },
+  {
+    "symbol": "ASIANPAINT",
+    "lot_size": 200
+  },
+  {
+    "symbol": "ASTRAL",
+    "lot_size": 275
+  },
+  {
+    "symbol": "ATUL",
+    "lot_size": 75
+  },
+  {
+    "symbol": "AUBANK",
+    "lot_size": 1000
+  },
+  {
+    "symbol": "AUROPHARMA",
+    "lot_size": 550
+  },
+  {
+    "symbol": "AXISBANK",
+    "lot_size": 625
+  },
+  {
+    "symbol": "BAJAJ-AUTO",
+    "lot_size": 125
+  },
+  {
+    "symbol": "BAJAJFINSV",
+    "lot_size": 500
+  },
+  {
+    "symbol": "BAJFINANCE",
+    "lot_size": 125
+  },
+  {
+    "symbol": "BALKRISIND",
+    "lot_size": 300
+  },
+  {
+    "symbol": "BALRAMCHIN",
+    "lot_size": 1600
+  },
+  {
+    "symbol": "BANDHANBNK",
+    "lot_size": 2500
+  },
+  {
+    "symbol": "BANKBARODA",
+    "lot_size": 2925
+  },
+  {
+    "symbol": "BATAINDIA",
+    "lot_size": 375
+  },
+  {
+    "symbol": "BEL",
+    "lot_size": 2850
+  },
+  {
+    "symbol": "BERGEPAINT",
+    "lot_size": 1100
+  },
+  {
+    "symbol": "BHARATFORG",
+    "lot_size": 500
+  },
+  {
+    "symbol": "BHARTIARTL",
+    "lot_size": 475
+  },
+  {
+    "symbol": "BHEL",
+    "lot_size": 2625
+  },
+  {
+    "symbol": "BIOCON",
+    "lot_size": 2500
+  },
+  {
+    "symbol": "BOSCHLTD",
+    "lot_size": 25
+  },
+  {
+    "symbol": "BPCL",
+    "lot_size": 1800
+  },
+  {
+    "symbol": "BRITANNIA",
+    "lot_size": 125
+  },
+  {
+    "symbol": "BSOFT",
+    "lot_size": 1000
+  },
+  {
+    "symbol": "CANBK",
+    "lot_size": 6750
+  },
+  {
+    "symbol": "CANFINHOME",
+    "lot_size": 975
+  },
+  {
+    "symbol": "CHAMBLFERT",
+    "lot_size": 1500
+  },
+  {
+    "symbol": "CHOLAFIN",
+    "lot_size": 625
+  },
+  {
+    "symbol": "CIPLA",
+    "lot_size": 650
+  },
+  {
+    "symbol": "COALINDIA",
+    "lot_size": 2100
+  },
+  {
+    "symbol": "COFORGE",
+    "lot_size": 150
+  },
+  {
+    "symbol": "COLPAL",
+    "lot_size": 350
+  },
+  {
+    "symbol": "CONCOR",
+    "lot_size": 1000
+  },
+  {
+    "symbol": "COROMANDEL",
+    "lot_size": 700
+  },
+  {
+    "symbol": "CROMPTON",
+    "lot_size": 1800
+  },
+  {
+    "symbol": "CUB",
+    "lot_size": 5000
+  },
+  {
+    "symbol": "CUMMINSIND",
+    "lot_size": 300
+  },
+  {
+    "symbol": "DABUR",
+    "lot_size": 1250
+  },
+  {
+    "symbol": "DALBHARAT",
+    "lot_size": 250
+  },
+  {
+    "symbol": "DEEPAKNTR",
+    "lot_size": 300
+  },
+  {
+    "symbol": "DIVISLAB",
+    "lot_size": 200
+  },
+  {
+    "symbol": "DIXON",
+    "lot_size": 100
+  },
+  {
+    "symbol": "DLF",
+    "lot_size": 825
+  },
+  {
+    "symbol": "DRREDDY",
+    "lot_size": 125
+  },
+  {
+    "symbol": "EICHERMOT",
+    "lot_size": 175
+  },
+  {
+    "symbol": "ESCORTS",
+    "lot_size": 275
+  },
+  {
+    "symbol": "EXIDEIND",
+    "lot_size": 1800
+  },
+  {
+    "symbol": "FEDERALBNK",
+    "lot_size": 5000
+  },
+  {
+    "symbol": "GAIL",
+    "lot_size": 4650
+  },
+  {
+    "symbol": "GLENMARK",
+    "lot_size": 725
+  },
+  {
+    "symbol": "GMRINFRA",
+    "lot_size": 10000
+  },
+  {
+    "symbol": "GNFC",
+    "lot_size": 1300
+  },
+  {
+    "symbol": "GODREJCP",
+    "lot_size": 500
+  },
+  {
+    "symbol": "GODREJPROP",
+    "lot_size": 475
+  },
+  {
+    "symbol": "GRANULES",
+    "lot_size": 2000
+  },
+  {
+    "symbol": "GRASIM",
+    "lot_size": 250
+  },
+  {
+    "symbol": "GUJGASLTD",
+    "lot_size": 1250
+  },
+  {
+    "symbol": "HAL",
+    "lot_size": 300
+  },
+  {
+    "symbol": "HAVELLS",
+    "lot_size": 500
+  },
+  {
+    "symbol": "HCLTECH",
+    "lot_size": 350
+  },
+  {
+    "symbol": "HDFCAMC",
+    "lot_size": 150
+  },
+  {
+    "symbol": "HDFCBANK",
+    "lot_size": 550
+  },
+  {
+    "symbol": "HDFCLIFE",
+    "lot_size": 1100
+  },
+  {
+    "symbol": "HEROMOTOCO",
+    "lot_size": 150
+  },
+  {
+    "symbol": "HINDALCO",
+    "lot_size": 1400
+  },
+  {
+    "symbol": "HINDCOPPER",
+    "lot_size": 2650
+  },
+  {
+    "symbol": "HINDPETRO",
+    "lot_size": 2025
+  },
+  {
+    "symbol": "HINDUNILVR",
+    "lot_size": 300
+  },
+  {
+    "symbol": "ICICIBANK",
+    "lot_size": 700
+  },
+  {
+    "symbol": "ICICIGI",
+    "lot_size": 500
+  },
+  {
+    "symbol": "ICICIPRULI",
+    "lot_size": 1500
+  },
+  {
+    "symbol": "IDEA",
+    "lot_size": 80000
+  },
+  {
+    "symbol": "IDFCFIRSTB",
+    "lot_size": 7500
+  },
+  {
+    "symbol": "IEX",
+    "lot_size": 3750
+  },
+  {
+    "symbol": "IGL",
+    "lot_size": 1375
+  },
+  {
+    "symbol": "INDHOTEL",
+    "lot_size": 1000
+  },
+  {
+    "symbol": "INDIACEM",
+    "lot_size": 2900
+  },
+  {
+    "symbol": "INDIAMART",
+    "lot_size": 300
+  },
+  {
+    "symbol": "INDIGO",
+    "lot_size": 150
+  },
+  {
+    "symbol": "INDUSINDBK",
+    "lot_size": 500
+  },
+  {
+    "symbol": "INDUSTOWER",
+    "lot_size": 3400
+  },
+  {
+    "symbol": "INFY",
+    "lot_size": 400
+  },
+  {
+    "symbol": "IOC",
+    "lot_size": 4875
+  },
+  {
+    "symbol": "IPCALAB",
+    "lot_size": 650
+  },
+  {
+    "symbol": "IRCTC",
+    "lot_size": 875
+  },
+  {
+    "symbol": "ITC",
+    "lot_size": 1600
+  },
+  {
+    "symbol": "JINDALSTEL",
+    "lot_size": 625
+  },
+  {
+    "symbol": "JKCEMENT",
+    "lot_size": 250
+  },
+  {
+    "symbol": "JSWSTEEL",
+    "lot_size": 675
+  },
+  {
+    "symbol": "JUBLFOOD",
+    "lot_size": 1250
+  },
+  {
+    "symbol": "KOTAKBANK",
+    "lot_size": 400
+  },
+  {
+    "symbol": "L&TFH",
+    "lot_size": 4468
+  },
+  {
+    "symbol": "LALPATHLAB",
+    "lot_size": 300
+  },
+  {
+    "symbol": "LAURUSLABS",
+    "lot_size": 1700
+  },
+  {
+    "symbol": "LICHSGFIN",
+    "lot_size": 2000
+  },
+  {
+    "symbol": "LT",
+    "lot_size": 175
+  },
+  {
+    "symbol": "LTIM",
+    "lot_size": 150
+  },
+  {
+    "symbol": "LTTS",
+    "lot_size": 200
+  },
+  {
+    "symbol": "LUPIN",
+    "lot_size": 425
+  },
+  {
+    "symbol": "M&M",
+    "lot_size": 350
+  },
+  {
+    "symbol": "M&MFIN",
+    "lot_size": 2000
+  },
+  {
+    "symbol": "MANAPPURAM",
+    "lot_size": 3000
+  },
+  {
+    "symbol": "MARICO",
+    "lot_size": 1200
+  },
+  {
+    "symbol": "MARUTI",
+    "lot_size": 50
+  },
+  {
+    "symbol": "MCDOWELL-N",
+    "lot_size": 700
+  },
+  {
+    "symbol": "MCX",
+    "lot_size": 250
+  },
+  {
+    "symbol": "METROPOLIS",
+    "lot_size": 400
+  },
+  {
+    "symbol": "MFSL",
+    "lot_size": 800
+  },
+  {
+    "symbol": "MGL",
+    "lot_size": 400
+  },
+  {
+    "symbol": "MOTHERSON",
+    "lot_size": 7100
+  },
+  {
+    "symbol": "MPHASIS",
+    "lot_size": 275
+  },
+  {
+    "symbol": "MRF",
+    "lot_size": 10
+  },
+  {
+    "symbol": "MUTHOOTFIN",
+    "lot_size": 550
+  },
+  {
+    "symbol": "NATIONALUM",
+    "lot_size": 3750
+  },
+  {
+    "symbol": "NAUKRI",
+    "lot_size": 150
+  },
+  {
+    "symbol": "NAVINFLUOR",
+    "lot_size": 150
+  },
+  {
+    "symbol": "NESTLEIND",
+    "lot_size": 250
+  },
+  {
+    "symbol": "NMDC",
+    "lot_size": 4500
+  },
+  {
+    "symbol": "NTPC",
+    "lot_size": 1500
+  },
+  {
+    "symbol": "OBEROIRLTY",
+    "lot_size": 700
+  },
+  {
+    "symbol": "OFSS",
+    "lot_size": 125
+  },
+  {
+    "symbol": "ONGC",
+    "lot_size": 3850
+  },
+  {
+    "symbol": "PAGEIND",
+    "lot_size": 15
+  },
+  {
+    "symbol": "PEL",
+    "lot_size": 750
+  },
+  {
+    "symbol": "PERSISTENT",
+    "lot_size": 100
+  },
+  {
+    "symbol": "PETRONET",
+    "lot_size": 3000
+  },
+  {
+    "symbol": "PFC",
+    "lot_size": 1300
+  },
+  {
+    "symbol": "PIDILITIND",
+    "lot_size": 250
+  },
+  {
+    "symbol": "PIIND",
+    "lot_size": 250
+  },
+  {
+    "symbol": "PNB",
+    "lot_size": 8000
+  },
+  {
+    "symbol": "POLYCAB",
+    "lot_size": 125
+  },
+  {
+    "symbol": "POWERGRID",
+    "lot_size": 3600
+  },
+  {
+    "symbol": "PVRINOX",
+    "lot_size": 407
+  },
+  {
+    "symbol": "RAMCOCEM",
+    "lot_size": 850
+  },
+  {
+    "symbol": "RBLBANK",
+    "lot_size": 2500
+  },
+  {
+    "symbol": "RECLTD",
+    "lot_size": 2000
+  },
+  {
+    "symbol": "RELIANCE",
+    "lot_size": 250
+  },
+  {
+    "symbol": "SAIL",
+    "lot_size": 8000
+  },
+  {
+    "symbol": "SBICARD",
+    "lot_size": 800
+  },
+  {
+    "symbol": "SBILIFE",
+    "lot_size": 750
+  },
+  {
+    "symbol": "SBIN",
+    "lot_size": 750
+  },
+  {
+    "symbol": "SHREECEM",
+    "lot_size": 25
+  },
+  {
+    "symbol": "SHRIRAMFIN",
+    "lot_size": 300
+  },
+  {
+    "symbol": "SIEMENS",
+    "lot_size": 125
+  },
+  {
+    "symbol": "SRF",
+    "lot_size": 375
+  },
+  {
+    "symbol": "SUNPHARMA",
+    "lot_size": 350
+  },
+  {
+    "symbol": "SUNTV",
+    "lot_size": 1500
+  },
+  {
+    "symbol": "SYNGENE",
+    "lot_size": 1000
+  },
+  {
+    "symbol": "TATACHEM",
+    "lot_size": 550
+  },
+  {
+    "symbol": "TATACOMM",
+    "lot_size": 500
+  },
+  {
+    "symbol": "TATACONSUM",
+    "lot_size": 900
+  },
+  {
+    "symbol": "TATAMOTORS",
+    "lot_size": 1425
+  },
+  {
+    "symbol": "TATAPOWER",
+    "lot_size": 3375
+  },
+  {
+    "symbol": "TATASTEEL",
+    "lot_size": 5500
+  },
+  {
+    "symbol": "TCS",
+    "lot_size": 175
+  },
+  {
+    "symbol": "TECHM",
+    "lot_size": 600
+  },
+  {
+    "symbol": "TITAN",
+    "lot_size": 175
+  },
+  {
+    "symbol": "TORNTPHARM",
+    "lot_size": 250
+  },
+  {
+    "symbol": "TRENT",
+    "lot_size": 200
+  },
+  {
+    "symbol": "TVSMOTOR",
+    "lot_size": 350
+  },
+  {
+    "symbol": "UBL",
+    "lot_size": 400
+  },
+  {
+    "symbol": "ULTRACEMCO",
+    "lot_size": 100
+  },
+  {
+    "symbol": "UPL",
+    "lot_size": 1300
+  },
+  {
+    "symbol": "VEDL",
+    "lot_size": 2300
+  },
+  {
+    "symbol": "VOLTAS",
+    "lot_size": 600
+  },
+  {
+    "symbol": "WIPRO",
+    "lot_size": 1500
+  },
+  {
+    "symbol": "ZEEL",
+    "lot_size": 3000
+  },
+  {
+    "symbol": "ZYDUSLIFE",
+    "lot_size": 900
+  }
+]

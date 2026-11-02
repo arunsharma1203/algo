@@ -21,6 +21,23 @@ class ExecuteRequest(BaseModel):
     simulation: bool = True
     bypass_safeguard: bool = False
 
+
+def get_system_mode() -> str:
+    """Returns current system execution mode (PAPER_TESTING or LIVE)."""
+    try:
+        from app.data.historical_data_layer import get_db_path
+        conn = sqlite3.connect(get_db_path(), timeout=5.0)
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM app_settings WHERE key = 'simulation_mode'")
+        row = cur.fetchone()
+        conn.close()
+        if row and str(row[0]).lower() == 'false':
+            return "LIVE"
+        return "PAPER_TESTING"
+    except Exception:
+        return "PAPER_TESTING"
+
+
 @router.get("/live-quote")
 def get_pre_execute_quote(ticker: str):
     """
@@ -39,37 +56,29 @@ async def execute_trade(req: ExecuteRequest):
     - Logs and formats broker payloads.
     """
     try:
-        # 1. Verify System Simulation Mode in Database
-        from app.data.historical_data_layer import get_db_path
-        conn = sqlite3.connect(get_db_path(), timeout=5.0)
-        cur = conn.cursor()
-        cur.execute("SELECT value FROM app_settings WHERE key = 'simulation_mode'")
-        sim_row = cur.fetchone()
-        conn.close()
-        
-        system_in_simulation = True if not sim_row or sim_row[0] != 'false' else False
         is_live_order = not req.simulation
         
-        # 2. Strict Safeguard Check: Block accidental live orders
-        if is_live_order and system_in_simulation and not req.bypass_safeguard:
+        # 1. Strict Safeguard Check: Block live orders (Broker Execution Unprovisioned)
+        if is_live_order:
             raise HTTPException(
                 status_code=403,
-                detail="⚠️ Live Order Blocked by Safeguard: System is currently in Simulation Mode. To execute real-money orders, switch Simulation Mode OFF in Settings or unlock the safeguard checkbox."
+                detail="⛔ Live Broker Order Routing is NOT PROVISIONED: Interactive order execution adapters are not provisioned in this platform. Simulation Mode is strictly enforced (fail-closed)."
             )
-            
-        # 3. If Live Order, validate broker credentials
-        if is_live_order:
-            if not req.api_token or len(req.api_token.strip()) < 8:
-                # Check if Upstox Algo Token or INDmoney token is saved in database
-                cur.execute("SELECT value FROM app_settings WHERE key = 'upstox_algo_token'")
-                algo_row = cur.fetchone()
-                if algo_row and algo_row[0] and len(algo_row[0].strip()) > 8:
-                    req.api_token = algo_row[0].strip()
-                else:
-                    raise HTTPException(
-                        status_code=401,
-                        detail="Valid Broker API Token or Upstox Algo Token required for live order routing. Configure in Settings or paste token."
-                    )
+
+        # 2. Verify System Simulation Mode in Database (safe fallback)
+        system_in_simulation = True
+        try:
+            from app.data.historical_data_layer import get_db_path
+            conn = sqlite3.connect(get_db_path(), timeout=5.0)
+            cur = conn.cursor()
+            cur.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)")
+            cur.execute("SELECT value FROM app_settings WHERE key = 'simulation_mode'")
+            sim_row = cur.fetchone()
+            conn.close()
+            if sim_row and sim_row[0] == 'false':
+                system_in_simulation = False
+        except Exception:
+            system_in_simulation = True
 
         # 4. Fetch Verified Real-Time LTP from Upstox / Provider
         live_meta = get_live_quote_with_meta(req.ticker)
@@ -95,21 +104,14 @@ async def execute_trade(req: ExecuteRequest):
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S IST")
         }
         
-        if is_live_order:
-            logger.info(f"🚨 [REAL-MONEY LIVE ROUTING]: Executing order to broker for {req.quantity}x {clean_symbol} @ ₹{live_price}: {order_payload}")
-            # Simulate network round-trip to broker API
-            time.sleep(1.0)
-            order_id = f"LIVE-{clean_symbol}-{int(time.time())}"
-            message = f"✅ LIVE ORDER ROUTED: {req.action} {req.quantity} shares of {clean_symbol} @ ₹{live_price} (Total: ₹{total_order_value:,}). Data verified via {data_source}."
-        else:
-            logger.info(f"🛡️ [PAPER SIMULATION]: Simulated order for {req.quantity}x {clean_symbol} @ ₹{live_price}: {order_payload}")
-            time.sleep(0.5)
-            order_id = f"SIM-{clean_symbol}-{int(time.time())}"
-            message = f"🛡️ PAPER TRADE EXECUTED: Simulated {req.action} {req.quantity} shares of {clean_symbol} @ ₹{live_price} (₹{total_order_value:,})."
+        logger.info(f"🛡️ [PAPER SIMULATION]: Simulated order for {req.quantity}x {clean_symbol} @ ₹{live_price}: {order_payload}")
+        time.sleep(0.5)
+        order_id = f"SIM-{clean_symbol}-{int(time.time())}"
+        message = f"🛡️ PAPER TRADE EXECUTED: Simulated {req.action} {req.quantity} shares of {clean_symbol} @ ₹{live_price} (₹{total_order_value:,})."
             
         return {
             "status": "success",
-            "simulation": not is_live_order,
+            "simulation": True,
             "order_id": order_id,
             "message": message,
             "execution_price": live_price,

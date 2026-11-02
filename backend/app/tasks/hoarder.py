@@ -7,7 +7,6 @@ from typing import Dict, List, Optional, Tuple, Generator, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
-import yfinance as yf
 import ta
 
 from app.analytics.universe_config import resolve_universe_tickers, LIVE_UNIVERSE
@@ -20,7 +19,7 @@ def format_sse(data: dict) -> str:
     """Formats payload as Server-Sent Event string."""
     return f"{json.dumps(data)}\n"
 
-def process_single_ticker_hoard(ticker: str, data_source: str = 'yfinance', api_key: str = '') -> Tuple[bool, int, str]:
+def process_single_ticker_hoard(ticker: str, data_source: str = 'upstox', api_key: str = '') -> Tuple[bool, int, str]:
     """
     Fetches 15m intraday candle data for a single equity symbol, computes technical indicators,
     and persists to SQLite ml_training_data table.
@@ -29,6 +28,15 @@ def process_single_ticker_hoard(ticker: str, data_source: str = 'yfinance', api_
     clean_ticker = ticker.strip().upper()
     if not clean_ticker.endswith(('.NS', '.BO')):
         clean_ticker = f"{clean_ticker}.NS"
+
+    if not data_source or data_source == 'yfinance':
+        try:
+            from app.data.market_provider import get_active_data_source
+            active_src = get_active_data_source()
+            if active_src:
+                data_source = active_src
+        except Exception:
+            data_source = 'upstox'
 
     try:
         df = pd.DataFrame()
@@ -57,8 +65,14 @@ def process_single_ticker_hoard(ticker: str, data_source: str = 'yfinance', api_
                 df = pd.DataFrame(candles)
 
         elif data_source == 'upstox':
-            from app.data.upstox_provider import fetch_upstox_candles
-            df = fetch_upstox_candles(clean_ticker, interval='15m', period='60d')
+            try:
+                from app.data.upstox_provider import fetch_upstox_candles
+                df = fetch_upstox_candles(clean_ticker, interval='15m', period='60d')
+            except Exception as upstox_err:
+                logger.warning(f"[Hoarder] Upstox error for {clean_ticker}: {upstox_err}.")
+                df = None
+            if df is None or df.empty or len(df) < 10:
+                return False, 0, f"Upstox returned insufficient 15m data for {clean_ticker}"
 
         elif data_source == 'dhan':
             import requests
@@ -82,21 +96,25 @@ def process_single_ticker_hoard(ticker: str, data_source: str = 'yfinance', api_
                 return False, 0, f"Zerodha API Error: {res.status_code}"
 
         else:
-            # Default Yahoo Finance Provider
-            df = yf.download(clean_ticker, period="60d", interval="15m", progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel(1)
+            return False, 0, f"Unsupported data source: {data_source}. Upstox is the required market data source."
 
         if df is None or df.empty or len(df) < 10:
             return False, 0, f"No 15m data returned for {clean_ticker}"
 
-        # Standardize columns
+        # Standardize column casing
+        df.columns = [str(c[0] if isinstance(c, tuple) else c).lower().strip() for c in df.columns]
         df = df.rename(columns={
-            'Open': 'open', 'High': 'high', 'Low': 'low', 
-            'Close': 'close', 'Volume': 'volume'
+            'open': 'open', 'high': 'high', 'low': 'low', 
+            'close': 'close', 'volume': 'volume'
         })
-        df = df.reset_index()
-        df = df.rename(columns={df.columns[0]: 'datetime'})
+        if 'datetime' not in df.columns and 'date' not in df.columns:
+            df = df.reset_index()
+            df = df.rename(columns={df.columns[0]: 'datetime'})
+        elif 'date' in df.columns and 'datetime' not in df.columns:
+            df = df.rename(columns={'date': 'datetime'})
+            
+        # Deduplicate columns if any
+        df = df.loc[:, ~df.columns.duplicated()].copy()
 
         # Technical Indicators
         df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
@@ -118,6 +136,14 @@ def process_single_ticker_hoard(ticker: str, data_source: str = 'yfinance', api_
         ml_df.attrs['source'] = data_source
 
         save_ml_training_data(clean_ticker, ml_df)
+
+        # Also persist into canonical ohlcv table with timeframe='15m'
+        try:
+            from app.data.data_gateway import DataGateway
+            DataGateway.persist_intraday_candles(clean_ticker, df, timeframe="15m", source=data_source)
+        except Exception as persist_err:
+            logger.debug(f"[Hoarder] Could not persist 15m candles to ohlcv for {clean_ticker}: {persist_err}")
+
         return True, len(ml_df), f"Saved {len(ml_df)} 15m bars for {clean_ticker}"
 
     except Exception as e:
@@ -125,9 +151,9 @@ def process_single_ticker_hoard(ticker: str, data_source: str = 'yfinance', api_
 
 
 def hoard_intraday_data(
-    universe: str = 'NIFTY_500',
+    universe: str = 'ALL_DATABASE_STOCKS',  # Changed from NIFTY_500 — must match Qlib universe
     custom_tickers: Optional[List[str]] = None,
-    data_source: str = 'yfinance',
+    data_source: str = 'upstox',
     api_key: str = '',
     max_workers: int = 8,
     batch_size: int = 25
@@ -135,7 +161,10 @@ def hoard_intraday_data(
     """
     Background batch job to fetch 15m intraday data for any configured universe,
     compute technical features, and store in SQLite ml_training_data table.
+    Uses pure Upstox API v2 with rate limit protection via UpstoxRateLimiter.
     """
+    if not data_source or data_source == 'yfinance':
+        data_source = 'upstox'
     start_time = time.time()
     tickers = resolve_universe_tickers(universe, custom_tickers=custom_tickers)
     total_tickers = len(tickers)
@@ -200,9 +229,9 @@ def hoard_intraday_data(
 
 
 def hoard_intraday_data_stream(
-    universe: str = 'NIFTY_500',
+    universe: str = 'ALL_DATABASE_STOCKS',  # Changed from NIFTY_500 — must match Qlib universe
     custom_tickers: Optional[List[str]] = None,
-    data_source: str = 'yfinance',
+    data_source: str = 'upstox',
     api_key: str = '',
     max_workers: int = 8,
     batch_size: int = 25
@@ -211,6 +240,8 @@ def hoard_intraday_data_stream(
     Generator yielding Server-Sent Events (SSE) for streaming real-time Data Hoarder telemetry to UI.
     """
     start_time = time.time()
+    if not data_source or data_source == 'yfinance':
+        data_source = 'upstox'
     tickers = resolve_universe_tickers(universe, custom_tickers=custom_tickers)
     total_tickers = len(tickers)
 

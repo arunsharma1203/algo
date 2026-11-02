@@ -2,7 +2,6 @@ import os
 import logging
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import ta
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
@@ -490,7 +489,7 @@ class WeeklyWalkForwardBacktestEngine:
                 } for y, data in sorted(yearly_perf.items()) if data["trades"] > 0
             },
             "scientific_data_availability": {
-                "price_and_technicals": "HISTORICAL DATA ACTIVE (yfinance Verified)",
+                "price_and_technicals": "HISTORICAL DATA ACTIVE (Upstox/Canonical Verified)",
                 "macro_regime": "HISTORICAL DATA ACTIVE (20-EMA Aligned <= T_bar)",
                 "oof_platt_calibration": "HISTORICAL DATA ACTIVE (Fitted strictly <= T_rebalance)",
                 "fractional_kelly_sizing": "HISTORICAL DATA ACTIVE (Mathematical Formula Parity)",
@@ -512,14 +511,22 @@ async def run_ml_backtest(req: MLBacktestRequest):
     try:
         ticker = req.ticker.strip().upper()
         clean_ticker = ticker if ticker.endswith(('.NS', '.BO')) else f"{ticker}.NS"
+        clean_sym = clean_ticker.replace(".NS", "").replace(".BO", "").strip().upper()
         model_type = req.model_type.upper()
         
         # 1. Fetch Data
+        from app.data.historical_data_layer import HistoricalDataLayer
+        from app.data.market_provider import fetch_candles
+
         if model_type == "SWING":
-            df = yf.download(clean_ticker, period="5y", interval="1d", progress=False)
+            df = HistoricalDataLayer.get_historical_ohlcv(clean_sym, timeframe="1d")
+            if df is None or len(df) < 300:
+                df = fetch_candles(clean_sym, interval="1d", period="5y")
             min_rows = 300
         else:
-            df = yf.download(clean_ticker, period="60d", interval="15m", progress=False)
+            df = HistoricalDataLayer.get_historical_ohlcv(clean_sym, timeframe="15m")
+            if df is None or len(df) < 300:
+                df = fetch_candles(clean_sym, interval="15m", period="60d")
             min_rows = 300
 
         # Validate Market Data

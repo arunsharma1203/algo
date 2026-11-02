@@ -253,8 +253,8 @@ class TestProductionRepair(unittest.TestCase):
         with patch("app.data.historical_data_layer.get_db_path", return_value=self.temp_db_path):
             conn = sqlite3.connect(self.temp_db_path)
             conn.execute("""
-                INSERT INTO ml_trade_history (id, timestamp, ticker, direction, entry, sl, tp1, tp2, confidence, status, outcome)
-                VALUES (101, '2026-09-01T10:00:00', 'TCS.NS', 'BULLISH', 4000.0, 3900.0, 4200.0, 4400.0, 75.0, 'OPEN', 'OPEN')
+                INSERT INTO ml_trade_history (id, timestamp, ticker, direction, entry, sl, tp1, tp2, confidence, status, outcome, position_type)
+                VALUES (101, '2026-09-01T10:00:00', 'TCS.NS', 'BULLISH', 4000.0, 3900.0, 4200.0, 4400.0, 75.0, 'OPEN', 'OPEN', 'PAPER_POSITION')
             """)
             conn.commit()
             conn.close()
@@ -274,7 +274,7 @@ class TestProductionRepair(unittest.TestCase):
 
             from app.analytics.autonomous_bot import active_trade_tracker
             with patch("app.analytics.autonomous_bot.is_market_open", return_value=True), \
-                 patch("app.api.ml_history.evaluate_ml_history", return_value=[{'id': 101, 'ticker': 'TCS.NS', 'outcome': 'OPEN', 'direction': 'BULLISH', 'entry': 4000.0, 'sl': 3900.0}]), \
+                 patch("app.api.ml_history.evaluate_ml_history", return_value=[{'id': 101, 'ticker': 'TCS.NS', 'outcome': 'OPEN', 'direction': 'BULLISH', 'entry': 4000.0, 'sl': 3900.0, 'position_type': 'PAPER_POSITION'}]), \
                  patch("app.analytics.autonomous_bot.evaluate_single_trade_risk", return_value=mock_audit), \
                  patch("app.analytics.telegram_notifier.send_telegram_message"):
                 active_trade_tracker(force_run=True)
@@ -292,8 +292,8 @@ class TestProductionRepair(unittest.TestCase):
         with patch("app.data.historical_data_layer.get_db_path", return_value=self.temp_db_path):
             conn = sqlite3.connect(self.temp_db_path)
             conn.execute("""
-                INSERT INTO ml_trade_history (id, timestamp, ticker, direction, entry, sl, tp1, tp2, confidence, status, outcome)
-                VALUES (102, '2026-09-01T10:00:00', 'INFY.NS', 'BULLISH', 1800.0, 1750.0, 1900.0, 2000.0, 70.0, 'OPEN', 'OPEN')
+                INSERT INTO ml_trade_history (id, timestamp, ticker, direction, entry, sl, tp1, tp2, confidence, status, outcome, position_type)
+                VALUES (102, '2026-09-01T10:00:00', 'INFY.NS', 'BULLISH', 1800.0, 1750.0, 1900.0, 2000.0, 70.0, 'OPEN', 'OPEN', 'PAPER_POSITION')
             """)
             conn.commit()
             conn.close()
@@ -312,7 +312,7 @@ class TestProductionRepair(unittest.TestCase):
 
             from app.analytics.autonomous_bot import active_trade_tracker
             with patch("app.analytics.autonomous_bot.is_market_open", return_value=True), \
-                 patch("app.api.ml_history.evaluate_ml_history", return_value=[{'id': 102, 'ticker': 'INFY.NS', 'outcome': 'OPEN', 'direction': 'BULLISH', 'entry': 1800.0, 'sl': 1750.0}]), \
+                 patch("app.api.ml_history.evaluate_ml_history", return_value=[{'id': 102, 'ticker': 'INFY.NS', 'outcome': 'OPEN', 'direction': 'BULLISH', 'entry': 1800.0, 'sl': 1750.0, 'position_type': 'PAPER_POSITION'}]), \
                  patch("app.analytics.autonomous_bot.evaluate_single_trade_risk", return_value=mock_audit), \
                  patch("app.analytics.telegram_notifier.send_telegram_message"):
                 active_trade_tracker(force_run=True)

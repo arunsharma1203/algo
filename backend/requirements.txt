@@ -6,3 +6,8 @@ numpy
 ta
 pydantic
 scikit-learn
+pyqlib==0.9.7
+lightgbm
+joblib
+requests
+upstox-python-sdk>=2.30.0

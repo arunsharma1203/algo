@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Key, Shield, HardDrive, DollarSign, Activity, DatabaseZap, Zap, CheckCircle, AlertCircle, ExternalLink, Globe, Copy, Check, Info, X } from 'lucide-react';
+import { User, Key, Shield, HardDrive, DollarSign, Activity, DatabaseZap, Zap, CheckCircle, AlertCircle, AlertTriangle, ExternalLink, Globe, Copy, Check, Info, X, Clock, Timer, RefreshCw } from 'lucide-react';
 import axios from 'axios';
 import { API_BASE } from '../services/api';
 
@@ -16,6 +16,19 @@ export default function Profile() {
   const [upstoxAlgoStatus, setUpstoxAlgoStatus] = useState(null);
   const [testingMarket, setTestingMarket] = useState(false);
   const [testingAlgo, setTestingAlgo] = useState(false);
+  const [upstoxRateLimits, setUpstoxRateLimits] = useState(null);
+  const [upstoxTokenStatus, setUpstoxTokenStatus] = useState(null);
+  const isTokenExpired = upstoxTokenStatus?.status === 'TOKEN_EXPIRED' || (upstoxTokenStatus && upstoxTokenStatus.is_valid === false);
+
+  // Real-time ticking timestamp for live countdown timers
+  const [nowTs, setNowTs] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowTs(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Static IP helper modal state
   const [ipModalOpen, setIpModalOpen] = useState(false);
@@ -29,7 +42,7 @@ export default function Profile() {
     simulationMode: true,
     defaultCapital: 100000,
     maxRiskPerTrade: 2.0,
-    dataSource: 'yfinance',
+    dataSource: 'upstox',
     dataApiKey: ''
   });
   
@@ -37,6 +50,112 @@ export default function Profile() {
   const [hoardLogs, setHoardLogs] = useState([]);
   const [isHoarding, setIsHoarding] = useState(false);
   const [testStatus, setTestStatus] = useState('');
+
+  const refreshUpstoxStatus = () => {
+    fetch(`${API_BASE}/settings/upstox/token-status`)
+      .then(res => res.json())
+      .then(data => setUpstoxTokenStatus(data))
+      .catch(e => console.error("Upstox token status fetch error:", e));
+  };
+
+  const refreshUpstoxRateLimits = () => {
+    fetch(`${API_BASE}/settings/upstox`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.rate_limits) {
+          setUpstoxRateLimits(data.rate_limits);
+        }
+      })
+      .catch(e => console.error("Upstox rate limits fetch error:", e));
+  };
+
+  // 5-second polling interval to keep rate limits telemetry fresh
+  useEffect(() => {
+    const pollInterval = setInterval(() => {
+      refreshUpstoxRateLimits();
+      refreshUpstoxStatus();
+    }, 5000);
+    return () => clearInterval(pollInterval);
+  }, []);
+
+  // Helper: Format seconds to HH:MM:SS or Dd HH:MM:SS
+  const formatSecondsToCountdown = (totalSec) => {
+    if (totalSec === null || totalSec === undefined || isNaN(totalSec)) return '--:--:--';
+    if (totalSec <= 0) return '00:00:00';
+    const days = Math.floor(totalSec / 86400);
+    const hours = Math.floor((totalSec % 86400) / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+
+    if (days > 0) {
+      return `${days}d ${String(hours).padStart(2, '0')}h ${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s`;
+    }
+    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
+
+  // Helper: Calculate remaining time to token refresh/expiry
+  const getTokenRefreshCountdown = () => {
+    if (isTokenExpired) {
+      return { formatted: '00:00:00', isExpired: true, label: 'Token Expired (Re-auth needed)' };
+    }
+    if (upstoxTokenStatus?.expires_at) {
+      try {
+        const expDate = new Date(upstoxTokenStatus.expires_at.replace(' ', 'T'));
+        const diffSec = Math.floor((expDate.getTime() - nowTs) / 1000);
+        if (diffSec <= 0) {
+          return { formatted: '00:00:00', isExpired: true, label: 'Token Expired (Re-auth needed)' };
+        }
+        return {
+          formatted: formatSecondsToCountdown(diffSec),
+          isExpired: false,
+          label: `Expires: ${upstoxTokenStatus.expires_at}`
+        };
+      } catch (e) {}
+    }
+    // Fallback: Upstox daily session reset cutoff (03:30:00 IST every morning)
+    const now = new Date(nowTs);
+    const reset = new Date(nowTs);
+    reset.setHours(3, 30, 0, 0);
+    if (now.getTime() >= reset.getTime()) {
+      reset.setDate(reset.getDate() + 1);
+    }
+    const diffSec = Math.floor((reset.getTime() - now.getTime()) / 1000);
+    return {
+      formatted: formatSecondsToCountdown(diffSec),
+      isExpired: false,
+      label: 'Daily 03:30 AM IST Cutoff'
+    };
+  };
+
+  // Helper: Calculate remaining time to 30-min rate limit sliding window replenishment
+  const getQuotaWindowCountdown = () => {
+    if (upstoxRateLimits?.circuit_open) {
+      const rem = upstoxRateLimits.circuit_cooldown_remaining_sec || 0;
+      return {
+        formatted: `${rem}s`,
+        isCooldown: true,
+        label: 'Circuit Breaker Cooldown'
+      };
+    }
+    const remSec = upstoxRateLimits?.window_reset_remaining_sec;
+    if (remSec && remSec > 0) {
+      const mins = Math.floor(remSec / 60);
+      const secs = remSec % 60;
+      return {
+        formatted: `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`,
+        isCooldown: false,
+        label: 'Rolling slot replenishment'
+      };
+    }
+    return {
+      formatted: 'FULL CAPACITY',
+      isCooldown: false,
+      label: 'All 1,600 slots available'
+    };
+  };
+
+  const tokenCountdown = getTokenRefreshCountdown();
+  const quotaCountdown = getQuotaWindowCountdown();
 
   useEffect(() => {
     // 1. Fetch Telegram Config from backend
@@ -60,8 +179,14 @@ export default function Profile() {
           algo_token: data.algo_token || '',
           redirect_uri: data.redirect_uri || prev.redirect_uri
         }));
+        if (data.rate_limits) {
+          setUpstoxRateLimits(data.rate_limits);
+        }
       })
       .catch(e => console.error("Upstox fetch error:", e));
+
+    // 2b. Fetch Upstox Token Status
+    refreshUpstoxStatus();
 
     // 3. Fetch Active Data Source
     fetch(`${API_BASE}/settings/datasource`)
@@ -187,6 +312,39 @@ export default function Profile() {
     } catch (e) {
       setUpstoxMarketStatus({ status: 'error', message: 'Connection to backend failed.' });
     } finally {
+      refreshUpstoxStatus();
+      setTestingMarket(false);
+    }
+  };
+
+  const handleSaveAndReconnectMarketToken = async () => {
+    setTestingMarket(true);
+    setUpstoxMarketStatus({ status: 'info', message: 'Saving and validating fresh market data token...' });
+    try {
+      await fetch(`${API_BASE}/settings/upstox`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(upstox)
+      });
+      await fetch(`${API_BASE}/settings/datasource`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'upstox' })
+      });
+      const response = await fetch(`${API_BASE}/settings/upstox/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...upstox, test_type: 'market' })
+      });
+      const data = await response.json();
+      setUpstoxMarketStatus(data);
+      if (data.status === 'success') {
+        setProfile(p => ({ ...p, dataSource: 'upstox' }));
+      }
+    } catch (e) {
+      setUpstoxMarketStatus({ status: 'error', message: 'Connection to backend failed.' });
+    } finally {
+      refreshUpstoxStatus();
       setTestingMarket(false);
     }
   };
@@ -287,9 +445,10 @@ export default function Profile() {
     await fetch(`${API_BASE}/settings/datasource`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source: profile.dataSource || 'yfinance' })
+      body: JSON.stringify({ source: profile.dataSource || 'upstox' })
     }).catch(e => console.error(e));
     
+    refreshUpstoxStatus();
     setSavedMessage(true);
     setTimeout(() => setSavedMessage(false), 3000);
   };
@@ -495,62 +654,46 @@ export default function Profile() {
               <Zap size={22} className="text-yellow-400" />
               <h2 className="font-black text-lg tracking-tight">Market Data Provider &amp; Upstox Real-Time Feed</h2>
             </div>
-            <span className={`text-xs font-bold px-3 py-1 rounded-full ${profile.dataSource === 'upstox' ? 'bg-emerald-500 text-white' : 'bg-yellow-500/30 text-yellow-300'}`}>
-              {profile.dataSource === 'upstox' ? '🟢 UPSTOX REAL-TIME (0ms)' : '🟡 YAHOO FINANCE (15m Delay)'}
+            <span className={`text-xs font-bold px-3 py-1 rounded-full ${isTokenExpired ? 'bg-rose-600 text-white animate-pulse' : 'bg-emerald-500 text-white'}`}>
+              {isTokenExpired ? '🔴 TOKEN EXPIRED / DEFENSIVE HALT' : '🟢 UPSTOX REAL-TIME (ACTIVE)'}
             </span>
           </div>
 
           <div className="p-6">
+            {/* Prominent Red Banner if Upstox token is expired or revoked */}
+            {isTokenExpired && (
+              <div className="mb-6 bg-rose-50 border-2 border-rose-500 rounded-xl p-4 text-rose-900 flex items-start space-x-3 shadow-sm animate-fade-in">
+                <AlertTriangle className="text-rose-600 shrink-0 mt-0.5" size={24} />
+                <div className="flex-1">
+                  <h3 className="font-black text-sm uppercase tracking-wide text-rose-800">
+                    ⚠️ Action Required: Upstox Access Token Expired or Revoked
+                  </h3>
+                  <p className="text-xs text-rose-700 mt-1">
+                    The Upstox market data token is invalid or expired. To safeguard capital from unmonitored execution, 
+                    <strong> emergency defensive liquidation was triggered across active positions</strong> and scanning has halted.
+                    Yahoo Finance fallback is permanently disabled across Qlib, Legacy, and Consensus pipelines.
+                  </p>
+                  <p className="text-xs font-bold text-rose-900 mt-2">
+                    👉 Please enter your fresh Upstox Market Data Token below and click "Save & Reconnect Market Token" to resume live operations.
+                  </p>
+                </div>
+              </div>
+            )}
+
             <div className="mb-6">
-              <label className="block text-sm font-bold text-gray-800 mb-3">Select Active Market Data Engine</label>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                
-                {/* Option 1: Upstox Live */}
-                <div 
-                  onClick={() => handleDataSourceChange('upstox')}
-                  className={`p-4 rounded-xl border-2 cursor-pointer transition flex items-start space-x-3 ${profile.dataSource === 'upstox' ? 'border-purple-600 bg-purple-50/50 shadow-sm' : 'border-gray-200 hover:border-gray-300'}`}
-                >
-                  <input 
-                    type="radio" 
-                    name="datasource" 
-                    checked={profile.dataSource === 'upstox'} 
-                    onChange={() => handleDataSourceChange('upstox')}
-                    className="mt-1 text-purple-600"
-                  />
-                  <div>
-                    <div className="flex items-center space-x-2">
-                      <span className="font-black text-gray-900">Upstox Real-Time Feed</span>
-                      <span className="text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded">RECOMMENDED FOR INTRADAY</span>
-                    </div>
-                    <p className="text-xs text-gray-600 mt-1">
-                      Direct exchange connection. Delivers <strong>0ms sub-second live ticks</strong> and real-time 1m/15m OHLCV candles with zero delay.
-                    </p>
+              <label className="block text-sm font-bold text-gray-800 mb-2">Active Market Data Engine</label>
+              <div className="p-4 rounded-xl border-2 border-purple-600 bg-purple-50/50 shadow-sm flex items-start space-x-3">
+                <div className="w-3 h-3 rounded-full bg-purple-600 mt-1 shrink-0" />
+                <div className="flex-1">
+                  <div className="flex items-center space-x-2">
+                    <span className="font-black text-gray-900">Pure Upstox API v2 Feed</span>
+                    <span className="text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded">SOLE SYSTEM PROVIDER</span>
                   </div>
+                  <p className="text-xs text-gray-600 mt-1">
+                    Direct exchange connection powering Qlib, Legacy, and Consensus pipelines. Delivers <strong>sub-second live ticks</strong> and real-time 15m OHLCV candles.
+                    Yahoo Finance has been completely decommissioned. If Upstox tokens expire or fail, the platform strictly fails closed defensively.
+                  </p>
                 </div>
-
-                {/* Option 2: Yahoo Finance */}
-                <div 
-                  onClick={() => handleDataSourceChange('yfinance')}
-                  className={`p-4 rounded-xl border-2 cursor-pointer transition flex items-start space-x-3 ${profile.dataSource === 'yfinance' ? 'border-indigo-600 bg-indigo-50/50 shadow-sm' : 'border-gray-200 hover:border-gray-300'}`}
-                >
-                  <input 
-                    type="radio" 
-                    name="datasource" 
-                    checked={profile.dataSource === 'yfinance'} 
-                    onChange={() => handleDataSourceChange('yfinance')}
-                    className="mt-1 text-indigo-600"
-                  />
-                  <div>
-                    <div className="flex items-center space-x-2">
-                      <span className="font-black text-gray-900">Yahoo Finance (Default)</span>
-                      <span className="text-[10px] font-bold bg-gray-100 text-gray-700 px-2 py-0.5 rounded">FREE FALLBACK</span>
-                    </div>
-                    <p className="text-xs text-gray-600 mt-1">
-                      Free historical and swing scanner data. Intraday data is subject to a 15-minute delay from the exchange.
-                    </p>
-                  </div>
-                </div>
-
               </div>
             </div>
 
@@ -605,30 +748,52 @@ export default function Profile() {
                 </div>
 
                 {/* Token 1: Market Data / Read-Only Analytics */}
-                <div className="md:col-span-2 bg-white border border-purple-100 rounded-xl p-4 shadow-2xs">
-                  <div className="flex justify-between items-center mb-1.5">
+                <div className={`md:col-span-2 rounded-xl p-4 shadow-2xs transition ${
+                  isTokenExpired 
+                    ? 'bg-rose-50/50 border-2 border-rose-500 ring-2 ring-rose-200' 
+                    : 'bg-white border border-purple-100'
+                }`}>
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 mb-1.5">
                     <div>
                       <span className="text-xs font-bold text-gray-800 flex items-center">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500 mr-2"></span>
+                        <span className={`w-2 h-2 rounded-full mr-2 ${isTokenExpired ? 'bg-rose-600 animate-ping' : 'bg-emerald-500'}`}></span>
                         1. Market Data &amp; Analytics Token (Read-Only)
                       </span>
                       <span className="text-[11px] text-gray-500 block">Powers sub-second live market ticks, OHLCV candle streams, and AI scanner feeds.</span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleTestUpstoxMarket}
-                      disabled={testingMarket}
-                      className="text-xs font-bold bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded-lg transition cursor-pointer"
-                    >
-                      {testingMarket ? 'Verifying...' : 'Test Market Feed'}
-                    </button>
+                    <div className="flex items-center space-x-2">
+                      <button
+                        type="button"
+                        onClick={handleSaveAndReconnectMarketToken}
+                        disabled={testingMarket}
+                        className={`text-xs font-bold px-3 py-1.5 rounded-lg transition cursor-pointer shadow-sm ${
+                          isTokenExpired 
+                            ? 'bg-rose-600 hover:bg-rose-700 text-white animate-pulse' 
+                            : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                        }`}
+                      >
+                        {testingMarket ? 'Saving & Verifying...' : isTokenExpired ? 'Save & Reconnect Market Token' : 'Save & Verify'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleTestUpstoxMarket}
+                        disabled={testingMarket}
+                        className="text-xs font-bold bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded-lg transition cursor-pointer"
+                      >
+                        {testingMarket ? 'Verifying...' : 'Test Market Feed'}
+                      </button>
+                    </div>
                   </div>
                   <input 
                     type="password" 
                     value={upstox.market_token}
                     onChange={(e) => setUpstox({...upstox, market_token: e.target.value})}
                     placeholder="Paste Upstox Market Data (Read-Only) Access Token..."
-                    className="w-full border border-gray-300 rounded-lg p-2.5 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-purple-500 bg-white mt-1"
+                    className={`w-full border rounded-lg p-2.5 font-mono text-xs focus:outline-none focus:ring-2 bg-white mt-1 ${
+                      isTokenExpired 
+                        ? 'border-rose-400 focus:ring-rose-500 text-rose-900 font-semibold' 
+                        : 'border-gray-300 focus:ring-purple-500'
+                    }`}
                   />
                   
                   {upstoxMarketStatus && (
@@ -680,6 +845,127 @@ export default function Profile() {
                       <span>{upstoxAlgoStatus.message}</span>
                     </div>
                   )}
+                </div>
+
+                {/* Upstox Rate Limit Guardrails & Protection Telemetry */}
+                <div className={`md:col-span-2 bg-gradient-to-br ${upstoxRateLimits?.circuit_open ? 'from-amber-950/40 via-slate-900 to-rose-950/30 border-rose-600/50' : 'from-slate-900 via-slate-850 to-indigo-950 border-slate-700/80'} border rounded-xl p-4 text-white shadow-md`}>
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 mb-3">
+                    <div className="flex items-center space-x-2">
+                      <div className={`w-2.5 h-2.5 rounded-full ${upstoxRateLimits?.circuit_open ? 'bg-amber-400 animate-ping' : 'bg-emerald-400 animate-pulse'}`}></div>
+                      <span className="text-xs font-bold text-slate-100 tracking-wide">
+                        Upstox Rate Limiter Active (Zero Token Blocking Protection)
+                      </span>
+                    </div>
+                    {upstoxRateLimits?.circuit_open ? (
+                      <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-rose-950/90 text-rose-300 border border-rose-600/70 animate-pulse">
+                        CIRCUIT OPEN ({upstoxRateLimits.circuit_cooldown_remaining_sec}s COOLDOWN)
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-700/50">
+                        STATUS: {upstoxRateLimits?.status || 'NORMAL'}
+                      </span>
+                    )}
+                  </div>
+
+                  {upstoxRateLimits?.circuit_open && (
+                    <div className="mb-3 p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-200 flex items-center justify-between">
+                      <span>Rate limit cooldown active. Network calls fail closed defensively with local SQLite cache to safeguard trading integrity.</span>
+                      <span className="font-mono font-bold text-amber-300 ml-2 whitespace-nowrap">{upstoxRateLimits.circuit_cooldown_remaining_sec}s left</span>
+                    </div>
+                  )}
+
+                  <p className="text-[11px] text-slate-300 mb-3">
+                    Enforces official Upstox API request ceilings with 150ms leaky-bucket inter-request pacing, bulk quote batching (up to 500 symbols/call), and automated 429 circuit breaker.
+                  </p>
+
+                  {/* Real-Time Live Timers: Token Refresh & Quota Window Reset */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mb-3">
+                    {/* Timer 1: Upstox Access Token Expiration / Daily Refresh Countdown */}
+                    <div className="bg-slate-800/90 border border-slate-700/80 rounded-lg p-3 flex items-center justify-between shadow-xs">
+                      <div className="flex items-center space-x-2.5">
+                        <div className={`p-2 rounded-lg ${tokenCountdown.isExpired ? 'bg-rose-950/80 text-rose-400 border border-rose-700/60' : 'bg-cyan-950/80 text-cyan-400 border border-cyan-700/60'}`}>
+                          <Clock size={16} className={tokenCountdown.isExpired ? "animate-pulse" : ""} />
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase font-bold tracking-wider text-slate-400">
+                            Token Refresh Timer
+                          </div>
+                          <div className="text-[11px] font-medium text-slate-300 truncate max-w-[170px]" title={tokenCountdown.label}>
+                            {tokenCountdown.label}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="text-right pl-2">
+                        <div className={`text-sm font-mono font-black tracking-tight ${tokenCountdown.isExpired ? 'text-rose-400 animate-pulse' : 'text-cyan-300'}`}>
+                          {tokenCountdown.formatted}
+                        </div>
+                        <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                          {tokenCountdown.isExpired ? '🔴 EXPIRED' : '🟢 ACTIVE TOKEN'}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Timer 2: 30-Min Quota Sliding Window Reset */}
+                    <div className="bg-slate-800/90 border border-slate-700/80 rounded-lg p-3 flex items-center justify-between shadow-xs">
+                      <div className="flex items-center space-x-2.5">
+                        <div className={`p-2 rounded-lg ${quotaCountdown.isCooldown ? 'bg-amber-950/80 text-amber-400 border border-amber-700/60' : 'bg-purple-950/80 text-purple-400 border border-purple-700/60'}`}>
+                          <Timer size={16} />
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase font-bold tracking-wider text-slate-400">
+                            {quotaCountdown.isCooldown ? "Circuit Cooldown" : "30-Min Quota Reset"}
+                          </div>
+                          <div className="text-[11px] font-medium text-slate-300">
+                            {quotaCountdown.label}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="text-right pl-2">
+                        <div className={`text-sm font-mono font-black tracking-tight ${quotaCountdown.isCooldown ? 'text-amber-400 animate-pulse' : 'text-purple-300'}`}>
+                          {quotaCountdown.formatted}
+                        </div>
+                        <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                          {quotaCountdown.isCooldown ? '⚡ COOLDOWN' : '⏱️ SLOTS RESET'}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div className="bg-slate-800/80 border border-slate-700 rounded-lg p-2">
+                      <div className="text-[10px] text-slate-400 font-semibold">Per Second</div>
+                      <div className="text-sm font-mono font-bold text-emerald-400 mt-0.5">
+                        {upstoxRateLimits?.current_1s ?? 0} / {upstoxRateLimits?.max_1s ?? 10}
+                      </div>
+                      <div className="text-[9px] text-slate-500">Auto Micro-Paced</div>
+                    </div>
+
+                    <div className="bg-slate-800/80 border border-slate-700 rounded-lg p-2">
+                      <div className="text-[10px] text-slate-400 font-semibold">Per Minute</div>
+                      <div className="text-sm font-mono font-bold text-indigo-300 mt-0.5">
+                        {upstoxRateLimits?.current_1m ?? 0} / {upstoxRateLimits?.max_1m ?? 500}
+                      </div>
+                      <div className="text-[9px] text-slate-500">Sliding Window</div>
+                    </div>
+
+                    <div className="bg-slate-800/80 border border-slate-700 rounded-lg p-2">
+                      <div className="text-[10px] text-slate-400 font-semibold">Per 30 Minutes</div>
+                      <div className="text-sm font-mono font-bold text-purple-300 mt-0.5">
+                        {upstoxRateLimits?.current_30m ?? 0} / {upstoxRateLimits?.max_30m ?? 1600}
+                      </div>
+                      <div className="text-[9px] text-slate-500">
+                        {upstoxRateLimits?.window_reset_remaining_sec > 0 
+                          ? `Resets in ${formatSecondsToCountdown(upstoxRateLimits.window_reset_remaining_sec)}`
+                          : "Hard Failover Cap"}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[10px] text-slate-400">
+                    <span>Total Session Calls: <strong className="text-slate-200">{upstoxRateLimits?.total_requests ?? 0}</strong></span>
+                    <span>Paced: <strong className="text-amber-300">{upstoxRateLimits?.throttled_count ?? 0}</strong></span>
+                    <span>Fail-Closed Protection: <strong className="text-emerald-400">{upstoxRateLimits?.rejected_count ?? 0}</strong></span>
+                  </div>
                 </div>
 
               </div>

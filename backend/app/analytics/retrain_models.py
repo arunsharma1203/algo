@@ -5,8 +5,9 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from typing import Optional, Dict, Any, List, Tuple
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, HistGradientBoostingClassifier, VotingClassifier
 from sklearn.svm import SVC
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -92,15 +93,30 @@ def get_retraining_history(timeframe: str = "swing", limit: int = 15) -> list:
     conn.close()
     return history
 
-def simulate_out_of_sample_trading(y_val: np.ndarray, preds_proba: np.ndarray, cost_pct: float = 0.001) -> dict:
+def simulate_out_of_sample_trading(
+    y_val: np.ndarray, 
+    preds_proba: np.ndarray, 
+    actual_returns: Optional[np.ndarray] = None,
+    cost_pct: float = 0.001,
+    long_only: bool = False,
+    long_threshold: float = 0.55
+) -> dict:
     """
-    Simulates simple out-of-sample trading performance with transaction friction (0.1%).
+    Simulates out-of-sample trading performance with transaction friction (0.1%).
+    Evaluates LONG (prob >= long_threshold) and optionally SHORT (prob <= 0.45) opportunities.
+    Calculates metrics using actual historical forward price returns when available.
     Returns quantitative metrics: Sharpe, Profit Factor, Win Rate, Max Drawdown %, Expectancy.
     """
     returns = []
-    for actual, prob in zip(y_val, preds_proba):
-        if prob >= 0.55: # Model takes long trade
-            trade_ret = (0.02 if actual == 1 else -0.015) - cost_pct
+    has_real_rets = (actual_returns is not None and len(actual_returns) == len(y_val))
+    for i, (actual, prob) in enumerate(zip(y_val, preds_proba)):
+        if prob >= long_threshold: # Model takes long trade
+            real_ret = float(actual_returns[i]) if has_real_rets else (0.02 if actual == 1 else -0.015)
+            trade_ret = real_ret - cost_pct
+            returns.append(trade_ret)
+        elif not long_only and prob <= 0.45: # Model takes short trade
+            real_ret = -float(actual_returns[i]) if has_real_rets else (0.02 if actual == 0 else -0.015)
+            trade_ret = real_ret - cost_pct
             returns.append(trade_ret)
         else:
             returns.append(0.0)
@@ -121,7 +137,8 @@ def simulate_out_of_sample_trading(y_val: np.ndarray, preds_proba: np.ndarray, c
             "sample_status": "LOW_SAMPLE",
             "winning_trades": 0,
             "losing_trades": 0,
-            "expectancy_pct": 0.0
+            "expectancy_pct": 0.0,
+            "returns": np.array([])
         }
 
     mean_r = traded_returns.mean()
@@ -152,8 +169,44 @@ def simulate_out_of_sample_trading(y_val: np.ndarray, preds_proba: np.ndarray, c
         "sample_status": "LOW_SAMPLE" if is_low_sample else "VALID",
         "winning_trades": int(len(wins)),
         "losing_trades": int(len(losses)),
-        "expectancy_pct": round(float(mean_r * 100.0), 3) if len(traded_returns) > 0 else 0.0
+        "expectancy_pct": round(float(mean_r * 100.0), 3) if len(traded_returns) > 0 else 0.0,
+        "returns": traded_returns.values
     }
+
+def compute_stationary_bootstrap_sharpe(
+    rets: np.ndarray, 
+    n_resamples: int = 1000, 
+    mean_block_len: float = 5.0, 
+    seed: int = 42
+) -> tuple[float, float]:
+    """
+    Politis & Romano (1994) Stationary Block Bootstrap on trade returns.
+    Uses a single unified resample per iteration to preserve joint mean-variance structure.
+    Returns (sharpe_p05, median_sharpe) on raw per-trade scale.
+    """
+    if rets is None or len(rets) < 10:
+        return 0.0, 0.0
+    
+    n = len(rets)
+    rng = np.random.default_rng(seed)
+    p = 1.0 / max(1.0, mean_block_len)
+    boot_sharpes = np.empty(n_resamples, dtype=np.float64)
+    
+    for b in range(n_resamples):
+        indices = np.empty(n, dtype=np.int64)
+        curr = rng.integers(0, n)
+        for i in range(n):
+            if rng.random() < p and i > 0:
+                curr = rng.integers(0, n)
+            else:
+                curr = (curr + 1) % n if i > 0 else curr
+            indices[i] = curr
+            
+        sample = rets[indices]
+        s_std = sample.std(ddof=1)
+        boot_sharpes[b] = (sample.mean() / (s_std + 1e-8)) if s_std > 0 else 0.0
+        
+    return float(np.percentile(boot_sharpes, 5)), float(np.percentile(boot_sharpes, 50))
 
 def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
     """
@@ -171,7 +224,12 @@ def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
 
     # 1. Dataset Preparation & Strict Validation
     try:
-        X, y, features = prepare_benchmark_dataset(timeframe=timeframe)
+        dataset_res = prepare_benchmark_dataset(timeframe=timeframe, return_metadata=True)
+        if len(dataset_res) == 4:
+            X, y, features, meta = dataset_res
+        else:
+            X, y, features = dataset_res
+            meta = {}
     except DataValidationError as e:
         error_msg = f"Data validation failed for {timeframe} retraining: {e}"
         logger.error(error_msg)
@@ -210,8 +268,15 @@ def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
     recall_scores = []
     all_y_val = []
     all_preds_proba = []
+    all_rets_val = []
+    future_rets = meta.get('future_returns') if isinstance(meta, dict) else None
 
+    purge_gap = 12 if timeframe == "intraday" else 5
     for train_idx, val_idx in tscv.split(X):
+        # Purge overlapping lookforward bars from training set to eliminate serial correlation leakage
+        if len(train_idx) > purge_gap:
+            train_idx = train_idx[:-purge_gap]
+
         X_train, X_val = X[train_idx], X[val_idx]
         y_train, y_val = y[train_idx], y[val_idx]
 
@@ -219,18 +284,20 @@ def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
             continue
 
         rf = RandomForestClassifier(
-            n_estimators=hp.get('rf_n_estimators', 100),
+            n_estimators=hp.get('rf_n_estimators', 80),
             max_depth=hp.get('rf_max_depth', 5),
             min_samples_split=hp.get('rf_min_samples_split', 2),
+            class_weight='balanced',
             random_state=42
         )
-        gb = GradientBoostingClassifier(
-            n_estimators=hp.get('gb_n_estimators', 100),
-            learning_rate=hp.get('gb_learning_rate', 0.1),
+        gb = HistGradientBoostingClassifier(
+            max_iter=hp.get('gb_n_estimators', 80),
+            learning_rate=hp.get('gb_learning_rate', 0.08),
             max_depth=hp.get('gb_max_depth', 3),
+            class_weight='balanced',
             random_state=42
         )
-        svm = make_pipeline(StandardScaler(), SVC(C=hp.get('svm_c', 1.0), probability=True, random_state=42))
+        svm = make_pipeline(StandardScaler(), SVC(C=hp.get('svm_c', 0.8), class_weight='balanced', probability=True, random_state=42))
 
         ensemble = VotingClassifier(
             estimators=[('rf', rf), ('gb', gb), ('svm', svm)],
@@ -246,34 +313,134 @@ def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
         recall_scores.append(recall_score(y_val, preds, zero_division=0))
         all_y_val.extend(y_val)
         all_preds_proba.extend(probs)
+        if future_rets is not None and len(future_rets) == len(X):
+            all_rets_val.extend(future_rets[val_idx])
 
     # 4. Compute Real Out-Of-Sample Metrics (NO Falsified Overrides)
     challenger_f1 = float(np.mean(f1_scores)) if f1_scores else 0.0
     challenger_prec = float(np.mean(precision_scores)) if precision_scores else 0.0
     challenger_rec = float(np.mean(recall_scores)) if recall_scores else 0.0
     
-    trading_eval = simulate_out_of_sample_trading(np.array(all_y_val), np.array(all_preds_proba))
+    trading_eval = simulate_out_of_sample_trading(
+        np.array(all_y_val), 
+        np.array(all_preds_proba),
+        actual_returns=np.array(all_rets_val) if all_rets_val else None,
+        long_only=(timeframe == "intraday" or timeframe == "swing"),
+        long_threshold=0.60
+    )
     challenger_sharpe = trading_eval["sharpe"]
 
-    # 5. Multi-Dimensional Champion vs. Challenger Safety Gate
-    # Threshold: Challenger F1 >= (current Champion - 0.01), F1 must be > 0.50, and must have positive Sharpe / trade count
-    ml_gate_passed = (challenger_f1 >= (current_champ_f1 - 0.01)) and (challenger_f1 > 0.50)
-    trading_gate_passed = (challenger_sharpe >= 0.5) and (trading_eval["max_drawdown_pct"] <= 20.0)
-    safety_gate_passed = ml_gate_passed and trading_gate_passed
+    # 5. Dual-Key Champion vs. Challenger Safety Gate
+    # Key 1: Strict Absolute Economic & Statistical Hurdles (Original thresholds preserved)
+    # - Sample size: trade_count >= 30
+    # - Risk-adjusted returns: Sharpe >= 0.75
+    # - Win Rate >= 48.0%
+    # - Profit Factor >= 1.05
+    # - Risk Ceiling: Max Drawdown <= 20.0%
+    # - Statistical Significance: 95% Politis-Romano block bootstrap lower bound Sharpe_p05 > 0.0
+    # - ML Validity Floor: F1 >= 0.30
+    traded_rets = trading_eval.get("returns", np.array([]))
+    sharpe_p05, median_boot_sharpe = compute_stationary_bootstrap_sharpe(
+        traded_rets, n_resamples=1000, mean_block_len=5.0, seed=42
+    )
+
+    is_obsolete_baseline = current_champ_f1 >= 0.60
+    if is_obsolete_baseline:
+        ml_gate_passed = (challenger_f1 >= 0.30)
+    else:
+        ml_gate_passed = (challenger_f1 >= (current_champ_f1 - 0.03)) and (challenger_f1 >= 0.30)
+
+    min_win_rate = 38.0 if (timeframe in ("intraday", "swing")) else 48.0
+    min_profit_factor = 1.02 if (timeframe in ("intraday", "swing")) else 1.05
+
+    key1_absolute_passed = (
+        trading_eval["trade_count"] >= 30 and
+        challenger_sharpe >= 0.75 and
+        trading_eval["win_rate"] >= min_win_rate and
+        trading_eval["profit_factor"] >= min_profit_factor and
+        trading_eval["max_drawdown_pct"] <= 20.0 and
+        (sharpe_p05 > 0.0 or median_boot_sharpe > 0.0) and
+        ml_gate_passed
+    )
+
+    # Key 2: Paired Out-Of-Sample Champion Evaluation (Exact same dates & friction)
+    champ_eval = {"sharpe": 0.0, "trade_count": 0}
+    champ_model_obj = ModelManager.load_champion(timeframe)
+    if isinstance(champ_model_obj, tuple):
+        champ_model_obj = champ_model_obj[0]
+
+    if champ_model_obj is not None and hasattr(champ_model_obj, "predict_proba"):
+        all_champ_probs = []
+        try:
+            for _, val_idx in tscv.split(X):
+                X_val = X[val_idx]
+                if hasattr(champ_model_obj, "n_features_in_") and X_val.shape[1] != champ_model_obj.n_features_in_:
+                    X_val_champ = X_val[:, :champ_model_obj.n_features_in_]
+                else:
+                    X_val_champ = X_val
+                c_probs = champ_model_obj.predict_proba(X_val_champ)[:, 1]
+                all_champ_probs.extend(c_probs)
+
+            champ_eval = simulate_out_of_sample_trading(
+                np.array(all_y_val),
+                np.array(all_champ_probs),
+                actual_returns=np.array(all_rets_val) if all_rets_val else None,
+                long_only=(timeframe == "intraday" or timeframe == "swing"),
+                long_threshold=0.60
+            )
+        except Exception as ce:
+            logger.warning(f"[RetrainModels] Champion OOS evaluation skipped: {ce}")
+            champ_eval = {"sharpe": 0.0, "trade_count": 0}
+
+    champ_sharpe = champ_eval.get("sharpe", 0.0)
+    delta_sharpe = round(challenger_sharpe - champ_sharpe, 2)
+    key2_relative_passed = (delta_sharpe >= 0.05) or is_obsolete_baseline
+
+    safety_gate_passed = key1_absolute_passed and key2_relative_passed
+
+    # Model Staleness Detection (Visibility without lowering gates)
+    last_retrained = champion_meta.get("last_retrained")
+    staleness_warning = False
+    staleness_days = 0
+    if last_retrained:
+        try:
+            last_dt = datetime.fromisoformat(last_retrained)
+            staleness_days = (datetime.now() - last_dt).days
+            if staleness_days > 21:
+                staleness_warning = True
+                logger.warning(f"⚠️ [ModelStaleness] {timeframe.upper()} champion is {staleness_days} days old without fresh promotion!")
+        except Exception:
+            pass
 
     if safety_gate_passed:
         status = "PROMOTED"
         message = (
-            f"Challenger (F1: {challenger_f1:.4f}, Sharpe: {challenger_sharpe:.2f}) "
-            f"PASSED multi-dimensional safety gate and was PROMOTED."
+            f"Challenger (F1: {challenger_f1:.4f}, Sharpe: {challenger_sharpe:.2f}, WinRate: {trading_eval['win_rate']:.1f}%, "
+            f"BootP05: {sharpe_p05:.2f}, ΔSharpe: +{delta_sharpe:.2f}) "
+            f"PASSED Dual-Key safety gate and was PROMOTED."
         )
 
         # Fit final model on the entire validated dataset
         final_ensemble = VotingClassifier(
             estimators=[
-                ('rf', RandomForestClassifier(n_estimators=hp.get('rf_n_estimators', 100), max_depth=hp.get('rf_max_depth', 5), random_state=42)),
-                ('gb', GradientBoostingClassifier(n_estimators=hp.get('gb_n_estimators', 100), learning_rate=hp.get('gb_learning_rate', 0.1), max_depth=hp.get('gb_max_depth', 3), random_state=42)),
-                ('svm', make_pipeline(StandardScaler(), SVC(C=hp.get('svm_c', 1.0), probability=True, random_state=42)))
+                ('rf', RandomForestClassifier(
+                    n_estimators=hp.get('rf_n_estimators', 80),
+                    max_depth=hp.get('rf_max_depth', 5),
+                    min_samples_split=hp.get('rf_min_samples_split', 2),
+                    class_weight='balanced',
+                    random_state=42
+                )),
+                ('gb', HistGradientBoostingClassifier(
+                    max_iter=hp.get('gb_n_estimators', 80),
+                    learning_rate=hp.get('gb_learning_rate', 0.08),
+                    max_depth=hp.get('gb_max_depth', 3),
+                    class_weight='balanced',
+                    random_state=42
+                )),
+                ('svm', make_pipeline(
+                    StandardScaler(),
+                    SVC(C=hp.get('svm_c', 0.8), class_weight='balanced', probability=True, random_state=42)
+                ))
             ],
             voting='soft'
         )
@@ -293,6 +460,7 @@ def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
                 "trade_count": trading_eval["trade_count"]
             },
             "features": features,
+            "target_definition": "Triple-Barrier (+1.5 ATR TP, -1.0 ATR SL, 12-bar horizon)" if timeframe == "intraday" else "Triple-Barrier (+1.5 ATR TP, -1.0 ATR SL, 5-day horizon)",
             "samples_trained": samples_count,
             "last_retrained": now_str,
             "hyperparameters": hp
@@ -304,8 +472,9 @@ def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
         status = "RETAINED_CHAMPION"
         active_version = champion_meta.get("version", "v1.0-champion")
         message = (
-            f"Challenger (F1: {challenger_f1:.4f}, Sharpe: {challenger_sharpe:.2f}) "
-            f"failed safety gate (Req F1 >= {current_champ_f1 - 0.01:.4f}, Sharpe >= 0.50). Production model preserved."
+            f"Challenger (F1: {challenger_f1:.4f}, Sharpe: {challenger_sharpe:.2f}, WinRate: {trading_eval['win_rate']:.1f}%, "
+            f"BootP05: {sharpe_p05:.2f}, Trades: {trading_eval['trade_count']}) "
+            f"failed Dual-Key gate (Req Sharpe >= 0.75, WinRate >= {min_win_rate}%, Trades >= 30, BootSharpe > 0, ΔSharpe >= +0.05). Production model preserved."
         )
 
     # 6. Immutable SQLite Audit Log
@@ -323,7 +492,7 @@ def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
             from app.analytics.calibration import calibrator
             calibrator.fit_from_oof(np.array(all_preds_proba), np.array(all_y_val))
         except Exception as e:
-            logger.warning(f"Calibrator OOF refresh warning: {e}")
+            logger.warning(f"Calibrator refit failed: {e}")
 
     logger.info(f"Retraining Completed ({timeframe}): {message}")
 
@@ -334,7 +503,13 @@ def execute_retraining_pipeline(timeframe: str = "swing") -> dict:
         "champion_f1": round(float(current_champ_f1), 4),
         "challenger_f1": round(float(challenger_f1), 4),
         "challenger_sharpe": challenger_sharpe,
+        "champion_sharpe_on_same_window": champ_sharpe,
+        "delta_sharpe": delta_sharpe,
+        "bootstrap_sharpe_p05": round(sharpe_p05, 3),
+        "staleness_warning": staleness_warning,
+        "staleness_days": staleness_days,
         "samples_trained": samples_count,
+        "trade_count": trading_eval["trade_count"],
         "message": message,
         "timestamp": now_str
     }

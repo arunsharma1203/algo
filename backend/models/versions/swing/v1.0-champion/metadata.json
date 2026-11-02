@@ -1,0 +1,26 @@
+{
+  "version": "v1.0-champion",
+  "timeframe": "swing",
+  "status": "BASELINE_ACTIVE",
+  "champion_f1": 0.695,
+  "validation_metrics": {
+    "f1": 0.695,
+    "precision": 0.67,
+    "recall": 0.7,
+    "sharpe_ratio": 1.45,
+    "max_drawdown_pct": 8.5,
+    "win_rate_pct": 58.2
+  },
+  "features": [
+    "rsi",
+    "macd",
+    "macd_diff",
+    "adx",
+    "atr"
+  ],
+  "target_definition": "Cumulative return > 3.0% over 5-day horizon",
+  "last_retrained": "2026-08-29T17:35:05.355526",
+  "total_promotions": 1,
+  "data_source": "yfinance",
+  "hyperparameter_source": "optuna_swing_best_params.json"
+}

@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import pandas as pd
 import ta
-import yfinance as yf
 
 from app.data.validator import MarketDataValidator
 
@@ -129,8 +128,9 @@ class HistoricalDataLayer:
             needs_full_backfill = bool(count < 2000 or not min_date or min_date > ten_yr_cutoff)
 
             if needs_full_backfill or force_refresh:
-                logger.info(f"Full 10-year sync for {clean_ticker}...")
-                raw_df = yf.download(clean_ticker, period="10y", interval="1d", progress=False)
+                logger.info(f"Syncing daily candles for {clean_ticker} via Upstox...")
+                from app.data.market_provider import fetch_candles
+                raw_df = fetch_candles(clean_ticker, interval="1d", period="1y")
             else:
                 last_dt = pd.to_datetime(max_date)
                 if (datetime.now() - last_dt).days < 2:
@@ -141,9 +141,9 @@ class HistoricalDataLayer:
                         "total_rows": count,
                         "latest_date": max_date
                     }
-                start_date = (last_dt - timedelta(days=5)).strftime('%Y-%m-%d')
-                logger.info(f"Incremental sync for {clean_ticker} from {start_date}...")
-                raw_df = yf.download(clean_ticker, start=start_date, interval="1d", progress=False)
+                logger.info(f"Incremental sync for {clean_ticker} via Upstox...")
+                from app.data.market_provider import fetch_candles
+                raw_df = fetch_candles(clean_ticker, interval="1d", period="1mo")
 
             if raw_df is None or raw_df.empty:
                 return {
@@ -170,7 +170,7 @@ class HistoricalDataLayer:
             # Clean and validate
             raw_df = raw_df[['date', 'open', 'high', 'low', 'close', 'volume']].dropna(subset=['open', 'high', 'low', 'close'])
             raw_df['ticker'] = clean_ticker
-            raw_df['source'] = 'yfinance'
+            raw_df['source'] = 'upstox'
             raw_df['hoard_timestamp'] = datetime.now().isoformat()
             raw_df['timeframe'] = '1d'
 
@@ -225,8 +225,12 @@ class HistoricalDataLayer:
         conn = sqlite3.connect(db_path, timeout=30.0)
 
         try:
-            query = "SELECT date, open, high, low, close, volume, source FROM ohlcv WHERE ticker = ? AND (timeframe = ? OR timeframe IS NULL)"
-            params = [clean_ticker, timeframe]
+            if timeframe in ("1d", "daily"):
+                query = "SELECT date, open, high, low, close, volume, source FROM ohlcv WHERE ticker = ? AND (timeframe = '1d' OR timeframe IS NULL)"
+                params = [clean_ticker]
+            else:
+                query = "SELECT date, open, high, low, close, volume, source FROM ohlcv WHERE ticker = ? AND timeframe = ?"
+                params = [clean_ticker, timeframe]
 
             if start_date:
                 query += " AND date >= ?"
@@ -466,7 +470,7 @@ class HistoricalDataLayer:
             "total_rows_synced": rows_synced_total,
             "start_date": start_time.isoformat(),
             "end_date": end_time.isoformat(),
-            "source": "yfinance",
+            "source": "upstox",
             "timestamp": end_time.isoformat(),
             "failed_tickers": failed_tickers
         }

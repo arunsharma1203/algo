@@ -285,20 +285,26 @@ class ResearchJobManager:
         """Creates a new research job, evaluates fingerprint for deduplication, and queues execution."""
         now_str = datetime.now().isoformat()
 
-        if research_type == "SINGLE_STOCK_WALK_FORWARD" or custom_tickers:
+        from app.analytics.universe_config import UNIVERSE_PRESETS
+
+        if research_type in ("SINGLE_STOCK_WALK_FORWARD", "SINGLE_STOCK") or custom_tickers or universe not in UNIVERSE_PRESETS:
             from app.data.validator import MarketDataValidator
             syms_to_check = custom_tickers if custom_tickers else universe
             ok, clean_syms, val_err = MarketDataValidator.validate_research_tickers(syms_to_check, timeframe=timeframe)
             if not ok:
-                raise ValueError(f"Ticker validation failed: {val_err}")
+                raise ValueError(f"INVALID_TICKER: {val_err}")
             tickers = clean_syms
-            if research_type == "SINGLE_STOCK_WALK_FORWARD":
+            if research_type in ("SINGLE_STOCK_WALK_FORWARD", "SINGLE_STOCK"):
                 universe = ", ".join(clean_syms)
         else:
             u_info = get_universe(universe)
-            tickers = custom_tickers if custom_tickers else u_info.get("tickers", ["RELIANCE.NS"])
+            tickers = custom_tickers if custom_tickers else u_info.get("tickers", [])
             
+        if not tickers:
+            raise ValueError(f"INVALID_TICKER: No valid tickers found for universe '{universe}'. Cannot run research on empty ticker list.")
+
         total_tasks = len(tickers)
+
 
         # 1. Deterministic Research Fingerprint Calculation
         fingerprint_params = {
@@ -1202,9 +1208,12 @@ class ResearchJobManager:
             elif res_type == "HORIZON_COMPARISON":
                 clean_t = tickers[0] if tickers else "RELIANCE.NS"
                 from app.api.ml_backtest import WeeklyWalkForwardBacktestEngine
-                import yfinance as yf
-                df_10y = yf.download(clean_t, period="10y", interval="1d", progress=False)
-                horizons = {"3_Years": 750, "5_Years": 1250, "7_Years": 1750, "10_Years": len(df_10y)}
+                from app.data.historical_data_layer import HistoricalDataLayer
+                df_10y = HistoricalDataLayer.get_historical_ohlcv(clean_t, timeframe="1d")
+                if df_10y is None or len(df_10y) < 500:
+                    from app.data.market_provider import fetch_candles
+                    df_10y = fetch_candles(clean_t, interval="1d", period="2y")
+                horizons = {"3_Years": min(750, len(df_10y)), "5_Years": min(1250, len(df_10y)), "7_Years": min(1750, len(df_10y)), "10_Years": len(df_10y)}
                 comp_res = {}
                 for idx, (h_name, n_bars) in enumerate(horizons.items()):
                     sub_df = df_10y.iloc[-n_bars:].copy()
