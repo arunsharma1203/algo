@@ -325,6 +325,133 @@ class TestMainOptionSnifferQuantHardening(unittest.TestCase):
             places=1,
         )
 
+    @patch("app.analytics.option_sniffer.option_signal_engine.send_telegram_message")
+    def test_05_h1_h2_cond_and_h3_22m_confirmed_upgrades(self, mock_tg):
+        """
+        Walk-Forward & Monte-Carlo Confirmed Upgrades:
+        1) H1: ATR_COMPRESSION_RATIO_MIN == 0.85 & LOW_ADX_IMPULSE_ATR_RATIO_MIN == 0.90.
+        2) H2_COND: Low-RV VRP Pinning Shield blocks when VRP > 6.0%, RV_15m_ann < 8.5%, and ATR_Ratio < 0.90,
+           while preserving genuine expanding breakouts (ATR_Ratio >= 0.90) even when VRP > 6.0%.
+        3) H3_22M: 22-Minute Near-Miss Round-Trip Shield triggers STAGNATION_TIME_STOP at >= 22.0m
+           when 4.0% <= MFE < 8.0% and PnL <= -3.5% (and does NOT prematurely cut at 15m).
+        4) Telegram footer accurately reflects LIVE AUTOPILOT ARMED vs PAPER ONLY.
+        """
+        import pandas as pd
+        from app.analytics.option_sniffer.option_regime_gate import (
+            ATR_COMPRESSION_RATIO_MIN,
+            LOW_ADX_IMPULSE_ATR_RATIO_MIN,
+            OptionRegimeGate,
+        )
+
+        self.assertEqual(ATR_COMPRESSION_RATIO_MIN, 0.85)
+        self.assertEqual(LOW_ADX_IMPULSE_ATR_RATIO_MIN, 0.90)
+
+        # Build 30 contiguous 1m bars where first 25 bars have 10pt range and last 5 bars compress to 8.6pt range
+        # (ATR_Ratio ~ 0.86: passes 0.85 base floor, but < 0.90 so H2_COND and low-ADX H1 apply)
+        start_dt = datetime(2026, 11, 2, 9, 30, 0)
+        rows = []
+        curr = 23300.0
+        for i in range(30):
+            ts = start_dt + timedelta(minutes=i)
+            step = 1.6 if (i % 2 == 0) else 0.7  # Low-RV (~4-5% annualized) gentle upward drift
+            o = curr
+            rng = 8.4 if i >= 25 else 10.0
+            h = o + rng * 0.7
+            l = o - rng * 0.3
+            c = o + step
+            rows.append({
+                "ticker": "NIFTY",
+                "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": 50000,
+                "is_complete": 1,
+                "is_synthetic": 0,
+                "is_gap": 0,
+                "available_at": (ts + timedelta(minutes=1)).isoformat(),
+                "is_point_in_time": 1,
+            })
+            curr = c
+        df_bars = pd.DataFrame(rows)
+        as_of = datetime(2026, 11, 2, 10, 0, 0)
+
+        gate = OptionRegimeGate(db_path=self.temp_db_path)
+        # With high option_iv=16.5% -> VRP > +6.0%, low RV_15m < 8.5%, and ATR_Ratio < 0.90 -> H2_COND blocks
+        eval_pin = gate.evaluate_regime(
+            underlying="NIFTY",
+            opt_type="CE",
+            as_of_time=as_of,
+            continuous_bars=df_bars,
+            option_ask=85.0,
+            target_pct=35.0,
+            lot_size=65,
+            option_iv=16.5,
+        )
+        self.assertFalse(eval_pin["hurdles_passed"])
+        self.assertTrue(any("Low-RV VRP Pinning Shield" in r for r in eval_pin["rejection_reasons"]))
+
+        # H3_22M: Test 22-Minute Near-Miss Round-Trip Shield in OptionPaperExecution
+        trade_near_miss = {
+            "trade_id": "t_nm_1",
+            "underlying": "NIFTY",
+            "option_type": "CE",
+            "entry_time": "2026-11-02T10:32:09",
+            "entry_ask": 78.35,
+            "initial_entry_ask": 78.35,
+            "peak_price": 83.90,  # +7.08% MFE (between 4.0% and 8.0%)
+            "trough_price": 74.50,
+            "lot_size": 65,
+            "quantity": 65,
+            "dynamic_sl_pct": 20.0,
+            "dynamic_target_pct": 35.0,
+        }
+        # At 15 minutes (10:47:09), bid=74.80 (-4.53% PnL) -> must NOT cut prematurely
+        reason_15m = OptionPaperExecution.evaluate_exit_conditions(
+            trade=trade_near_miss,
+            current_bid=74.80,
+            quote={"bid": 74.80, "ask": 75.10},
+            now_dt=datetime(2026, 11, 2, 10, 47, 9),
+        )
+        self.assertIsNone(reason_15m)
+
+        # At 22 minutes (10:54:15), bid=74.80 (-4.53% PnL <= -3.5%, MFE=7.08%) -> MUST cut via STAGNATION_TIME_STOP
+        reason_22m = OptionPaperExecution.evaluate_exit_conditions(
+            trade=trade_near_miss,
+            current_bid=74.80,
+            quote={"bid": 74.80, "ask": 75.10},
+            now_dt=datetime(2026, 11, 2, 10, 54, 15),
+        )
+        self.assertEqual(reason_22m, "STAGNATION_TIME_STOP")
+
+        # Telegram footer check when Live is armed vs disarmed
+        sig_payload = {
+            "direction": DIRECTION_BUY_CE,
+            "trading_symbol": "NIFTY 23350 CE 03 NOV 26",
+            "underlying": "NIFTY",
+            "spot_price": 23350.0,
+            "strike": 23350.0,
+            "expiry": "2026-11-03",
+            "option_ask": 78.35,
+            "option_bid": 78.00,
+            "spread_pct": 0.45,
+            "delta": 0.50,
+            "iv": 14.2,
+            "volume": 120000,
+            "oi": 250000,
+            "calibrated_prob": 0.56,
+            "expected_net_return": 7.5,
+            "created_at": "2026-11-02T10:32:09",
+            "data_freshness": "REAL_TIME",
+            "quote_age_ms": 120,
+        }
+        mock_live_adapter = MagicMock()
+        mock_live_adapter._is_live_armed = True
+        with patch("app.analytics.option_sniffer.option_live_adapter.get_option_live_adapter", return_value=mock_live_adapter):
+            OptionSignalEngine._send_telegram_signal_alert(sig_payload)
+            self.assertIn("LIVE AUTOPILOT ARMED + PAPER TRACKING", mock_tg.call_args[0][0])
+
 
 if __name__ == "__main__":
     unittest.main()

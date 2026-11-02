@@ -453,12 +453,18 @@ class OptionPaperExecution:
                             if entry_spot > 0 and curr_spot >= (entry_spot + min_pts):
                                 return "STRUCTURE_INVALIDATION_BULL"
 
-        # 5. Theta Stagnation Stop (Apex Quant Velocity Protection)
+        # 5. Theta Stagnation Stop (Apex Quant Velocity Protection + H3_22M Near-Miss Round-Trip Shield)
         if not exit_reason and ENABLE_APEX_QUANT_ENGINE:
             if (
                 duration_min >= THETA_STAGNATION_TIMEOUT_MINUTES
                 and mfe_pct < THETA_STAGNATION_MIN_MFE_PCT
                 and current_pnl_pct < 0
+            ):
+                return "STAGNATION_TIME_STOP"
+            elif (
+                duration_min >= 22.0
+                and 4.0 <= mfe_pct < 8.0
+                and current_pnl_pct <= -3.5
             ):
                 return "STAGNATION_TIME_STOP"
 

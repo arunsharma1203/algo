@@ -47,7 +47,10 @@ logger = logging.getLogger(__name__)
 MIN_WARMUP_BARS = 28  # 2 * 14 bars for canonical Wilder ADX(14) (completed 1-minute bars)
 ADX_MIN_THRESHOLD = 20.0  # Markets below 20.0 ADX are choppy/non-trending
 KAUFMAN_ER_MIN_THRESHOLD = 0.30  # Ratios below 0.30 represent chaotic noise
-ATR_COMPRESSION_RATIO_MIN = 0.70  # ATR_5m / ATR_20m < 0.70 represents volatility contraction
+ATR_COMPRESSION_RATIO_MIN = 0.85  # ATR_5m / ATR_20m < 0.85 represents volatility contraction (H1 walk-forward calibrated)
+LOW_ADX_IMPULSE_ATR_RATIO_MIN = 0.90  # Low-ADX (15.0-20.0) fresh impulse override requires ATR_5m / ATR_20m >= 0.90
+VRP_PINNING_MAX_SPREAD_PCT = 6.0  # H2_COND: VRP = (IV - RV_15m_ann) > +6.0% in low-RV compression blocks pinning trap
+VRP_PINNING_LOW_RV_THRESHOLD_PCT = 8.5  # H2_COND: Annualized 15m realized volatility < 8.5%
 EXTREMA_DISPLACEMENT_MAX_ATR = 2.50  # Moves > 2.5x ATR off day extrema indicate exhausted trend
 MIN_REWARD_TO_COST_RATIO = 2.50  # Minimum gross target gain vs all-in friction hurdle
 
@@ -177,6 +180,26 @@ def compute_atr_ratio(
     if atr_l <= 1e-9:
         return None
     return float(atr_s / atr_l)
+
+
+def compute_realized_vol_15m_annualized(
+    close: np.ndarray,
+    period: int = 15
+) -> Optional[float]:
+    """
+    Computes 15-minute annualized realized volatility (%) from completed 1-minute close bars:
+      RV_15m_ann = std(log(C_t / C_{t-1}), ddof=1) * sqrt(375 * 252) * 100.0
+    """
+    if len(close) < period + 1:
+        return None
+    c_arr = np.asarray(close[-(period + 1):], dtype=float)
+    if np.isnan(c_arr).any() or (c_arr <= 0).any():
+        return None
+    log_rets = np.diff(np.log(c_arr))
+    if len(log_rets) < 2:
+        return None
+    rv_ann = float(np.std(log_rets, ddof=1) * np.sqrt(375.0 * 252.0) * 100.0)
+    return round(rv_ann, 2)
 
 
 class OptionRegimeGate:
@@ -450,7 +473,8 @@ class OptionRegimeGate:
         is_reversal_recovery: bool = False,
         heavyweight_candles: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         heavyweight_quotes: Optional[Dict[str, Dict[str, Any]]] = None,
-        enforce_cutoff: bool = False
+        enforce_cutoff: bool = False,
+        option_iv: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Master regime evaluation pipeline.
@@ -473,6 +497,8 @@ class OptionRegimeGate:
             "minus_di": None,
             "kaufman_er": None,
             "atr_ratio": None,
+            "rv_15m_ann": None,
+            "vrp": None,
             "hw_slopes": {},
             "reward_to_cost_ratio": None
         }
@@ -520,23 +546,37 @@ class OptionRegimeGate:
         telemetry["plus_di"] = round(p_di, 2)
         telemetry["minus_di"] = round(m_di, 2)
 
-        # 3. Kaufman Efficiency Ratio (ER_15m)
+        # 3. Kaufman Efficiency Ratio (ER_15m) & ATR Volatility Expansion/Compression Ratio
         er_val = compute_kaufman_er(c_arr, period=14)
+        atr_ratio = compute_atr_ratio(h_arr, l_arr, c_arr, short_period=5, long_period=20)
+        if atr_ratio is not None:
+            telemetry["atr_ratio"] = round(atr_ratio, 3)
 
-        # Fresh Directional Impulse Override:
+        # Fresh Directional Impulse Override (H1 Hardened):
         # When the index breaks out of consolidation, 28-bar double-smoothed Wilder ADX(14) lags between 15.0 and 20.0
-        # for 8-12 minutes even when instantaneous directional spread (|plus_di - minus_di| >= 12.0) and Kaufman ER (>= 0.35)
-        # confirm a genuine trend impulse.
+        # for 8-12 minutes even when instantaneous directional spread (|plus_di - minus_di| >= 12.0), Kaufman ER (>= 0.35),
+        # and volatility expansion (ATR_5m / ATR_20m >= 0.90) confirm a genuine trend impulse.
         is_fresh_impulse_breakout = (
             adx_val >= 15.0
             and abs(p_di - m_di) >= 12.0
             and (er_val is not None and er_val >= 0.35)
+            and (atr_ratio is None or atr_ratio >= LOW_ADX_IMPULSE_ATR_RATIO_MIN)
         )
 
         if adx_val < ADX_MIN_THRESHOLD and not is_fresh_impulse_breakout:
-            rejection_reasons.append(
-                f"Chop Shield: Wilder ADX(14) is {adx_val:.1f} < {ADX_MIN_THRESHOLD:.1f} (market is in weak chop; option buying halted)."
-            )
+            if (
+                adx_val >= 15.0
+                and abs(p_di - m_di) >= 12.0
+                and (er_val is not None and er_val >= 0.35)
+                and (atr_ratio is not None and atr_ratio < LOW_ADX_IMPULSE_ATR_RATIO_MIN)
+            ):
+                rejection_reasons.append(
+                    f"Chop Shield: Wilder ADX(14) is {adx_val:.1f} < {ADX_MIN_THRESHOLD:.1f} and ATR ratio ({atr_ratio:.2f} < {LOW_ADX_IMPULSE_ATR_RATIO_MIN:.2f}) fails low-ADX impulse expansion requirement."
+                )
+            else:
+                rejection_reasons.append(
+                    f"Chop Shield: Wilder ADX(14) is {adx_val:.1f} < {ADX_MIN_THRESHOLD:.1f} (market is in weak chop; option buying halted)."
+                )
 
         if opt_type == "CE" and p_di < m_di:
             rejection_reasons.append(
@@ -557,14 +597,26 @@ class OptionRegimeGate:
         else:
             rejection_reasons.append("Regime Gate: Fail-Closed: Kaufman ER calculation returned None")
 
-        # 4. ATR Volatility Expansion/Compression Ratio
-        atr_ratio = compute_atr_ratio(h_arr, l_arr, c_arr, short_period=5, long_period=20)
-        if atr_ratio is not None:
-            telemetry["atr_ratio"] = round(atr_ratio, 3)
-            if atr_ratio < ATR_COMPRESSION_RATIO_MIN:
-                rejection_reasons.append(
-                    f"Volatility Compression: ATR ratio ({atr_ratio:.2f} < {ATR_COMPRESSION_RATIO_MIN:.2f}) indicates contracting volatility."
-                )
+        # 4. ATR Volatility Expansion/Compression Ratio & Conditional Low-RV VRP Pinning Shield (H1 + H2_COND)
+        if atr_ratio is not None and atr_ratio < ATR_COMPRESSION_RATIO_MIN:
+            rejection_reasons.append(
+                f"Volatility Compression: ATR ratio ({atr_ratio:.2f} < {ATR_COMPRESSION_RATIO_MIN:.2f}) indicates contracting volatility."
+            )
+
+        rv_15m_ann = compute_realized_vol_15m_annualized(c_arr, period=15)
+        if rv_15m_ann is not None:
+            telemetry["rv_15m_ann"] = rv_15m_ann
+            if option_iv is not None and float(option_iv) > 0:
+                vrp_val = round(float(option_iv) - rv_15m_ann, 2)
+                telemetry["vrp"] = vrp_val
+                if (
+                    vrp_val > VRP_PINNING_MAX_SPREAD_PCT
+                    and 0.5 < rv_15m_ann < VRP_PINNING_LOW_RV_THRESHOLD_PCT
+                    and (atr_ratio is not None and atr_ratio < LOW_ADX_IMPULSE_ATR_RATIO_MIN)
+                ):
+                    rejection_reasons.append(
+                        f"Low-RV VRP Pinning Shield: VRP (+{vrp_val:.2f}% > +{VRP_PINNING_MAX_SPREAD_PCT:.1f}%) with low 15m RV ({rv_15m_ann:.2f}% < {VRP_PINNING_LOW_RV_THRESHOLD_PCT:.1f}%) and ATR ratio ({atr_ratio:.2f} < {LOW_ADX_IMPULSE_ATR_RATIO_MIN:.2f}) indicates overpriced gamma pinning."
+                    )
 
         # 5. Heavyweight Stock Alignment
         ok_hw, hw_msg, hw_slopes = self.evaluate_heavyweight_slopes(

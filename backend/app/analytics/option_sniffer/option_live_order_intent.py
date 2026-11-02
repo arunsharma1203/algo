@@ -1339,8 +1339,10 @@ class OrderIntentEngine:
                 if current_bid <= ratchet_stop:
                     exit_reason = "TRAILING_STOP_HIT"
 
-            # 4. Theta Stagnation Stop (Apex Quant Velocity Protection)
+            # 4. Theta Stagnation Stop (Apex Quant Velocity Protection + H3_22M Near-Miss Round-Trip Shield)
             if not exit_reason and duration_min >= THETA_STAGNATION_TIMEOUT_MINUTES and mfe_pct < THETA_STAGNATION_MIN_MFE_PCT and current_pnl_pct < 0:
+                exit_reason = "STAGNATION_TIME_STOP"
+            elif not exit_reason and duration_min >= 22.0 and (4.0 <= mfe_pct < 8.0) and current_pnl_pct <= -3.5:
                 exit_reason = "STAGNATION_TIME_STOP"
 
             # 5. Time Decay (45 min) & Session Cutoff (15:15 IST)

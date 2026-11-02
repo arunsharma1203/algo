@@ -668,7 +668,8 @@ class OptionSignalEngine:
                 is_breakout=bool(is_day_high_breakout or is_day_low_breakdown),
                 is_reversal_recovery=bool(is_v_bottom_recovery if opt_type == "CE" else is_v_top_reversal),
                 enforce_cutoff=enforce_cutoff,
-                heavyweight_quotes=active_hw_quotes
+                heavyweight_quotes=active_hw_quotes,
+                option_iv=float(quote.get("iv") or 15.0)
             )
             if not regime_eval.get("hurdles_passed", False):
                 rejection_reasons.extend(regime_eval.get("rejection_reasons", []))
@@ -1155,6 +1156,11 @@ class OptionSignalEngine:
             pass
 
         title_badge = "LIVE & PAPER BUY" if is_live else "PAPER BUY"
+        footer_badge = (
+            "<b>🟢 LIVE AUTOPILOT ARMED + PAPER TRACKING</b>"
+            if is_live
+            else "<b>⚠️ PAPER ONLY — NO LIVE ORDER PLACED</b>"
+        )
         msg = (
             f"<b>📡 OPTION SNIFFER | {title_badge}</b>\n"
             f"<b>{dir_emoji} | {signal['trading_symbol']}</b>\n"
@@ -1172,7 +1178,7 @@ class OptionSignalEngine:
             f"• <b>Signal Time:</b> {signal['created_at'][11:19]} IST\n"
             f"• <b>Data Freshness:</b> {signal['data_freshness']} ({signal['quote_age_ms']}ms)\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>⚠️ PAPER ONLY — NO LIVE ORDER PLACED</b>"
+            f"{footer_badge}"
         )
         try:
             send_telegram_message(msg)
