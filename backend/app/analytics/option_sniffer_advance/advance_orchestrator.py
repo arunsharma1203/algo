@@ -268,7 +268,48 @@ class OptionSnifferAdvanceOrchestrator:
             qualified_short: List[Dict[str, Any]] = []
 
             if is_option_trading_window(now_dt):
-                for contract in contracts:
+                today_str = now_dt.strftime("%Y-%m-%d")
+                macro_info: Dict[str, Any] = {}
+                try:
+                    from app.analytics.macro_engine import get_macro_regime
+                    macro_info = get_macro_regime() or {}
+                except Exception:
+                    pass
+
+                upstream_signals: Dict[str, Any] = {}
+                try:
+                    from app.analytics.consensus_scanner import ConsensusScanner
+                    latest_c = ConsensusScanner.get_latest_scan("INTRADAY")
+                    if latest_c:
+                        scan_completed_at = str(latest_c.get("completed_at") or "")
+                        if not scan_completed_at or scan_completed_at.startswith(today_str):
+                            unanimous = latest_c.get("unanimous_trades") or []
+                            buy_votes = sum(1 for t in unanimous if str(t.get("direction", "")).upper() in ("BUY", "BULLISH"))
+                            sell_votes = sum(1 for t in unanimous if str(t.get("direction", "")).upper() in ("SELL", "BEARISH"))
+                            c_dir = "NEUTRAL"
+                            if len(unanimous) >= 2:
+                                if buy_votes > sell_votes and buy_votes > 0:
+                                    c_dir = "BULLISH"
+                                elif sell_votes > buy_votes and sell_votes > 0:
+                                    c_dir = "BEARISH"
+                            upstream_signals = {
+                                "consensus_direction": c_dir,
+                                "consensus_confidence": unanimous[0].get("composite_score", 65.0) if unanimous else 50.0,
+                            }
+                except Exception:
+                    pass
+
+                def _atm_sort_key(c: Dict[str, Any]):
+                    u_name = str(c.get("underlying") or "NIFTY").upper()
+                    uq_obj = underlying_quotes.get(u_name) or {}
+                    spot_val = float(uq_obj.get("spot_ltp") or 0.0)
+                    strike_val = float(c.get("strike") or 0.0)
+                    if spot_val > 0 and strike_val > 0:
+                        return (abs(strike_val - spot_val), strike_val)
+                    return (0.0, strike_val)
+
+                ordered_contracts = sorted(contracts, key=_atm_sort_key)
+                for contract in ordered_contracts:
                     ikey = contract.get("instrument_key")
                     quote = live_quotes.get(ikey) or self.stream_manager.get_option_quote(ikey)
                     if not quote:
@@ -292,6 +333,8 @@ class OptionSnifferAdvanceOrchestrator:
                         underlying_quote=u_quote,
                         chain_intel=chain_intel_map.get(u_sym, {}),
                         underlying_df=u_df,
+                        macro_context=macro_info,
+                        upstream_signals=upstream_signals,
                         as_of_time=now_dt,
                         enforce_cutoff=True,
                     )

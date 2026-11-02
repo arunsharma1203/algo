@@ -143,35 +143,7 @@ class AdvanceSignalEngine:
         else:
             otm_strikes = 0.0
 
-        # 2. Extract 28 Point-in-Time Features & Run Option Alpha Model
-        features = OptionFeatureExtractor.extract_features(
-            contract=contract,
-            quote=quote,
-            underlying_quote=underlying_quote,
-            underlying_df=underlying_df,
-            macro_context=macro_context,
-            upstream_signals=upstream_signals,
-            as_of_time=now_dt,
-        )
-        pred = self.model.predict_contract(features)
-        cal_prob = float(pred.get("calibrated_prob") or 0.50)
-        exp_net_ret = float(pred.get("expected_net_return_pct") or 0.0)
-
-        rejection_reasons: List[str] = []
-
-        # 3. Microstructure & Warm-up Hard Hurdles
-        if enforce_cutoff and (not is_option_trading_window(now_dt) or not is_option_entry_window(now_dt)):
-            rejection_reasons.append("Outside intraday option entry window (09:30-13:15 IST)")
-        if now_dt.hour == 9 and now_dt.minute < 43:
-            rejection_reasons.append(f"Causal 28-bar Wilder ADX(14) warm-up incomplete before 09:43 IST ({completed_bars}/28 bars)")
-        if age_ms > MAX_QUOTE_AGE_MS:
-            rejection_reasons.append(f"Stale option quote ({age_ms}ms > {MAX_QUOTE_AGE_MS}ms)")
-        if bid < MIN_BID_PRICE or ask < bid or spread_pct > MAX_SPREAD_PCT:
-            rejection_reasons.append(f"Spread/quote quality fail (Bid=₹{bid:.2f}, Spread={spread_pct:.2f}%)")
-        if oi < MIN_OI or vol < MIN_VOLUME:
-            rejection_reasons.append(f"Insufficient liquidity (OI={int(oi)}, Vol={int(vol)})")
-
-        # 4. Check Active Dual-Book Positions & Post-Harvest Cooldown State
+        # 2. Check Active Dual-Book Positions & Post-Harvest Cooldown State
         open_trades = AdvanceDB.get_open_trades()
         u_open_long = [
             t for t in open_trades if t.get("book_type") == BOOK_LONG_BUY and str(t.get("underlying") or "").upper() == u_sym
@@ -199,7 +171,7 @@ class AdvanceSignalEngine:
         )
         is_post_harvest_after_close = recent_harvest is not None
 
-        # 5. Institutional Dual-Book Regime Classification
+        # 3. Institutional Dual-Book Regime Classification
         can_short_extrinsic = (
             bid >= SHORT_MIN_ENTRY_BID_PRICE
             and ((otm_strikes >= -SHORT_MAX_ITM_STRIKES) or (kaufman_er <= 0.15))
@@ -218,6 +190,58 @@ class AdvanceSignalEngine:
         is_short_regime = can_short_extrinsic and (
             is_contraction_short or is_wave2_exhaustion_short or is_diagonal_otm_short
         )
+
+        # 4. Derive Causal Intraday Directional Alignment when upstream_signals is absent/neutral
+        effective_upstream = dict(upstream_signals or {})
+        c_dir = str(effective_upstream.get("consensus_direction") or "").upper().strip()
+        if not c_dir or c_dir == "NEUTRAL":
+            u_open = float(underlying_quote.get("open") or spot_ltp)
+            u_vwap = float(underlying_quote.get("vwap") or u_open or spot_ltp)
+            if is_short_regime:
+                effective_upstream["consensus_direction"] = "BULLISH" if opt_type == "CE" else "BEARISH"
+                effective_upstream.setdefault("consensus_confidence", 65.0)
+            else:
+                if spot_ltp > 0 and u_open > 0:
+                    if spot_ltp >= u_open and spot_ltp >= (u_vwap * 0.999):
+                        effective_upstream["consensus_direction"] = "BULLISH"
+                        effective_upstream.setdefault("consensus_confidence", 65.0)
+                    elif spot_ltp <= u_open and spot_ltp <= (u_vwap * 1.001):
+                        effective_upstream["consensus_direction"] = "BEARISH"
+                        effective_upstream.setdefault("consensus_confidence", 65.0)
+                    elif syn_basis >= 1.0:
+                        effective_upstream["consensus_direction"] = "BULLISH"
+                        effective_upstream.setdefault("consensus_confidence", 60.0)
+                    elif syn_basis <= -1.0:
+                        effective_upstream["consensus_direction"] = "BEARISH"
+                        effective_upstream.setdefault("consensus_confidence", 60.0)
+
+        # 5. Extract 28 Point-in-Time Features & Run Option Alpha Model
+        features = OptionFeatureExtractor.extract_features(
+            contract=contract,
+            quote=quote,
+            underlying_quote=underlying_quote,
+            underlying_df=underlying_df,
+            macro_context=macro_context,
+            upstream_signals=effective_upstream,
+            as_of_time=now_dt,
+        )
+        pred = self.model.predict_contract(features)
+        cal_prob = float(pred.get("calibrated_prob") or 0.50)
+        exp_net_ret = float(pred.get("expected_net_return_pct") or 0.0)
+
+        rejection_reasons: List[str] = []
+
+        # 6. Microstructure & Warm-up Hard Hurdles
+        if enforce_cutoff and (not is_option_trading_window(now_dt) or not is_option_entry_window(now_dt)):
+            rejection_reasons.append("Outside intraday option entry window (09:30-13:15 IST)")
+        if now_dt.hour == 9 and now_dt.minute < 43:
+            rejection_reasons.append(f"Causal 28-bar Wilder ADX(14) warm-up incomplete before 09:43 IST ({completed_bars}/28 bars)")
+        if age_ms > MAX_QUOTE_AGE_MS:
+            rejection_reasons.append(f"Stale option quote ({age_ms}ms > {MAX_QUOTE_AGE_MS}ms)")
+        if bid < MIN_BID_PRICE or ask < bid or spread_pct > MAX_SPREAD_PCT:
+            rejection_reasons.append(f"Spread/quote quality fail (Bid=₹{bid:.2f}, Spread={spread_pct:.2f}%)")
+        if oi < MIN_OI or vol < MIN_VOLUME:
+            rejection_reasons.append(f"Insufficient liquidity (OI={int(oi)}, Vol={int(vol)})")
 
         if is_short_regime:
             book_type = BOOK_SHORT_SELL
