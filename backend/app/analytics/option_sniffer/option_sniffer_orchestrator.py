@@ -251,14 +251,20 @@ class OptionSnifferOrchestrator:
                     continue
                 last_atm = OptionContractDiscovery._LAST_ATM_STRIKES.get(u) or 0.0
                 step = 100.0 if "BANK" in u else 50.0
-                major_shift = (last_atm <= 0) or (abs(u_spot - last_atm) >= (2.0 * step))
+                if last_atm <= 0 and self.contracts:
+                    u_strikes = sorted(float(c.get("strike") or 0.0) for c in self.contracts if str(c.get("underlying") or "").upper() == u and float(c.get("strike") or 0.0) > 0)
+                    if u_strikes:
+                        last_atm = u_strikes[len(u_strikes) // 2]
+                major_shift = (last_atm > 0) and (abs(u_spot - last_atm) >= (2.0 * step)) and ((now - self._last_discovery_time) > 0)
                 periodic_shift = ((now - self._last_discovery_time) > 1800.0) and OptionContractDiscovery.check_dynamic_atm_shift(u, u_spot)
                 if major_shift or periodic_shift:
                     logger.info(
                         f"[OptionSnifferOrchestrator] ATM shift detected for {u} (Spot=₹{u_spot:.2f}, Last ATM={last_atm}). Refreshing contracts..."
                     )
-                    self.contracts = OptionContractDiscovery.discover_monitored_universe(spot_prices=live_spots_now)
-                    self.stream_manager.sync_monitored_contracts(self.contracts)
+                    refreshed_contracts = OptionContractDiscovery.discover_monitored_universe(spot_prices=live_spots_now)
+                    if refreshed_contracts:
+                        self.contracts = refreshed_contracts
+                        self.stream_manager.sync_monitored_contracts(self.contracts)
                     self._last_discovery_time = now
                     break
 
@@ -329,9 +335,19 @@ class OptionSnifferOrchestrator:
                     uq_obj = underlying_quotes.get(u_name) or self.stream_manager.get_underlying_quote(u_name) or {}
                     spot_val = float(uq_obj.get("spot_ltp") or 0.0)
                     strike_val = float(c.get("strike") or 0.0)
+                    exp_str = str(c.get("expiry") or "")
+                    exp_penalty = 0
+                    if exp_str:
+                        try:
+                            exp_dt = datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
+                            dte_days = (exp_dt - now_dt.date()).days
+                            if dte_days <= 0 or (dte_days == 1 and (now_dt.hour > 12 or (now_dt.hour == 12 and now_dt.minute >= 30))):
+                                exp_penalty = 1
+                        except Exception:
+                            pass
                     if spot_val > 0 and strike_val > 0:
-                        return (abs(strike_val - spot_val), strike_val)
-                    return (0.0, strike_val)
+                        return (abs(strike_val - spot_val), exp_penalty, exp_str, strike_val)
+                    return (0.0, exp_penalty, exp_str, strike_val)
 
                 ordered_contracts = sorted(self.contracts, key=_atm_priority_key)
                 for contract in ordered_contracts:

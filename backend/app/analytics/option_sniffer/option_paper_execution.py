@@ -183,11 +183,11 @@ class OptionPaperExecution:
                 )
                 return None
 
-        # Hard Circuit Breaker Interlock: Never open paper trade if paper session circuit breaker is halted
+        # Hard Circuit Breaker Interlock: Never open paper trade if paper session circuit breaker is halted or paused
         cb = OptionDB.get_daily_circuit_breaker_telemetry(as_of_time=now_dt)
-        if isinstance(cb, dict) and cb.get("is_session_halted"):
+        if isinstance(cb, dict) and (cb.get("is_session_halted") or cb.get("is_pause_active")):
             logger.warning(
-                f"[OptionPaperExecution] 🛑 Blocked paper trade open: Circuit Breaker is HALTED ({cb.get('halt_reason')})"
+                f"[OptionPaperExecution] 🛑 Blocked paper trade open: Circuit Breaker Halted/Paused ({cb.get('halt_reason') or 'Introspection pause active'})"
             )
             return None
 
@@ -760,16 +760,20 @@ class OptionPaperExecution:
 
         success = OptionDB.close_paper_trade(trade_id, close_data)
         if success:
-            if exit_reason in ("STOP_LOSS_HIT", "STRUCTURE_INVALIDATION_BEAR", "STRUCTURE_INVALIDATION_BULL"):
+            if (
+                exit_reason in ("STOP_LOSS_HIT", "STRUCTURE_INVALIDATION_BEAR", "STRUCTURE_INVALIDATION_BULL", "STAGNATION_TIME_STOP")
+                or (exit_reason == "TIME_DECAY_EXPIRY" and net_pnl < 0)
+            ):
                 try:
                     from app.analytics.option_sniffer.option_signal_engine import OptionSignalEngine
                     OptionSignalEngine.record_direction_sl_cooldown(
                         trade.get("underlying", "NIFTY"),
-                        trade.get("option_type", "CE")
+                        trade.get("option_type", "CE"),
+                        as_of_time=as_of_time
                     )
                 except Exception as cd_err:
                     logger.debug(f"[OptionPaperExecution] Direction SL cooldown note: {cd_err}")
-            elif mfe_pct >= POST_HARVEST_MIN_MFE_PCT and net_pnl > 0:
+            elif (mfe_pct >= POST_HARVEST_MIN_MFE_PCT or exit_reason in ("TARGET_MET", "TRAILING_STOP_HIT", "TIME_DECAY_EXPIRY")) and net_pnl > 0:
                 try:
                     from app.analytics.option_sniffer.option_signal_engine import OptionSignalEngine
                     OptionSignalEngine.record_direction_harvest_cooldown(

@@ -218,10 +218,15 @@ class OptionAlphaModel:
 
         # Spread friction penalty
         spread_penalty = max(0.0, (spread_pct - 1.0) * 0.03)
-        # Moneyness penalty for deep OTM
-        otm_penalty = max(0.0, (abs_moneyness - 0.015) * 2.0)
+        # Moneyness & Low-Delta penalty for OTM strikes (starts beyond ~0.25% distance from ATM)
+        otm_penalty = max(0.0, (abs_moneyness - 0.0025) * 8.0)
+        abs_delta = abs(float(features.get("delta") or 0.50))
+        low_delta_penalty = max(0.0, (0.38 - abs_delta) * 0.35)
 
-        structural_prob = max(0.10, min(0.85, base_edge + (up_conf * 0.05) - spread_penalty - otm_penalty))
+        structural_prob = max(
+            0.10,
+            min(0.85, base_edge + (up_conf * 0.05) - spread_penalty - otm_penalty - low_delta_penalty),
+        )
         raw_score = structural_prob
         calibrated_prob = structural_prob
 

@@ -90,16 +90,27 @@ class OptionSignalEngine:
     _COOLDOWNS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_COOLDOWNS", {})  # instrument_key -> last_active_signal_epoch
     _DIRECTION_SL_COOLDOWNS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_DIRECTION_SL_COOLDOWNS", {})  # "{underlying}_{opt_type}" -> last_sl_hit_epoch
     _DIRECTION_HARVEST_COOLDOWNS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_DIRECTION_HARVEST_COOLDOWNS", {})  # "{underlying}_{opt_type}" -> last_harvest_exit_epoch
-    _DIRECTION_SL_COOLDOWN_SECONDS: int = 600  # 10-minute direction cooldown after Stop-Loss hit
+    _DIRECTION_SL_COOLDOWN_SECONDS: int = 1200  # 20-minute direction cooldown after Stop-Loss hit or Stagnation exit
     _MAX_CONCURRENT_OPEN_TRADES: int = 3
     _PORTFOLIO_LOSS_HISTORY: List[float] = getattr(_PREV_OSE_CLS, "_PORTFOLIO_LOSS_HISTORY", [])  # list of recent SL epochs across portfolio
     _INTROSPECTION_FROZEN_UNTIL: float = getattr(_PREV_OSE_CLS, "_INTROSPECTION_FROZEN_UNTIL", 0.0)
     _ACTIVE_UNDERLYING_LOCKS: Dict[str, float] = getattr(_PREV_OSE_CLS, "_ACTIVE_UNDERLYING_LOCKS", {})  # underlying -> last_open_trade_epoch (Anti-Clustering Mutex)
 
     @classmethod
-    def record_direction_harvest_cooldown(cls, underlying: str, opt_type: str, epoch: Optional[float] = None) -> None:
+    def record_direction_harvest_cooldown(
+        cls,
+        underlying: str,
+        opt_type: str,
+        epoch: Optional[float] = None,
+        as_of_time: Optional[Any] = None,
+    ) -> None:
         """Places underlying+opt_type on a 60m Post-Harvest Wave Exhaustion Cooldown after closing a >= +15% MFE winner."""
-        curr_epoch = epoch if epoch is not None else time.time()
+        if epoch is not None:
+            curr_epoch = float(epoch)
+        elif as_of_time is not None and hasattr(as_of_time, "timestamp"):
+            curr_epoch = float(as_of_time.timestamp())
+        else:
+            curr_epoch = time.time()
         key = f"{str(underlying or 'NIFTY').upper()}_{str(opt_type or 'CE').upper()}"
         cls._DIRECTION_HARVEST_COOLDOWNS[key] = curr_epoch
         logger.info(
@@ -107,12 +118,23 @@ class OptionSignalEngine:
         )
 
     @classmethod
-    def record_direction_sl_cooldown(cls, underlying: str, opt_type: str, epoch: Optional[float] = None) -> None:
+    def record_direction_sl_cooldown(
+        cls,
+        underlying: str,
+        opt_type: str,
+        epoch: Optional[float] = None,
+        as_of_time: Optional[Any] = None,
+    ) -> None:
         """Places all contracts of underlying+opt_type on cooldown and manages portfolio introspection entropy."""
-        curr_epoch = epoch if epoch is not None else time.time()
+        if epoch is not None:
+            curr_epoch = float(epoch)
+        elif as_of_time is not None and hasattr(as_of_time, "timestamp"):
+            curr_epoch = float(as_of_time.timestamp())
+        else:
+            curr_epoch = time.time()
         key = f"{str(underlying or 'NIFTY').upper()}_{str(opt_type or 'CE').upper()}"
         cls._DIRECTION_SL_COOLDOWNS[key] = curr_epoch
-        logger.info(f"[OptionSignalEngine] 🛡️ Activated {cls._DIRECTION_SL_COOLDOWN_SECONDS}s Direction SL Cooldown for {key}.")
+        logger.info(f"[OptionSignalEngine] 🛡️ Activated {cls._DIRECTION_SL_COOLDOWN_SECONDS}s Direction SL/Stagnation Cooldown for {key}.")
 
         # Portfolio Introspection: Clean losses older than 30m, append current
         cls._PORTFOLIO_LOSS_HISTORY = [e for e in cls._PORTFOLIO_LOSS_HISTORY if (curr_epoch - e) <= (INTROSPECTION_FREEZE_MINUTES * 60)]
@@ -773,17 +795,18 @@ class OptionSignalEngine:
         is_live_armed = False
         live_capacity_reached = False
         live_underlying_full = False
+        live_order_engine = None
         try:
             from app.analytics.option_sniffer.option_live_adapter import get_option_live_adapter
             from app.analytics.option_sniffer.option_live_order_intent import get_order_intent_engine, MAX_CONCURRENT_POSITIONS
             live_adapter = get_option_live_adapter()
             if getattr(live_adapter, "_is_live_armed", False):
                 is_live_armed = True
-                order_engine = get_order_intent_engine()
-                live_active = order_engine.get_active_positions_count()
+                live_order_engine = get_order_intent_engine()
+                live_active = live_order_engine.get_active_positions_count()
                 if live_active >= MAX_CONCURRENT_POSITIONS:
                     live_capacity_reached = True
-                if hasattr(order_engine, "has_active_position_for_underlying") and order_engine.has_active_position_for_underlying(underlying) is True:
+                if hasattr(live_order_engine, "has_active_position_for_underlying") and live_order_engine.has_active_position_for_underlying(underlying) is True:
                     live_underlying_full = True
         except Exception as e:
             logger.debug(f"[OptionSignalEngine] Live state check note: {e}")
@@ -802,6 +825,20 @@ class OptionSignalEngine:
             )
             for t in u_open_trades
         )
+
+        # 1-Live-Per-Wave Synchronization: if Paper holds an open wave on this underlying and Live already
+        # entered (and exited early, e.g., via 12m stagnation) during that Paper wave, treat live_underlying_full as True
+        if is_live_armed and not live_underlying_full and u_open_trades and live_order_engine is not None:
+            try:
+                earliest_paper_entry = min(str(t.get("entry_time") or "") for t in u_open_trades if t.get("entry_time"))
+                if (
+                    earliest_paper_entry
+                    and hasattr(live_order_engine, "has_participated_in_wave")
+                    and live_order_engine.has_participated_in_wave(u_str, earliest_paper_entry) is True
+                ):
+                    live_underlying_full = True
+            except Exception:
+                pass
 
         # Enforce strict in-memory lock so subsequent contracts in the same sweep cannot stack
         last_u_lock = self._ACTIVE_UNDERLYING_LOCKS.get(u_str, 0.0)
@@ -834,12 +871,13 @@ class OptionSignalEngine:
         )
 
         # If live trading is armed, allow signals to activate if live capacity is available,
-        # even if paper capacity is full (and vice versa). Only reject if all actionable capacity is exhausted.
+        # even if paper capacity is full (and vice versa). Only reject if all actionable capacity is exhausted
+        # or if another strike of the same underlying already triggered ACTIVE in this sweep (has_recent_u_lock).
         if is_live_armed:
-            if live_underlying_full and paper_underlying_full:
-                existing_syms = ", ".join(t.get('trading_symbol', u_str) for t in u_open_trades)
+            if (live_underlying_full and paper_underlying_full) or (has_recent_u_lock and paper_underlying_full):
+                existing_syms = ", ".join(t.get('trading_symbol', u_str) for t in u_open_trades) or u_str
                 rejection_reasons.append(
-                    f"Anti-Clustering Shield: Active {u_str} position exists in both Live and Paper ({existing_syms}). Max {MAX_POSITIONS_PER_UNDERLYING} position per underlying strictly enforced."
+                    f"Anti-Clustering Shield: Active {u_str} position/wave lock exists in Live and Paper ({existing_syms}). Max 1 winner per sweep & 1 live entry per wave strictly enforced."
                 )
             if live_capacity_reached and paper_capacity_reached:
                 rejection_reasons.append(
@@ -870,6 +908,25 @@ class OptionSignalEngine:
                     f"Max concurrent paper trades reached ({len(open_trades)}/{self._MAX_CONCURRENT_OPEN_TRADES})"
                 )
 
+        # Gate 9A: Institutional Option-Buying Strike Moneyness, Delta & Premium Discipline
+        if not paper_pyramiding_otm_blocked:
+            raw_delta_val = abs(float(quote.get("delta") or 0.50))
+            if 0.0 < ask < 35.0:
+                rejection_reasons.append(
+                    f"Minimum Premium Discipline: Option ask ₹{ask:.2f} < ₹35.00 institutional floor (high theta/lottery trap blocked)."
+                )
+            if 0.0 < raw_delta_val < 0.32:
+                rejection_reasons.append(
+                    f"Minimum Delta Discipline: |Delta| {raw_delta_val:.2f} < 0.32 institutional floor (far-OTM theta decay blocked)."
+                )
+            if spot_ltp > 0 and strike > 0:
+                otm_dist_pts = max(0.0, (strike - spot_ltp) if opt_type == "CE" else (spot_ltp - strike))
+                max_entry_otm_pts = 480.0 if is_banknifty else 220.0
+                if otm_dist_pts > max_entry_otm_pts:
+                    rejection_reasons.append(
+                        f"Far-OTM Strike Discipline: Strike {strike:.0f} is {otm_dist_pts:.0f} pts OTM from spot {spot_ltp:.1f} (max {max_entry_otm_pts:.0f} pts)."
+                    )
+
         # Gate 9B: Two-Tier Database-Backed Paper Circuit Breaker & Canary Scout Guard
         # Paper trading MUST ALWAYS be bound by paper circuit breaker (never bypass due to live being armed)
         paper_cb = OptionDB.get_daily_circuit_breaker_telemetry(
@@ -899,10 +956,11 @@ class OptionSignalEngine:
             )
 
         # Gate 9B-2: Live Broker Circuit Breaker Check (checked additionally when live trading is armed)
+        live_cb = None
         if is_live_armed:
             try:
                 from app.analytics.option_sniffer.option_live_order_intent import get_order_intent_engine
-                order_engine = get_order_intent_engine()
+                order_engine = live_order_engine or get_order_intent_engine()
                 live_cb = order_engine.get_live_circuit_breaker_telemetry(
                     max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
                     max_daily_loss_inr=MAX_DAILY_LOSS_INR,
@@ -914,17 +972,28 @@ class OptionSignalEngine:
                     rejection_reasons.append(
                         f"🚨 Live Broker Circuit Breaker Tripped: {live_cb.get('halt_reason')} Real trading halted for session."
                     )
+                elif isinstance(live_cb, dict) and live_cb.get("is_pause_active") is True:
+                    rem_live_sec = live_cb.get("pause_remaining_sec", 0)
+                    unfreeze_live_str = live_cb.get("pause_unfreeze_time", "soon")
+                    rejection_reasons.append(
+                        f"⏳ Live Broker Introspection Pause Active: {live_cb.get('consecutive_losses')} consecutive live losses. "
+                        f"Real entry dispatch paused ({rem_live_sec}s remaining until {unfreeze_live_str} IST)."
+                    )
             except Exception as e:
                 logger.error(f"[OptionSignalEngine] Failed to get live circuit breaker telemetry: {e}")
                 rejection_reasons.append(
                     f"Fail-Closed: Error querying live circuit breaker ({e})"
                 )
 
-        # Gate 9C: Cross-Index Contagion Lockout (Anti-Hopping Shield)
-        recent_loss_time_str = cb_telemetry.get("most_recent_loss_time")
+        # Gate 9C: Cross-Index Contagion Lockout (Anti-Hopping Shield across Paper & Live Books)
+        recent_loss_time_str = cb_telemetry.get("most_recent_loss_time") if isinstance(cb_telemetry, dict) else None
+        if is_live_armed and isinstance(live_cb, dict) and live_cb.get("most_recent_loss_time"):
+            live_loss_str = str(live_cb.get("most_recent_loss_time"))
+            if not recent_loss_time_str or live_loss_str.replace("T", " ") > str(recent_loss_time_str).replace("T", " "):
+                recent_loss_time_str = live_loss_str
         if recent_loss_time_str:
             try:
-                loss_dt = datetime.fromisoformat(recent_loss_time_str)
+                loss_dt = datetime.fromisoformat(str(recent_loss_time_str).replace(" ", "T"))
                 loss_elapsed_sec = (now_dt - loss_dt).total_seconds()
                 if 0 <= loss_elapsed_sec < POST_LOSS_CONTAGION_FREEZE_SECONDS:
                     rem_contagion_sec = int(POST_LOSS_CONTAGION_FREEZE_SECONDS - loss_elapsed_sec)
@@ -946,7 +1015,7 @@ class OptionSignalEngine:
         sl_cooldown_rem = int(self._DIRECTION_SL_COOLDOWN_SECONDS - (now_epoch - last_sl_time))
         if sl_cooldown_rem > 0:
             rejection_reasons.append(
-                f"Direction SL cooldown active for {underlying} {opt_type} ({sl_cooldown_rem}s remaining after recent Stop-Loss hit)"
+                f"Direction SL cooldown active for {underlying} {opt_type} ({sl_cooldown_rem}s remaining after recent Stop-Loss/Stagnation exit)"
             )
 
         # Gate 10B: Anti-Ping-Pong Directional Flip Lockout
@@ -969,7 +1038,7 @@ class OptionSignalEngine:
         harvest_elapsed = (now_epoch - last_harvest_epoch) if last_harvest_epoch > 0 else -1.0
         harvest_mem_rem = (
             int(POST_HARVEST_WAVE_COOLDOWN_SECONDS - harvest_elapsed)
-            if (as_of_time is None and 0.0 <= harvest_elapsed < POST_HARVEST_WAVE_COOLDOWN_SECONDS)
+            if (0.0 <= harvest_elapsed < POST_HARVEST_WAVE_COOLDOWN_SECONDS)
             else 0
         )
         recent_harvest_db = OptionDB.get_recent_harvested_wave(
@@ -1047,6 +1116,7 @@ class OptionSignalEngine:
         # ── TRANSITION TO ACTIVE: TELEGRAM ALERT & PAPER ORDER ENTRY ─────────
         if final_status == STATE_ACTIVE:
             self._COOLDOWNS[ikey] = now_epoch
+            self._ACTIVE_UNDERLYING_LOCKS[u_str] = now_epoch
             logger.info(f"[OptionSignalEngine] 🚨 ACTIVE SIGNAL TRIGGERED: {tsym} {direction} (P={calibrated_prob*100:.1f}%)")
 
             # 1. Dispatch Immediate Telegram Alert

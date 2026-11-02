@@ -235,6 +235,29 @@ class OrderIntentEngine:
             )
             return cur.fetchone() is not None
 
+    def has_participated_in_wave(self, underlying: str, since_iso: str) -> bool:
+        """
+        Checks if a live order intent (FILLED, SUBMITTED, or PARTIALLY_FILLED) has already been
+        executed for this underlying during the currently open Paper wave (created_at >= since_iso).
+        Prevents Live Autopilot from re-entering the same Paper wave after an early live exit.
+        """
+        if not underlying or not since_iso:
+            return False
+        u_clean = str(underlying).upper().strip()
+        since_norm = str(since_iso).strip().replace("T", " ")[:19]
+        with self._get_db_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT 1 FROM option_live_order_intents
+                WHERE UPPER(underlying) = ?
+                  AND state IN ('SUBMITTED', 'PARTIALLY_FILLED', 'FILLED')
+                  AND REPLACE(SUBSTR(created_at, 1, 19), 'T', ' ') >= ?;
+                """,
+                (u_clean, since_norm),
+            )
+            return cur.fetchone() is not None
+
     def get_active_positions_count(self) -> int:
         """Returns the number of currently open/filled positions."""
         with self._get_db_conn() as conn:
@@ -1331,6 +1354,17 @@ class OrderIntentEngine:
                 logger.info(f"⚡ [OrderIntentEngine] Auto-Exit Triggered ({exit_reason}): {pos['trading_symbol']} @ Bid ₹{current_bid:.2f} ({current_pnl_pct:+.1f}%)")
                 res = self.trigger_sos_panic_exit(pos["order_intent_id"], current_bid_price=current_bid)
                 res["exit_reason"] = exit_reason
+                try:
+                    from app.analytics.option_sniffer.option_signal_engine import OptionSignalEngine
+                    tsym_exit = str(pos.get("trading_symbol") or "").upper()
+                    opt_dir_exit = "PE" if (tsym_exit.endswith("PE") or " PE" in tsym_exit or pos.get("action") == "BUY_PE") else "CE"
+                    und_exit = str(pos.get("underlying") or ("BANKNIFTY" if "BANK" in tsym_exit else "NIFTY")).upper()
+                    if exit_reason in ("STOP_LOSS_HIT", "STAGNATION_TIME_STOP") or current_pnl_pct < 0:
+                        OptionSignalEngine.record_direction_sl_cooldown(und_exit, opt_dir_exit, as_of_time=now_dt)
+                    elif exit_reason in ("TARGET_MET", "TRAILING_STOP_HIT") or current_pnl_pct > 0:
+                        OptionSignalEngine.record_direction_harvest_cooldown(und_exit, opt_dir_exit, as_of_time=now_dt)
+                except Exception as cd_err:
+                    logger.debug(f"[OrderIntentEngine] Live auto-exit cooldown recording note: {cd_err}")
                 closed_records.append(res)
 
         return closed_records
@@ -1371,10 +1405,15 @@ class OrderIntentEngine:
             logger.warning(f"[Autopilot] 🚨 CANARY SCOUT ABORT: Paper trading stopped out today ({canary_reason}). Live trading blocked to preserve real capital.")
             return []
 
-        # Gate 0C: Live Circuit Breaker Check
+        # Gate 0C: Live Circuit Breaker & Introspection Pause Check
         live_cb = self.get_live_circuit_breaker_telemetry()
         if isinstance(live_cb, dict) and live_cb.get("is_session_halted"):
             logger.warning(f"[Autopilot] 🚨 Live circuit breaker halted: {live_cb.get('halt_reason')}")
+            return []
+        if isinstance(live_cb, dict) and live_cb.get("is_pause_active"):
+            logger.info(
+                f"[Autopilot] ⏳ Live Introspection Pause Active ({live_cb.get('pause_remaining_sec', 0)}s remaining): {live_cb.get('halt_reason')}"
+            )
             return []
 
         # Gate 0D: Portfolio Introspection Engine ("Stop, Look Back & Decide")
@@ -1390,6 +1429,12 @@ class OrderIntentEngine:
         active_count = self.get_active_positions_count()
         if active_count >= MAX_CONCURRENT_POSITIONS:
             return []
+
+        open_paper_trades = []
+        try:
+            open_paper_trades = OptionDB.get_open_paper_trades() or []
+        except Exception:
+            open_paper_trades = []
 
         recent_signals = adapter.get_read_only_recent_signals(limit=20, today_only=True)
         actionable = []
@@ -1407,6 +1452,40 @@ class OrderIntentEngine:
                     continue
                 if und and self.has_active_position_for_underlying(und):
                     continue
+
+                # 1-Live-Per-Wave Guard: If Paper is still holding an open wave on this underlying and Live
+                # already participated (and exited early, e.g., via 12m stagnation), block same-wave re-entry!
+                u_paper_open = [t for t in open_paper_trades if str(t.get("underlying") or "").upper() == und and t.get("entry_time")]
+                if u_paper_open:
+                    earliest_wave_iso = min(str(t["entry_time"]) for t in u_paper_open)
+                    if self.has_participated_in_wave(und, earliest_wave_iso) is True:
+                        logger.info(
+                            f"[Autopilot] 1-Live-Per-Wave Guard: Blocked {s.get('trading_symbol')} because Live already participated in ongoing {und} wave started at {earliest_wave_iso}."
+                        )
+                        continue
+
+                # Institutional Strike Moneyness, Delta & Premium Filter
+                sig_ask = float(s.get("option_ask") or s.get("ask") or 0.0)
+                sig_spot = float(s.get("spot_price") or 0.0)
+                sig_strike = float(s.get("strike") or 0.0)
+                sig_delta = abs(float(s.get("delta") or 0.50))
+                if 0.0 < sig_ask < 35.0:
+                    continue
+                if 0.0 < sig_delta < 0.32:
+                    continue
+                atm_dist_bucket = 0
+                if sig_spot > 0 and sig_strike > 0:
+                    is_bnf = "BANK" in und
+                    strike_step = 100.0 if is_bnf else 50.0
+                    opt_dir_s = "PE" if s.get("action") == "BUY_PE" else "CE"
+                    otm_pts = max(0.0, (sig_strike - sig_spot) if opt_dir_s == "CE" else (sig_spot - sig_strike))
+                    max_otm_live = 260.0 if is_bnf else 125.0
+                    if otm_pts > max_otm_live:
+                        logger.info(
+                            f"[Autopilot] Far-OTM Strike Filter: Rejected {s.get('trading_symbol')} ({otm_pts:.0f} pts OTM > {max_otm_live:.0f} pts max)."
+                        )
+                        continue
+                    atm_dist_bucket = int(round(abs(sig_strike - sig_spot) / strike_step))
 
                 # STRICT ZERO LOOKBACK: signal must have been generated strictly AFTER live trading was armed today!
                 ts_str = s.get("timestamp") or s.get("created_at") or ""
@@ -1428,12 +1507,14 @@ class OrderIntentEngine:
                 score = round(cal_prob * max(0.1, exp_ret), 3)
                 s_copy = dict(s)
                 s_copy["priority_score"] = score
+                s_copy["atm_dist_bucket"] = atm_dist_bucket
                 actionable.append(s_copy)
 
         if not actionable:
             return []
 
-        actionable.sort(key=lambda x: x["priority_score"], reverse=True)
+        # Sort by ATM proximity first (bucket 0 = ATM before OTM/ITM), then highest priority_score
+        actionable.sort(key=lambda x: (x.get("atm_dist_bucket", 0), -x["priority_score"]))
         dispatched_orders = []
         rest_refreshed_in_sweep = False
 

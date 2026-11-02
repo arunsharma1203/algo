@@ -795,8 +795,35 @@ class OptionStreamManager:
                         oi = float(v.get("oi") or 0.0)
 
                         existing_quote = self._option_quotes.get(matched_key) or {}
-                        delta = float(existing_quote.get("delta") or (0.50 if meta.get("option_type") == "CE" else -0.50))
+                        opt_t = str(meta.get("option_type") or "CE").upper()
+                        raw_existing_delta = existing_quote.get("delta")
                         iv = float(existing_quote.get("iv") or 15.0)
+                        delta = float(raw_existing_delta) if raw_existing_delta is not None else (0.50 if opt_t == "CE" else -0.50)
+
+                        # Analytical Black-Scholes Delta fallback when REST quote lacks live WebSocket Greeks
+                        # (prevents OTM strikes like +250pt CE from spoofing placeholder delta = 0.50)
+                        try:
+                            u_sym_m = str(meta.get("underlying") or "NIFTY").upper()
+                            u_spot_m = float((self._underlying_quotes.get(u_sym_m) or {}).get("spot_ltp") or 0.0)
+                            strike_m = float(meta.get("strike") or 0.0)
+                            if u_spot_m > 0 and strike_m > 0 and (raw_existing_delta is None or (abs(abs(delta) - 0.50) < 1e-4 and abs(strike_m - u_spot_m) > 30.0)):
+                                import math
+                                dte_days = 4.0
+                                exp_s = str(meta.get("expiry") or "")
+                                if exp_s:
+                                    try:
+                                        exp_d = datetime.strptime(exp_s[:10], "%Y-%m-%d").date()
+                                        dte_days = max(0.5, float((exp_d - to_ist_naive().date()).days))
+                                    except Exception:
+                                        dte_days = 4.0
+                                t_yr = max(1.0 / 365.0, dte_days / 365.0)
+                                sigma = max(0.08, iv / 100.0)
+                                d1 = (math.log(u_spot_m / strike_m) + (0.065 + 0.5 * sigma * sigma) * t_yr) / (sigma * math.sqrt(t_yr))
+                                call_delta = 0.5 * (1.0 + math.erf(d1 / math.sqrt(2.0)))
+                                call_delta = max(0.02, min(0.98, call_delta))
+                                delta = round(call_delta if opt_t == "CE" else (call_delta - 1.0), 4)
+                        except Exception:
+                            pass
 
                         self._option_quotes[matched_key] = {
                             "instrument_key": matched_key,
