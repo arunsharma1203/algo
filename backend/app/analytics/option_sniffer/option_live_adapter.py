@@ -855,9 +855,9 @@ class OptionLiveAdapter:
           - total_net_pnl: Headline figure matching Upstox screen (realized_gross_pnl + unrealized_net_pnl)
           - closed_trades_count, wins, losses, win_rate
         """
-        # Periodic light sync with Upstox Tradebook
+        # Periodic light sync with Upstox Tradebook (throttled to 20s to preserve Upstox 30m rate quota)
         now = time.time()
-        if (now - getattr(self, "_last_tradebook_sync", 0.0)) > 6.0:
+        if (now - getattr(self, "_last_tradebook_sync", 0.0)) > 20.0:
             self._last_tradebook_sync = now
             self.sync_trades_from_upstox_tradebook()
 

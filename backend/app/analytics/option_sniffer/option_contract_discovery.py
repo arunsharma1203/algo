@@ -72,12 +72,55 @@ class OptionContractDiscovery:
         url = f"{UPSTOX_BASE_URL}/option/contract"
         params = {"instrument_key": instrument_key}
 
+        def _sqlite_fallback() -> List[Dict[str, Any]]:
+            try:
+                import json as _json
+                today_s = date.today().strftime("%Y-%m-%d")
+                conn = OptionDB.get_connection()
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT instrument_key, trading_symbol, underlying, expiry, strike, option_type, lot_size, metadata_json
+                    FROM option_sniffer_candidates
+                    WHERE underlying = ? AND expiry >= ?
+                    """,
+                    (u_upper, today_s),
+                )
+                rows = cur.fetchall()
+                conn.close()
+                fallback_list = []
+                for r in rows:
+                    meta = {}
+                    try:
+                        meta = _json.loads(r[7] or "{}")
+                    except Exception:
+                        pass
+                    fallback_list.append({
+                        "instrument_key": r[0],
+                        "trading_symbol": r[1],
+                        "underlying": r[2],
+                        "expiry": r[3],
+                        "strike_price": float(r[4] or 0.0),
+                        "instrument_type": r[5],
+                        "lot_size": int(r[6] or 65),
+                        "exchange_token": meta.get("exchange_token"),
+                        "tick_size": meta.get("tick_size", 0.05),
+                        "freeze_quantity": meta.get("freeze_quantity"),
+                        "weekly": meta.get("weekly", True),
+                    })
+                if fallback_list:
+                    logger.info(f"[OptionDiscovery] Loaded {len(fallback_list)} cached contracts for {u_upper} from SQLite catalog.")
+                return fallback_list
+            except Exception as fb_err:
+                logger.debug(f"[OptionDiscovery] SQLite contract fallback note: {fb_err}")
+                return []
+
         try:
             logger.info(f"[OptionDiscovery] Discovering option contracts for {u_upper} via {url}...")
             res = upstox_request("GET", url, headers=headers, params=params, timeout=8.0)
             if res.status_code != 200:
                 logger.error(f"[OptionDiscovery] Upstox returned status {res.status_code}: {res.text[:200]}")
-                return cached["contracts"] if cached else []
+                return cached["contracts"] if cached else _sqlite_fallback()
 
             payload = res.json()
             raw_contracts = payload.get("data", [])
@@ -90,7 +133,7 @@ class OptionContractDiscovery:
             return raw_contracts
         except Exception as e:
             logger.error(f"[OptionDiscovery] Failed to fetch contracts for {u_upper}: {e}")
-            return cached["contracts"] if cached else []
+            return cached["contracts"] if cached else _sqlite_fallback()
 
     @classmethod
     def get_available_expiries(
@@ -143,23 +186,53 @@ class OptionContractDiscovery:
         monitored_contracts: List[Dict[str, Any]] = []
 
         for underlying in ("NIFTY", "BANKNIFTY"):
-            # 1. Determine Spot Price
+            # 1. Determine Spot Price (prioritize live stream cache & continuous index DB before REST/fallback)
             spot = spot_prices.get(underlying)
             if not spot:
                 spot = spot_prices.get(f"{underlying}.NS")
-            if not spot:
-                # Query cached or live spot
+            if not spot or spot <= 0:
+                try:
+                    from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+                    uq = OptionStreamManager().get_underlying_quote(underlying) or {}
+                    if float(uq.get("spot_ltp") or 0.0) > 0:
+                        spot = float(uq["spot_ltp"])
+                except Exception:
+                    pass
+            if not spot or spot <= 0:
+                try:
+                    conn = OptionDB.get_connection()
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT close FROM continuous_index_ohlcv WHERE ticker = ? ORDER BY timestamp DESC LIMIT 1",
+                        (underlying,),
+                    )
+                    row = cur.fetchone()
+                    conn.close()
+                    if row and float(row[0] or 0.0) > 0:
+                        spot = float(row[0])
+                except Exception:
+                    pass
+            if not spot or spot <= 0:
+                # Query cached or live spot via REST
                 try:
                     spot = fetch_upstox_ltp(underlying)
                 except Exception:
                     spot = None
+            if not spot or spot <= 0:
+                last_atm = cls._LAST_ATM_STRIKES.get(underlying)
+                if last_atm and last_atm > 0:
+                    spot = float(last_atm)
 
             if not spot or spot <= 0:
-                # Safe fallback to recent typical range if spot is temporarily unavailable during closed session
+                # Safe fallback to recent typical range only if all live/DB/cache sources are empty
                 spot = 22500.0 if underlying == "NIFTY" else 48500.0
                 logger.info(f"[OptionDiscovery] Using reference anchor spot ₹{spot} for {underlying} initialization.")
 
-            # 2. Get Expiries (strictly capped at MAX_OPTION_EXPIRY_DTE)
+            # 2. Calculate ATM Strike & Record Anchor (even if DTE filter skips underlying)
+            atm_strike = cls.calculate_atm_strike(underlying, spot)
+            cls._LAST_ATM_STRIKES[underlying] = atm_strike
+
+            # 3. Get Expiries (strictly capped at MAX_OPTION_EXPIRY_DTE)
             expiries = cls.get_available_expiries(underlying, force_refresh=force_refresh)
             if not expiries:
                 logger.warning(
@@ -178,9 +251,7 @@ class OptionContractDiscovery:
             except Exception:
                 pass
 
-            # 3. Calculate ATM and Strike Window
-            atm_strike = cls.calculate_atm_strike(underlying, spot)
-            cls._LAST_ATM_STRIKES[underlying] = atm_strike
+            # 4. Calculate Strike Window
             interval = STRIKE_INTERVALS.get(underlying, 50.0)
 
             min_strike = atm_strike - (ATM_STRIKE_WINDOW * interval)

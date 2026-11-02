@@ -153,7 +153,7 @@ class AdvanceSignalEngine:
             upstream_signals=upstream_signals,
             as_of_time=now_dt,
         )
-        pred = self.model.predict_contract(features, option_type=opt_type)
+        pred = self.model.predict_contract(features)
         cal_prob = float(pred.get("calibrated_prob") or 0.50)
         exp_net_ret = float(pred.get("expected_net_return_pct") or 0.0)
 

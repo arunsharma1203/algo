@@ -184,7 +184,15 @@ class OptionSnifferOrchestrator:
             last_date = getattr(self, "_last_discovery_date", "")
             if last_date != today_str or not self.contracts:
                 logger.info(f"[OptionSnifferOrchestrator] Discovering active ATM contracts for session {today_str}...")
-                self.contracts = OptionContractDiscovery.discover_monitored_universe(force_refresh=True)
+                live_spots = {
+                    u: float((self.stream_manager.get_underlying_quote(u) or {}).get("spot_ltp") or 0.0)
+                    for u in ("NIFTY", "BANKNIFTY")
+                    if float((self.stream_manager.get_underlying_quote(u) or {}).get("spot_ltp") or 0.0) > 0
+                }
+                self.contracts = OptionContractDiscovery.discover_monitored_universe(
+                    spot_prices=live_spots or None,
+                    force_refresh=True
+                )
                 self.stream_manager.sync_monitored_contracts(self.contracts)
                 self._last_discovery_date = today_str
                 self._last_discovery_time = time.time()
@@ -230,17 +238,29 @@ class OptionSnifferOrchestrator:
                 as_of_time=now_dt
             )
 
-            # 2. Dynamic ATM Shift Check (Refresh candidate universe if spot moved > 1 strike)
+            # 2. Dynamic ATM Shift Check (Refresh candidate universe if spot moved >= 2 strikes immediately, or >= 1 strike after 30 mins)
             now = time.time()
-            if (now - self._last_discovery_time) > 1800.0:  # Every 30 mins minimum or upon shift
-                for u in ("NIFTY", "BANKNIFTY"):
-                    u_quote = self.stream_manager.get_underlying_quote(u)
-                    if u_quote and OptionContractDiscovery.check_dynamic_atm_shift(u, u_quote["spot_ltp"]):
-                        logger.info(f"[OptionSnifferOrchestrator] ATM shift detected for {u}. Refreshing contracts...")
-                        self.contracts = OptionContractDiscovery.discover_monitored_universe()
-                        self.stream_manager.sync_monitored_contracts(self.contracts)
-                        self._last_discovery_time = now
-                        break
+            live_spots_now = {
+                u: float((underlying_quotes.get(u) or {}).get("spot_ltp") or 0.0)
+                for u in ("NIFTY", "BANKNIFTY")
+                if float((underlying_quotes.get(u) or {}).get("spot_ltp") or 0.0) > 0
+            }
+            for u in ("NIFTY", "BANKNIFTY"):
+                u_spot = live_spots_now.get(u, 0.0)
+                if u_spot <= 0:
+                    continue
+                last_atm = OptionContractDiscovery._LAST_ATM_STRIKES.get(u) or 0.0
+                step = 100.0 if "BANK" in u else 50.0
+                major_shift = (last_atm <= 0) or (abs(u_spot - last_atm) >= (2.0 * step))
+                periodic_shift = ((now - self._last_discovery_time) > 1800.0) and OptionContractDiscovery.check_dynamic_atm_shift(u, u_spot)
+                if major_shift or periodic_shift:
+                    logger.info(
+                        f"[OptionSnifferOrchestrator] ATM shift detected for {u} (Spot=₹{u_spot:.2f}, Last ATM={last_atm}). Refreshing contracts..."
+                    )
+                    self.contracts = OptionContractDiscovery.discover_monitored_universe(spot_prices=live_spots_now)
+                    self.stream_manager.sync_monitored_contracts(self.contracts)
+                    self._last_discovery_time = now
+                    break
 
             # 3. Upstream Context & Macro Retrieval
             macro_info = {}
@@ -570,16 +590,17 @@ class OptionSnifferOrchestrator:
         """Active candidates with live quotes."""
         candidates = self.contracts if self.contracts else OptionDB.get_active_candidates()
 
-        # If stream manager has no quotes or any candidate quote is stale, proactively refresh
-        cached_quotes = self.stream_manager.get_all_active_option_quotes()
+        # If stream manager has no quotes or any active candidate quote is stale, proactively refresh (throttled)
+        cand_quotes = [self.stream_manager.get_option_quote(c.get("instrument_key")) for c in candidates if c.get("instrument_key")]
+        valid_cand_quotes = [q for q in cand_quotes if q is not None]
         has_stale_or_missing = (
-            not cached_quotes
-            or len(cached_quotes) < len(candidates)
-            or any(q.get("quote_age_ms", 99999) > 15000 for q in cached_quotes)
+            not valid_cand_quotes
+            or len(valid_cand_quotes) < len(candidates)
+            or any(q.get("quote_age_ms", 99999) > 15000 for q in valid_cand_quotes)
         )
         if has_stale_or_missing:
             try:
-                self.stream_manager.refresh_quotes_via_rest()
+                self.stream_manager.refresh_quotes_via_rest(min_interval_sec=8.0)
             except Exception as e:
                 logger.debug(f"[OptionSnifferOrchestrator] Candidate quote fetch note: {e}")
 

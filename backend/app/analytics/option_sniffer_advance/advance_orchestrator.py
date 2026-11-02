@@ -171,7 +171,12 @@ class OptionSnifferAdvanceOrchestrator:
         except Exception:
             pass
         try:
-            return OptionContractDiscovery.discover_monitored_universe()
+            live_spots = {
+                u: float((self.stream_manager.get_underlying_quote(u) or {}).get("spot_ltp") or 0.0)
+                for u in ("NIFTY", "BANKNIFTY")
+                if float((self.stream_manager.get_underlying_quote(u) or {}).get("spot_ltp") or 0.0) > 0
+            }
+            return OptionContractDiscovery.discover_monitored_universe(spot_prices=live_spots or None)
         except Exception:
             return []
 

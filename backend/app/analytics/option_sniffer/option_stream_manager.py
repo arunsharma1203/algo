@@ -84,21 +84,50 @@ class OptionStreamManager:
         Registers monitored contracts with the stream manager and subscribes
         their instrument keys to the active Upstox WebSocket V3 connection.
         """
+        open_position_contracts: List[Dict[str, Any]] = []
+        try:
+            conn = OptionDB.get_connection()
+            cur = conn.cursor()
+            for tbl in ("option_paper_trades", "option_advance_paper_trades"):
+                try:
+                    cur.execute(
+                        f"SELECT instrument_key, trading_symbol, underlying, strike_price, option_type, expiry, lot_size "
+                        f"FROM {tbl} WHERE trade_status = 'OPEN'"
+                    )
+                    for row in cur.fetchall():
+                        if row[0]:
+                            open_position_contracts.append({
+                                "instrument_key": row[0],
+                                "trading_symbol": row[1],
+                                "underlying": row[2] or "NIFTY",
+                                "strike_price": float(row[3] or 0.0),
+                                "option_type": row[4] or "CE",
+                                "expiry": row[5] or "",
+                                "lot_size": int(row[6] or 65),
+                            })
+                except Exception:
+                    pass
+            conn.close()
+        except Exception:
+            pass
+
         with self._lock:
             new_keys: List[str] = []
-            for c in contracts:
+            updated_key_to_contract: Dict[str, Dict[str, Any]] = {}
+            for c in list(contracts) + open_position_contracts:
                 ikey = c.get("instrument_key")
                 if not ikey:
                     continue
-                self._key_to_contract[ikey] = c
+                updated_key_to_contract[ikey] = c
                 tsym = c.get("trading_symbol")
                 if tsym:
                     self._symbol_to_key[tsym] = ikey
-                new_keys.append(ikey)
+                if ikey not in new_keys:
+                    new_keys.append(ikey)
 
             # Include underlying index keys (NIFTY, BANKNIFTY, INDIA VIX)
             for u_name, u_key in UNDERLYING_INSTRUMENTS.items():
-                self._key_to_contract[u_key] = {
+                updated_key_to_contract[u_key] = {
                     "instrument_key": u_key,
                     "trading_symbol": u_name,
                     "underlying": u_name,
@@ -106,6 +135,8 @@ class OptionStreamManager:
                 }
                 self._symbol_to_key[u_name] = u_key
                 new_keys.append(u_key)
+
+            self._key_to_contract = updated_key_to_contract
 
         # Register feed listener with centralized stream service (self-healing for active memory instance)
         try:
@@ -566,9 +597,14 @@ class OptionStreamManager:
             return quote
 
     def get_all_active_option_quotes(self) -> List[Dict[str, Any]]:
-        """Returns all cached option quotes."""
+        """Returns all cached option quotes for currently monitored option contracts."""
         with self._lock:
-            return [self.get_option_quote(k) for k in self._option_quotes if self.get_option_quote(k)]
+            monitored_opt_keys = [
+                k for k, m in self._key_to_contract.items()
+                if not m.get("is_underlying")
+            ]
+            target_keys = monitored_opt_keys if monitored_opt_keys else list(self._option_quotes.keys())
+            return [self.get_option_quote(k) for k in target_keys if self.get_option_quote(k)]
 
     def seed_initial_quotes_from_chain(self, chain_data_list: List[Dict[str, Any]]) -> int:
         """
@@ -636,7 +672,7 @@ class OptionStreamManager:
         logger.info(f"[OptionStreamManager] Seeded {seeded} option contracts from baseline snapshot.")
         return seeded
 
-    def refresh_quotes_via_rest(self) -> int:
+    def refresh_quotes_via_rest(self, min_interval_sec: float = 0.0) -> int:
         """
         Direct resilient polling mechanism:
         Fetches live Upstox market quotes (LTP, Bid, Ask, OI, Volume, OHLC)
@@ -644,6 +680,11 @@ class OptionStreamManager:
         in single batch REST calls (/v2/market-quote/quotes).
         Provides 100% resilient real-time quote updates even if WebSocket connection is lost or delayed.
         """
+        now_t = time.time()
+        last_rest = getattr(self, "_last_rest_refresh_time", 0.0)
+        if min_interval_sec > 0.0 and (now_t - last_rest) < min_interval_sec:
+            return len(self._option_quotes)
+
         from app.data.upstox_provider import get_upstox_token, UPSTOX_BASE_URL, upstox_request
         token = get_upstox_token()
         if not token:
@@ -789,6 +830,8 @@ class OptionStreamManager:
             except Exception as e:
                 logger.warning(f"[OptionStreamManager] REST quote refresh error: {e}")
 
+        if updated_count > 0:
+            self._last_rest_refresh_time = time.time()
         logger.info(f"[OptionStreamManager] Refreshed {updated_count} option & index quotes via live REST batch.")
         return updated_count
 

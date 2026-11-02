@@ -1435,6 +1435,7 @@ class OrderIntentEngine:
 
         actionable.sort(key=lambda x: x["priority_score"], reverse=True)
         dispatched_orders = []
+        rest_refreshed_in_sweep = False
 
         for cand in actionable:
             if self.get_active_positions_count() >= MAX_CONCURRENT_POSITIONS:
@@ -1522,13 +1523,16 @@ class OrderIntentEngine:
 
             live_quote = live_quotes_map.get(ikey)
             # If live quote is missing or its LTT age exceeds MAX_EXECUTION_QUOTE_AGE_MS (1000ms) due to 2s reconciler sleep,
-            # perform an immediate on-demand REST quote refresh from Upstox so pre-trade validation has a sub-second (0ms) live quote.
+            # perform at most ONE on-demand REST quote refresh per sweep from Upstox so pre-trade validation has a sub-second live quote.
             raw_live_age = live_quote.get("quote_age_ms") if isinstance(live_quote, dict) else None
-            if not live_quote or int(raw_live_age if raw_live_age is not None else 99999) > MAX_EXECUTION_QUOTE_AGE_MS:
+            if (not live_quote or int(raw_live_age if raw_live_age is not None else 99999) > MAX_EXECUTION_QUOTE_AGE_MS) and not rest_refreshed_in_sweep:
+                rest_refreshed_in_sweep = True
                 try:
                     from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
                     stream_mgr = OptionStreamManager()
-                    stream_mgr.refresh_quotes_via_rest()
+                    stream_mgr.refresh_quotes_via_rest(min_interval_sec=1.5)
+                    for q_item in stream_mgr.get_all_active_option_quotes():
+                        live_quotes_map[q_item["instrument_key"]] = q_item
                     refreshed_q = stream_mgr.get_option_quote(ikey)
                     if refreshed_q:
                         live_quote = refreshed_q
