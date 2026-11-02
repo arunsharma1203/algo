@@ -304,9 +304,19 @@ class OptionSnifferAdvanceOrchestrator:
                     uq_obj = underlying_quotes.get(u_name) or {}
                     spot_val = float(uq_obj.get("spot_ltp") or 0.0)
                     strike_val = float(c.get("strike") or 0.0)
+                    exp_str = str(c.get("expiry") or "")
+                    exp_penalty = 0
+                    if exp_str:
+                        try:
+                            exp_dt = datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
+                            dte_days = (exp_dt - now_dt.date()).days
+                            if dte_days <= 0 or (dte_days == 1 and (now_dt.hour > 12 or (now_dt.hour == 12 and now_dt.minute >= 30))):
+                                exp_penalty = 1
+                        except Exception:
+                            pass
                     if spot_val > 0 and strike_val > 0:
-                        return (abs(strike_val - spot_val), strike_val)
-                    return (0.0, strike_val)
+                        return (abs(strike_val - spot_val), exp_penalty, exp_str, strike_val)
+                    return (0.0, exp_penalty, exp_str, strike_val)
 
                 ordered_contracts = sorted(contracts, key=_atm_sort_key)
                 for contract in ordered_contracts:

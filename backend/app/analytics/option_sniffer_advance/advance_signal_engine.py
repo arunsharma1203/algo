@@ -73,6 +73,7 @@ class AdvanceSignalEngine:
     """Institutional Dual-Book Regime Router & Signal Evaluator."""
 
     _COOLDOWNS: Dict[str, float] = {}
+    _ACTIVE_UNDERLYING_LOCKS: Dict[str, float] = {}
 
     def __init__(self, model: Optional[OptionAlphaModel] = None):
         self.model = model or OptionAlphaModel()
@@ -80,6 +81,7 @@ class AdvanceSignalEngine:
     @classmethod
     def reset_state(cls) -> None:
         cls._COOLDOWNS.clear()
+        cls._ACTIVE_UNDERLYING_LOCKS.clear()
 
     @classmethod
     def record_exit_cooldown(
@@ -170,6 +172,7 @@ class AdvanceSignalEngine:
         is_long_open = len(u_open_long) > 0
         is_short_open = len(u_open_short) > 0
         parent_long_entry_time = str(u_open_long[0].get("entry_time") or "") if is_long_open else ""
+        parent_long_opt_type = str(u_open_long[0].get("option_type") or "").upper().strip() if is_long_open else ""
 
         long_open_elapsed_sec = 99999.0
         if is_long_open:
@@ -198,14 +201,22 @@ class AdvanceSignalEngine:
         is_wave2_exhaustion_short = is_post_harvest_after_close and (
             atr_ratio <= POST_HARVEST_EXHAUSTION_ATR_RATIO_MAX or kaufman_er <= POST_HARVEST_EXHAUSTION_ER_MAX
         )
+        is_diagonal_type_mismatch = (
+            is_long_open
+            and (long_open_elapsed_sec >= DIAGONAL_MIN_LONG_ELAPSED_SECONDS)
+            and (otm_strikes >= DIAGONAL_MIN_OTM_STRIKES)
+            and bool(parent_long_opt_type)
+            and (opt_type != parent_long_opt_type)
+        )
         is_diagonal_otm_short = (
             is_long_open
+            and (not parent_long_opt_type or opt_type == parent_long_opt_type)
             and (long_open_elapsed_sec >= DIAGONAL_MIN_LONG_ELAPSED_SECONDS)
             and (otm_strikes >= DIAGONAL_MIN_OTM_STRIKES)
         )
 
         is_short_regime = can_short_extrinsic and (
-            is_contraction_short or is_wave2_exhaustion_short or is_diagonal_otm_short
+            is_contraction_short or is_wave2_exhaustion_short or is_diagonal_otm_short or is_diagonal_type_mismatch
         )
 
         # 4. Derive Causal Intraday Directional Alignment when upstream_signals is absent/neutral
@@ -272,17 +283,41 @@ class AdvanceSignalEngine:
             direction = DIRECTION_SELL_CE if opt_type == "CE" else DIRECTION_SELL_PE
             if is_wave2_exhaustion_short:
                 strategy_mode = STRATEGY_WAVE2_EXHAUSTION_SELLER
-            elif is_diagonal_otm_short:
+            elif is_diagonal_otm_short or is_diagonal_type_mismatch:
                 strategy_mode = STRATEGY_DIAGONAL_OTM_WING_SELLER
             else:
                 strategy_mode = STRATEGY_CONTRACTION_THETA_SELLER
 
             if is_short_open:
                 rejection_reasons.append(f"Short Book Anti-Clustering: Active 1-Lot Short {u_sym} position already open")
+            if is_diagonal_type_mismatch:
+                rejection_reasons.append(
+                    f"Diagonal Spread Type Mismatch: Active {u_sym} parent Long is {parent_long_opt_type}, cannot pair with opposite {opt_type} short wing"
+                )
             if strategy_mode == STRATEGY_DIAGONAL_OTM_WING_SELLER and parent_long_entry_time:
                 if AdvanceDB.has_diagonal_wing_for_active_long(u_sym, parent_long_entry_time):
                     rejection_reasons.append(
                         f"Diagonal Wing Anti-Churn: 1 Diagonal OTM Wing already executed for active {u_sym} parent Long wave"
+                    )
+            if strategy_mode == STRATEGY_WAVE2_EXHAUSTION_SELLER and recent_harvest and recent_harvest.get("exit_time"):
+                if AdvanceDB.has_exhaustion_short_for_harvested_wave(
+                    u_sym, opt_type, str(recent_harvest.get("exit_time"))
+                ):
+                    rejection_reasons.append(
+                        f"Wave-2 Exhaustion Anti-Churn: 1 Exhaustion Short already executed for harvested {u_sym} {opt_type} wave"
+                    )
+            if strategy_mode == STRATEGY_CONTRACTION_THETA_SELLER:
+                if vrp < 0.0:
+                    rejection_reasons.append(
+                        f"Contraction Short VRP Guard: VRP ({vrp:+.2f}% < 0.0%) indicates underpriced IV relative to 15m RV ({rv_15m_ann:.1f}%)"
+                    )
+                if opt_type == "CE" and (plus_di - minus_di) > 8.0 and kaufman_er >= 0.30:
+                    rejection_reasons.append(
+                        f"Contraction Short Trend Conflict: +DI ({plus_di:.1f}) > -DI ({minus_di:.1f}) + 8.0 with ER {kaufman_er:.2f}; naked SELL_CE blocked"
+                    )
+                elif opt_type == "PE" and (minus_di - plus_di) > 8.0 and kaufman_er >= 0.30:
+                    rejection_reasons.append(
+                        f"Contraction Short Trend Conflict: -DI ({minus_di:.1f}) > +DI ({plus_di:.1f}) + 8.0 with ER {kaufman_er:.2f}; naked SELL_PE blocked"
                     )
             recent_short_loss = AdvanceDB.get_recent_book_loss_cooldown(
                 book_type=BOOK_SHORT_SELL,
@@ -304,6 +339,19 @@ class AdvanceSignalEngine:
 
             if is_long_open:
                 rejection_reasons.append(f"Long Book Anti-Clustering: Active 1-Lot Long {u_sym} position already open")
+            raw_delta_abs = abs(float(quote.get("delta") or 0.50))
+            if 0.0 < ask < 35.0:
+                rejection_reasons.append(
+                    f"Minimum Premium Discipline: Option ask ₹{ask:.2f} < ₹35.00 institutional floor"
+                )
+            if 0.0 < raw_delta_abs < 0.32:
+                rejection_reasons.append(
+                    f"Minimum Delta Discipline: |Delta| {raw_delta_abs:.2f} < 0.32 institutional floor"
+                )
+            if otm_strikes > 2.5:
+                rejection_reasons.append(
+                    f"Far-OTM Strike Discipline: Strike {strike:.0f} is {otm_strikes:.2f} strikes OTM (> 2.50 max)"
+                )
             if is_post_harvest_after_close:
                 rem_m = max(1, int(recent_harvest.get("remaining_seconds", 1800)) // 60)
                 rejection_reasons.append(
@@ -342,6 +390,11 @@ class AdvanceSignalEngine:
         cb = AdvanceDB.get_circuit_breaker_telemetry(as_of_time=now_dt)
         if cb.get("is_session_halted") or cb.get("is_pause_active"):
             rejection_reasons.append(f"Sandbox Circuit Breaker Active: {cb.get('halt_reason')}")
+
+        u_lock_key = f"{book_type}_{u_sym}"
+        last_u_lock = self._ACTIVE_UNDERLYING_LOCKS.get(u_lock_key, 0.0)
+        if 0 <= (now_epoch - last_u_lock) < 15.0:
+            rejection_reasons.append(f"Same-Sweep Anti-Clustering Lock: {u_sym} {book_type} already triggered in current sweep")
 
         cd_key = f"{book_type}_{ikey}"
         last_cd = self._COOLDOWNS.get(cd_key, 0.0)
@@ -396,6 +449,7 @@ class AdvanceSignalEngine:
 
         if is_active:
             self._COOLDOWNS[cd_key] = now_epoch
+            self._ACTIVE_UNDERLYING_LOCKS[u_lock_key] = now_epoch
             trade_id = AdvancePaperExecution.open_trade(
                 sig_payload, as_of_time=now_dt, enforce_cutoff=enforce_cutoff
             )

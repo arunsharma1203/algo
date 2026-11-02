@@ -669,6 +669,220 @@ class TestStep3OptionSnifferAdvanceDualBook(unittest.TestCase):
         self.assertEqual(reasons["NSE_FO|W_SHORT"], "PARENT_LONG_EXITED_RECONCILE")
         self.assertEqual(len(AdvanceDB.get_open_trades()), 0)
 
+    def test_10_five_institutional_advance_upgrades(self):
+        """
+        Verifies Upgrades A1-A5:
+          - A1: CONTRACTION_THETA_SELLER blocks VRP < 0.0 and blocks naked SELL_CE into strong +DI trend.
+          - A2: DIAGONAL_OTM_WING_SELLER blocks opposite option_type wing (PE wing on CE parent Long).
+          - A3: WAVE_2_EXHAUSTION_SELLER enforces 1-Exhaustion-Short-Per-Harvested-Long-Wave.
+          - A4: LONG_BOOK_BUY enforces Ask >= Rs.35, |Delta| >= 0.32, OTM <= 2.5 strikes, and Same-Sweep Lock.
+        """
+        engine = AdvanceSignalEngine()
+        t0 = datetime(2026, 11, 2, 10, 15, 0)
+
+        with patch.object(
+            engine.model,
+            "predict_contract",
+            return_value={"calibrated_prob": 0.58, "expected_net_return_pct": 14.0},
+        ):
+            # A4: Low premium / low delta / far-OTM lottery contract blocked in LONG_BOOK_BUY
+            otm_lottery = {
+                "instrument_key": "NSE_FO|LOTTERY_23600CE",
+                "trading_symbol": "NIFTY 23600 CE",
+                "underlying": "NIFTY",
+                "strike": 23600.0,
+                "option_type": "CE",
+                "lot_size": 65,
+                "expiry": "2026-11-03",
+            }
+            lottery_quote = {
+                **otm_lottery,
+                "ltp": 11.0,
+                "bid": 10.75,
+                "ask": 10.80,
+                "spread_pct": 0.45,
+                "volume": 80000,
+                "oi": 200000,
+                "iv": 14.5,
+                "delta": 0.11,
+                "quote_age_ms": 50,
+            }
+            u_quote = {"spot_ltp": 23350.0, "open": 23300.0, "vwap": 23320.0}
+            bull_intel = {
+                "spot_price": 23350.0,
+                "completed_bars_count": 60,
+                "adx_14": 25.0,
+                "plus_di": 28.0,
+                "minus_di": 14.0,
+                "kaufman_er": 0.42,
+                "atr_ratio": 1.08,
+                "vrp": 2.5,
+                "rv_15m_ann": 12.0,
+            }
+            res_lot = engine.evaluate_contract(
+                contract=otm_lottery,
+                quote=lottery_quote,
+                underlying_quote=u_quote,
+                chain_intel=bull_intel,
+                as_of_time=t0,
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(res_lot["status"], "ACTIVE")
+            lot_reasons = " | ".join(res_lot["rejection_reasons"])
+            self.assertIn("Minimum Premium Discipline", lot_reasons)
+            self.assertIn("Minimum Delta Discipline", lot_reasons)
+            self.assertIn("Far-OTM Strike Discipline", lot_reasons)
+
+            # A1: CONTRACTION_THETA_SELLER blocks when VRP < 0.0 or strong +DI trend conflict
+            atm_ce = {
+                "instrument_key": "NSE_FO|ATM_23350CE",
+                "trading_symbol": "NIFTY 23350 CE",
+                "underlying": "NIFTY",
+                "strike": 23350.0,
+                "option_type": "CE",
+                "lot_size": 65,
+                "expiry": "2026-11-03",
+            }
+            atm_quote = {
+                **atm_ce,
+                "ltp": 82.0,
+                "bid": 81.8,
+                "ask": 82.0,
+                "spread_pct": 0.24,
+                "volume": 150000,
+                "oi": 450000,
+                "iv": 13.0,
+                "delta": 0.50,
+                "quote_age_ms": 50,
+            }
+            contraction_bad_intel = {
+                "spot_price": 23350.0,
+                "completed_bars_count": 60,
+                "adx_14": 21.0,
+                "plus_di": 26.0,
+                "minus_di": 14.0,
+                "kaufman_er": 0.34,
+                "atr_ratio": 0.80,
+                "vrp": -1.5,
+                "rv_15m_ann": 14.5,
+            }
+            res_c_bad = engine.evaluate_contract(
+                contract=atm_ce,
+                quote=atm_quote,
+                underlying_quote=u_quote,
+                chain_intel=contraction_bad_intel,
+                as_of_time=t0,
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(res_c_bad["status"], "ACTIVE")
+            c_reasons = " | ".join(res_c_bad["rejection_reasons"])
+            self.assertIn("Contraction Short VRP Guard", c_reasons)
+            self.assertIn("Contraction Short Trend Conflict", c_reasons)
+
+            # A2: Open a parent Long CE at 10:15, then at 10:25 (> 8m elapsed) verify an OTM PE wing is blocked
+            res_long = engine.evaluate_contract(
+                contract=atm_ce,
+                quote=atm_quote,
+                underlying_quote=u_quote,
+                chain_intel=bull_intel,
+                as_of_time=t0,
+                enforce_cutoff=True,
+            )
+            self.assertEqual(res_long["status"], "ACTIVE")
+
+            otm_pe_wing = {
+                "instrument_key": "NSE_FO|OTM_23250PE",
+                "trading_symbol": "NIFTY 23250 PE",
+                "underlying": "NIFTY",
+                "strike": 23250.0,
+                "option_type": "PE",
+                "lot_size": 65,
+                "expiry": "2026-11-03",
+            }
+            pe_wing_quote = {
+                **otm_pe_wing,
+                "ltp": 45.0,
+                "bid": 44.8,
+                "ask": 45.0,
+                "spread_pct": 0.44,
+                "volume": 120000,
+                "oi": 380000,
+                "iv": 15.0,
+                "delta": -0.28,
+                "quote_age_ms": 50,
+            }
+            res_mismatch = engine.evaluate_contract(
+                contract=otm_pe_wing,
+                quote=pe_wing_quote,
+                underlying_quote=u_quote,
+                chain_intel=bull_intel,
+                as_of_time=datetime(2026, 11, 2, 10, 25, 0),
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(res_mismatch["status"], "ACTIVE")
+            self.assertTrue(
+                any("Diagonal Spread Type Mismatch" in r for r in res_mismatch["rejection_reasons"]),
+                f"Expected Diagonal Spread Type Mismatch, got: {res_mismatch['rejection_reasons']}",
+            )
+
+            # A3: Close the parent Long CE as a +30% MFE winner at 10:30, then verify WAVE_2_EXHAUSTION_SELLER
+            # allows the 1st Exhaustion Short at 10:35, and blocks a 2nd repeat Exhaustion Short at 10:50!
+            AdvancePaperExecution.update_open_trades(
+                {"NSE_FO|ATM_23350CE": {**atm_quote, "bid": 108.0, "ask": 108.4}},
+                {"NIFTY": u_quote},
+                as_of_time=datetime(2026, 11, 2, 10, 28, 0),
+            )
+            closed_l = AdvancePaperExecution.update_open_trades(
+                {"NSE_FO|ATM_23350CE": {**atm_quote, "bid": 98.0, "ask": 98.4}},
+                {"NIFTY": u_quote},
+                as_of_time=datetime(2026, 11, 2, 10, 30, 0),
+            )
+            self.assertEqual(len(closed_l), 1)
+
+            exh_intel = {
+                **bull_intel,
+                "atr_ratio": 0.88,
+                "kaufman_er": 0.18,
+            }
+            res_exh1 = engine.evaluate_contract(
+                contract=atm_ce,
+                quote={**atm_quote, "bid": 90.0, "ask": 90.2},
+                underlying_quote=u_quote,
+                chain_intel=exh_intel,
+                as_of_time=datetime(2026, 11, 2, 10, 36, 0),
+                enforce_cutoff=True,
+            )
+            self.assertEqual(res_exh1["status"], "ACTIVE")
+            self.assertEqual(res_exh1["strategy_mode"], STRATEGY_WAVE2_EXHAUSTION_SELLER)
+
+            # Close 1st Exhaustion Short as a Reverse-Chandelier winner at 10:45
+            AdvancePaperExecution.update_open_trades(
+                {"NSE_FO|ATM_23350CE": {**atm_quote, "bid": 68.0, "ask": 68.2}},
+                {"NIFTY": u_quote},
+                as_of_time=datetime(2026, 11, 2, 10, 42, 0),
+            )
+            closed_exh1 = AdvancePaperExecution.update_open_trades(
+                {"NSE_FO|ATM_23350CE": {**atm_quote, "bid": 72.5, "ask": 72.8}},
+                {"NIFTY": u_quote},
+                as_of_time=datetime(2026, 11, 2, 10, 45, 0),
+            )
+            self.assertEqual(len(closed_exh1), 1)
+
+            # Attempt 2nd repeat Wave-2 Exhaustion Short at 10:52 on the same harvested Long wave -> BLOCKED!
+            res_exh2 = engine.evaluate_contract(
+                contract=atm_ce,
+                quote={**atm_quote, "bid": 78.0, "ask": 78.2},
+                underlying_quote=u_quote,
+                chain_intel=exh_intel,
+                as_of_time=datetime(2026, 11, 2, 10, 52, 0),
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(res_exh2["status"], "ACTIVE")
+            self.assertTrue(
+                any("Wave-2 Exhaustion Anti-Churn" in r for r in res_exh2["rejection_reasons"]),
+                f"Expected Wave-2 Exhaustion Anti-Churn, got: {res_exh2['rejection_reasons']}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

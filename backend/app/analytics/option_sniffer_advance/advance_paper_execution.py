@@ -415,6 +415,8 @@ class AdvancePaperExecution:
                     exit_reason = "STAGNATION_TIME_STOP"
                 elif duration_min >= 20.0 and mfe_pct < 8.0 and curr_pnl_pct <= -2.0:
                     exit_reason = "STAGNATION_TIME_STOP"
+                elif duration_min >= 22.0 and 4.0 <= mfe_pct < 8.0 and curr_pnl_pct <= -3.5:
+                    exit_reason = "STAGNATION_TIME_STOP"
                 elif duration_min >= MAX_HOLDING_MINUTES:
                     exit_reason = "TIME_DECAY_EXPIRY"
                 elif (enforce_cutoff or as_of_time is not None) and (

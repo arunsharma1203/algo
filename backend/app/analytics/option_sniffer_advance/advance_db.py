@@ -23,6 +23,7 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     POST_SL_DIRECTIONAL_COOLDOWN_SECONDS,
     POST_STAGNATION_COOLDOWN_SECONDS,
     STRATEGY_DIAGONAL_OTM_WING_SELLER,
+    STRATEGY_WAVE2_EXHAUSTION_SELLER,
     to_ist_naive,
 )
 from app.data.historical_data_layer import get_db_path
@@ -727,6 +728,45 @@ class AdvanceDB:
                 return row is not None
             except Exception as e:
                 logger.debug(f"[AdvanceDB] Diagonal wing parent check note: {e}")
+                return False
+
+    @classmethod
+    def has_exhaustion_short_for_harvested_wave(
+        cls,
+        underlying: str,
+        option_type: str,
+        harvest_exit_time: str,
+    ) -> bool:
+        """
+        Enforces a strict 1-Wave-2-Exhaustion-Short-Per-Long-Harvest invariant:
+        Once WAVE_2_EXHAUSTION_SELLER has executed 1 trade on (underlying, option_type)
+        at or after `harvest_exit_time`, blocks repeat 2nd/3rd exhaustion entries on the same wave.
+        """
+        u_str = str(underlying or "NIFTY").upper().strip()
+        o_str = str(option_type or "CE").upper().strip()
+        if not harvest_exit_time:
+            return False
+
+        with _ADVANCE_DB_LOCK:
+            try:
+                conn = cls.get_connection()
+                row = conn.execute(
+                    """
+                    SELECT trade_id
+                    FROM option_sniffer_advance_trades
+                    WHERE book_type = ?
+                      AND strategy_mode = ?
+                      AND UPPER(underlying) = ?
+                      AND UPPER(option_type) = ?
+                      AND entry_time >= ?
+                    LIMIT 1
+                    """,
+                    (BOOK_SHORT_SELL, STRATEGY_WAVE2_EXHAUSTION_SELLER, u_str, o_str, str(harvest_exit_time)),
+                ).fetchone()
+                conn.close()
+                return row is not None
+            except Exception as e:
+                logger.debug(f"[AdvanceDB] Exhaustion wave check note: {e}")
                 return False
 
     @classmethod
