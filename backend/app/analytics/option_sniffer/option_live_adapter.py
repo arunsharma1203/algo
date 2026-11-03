@@ -1086,9 +1086,10 @@ class OptionLiveAdapter:
                     for pos in positions:
                         ikey = pos.get("instrument_key")
                         quote = stream_mgr.get_option_quote(ikey) if ikey else None
-                        if not quote and ikey and not refreshed_once:
+                        quote_stale = (not quote) or (int(quote.get("quote_age_ms") or 0) > 4000)
+                        if quote_stale and ikey and not refreshed_once:
                             refreshed_once = True
-                            stream_mgr.refresh_quotes_via_rest()
+                            stream_mgr.refresh_quotes_via_rest(min_interval_sec=4.0)
                             quote = stream_mgr.get_option_quote(ikey)
                         if quote:
                             current_bid = float(quote.get("bid") or quote.get("ltp") or 0.0)

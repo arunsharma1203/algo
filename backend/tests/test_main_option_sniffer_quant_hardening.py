@@ -726,6 +726,29 @@ class TestMainOptionSnifferQuantHardening(unittest.TestCase):
             self.assertEqual(sp_val, 0.25)
             self.assertTrue(sp_ok)
 
+        # 7. Verify WebSocket V3 Startup Race Fix & Zero Synthetic Price Offset
+        from app.data.upstox_stream_service import UpstoxStreamService
+        ws_svc = UpstoxStreamService.__new__(UpstoxStreamService)
+        import threading
+        ws_svc._lock = threading.Lock()
+        ws_svc._key_to_symbol = {"NSE_EQ|RELIANCE": "RELIANCE.NS"}
+        ws_svc._additional_keys = set()
+        ws_svc._subscribed_ws_keys = set()
+        ws_svc._streamer = MagicMock()
+        ws_svc._is_connected = False
+
+        # Call subscribe_additional_keys while _is_connected is False (simulating startup race)
+        ws_svc.subscribe_additional_keys(["NSE_FO|39945", "NSE_FO|39946"])
+        self.assertIn("NSE_FO|39945", ws_svc._additional_keys)
+        self.assertNotIn("NSE_FO|39945", ws_svc._subscribed_ws_keys)
+        ws_svc._streamer.subscribe.assert_not_called()
+
+        # Once connected, calling subscribe_additional_keys subscribes the pending option keys on WebSocket V3
+        ws_svc._is_connected = True
+        ws_svc.subscribe_additional_keys(["NSE_FO|39945", "NSE_FO|39946"])
+        ws_svc._streamer.subscribe.assert_called_once_with(["NSE_FO|39945", "NSE_FO|39946"], "full")
+        self.assertIn("NSE_FO|39945", ws_svc._subscribed_ws_keys)
+
 
 if __name__ == "__main__":
     unittest.main()

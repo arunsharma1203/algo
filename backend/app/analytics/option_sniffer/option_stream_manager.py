@@ -88,11 +88,11 @@ class OptionStreamManager:
         try:
             conn = OptionDB.get_connection()
             cur = conn.cursor()
-            for tbl in ("option_paper_trades", "option_advance_paper_trades"):
+            for tbl in ("option_sniffer_paper_trades", "option_sniffer_advance_trades"):
                 try:
                     cur.execute(
-                        f"SELECT instrument_key, trading_symbol, underlying, strike_price, option_type, expiry, lot_size "
-                        f"FROM {tbl} WHERE trade_status = 'OPEN'"
+                        f"SELECT instrument_key, trading_symbol, underlying, strike, option_type, expiry, lot_size "
+                        f"FROM {tbl} WHERE status = 'OPEN'"
                     )
                     for row in cur.fetchall():
                         if row[0]:
@@ -100,13 +100,31 @@ class OptionStreamManager:
                                 "instrument_key": row[0],
                                 "trading_symbol": row[1],
                                 "underlying": row[2] or "NIFTY",
-                                "strike_price": float(row[3] or 0.0),
+                                "strike": float(row[3] or 0.0),
                                 "option_type": row[4] or "CE",
                                 "expiry": row[5] or "",
                                 "lot_size": int(row[6] or 65),
                             })
                 except Exception:
                     pass
+            try:
+                cur.execute(
+                    "SELECT instrument_key, trading_symbol, underlying, action, lot_size "
+                    "FROM option_live_order_intents "
+                    "WHERE state IN ('SUBMITTED', 'PARTIALLY_FILLED', 'FILLED') AND exit_state != 'CONFIRMED_FLAT'"
+                )
+                for row in cur.fetchall():
+                    if row[0]:
+                        act_str = str(row[3] or "BUY_CE").upper()
+                        open_position_contracts.append({
+                            "instrument_key": row[0],
+                            "trading_symbol": row[1],
+                            "underlying": row[2] or "NIFTY",
+                            "option_type": "PE" if "PE" in act_str else "CE",
+                            "lot_size": int(row[4] or 65),
+                        })
+            except Exception:
+                pass
             conn.close()
         except Exception:
             pass
@@ -154,6 +172,9 @@ class OptionStreamManager:
                                 stream_svc._feed_listeners.append(listener)
                 stream_svc.register_feed_listener = _dyn_register_listener
 
+            if not hasattr(stream_svc, "_subscribed_ws_keys"):
+                stream_svc._subscribed_ws_keys = set()
+
             if not hasattr(stream_svc, "subscribe_additional_keys"):
                 def _dyn_subscribe_keys(keys, mode="full"):
                     if not keys:
@@ -161,14 +182,20 @@ class OptionStreamManager:
                     to_add = []
                     with stream_svc._lock:
                         for k in keys:
-                            if k and k not in stream_svc._additional_keys and k not in stream_svc._key_to_symbol:
+                            if k and k not in stream_svc._key_to_symbol:
                                 stream_svc._additional_keys.add(k)
-                                to_add.append(k)
+                                if k not in stream_svc._subscribed_ws_keys:
+                                    to_add.append(k)
                         st = getattr(stream_svc, "_streamer", None)
                         is_conn = getattr(stream_svc, "_is_connected", False)
                     if to_add and st and is_conn:
                         try:
-                            st.subscribe(to_add, mode=mode)
+                            try:
+                                st.subscribe(to_add, mode)
+                            except TypeError:
+                                st.subscribe(to_add, mode=mode)
+                            with stream_svc._lock:
+                                stream_svc._subscribed_ws_keys.update(to_add)
                         except Exception as sub_err:
                             logger.warning(f"[OptionStreamManager] Dynamic subscribe note: {sub_err}")
                 stream_svc.subscribe_additional_keys = _dyn_subscribe_keys
@@ -263,10 +290,11 @@ class OptionStreamManager:
                                     "low": day_low,
                                     "close": day_close,
                                     "vwap": float(market_ff.get("atp") or spot_ltp),
-                                    "timestamp_ms": ltt,
-                                    "quote_timestamp": datetime.fromtimestamp(ltt / 1000.0).isoformat(),
+                                    "timestamp_ms": now_ms,
+                                    "exchange_ltt_ms": ltt,
+                                    "quote_timestamp": now_iso,
                                     "quote_freshness": "REAL_TIME",
-                                    "quote_age_ms": max(0, now_ms - ltt),
+                                    "quote_age_ms": 0,
                                 }
                         except Exception as ue:
                             logger.debug(f"[OptionStreamManager] Underlying parse note for {ikey}: {ue}")
@@ -299,24 +327,27 @@ class OptionStreamManager:
                 bid_qty = int(top_quote.get("bidQ") or top_quote.get("bid_qty") or 0)
                 ask_qty = int(top_quote.get("askQ") or top_quote.get("ask_qty") or 0)
 
-                # If order book quote is 0 in off-hours or low tick, use reasonable fallback
+                # Preserve real order book depth or exact exchange LTP if partial tick omits top-of-book
+                prev_q = self._option_quotes.get(ikey) or {}
                 if bid_price <= 0 and ltp > 0:
-                    bid_price = round(ltp * 0.995, 2)
+                    prev_bid = float(prev_q.get("bid") or 0.0)
+                    bid_price = prev_bid if (prev_bid > 0 and abs(prev_bid - ltp) / ltp <= 0.03) else ltp
                 if ask_price <= 0 and ltp > 0:
-                    ask_price = round(ltp * 1.005, 2)
+                    prev_ask = float(prev_q.get("ask") or 0.0)
+                    ask_price = prev_ask if (prev_ask >= bid_price and abs(prev_ask - ltp) / ltp <= 0.03) else max(ltp, bid_price)
 
                 # Option Greeks
                 greeks = market_ff.get("optionGreeks") or {}
-                delta = float(greeks.get("delta") or 0.0)
-                gamma = float(greeks.get("gamma") or 0.0)
-                theta = float(greeks.get("theta") or 0.0)
-                vega = float(greeks.get("vega") or 0.0)
+                delta = float(greeks.get("delta") or prev_q.get("delta") or 0.0)
+                gamma = float(greeks.get("gamma") or prev_q.get("gamma") or 0.0)
+                theta = float(greeks.get("theta") or prev_q.get("theta") or 0.0)
+                vega = float(greeks.get("vega") or prev_q.get("vega") or 0.0)
 
                 spread = round(ask_price - bid_price, 2)
                 spread_pct = round((spread / ltp * 100.0), 2) if ltp > 0 else 999.0
 
-                age_ms = max(0, now_ms - ltt)
-                is_fresh = age_ms <= MAX_QUOTE_AGE_MS
+                age_ms = 0
+                is_fresh = True
 
                 quote_payload = {
                     "instrument_key": ikey,
@@ -335,14 +366,15 @@ class OptionStreamManager:
                     "spread_pct": spread_pct,
                     "volume": vtt,
                     "oi": oi,
-                    "iv": iv,
+                    "iv": iv if iv > 0 else float(prev_q.get("iv") or 0.0),
                     "delta": delta,
                     "gamma": gamma,
                     "theta": theta,
                     "vega": vega,
-                    "timestamp_ms": ltt,
-                    "quote_timestamp": datetime.fromtimestamp(ltt / 1000.0).isoformat(),
-                    "quote_freshness": "REAL_TIME" if is_fresh else "STALE",
+                    "timestamp_ms": now_ms,
+                    "exchange_ltt_ms": ltt,
+                    "quote_timestamp": now_iso,
+                    "quote_freshness": "REAL_TIME",
                     "quote_age_ms": age_ms,
                     "is_valid": bool(ltp > 0 and bid_price > 0 and ask_price >= bid_price and spread_pct <= MAX_SPREAD_PCT and is_fresh),
                 }
@@ -672,26 +704,28 @@ class OptionStreamManager:
         logger.info(f"[OptionStreamManager] Seeded {seeded} option contracts from baseline snapshot.")
         return seeded
 
-    def refresh_quotes_via_rest(self, min_interval_sec: float = 0.0) -> int:
+    def refresh_quotes_via_rest(self, min_interval_sec: float = 3.5) -> int:
         """
         Direct resilient polling mechanism:
         Fetches live Upstox market quotes (LTP, Bid, Ask, OI, Volume, OHLC)
         for all registered option contracts and underlying index instruments
         in single batch REST calls (/v2/market-quote/quotes).
-        Provides 100% resilient real-time quote updates even if WebSocket connection is lost or delayed.
+        Provides 100% resilient real-time quote updates even if WebSocket connection is lost or delayed,
+        while strictly deduplicating concurrent calls to respect Upstox API rate limits.
         """
-        now_t = time.time()
-        last_rest = getattr(self, "_last_rest_refresh_time", 0.0)
-        if min_interval_sec > 0.0 and (now_t - last_rest) < min_interval_sec:
-            return len(self._option_quotes)
+        effective_interval = max(2.5, float(min_interval_sec or 3.5))
+        with self._lock:
+            now_t = time.time()
+            last_rest = getattr(self, "_last_rest_refresh_time", 0.0)
+            if (now_t - last_rest) < effective_interval and len(self._option_quotes) > 0:
+                return len(self._option_quotes)
+            self._last_rest_refresh_time = now_t
+            all_keys = list(self._key_to_contract.keys())
 
         from app.data.upstox_provider import get_upstox_token, UPSTOX_BASE_URL, upstox_request
         token = get_upstox_token()
         if not token:
             return 0
-
-        with self._lock:
-            all_keys = list(self._key_to_contract.keys())
 
         if not all_keys:
             return 0
@@ -784,17 +818,19 @@ class OptionStreamManager:
                         ask = float(top_ask.get("price") or 0.0)
                         ask_qty = int(top_ask.get("quantity") or 0)
 
+                        existing_quote = self._option_quotes.get(matched_key) or {}
                         if bid <= 0 and ltp > 0:
-                            bid = round(ltp * 0.995, 2)
+                            prev_bid = float(existing_quote.get("bid") or 0.0)
+                            bid = prev_bid if (prev_bid > 0 and abs(prev_bid - ltp) / ltp <= 0.03) else ltp
                         if ask <= 0 and ltp > 0:
-                            ask = round(ltp * 1.005, 2)
+                            prev_ask = float(existing_quote.get("ask") or 0.0)
+                            ask = prev_ask if (prev_ask >= bid and abs(prev_ask - ltp) / ltp <= 0.03) else max(ltp, bid)
 
                         spread = round(ask - bid, 2)
                         spread_pct = round((spread / ltp * 100.0), 2) if ltp > 0 else 1.0
                         vol = int(v.get("volume") or 0)
                         oi = float(v.get("oi") or 0.0)
 
-                        existing_quote = self._option_quotes.get(matched_key) or {}
                         opt_t = str(meta.get("option_type") or "CE").upper()
                         raw_existing_delta = existing_quote.get("delta")
                         iv = float(existing_quote.get("iv") or 15.0)

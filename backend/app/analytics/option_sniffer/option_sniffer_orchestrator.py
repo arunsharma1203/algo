@@ -198,14 +198,14 @@ class OptionSnifferOrchestrator:
                 self._last_discovery_time = time.time()
 
             # 0b. Self-Healing Live Quote Ingestion:
-            # Verify that quotes exist and neither underlyings nor candidate options are stale (> 15s).
-            # If any quote is stale or missing, pull fresh quotes via REST batch quote so every contract has fresh data.
+            # Verify that quotes exist and neither underlyings nor candidate options are stale (> 8s).
+            # If any quote is stale or missing, pull fresh quotes via REST batch quote (throttled to respect Upstox rate limits).
             active_quotes = self.stream_manager.get_all_active_option_quotes()
-            stale_count = sum(1 for q in active_quotes if q.get("quote_age_ms", 99999) > 15000)
+            stale_count = sum(1 for q in active_quotes if q.get("quote_age_ms", 99999) > 8000)
             underlying_stale = False
             for u in ("NIFTY", "BANKNIFTY"):
                 uq = self.stream_manager.get_underlying_quote(u)
-                if not uq or uq.get("quote_age_ms", 99999) > 15000:
+                if not uq or uq.get("quote_age_ms", 99999) > 8000:
                     underlying_stale = True
                     break
 
@@ -216,7 +216,7 @@ class OptionSnifferOrchestrator:
                 or underlying_stale
             )
             if needs_rest_refresh:
-                self.stream_manager.refresh_quotes_via_rest()
+                self.stream_manager.refresh_quotes_via_rest(min_interval_sec=4.0)
 
             # 1. Update active paper positions
             live_quotes = {q["instrument_key"]: q for q in self.stream_manager.get_all_active_option_quotes()}
@@ -667,6 +667,7 @@ class OptionSnifferOrchestrator:
         open_raw = OptionDB.get_open_paper_trades()
         now_dt = to_ist_naive()
         decorated_open: List[Dict[str, Any]] = []
+        refreshed_once = False
 
         for trade in open_raw:
             t = dict(trade)
@@ -674,6 +675,14 @@ class OptionSnifferOrchestrator:
             quote = None
             if ikey:
                 quote = self.stream_manager.get_option_quote(ikey)
+                quote_stale = (not quote) or (int(quote.get("quote_age_ms") or 0) > 4000)
+                if quote_stale and not refreshed_once:
+                    refreshed_once = True
+                    try:
+                        self.stream_manager.refresh_quotes_via_rest(min_interval_sec=4.0)
+                    except Exception:
+                        pass
+                    quote = self.stream_manager.get_option_quote(ikey)
                 if not quote:
                     quote = self.stream_manager._option_quotes.get(ikey)
 
@@ -683,15 +692,15 @@ class OptionSnifferOrchestrator:
             base_lot_qty = int(t.get("lot_size") or quantity or 65)
             is_scaled_in = int(t.get("scale_in_count") or 0) >= 1
 
-            # Live execution prices strictly at market bid
+            # Live execution prices strictly at real market bid / LTP (zero synthetic offset)
             if quote and float(quote.get("bid") or 0.0) > 0:
                 current_bid = float(quote.get("bid"))
                 current_ask = float(quote.get("ask") or current_bid)
                 current_ltp = float(quote.get("ltp") or current_bid)
             elif quote and float(quote.get("ltp") or 0.0) > 0:
                 current_ltp = float(quote.get("ltp"))
-                current_bid = round(current_ltp * 0.995, 2)
-                current_ask = round(current_ltp * 1.005, 2)
+                current_bid = current_ltp
+                current_ask = float(quote.get("ask") or current_ltp)
             else:
                 current_bid = float(t.get("peak_price") or anchor_entry_ask)
                 current_ask = entry_ask

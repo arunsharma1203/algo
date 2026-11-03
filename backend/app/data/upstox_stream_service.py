@@ -104,6 +104,7 @@ class UpstoxStreamService:
         # External listeners and dynamic subscriptions (e.g. Option Sniffer, Index Candle Ingestion)
         self._feed_listeners: List[Any] = []
         self._additional_keys: Set[str] = {"NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"}
+        self._subscribed_ws_keys: Set[str] = set()
 
         # Wire continuous index candle ingestion service (for NIFTY and BANKNIFTY continuous_index_ohlcv)
         try:
@@ -168,16 +169,24 @@ class UpstoxStreamService:
             return
         to_add: List[str] = []
         with self._lock:
+            if not hasattr(self, "_subscribed_ws_keys"):
+                self._subscribed_ws_keys = set()
             for k in keys:
-                if k and k not in self._additional_keys and k not in self._key_to_symbol:
+                if k and k not in self._key_to_symbol:
                     self._additional_keys.add(k)
-                    to_add.append(k)
+                    if k not in self._subscribed_ws_keys:
+                        to_add.append(k)
             st = self._streamer
             is_conn = self._is_connected
 
         if to_add and st and is_conn:
             try:
-                st.subscribe(to_add, mode=mode)
+                try:
+                    st.subscribe(to_add, mode)
+                except TypeError:
+                    st.subscribe(to_add, mode=mode)
+                with self._lock:
+                    self._subscribed_ws_keys.update(to_add)
                 logger.info(f"[UpstoxStreamService] Dynamically subscribed {len(to_add)} additional keys to WebSocket.")
             except Exception as sub_err:
                 logger.warning(f"[UpstoxStreamService] Dynamic subscribe note: {sub_err}")
@@ -257,13 +266,31 @@ class UpstoxStreamService:
                 streamer = upstox_client.MarketDataStreamerV3(client, instrument_keys, mode="full")
 
                 def _on_open(*args, **kwargs):
+                    pending_to_sub: List[str] = []
                     with self._lock:
                         self._is_connected = True
                         self._connected_at = datetime.now().isoformat()
                         self._last_error = None
+                        self._subscribed_ws_keys = set(instrument_keys)
+                        for k in self._additional_keys:
+                            if k and k not in self._subscribed_ws_keys:
+                                pending_to_sub.append(k)
                     logger.info(
                         f"[UpstoxStreamService] ✅ WebSocket V3 CONNECTED. Streaming live ticks for {len(instrument_keys)} instruments."
                     )
+                    if pending_to_sub:
+                        try:
+                            try:
+                                streamer.subscribe(pending_to_sub, "full")
+                            except TypeError:
+                                streamer.subscribe(pending_to_sub, mode="full")
+                            with self._lock:
+                                self._subscribed_ws_keys.update(pending_to_sub)
+                            logger.info(
+                                f"[UpstoxStreamService] ✅ Subscribed {len(pending_to_sub)} queued option/index keys on WebSocket open."
+                            )
+                        except Exception as sub_e:
+                            logger.warning(f"[UpstoxStreamService] On-open option subscription note: {sub_e}")
 
                 def _on_message(msg, *args, **kwargs):
                     self._handle_feed_message(msg)
@@ -276,6 +303,8 @@ class UpstoxStreamService:
                 def _on_close(*args, **kwargs):
                     with self._lock:
                         self._is_connected = False
+                        if hasattr(self, "_subscribed_ws_keys"):
+                            self._subscribed_ws_keys.clear()
                     logger.info(f"[UpstoxStreamService] WebSocket connection closed: {args}")
 
                 streamer.on("open", _on_open)
