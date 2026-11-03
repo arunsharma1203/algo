@@ -1319,29 +1319,55 @@ class OptionDB:
                 day_dt = dt_cls.strptime(date_str, "%Y-%m-%d").date()
                 next_day_start = f"{(day_dt + timedelta(days=1)).strftime('%Y-%m-%d')} 00:00:00"
 
-                # 2. Check for any closed trades with net loss or SL/CB exit reason
+                # 2. Check for any closed trades with hard SL/CB/Structure exit reason, meaningful loss, or >=2 scratch losses
                 cur = conn.cursor()
                 rows = cur.execute("""
-                    SELECT trade_id, trading_symbol, exit_reason, net_pnl, exit_time
+                    SELECT trade_id, trading_symbol, exit_reason, net_pnl, exit_time, net_pnl_pct
                     FROM option_sniffer_paper_trades
                     WHERE status = 'CLOSED' 
                       AND exit_time >= ? AND exit_time < ?
                       AND (
                           net_pnl < 0 
-                          OR exit_reason IN ('STOP_LOSS_HIT', 'CIRCUIT_BREAKER_HALT', 'STRUCTURE_INVALIDATION')
+                          OR exit_reason IN (
+                              'STOP_LOSS_HIT',
+                              'CIRCUIT_BREAKER_HALT',
+                              'STRUCTURE_INVALIDATION',
+                              'STRUCTURE_INVALIDATION_BEAR',
+                              'STRUCTURE_INVALIDATION_BULL'
+                          )
                       )
                     ORDER BY exit_time DESC;
                 """, (day_start, next_day_start)).fetchall()
                 conn.close()
 
                 if rows:
-                    worst_or_recent = rows[0]
-                    t_id = worst_or_recent[0]
-                    sym = worst_or_recent[1]
-                    reason = worst_or_recent[2]
-                    pnl = float(worst_or_recent[3] or 0.0)
-                    t_time = worst_or_recent[4]
-                    return True, f"Canary trade {t_id} ({sym}) suffered {reason} with PnL ₹{pnl:,.2f} at {t_time}"
+                    hard_sl_reasons = {
+                        "STOP_LOSS_HIT",
+                        "CIRCUIT_BREAKER_HALT",
+                        "STRUCTURE_INVALIDATION",
+                        "STRUCTURE_INVALIDATION_BEAR",
+                        "STRUCTURE_INVALIDATION_BULL",
+                    }
+                    for r in rows:
+                        t_id, sym, reason, pnl_raw, t_time, pnl_pct_raw = (
+                            r[0],
+                            r[1],
+                            str(r[2] or ""),
+                            float(r[3] or 0.0),
+                            r[4],
+                            float(r[5] or 0.0),
+                        )
+                        if reason in hard_sl_reasons or pnl_raw <= -450.0 or pnl_pct_raw <= -8.0:
+                            return True, f"Canary trade {t_id} ({sym}) suffered {reason} with PnL ₹{pnl_raw:,.2f} at {t_time}"
+
+                    if len(rows) >= 2:
+                        worst_or_recent = rows[0]
+                        t_id = worst_or_recent[0]
+                        sym = worst_or_recent[1]
+                        reason = worst_or_recent[2]
+                        pnl = float(worst_or_recent[3] or 0.0)
+                        t_time = worst_or_recent[4]
+                        return True, f"Canary trade {t_id} ({sym}) suffered {reason} with PnL ₹{pnl:,.2f} at {t_time} (2+ negative paper exits today)"
 
                 return False, "Canary scout healthy: zero paper stop losses today"
             except Exception as e:

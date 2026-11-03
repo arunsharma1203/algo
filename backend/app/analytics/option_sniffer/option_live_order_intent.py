@@ -33,6 +33,8 @@ from app.analytics.option_sniffer.option_constants import (
     DEFAULT_TRAILING_STEP_PCT,
     DEFAULT_HOLDING_MAX_MINUTES,
     BREAKEVEN_FLOOR_PCT,
+    EARLY_BREAKEVEN_TRIGGER_PCT,
+    EARLY_BREAKEVEN_FLOOR_PCT,
     is_option_entry_window,
     is_live_option_entry_window,
     LIVE_ENTRY_OPEN_HOUR,
@@ -1326,18 +1328,37 @@ class OrderIntentEngine:
             elif current_pnl_pct <= -stop_hurdle:
                 exit_reason = "STOP_LOSS_HIT"
             # 3. 4-Tier Chandelier Trailing Stop & Target-Lock Ratchet (100% Parity with Paper Execution)
-            elif mfe_pct >= ratchet_trigger:
+            elif mfe_pct >= min(EARLY_BREAKEVEN_TRIGGER_PCT, ratchet_trigger):
                 chandelier_stop = OptionPaperExecution.calculate_chandelier_stop(
                     entry_fill,
                     current_peak,
                     mfe_pct,
                     target_hurdle=target_hurdle if is_uncapped_mode else None
                 )
-                peak_trail_stop = current_peak * (1.0 - DEFAULT_TRAILING_STEP_PCT / 100.0)
-                breakeven_floor = entry_fill * (1.0 + BREAKEVEN_FLOOR_PCT / 100.0)
-                ratchet_stop = max(chandelier_stop or 0.0, peak_trail_stop, breakeven_floor)
+                if mfe_pct >= ratchet_trigger:
+                    peak_trail_stop = current_peak * (1.0 - DEFAULT_TRAILING_STEP_PCT / 100.0)
+                    breakeven_floor = entry_fill * (1.0 + BREAKEVEN_FLOOR_PCT / 100.0)
+                    classic_ratchet = max(peak_trail_stop, breakeven_floor)
+                else:
+                    classic_ratchet = entry_fill * (1.0 + EARLY_BREAKEVEN_FLOOR_PCT / 100.0)
+                ratchet_stop = max(chandelier_stop or 0.0, classic_ratchet)
                 if current_bid <= ratchet_stop:
                     exit_reason = "TRAILING_STOP_HIT"
+                else:
+                    # Exchange-Level Broker SL Ratcheting: ratchet resting Upstox SL order up in-place (₹0 extra margin)
+                    existing_sl_id = pos.get("broker_sl_order_id")
+                    current_sl_trig = float(pos.get("stop_loss_trigger") or 0.0)
+                    if existing_sl_id and ratchet_stop > (current_sl_trig + 0.50) and current_bid > (ratchet_stop + 0.50):
+                        try:
+                            self.modify_broker_stop_loss_order(
+                                intent_id,
+                                str(existing_sl_id),
+                                entry_fill,
+                                max(1, lot_qty),
+                                custom_trigger_price=ratchet_stop,
+                            )
+                        except Exception as sl_mod_err:
+                            logger.debug(f"[OrderIntentEngine] Broker SL ratchet modify note: {sl_mod_err}")
 
             # 4. Theta Stagnation Stop (Apex Quant Velocity Protection + H3_22M Near-Miss Round-Trip Shield)
             if not exit_reason and duration_min >= THETA_STAGNATION_TIMEOUT_MINUTES and mfe_pct < THETA_STAGNATION_MIN_MFE_PCT and current_pnl_pct < 0:
@@ -1458,6 +1479,7 @@ class OrderIntentEngine:
                 # 1-Live-Per-Wave Guard: If Paper is still holding an open wave on this underlying and Live
                 # already participated (and exited early, e.g., via 12m stagnation), block same-wave re-entry!
                 u_paper_open = [t for t in open_paper_trades if str(t.get("underlying") or "").upper() == und and t.get("entry_time")]
+                u_paper_keys = {str(t.get("instrument_key") or "") for t in u_paper_open if t.get("instrument_key")}
                 if u_paper_open:
                     earliest_wave_iso = min(str(t["entry_time"]) for t in u_paper_open)
                     if self.has_participated_in_wave(und, earliest_wave_iso) is True:
@@ -1465,9 +1487,14 @@ class OrderIntentEngine:
                             f"[Autopilot] 1-Live-Per-Wave Guard: Blocked {s.get('trading_symbol')} because Live already participated in ongoing {und} wave started at {earliest_wave_iso}."
                         )
                         continue
+                    if u_paper_keys and ikey and ikey not in u_paper_keys:
+                        logger.info(
+                            f"[Autopilot] Same-Strike Wave Parity: Blocked {s.get('trading_symbol')} because Paper is actively holding a different strike on {und}."
+                        )
+                        continue
 
                 # Institutional Strike Moneyness, Delta & Premium Filter
-                sig_ask = float(s.get("option_ask") or s.get("ask") or 0.0)
+                sig_ask = float(s.get("option_ask") or s.get("ask") or s.get("suggested_entry") or 0.0)
                 sig_spot = float(s.get("spot_price") or 0.0)
                 sig_strike = float(s.get("strike") or 0.0)
                 sig_delta = abs(float(s.get("delta") or 0.50))
@@ -1495,11 +1522,16 @@ class OrderIntentEngine:
                     continue
 
                 # Verify signal recency so stale signals from earlier in the morning are never executed
-                if ts_str and max_signal_age_sec > 0:
+                effective_max_age = (
+                    max(max_signal_age_sec, 900.0)
+                    if (u_paper_keys and ikey in u_paper_keys)
+                    else max_signal_age_sec
+                )
+                if ts_str and effective_max_age > 0:
                     try:
                         sig_dt = datetime.fromisoformat(str(ts_str))
                         age_sec = (now_dt - sig_dt).total_seconds()
-                        if age_sec > max_signal_age_sec or age_sec < -5.0:
+                        if age_sec > effective_max_age or age_sec < -5.0:
                             continue
                     except Exception:
                         pass
@@ -1898,6 +1930,25 @@ class OrderIntentEngine:
         when updating partial-to-full quantity or ratcheting trailing stop floors.
         """
         if not broker_sl_order_id or str(broker_sl_order_id).startswith("UPSTOX_"):
+            if custom_trigger_price is not None and custom_trigger_price > 0:
+                sim_trig = align_to_nse_tick(round(custom_trigger_price, 1))
+                sim_lim = align_to_nse_tick(round(sim_trig * 0.985, 1))
+                now_iso_sim = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                try:
+                    with self._get_db_conn() as conn:
+                        conn.execute(
+                            "UPDATE option_live_order_intents SET stop_loss_trigger = ?, stop_loss_limit = ?, updated_at = ? WHERE order_intent_id = ?;",
+                            (sim_trig, sim_lim, now_iso_sim, order_intent_id),
+                        )
+                        conn.commit()
+                except Exception:
+                    pass
+                return {
+                    "status": "SIMULATED_MODIFIED",
+                    "broker_sl_order_id": broker_sl_order_id,
+                    "trigger_price": sim_trig,
+                    "stop_loss_trigger": sim_trig,
+                }
             return {"status": "SIMULATED_MODIFIED", "broker_sl_order_id": broker_sl_order_id}
 
         with self._get_db_conn() as conn:

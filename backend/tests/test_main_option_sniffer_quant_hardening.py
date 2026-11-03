@@ -452,6 +452,240 @@ class TestMainOptionSnifferQuantHardening(unittest.TestCase):
             OptionSignalEngine._send_telegram_signal_alert(sig_payload)
             self.assertIn("LIVE AUTOPILOT ARMED + PAPER TRACKING", mock_tg.call_args[0][0])
 
+    @patch("app.analytics.option_sniffer.option_signal_engine.send_telegram_message")
+    @patch("app.analytics.option_sniffer.option_signal_engine.is_option_entry_window", return_value=True)
+    @patch("app.analytics.option_sniffer.option_signal_engine.is_option_trading_window", return_value=True)
+    def test_11_surgical_patch_canary_scratch_same_strike_and_sl_ratchet(self, mock_tw, mock_ew, mock_tg):
+        """
+        Verifies the 4 surgical quant patches:
+          1. Canary Scout ignores a single minor -₹85 (-1.5%) stagnation scratch exit (zero live starvation),
+             but immediately trips on 2 scratch losses or any STOP_LOSS_HIT / <= -₹450 loss.
+          2. Same-Strike Wave Parity: When Paper is holding NIFTY 23350 CE, OptionSignalEngine and
+             OrderIntentEngine block a different strike (23400 CE / 23600 CE) while allowing the
+             exact same 23350 CE strike after 60s.
+          3. OptionLiveAdapter.get_read_only_recent_signals() returns option_ask, delta, iv, expiry.
+          4. Exchange-Level Broker SL Ratcheting: check_and_execute_live_exits() ratchets stop_loss_trigger
+             up on Upstox in-place as MFE expands (+20% -> +40% Uncapped Runner).
+        """
+        today_str = "2026-11-03"
+        # 1. Single minor stagnation scratch (-₹85, -1.5%) does NOT trip Canary Scout
+        OptionDB.create_paper_trade({
+            "trade_id": "pt_scratch_1",
+            "signal_id": "sig_sc_1",
+            "instrument_key": "NSE_FO|23350CE",
+            "trading_symbol": "NIFTY 23350 CE 10 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 23350.0,
+            "option_type": "CE",
+            "expiry": "2026-11-10",
+            "quantity": 65,
+            "lot_size": 65,
+            "entry_time": f"{today_str}T09:32:00",
+            "entry_ask": 85.0,
+            "entry_bid": 84.5,
+        })
+        OptionDB.close_paper_trade(
+            trade_id="pt_scratch_1",
+            close_data={
+                "exit_time": f"{today_str}T09:44:00",
+                "exit_bid": 84.5,
+                "exit_ask": 85.0,
+                "exit_price_used": 84.5,
+                "peak_price": 86.0,
+                "trough_price": 83.5,
+                "mae_pct": -1.76,
+                "mfe_pct": 1.18,
+                "gross_pnl": -32.5,
+                "charges": 52.5,
+                "slippage": 0.0,
+                "net_pnl": -85.0,
+                "net_pnl_pct": -1.54,
+                "holding_duration_seconds": 720,
+                "exit_reason": "STAGNATION_TIME_STOP",
+            },
+        )
+        has_sl_1, msg_1 = OptionDB.has_paper_stop_loss_today(today_str)
+        self.assertFalse(has_sl_1, f"Single minor scratch should not starve Live trading: {msg_1}")
+
+        # A 2nd scratch loss on the same day MUST trip Canary Scout
+        OptionDB.create_paper_trade({
+            "trade_id": "pt_scratch_2",
+            "signal_id": "sig_sc_2",
+            "instrument_key": "NSE_FO|23350CE",
+            "trading_symbol": "NIFTY 23350 CE 10 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 23350.0,
+            "option_type": "CE",
+            "expiry": "2026-11-10",
+            "quantity": 65,
+            "lot_size": 65,
+            "entry_time": f"{today_str}T10:10:00",
+            "entry_ask": 85.0,
+            "entry_bid": 84.5,
+        })
+        OptionDB.close_paper_trade(
+            trade_id="pt_scratch_2",
+            close_data={
+                "exit_time": f"{today_str}T10:22:00",
+                "exit_bid": 84.0,
+                "exit_ask": 84.5,
+                "exit_price_used": 84.0,
+                "peak_price": 86.0,
+                "trough_price": 83.0,
+                "mae_pct": -2.35,
+                "mfe_pct": 1.18,
+                "gross_pnl": -65.0,
+                "charges": 55.0,
+                "slippage": 0.0,
+                "net_pnl": -120.0,
+                "net_pnl_pct": -2.17,
+                "holding_duration_seconds": 720,
+                "exit_reason": "STAGNATION_TIME_STOP",
+            },
+        )
+        has_sl_2, msg_2 = OptionDB.has_paper_stop_loss_today(today_str)
+        self.assertTrue(has_sl_2)
+        self.assertIn("2+ negative paper exits today", msg_2)
+
+        # 2. Same-Strike Wave Parity when Paper is holding an open position
+        OptionSignalEngine.reset_class_state()
+        OptionDB.create_paper_trade({
+            "trade_id": "pt_open_wave",
+            "signal_id": "sig_open_wave",
+            "instrument_key": "NSE_FO|23350CE",
+            "trading_symbol": "NIFTY 23350 CE 10 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 23350.0,
+            "option_type": "CE",
+            "expiry": "2026-11-10",
+            "quantity": 65,
+            "lot_size": 65,
+            "entry_time": "2026-11-04T09:42:00",
+            "entry_ask": 95.0,
+            "entry_bid": 94.5,
+        })
+        mock_adapter = MagicMock()
+        mock_adapter._is_live_armed = True
+        mock_live_eng = MagicMock()
+        mock_live_eng.get_active_positions_count.return_value = 0
+        mock_live_eng.has_active_position_for_underlying.return_value = False
+        mock_live_eng.has_participated_in_wave.return_value = False
+        mock_live_eng.get_live_circuit_breaker_telemetry.return_value = {"is_session_halted": False}
+
+        diff_contract = {
+            "instrument_key": "NSE_FO|23400CE",
+            "trading_symbol": "NIFTY 23400 CE 10 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 23400.0,
+            "option_type": "CE",
+            "expiry": "2026-11-10",
+            "lot_size": 65,
+        }
+        same_contract = {
+            "instrument_key": "NSE_FO|23350CE",
+            "trading_symbol": "NIFTY 23350 CE 10 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 23350.0,
+            "option_type": "CE",
+            "expiry": "2026-11-10",
+            "lot_size": 65,
+        }
+        valid_q = {
+            "bid": 95.0,
+            "ask": 95.5,
+            "ltp": 95.25,
+            "spread_pct": 0.52,
+            "quote_age_ms": 100,
+            "oi": 400000,
+            "volume": 180000,
+            "delta": 0.51,
+            "iv": 13.5,
+            "quote_freshness": "REAL_TIME",
+        }
+        u_q = {
+            "spot_ltp": 23355.0,
+            "open": 23250.0,
+            "high": 23360.0,
+            "low": 23240.0,
+            "close": 23260.0,
+            "vwap": 23300.0,
+            "quote_age_ms": 100,
+        }
+        with patch("app.analytics.option_sniffer.option_live_adapter.get_option_live_adapter", return_value=mock_adapter), \
+             patch("app.analytics.option_sniffer.option_live_order_intent.get_order_intent_engine", return_value=mock_live_eng):
+            sig_eng = OptionSignalEngine(model=self.mock_model)
+            # Evaluating a DIFFERENT strike (23400 CE) while Paper holds 23350 CE MUST be blocked
+            res_diff = sig_eng.evaluate_contract(
+                contract=diff_contract,
+                quote=valid_q,
+                underlying_quote=u_q,
+                as_of_time=datetime(2026, 11, 4, 9, 45, 5),
+                enforce_cutoff=True,
+                enforce_regime_gate=False,
+            )
+            self.assertEqual(res_diff["status"], STATE_QUALIFIED)
+            self.assertTrue(any("locked to the active wave contract" in r for r in res_diff["rejection_reasons"]))
+
+            # Evaluating the SAME strike (23350 CE) activates cleanly for Live without opening a 2nd Paper trade
+            res_same = sig_eng.evaluate_contract(
+                contract=same_contract,
+                quote=valid_q,
+                underlying_quote=u_q,
+                as_of_time=datetime(2026, 11, 4, 9, 45, 5),
+                enforce_cutoff=True,
+                enforce_regime_gate=False,
+            )
+            self.assertEqual(res_same["status"], STATE_ACTIVE)
+            self.assertEqual(len(OptionDB.get_open_paper_trades()), 1)
+
+        # 3. Verify OptionLiveAdapter.get_read_only_recent_signals returns option_ask, delta, iv, expiry
+        from app.analytics.option_sniffer.option_live_adapter import get_option_live_adapter
+        with patch("app.analytics.option_sniffer.option_live_adapter.get_db_path", return_value=self.temp_db_path):
+            recent_sigs = get_option_live_adapter().get_read_only_recent_signals(limit=5, today_only=False)
+        self.assertGreaterEqual(len(recent_sigs), 1)
+        latest_sig = recent_sigs[0]
+        self.assertIn("option_ask", latest_sig)
+        self.assertIn("delta", latest_sig)
+        self.assertIn("expiry", latest_sig)
+        self.assertAlmostEqual(float(latest_sig["option_ask"]), 95.5, places=2)
+
+        # 4. Exchange-Level Broker SL Ratcheting on Uncapped Chandelier Runner
+        live_eng = OrderIntentEngine()
+        ok_int, _, intent_rec = live_eng.create_and_validate_intent(
+            signal_payload={
+                "signal_id": "sig_runner_ratchet",
+                "instrument_key": "NSE_FO|23350CE",
+                "trading_symbol": "NIFTY 23350 CE 10 NOV 26",
+                "underlying": "NIFTY",
+                "action": "BUY_CE",
+                "option_ask": 100.0,
+                "lot_size": 65,
+            },
+            live_quote={"ask": 100.0, "bid": 99.5, "quote_age_ms": 100},
+            deployable_capital=30000.0,
+        )
+        self.assertTrue(ok_int)
+        intent_id = intent_rec["order_intent_id"]
+        live_eng.simulate_order_execution(intent_id, scenario="CLEAN_FILL", mock_fill_price=100.0, sl_pct=20.0)
+
+        # Tick 1: Bid rises to ₹120.0 (+20% MFE >= +15% trigger) -> Does NOT exit, ratchets exchange SL trigger up from ₹80.0 to ₹110.40
+        exits_t1 = live_eng.check_and_execute_live_exits(
+            {"NSE_FO|23350CE": {"bid": 120.0, "ask": 120.5, "ltp": 120.0}}
+        )
+        self.assertEqual(len(exits_t1), 0)
+        with live_eng._get_db_conn() as conn:
+            sl_t1 = float(conn.execute("SELECT stop_loss_trigger FROM option_live_order_intents WHERE order_intent_id = ?;", (intent_id,)).fetchone()[0])
+        self.assertAlmostEqual(sl_t1, 110.4, places=1)
+
+        # Tick 2: Bid surges to ₹140.0 (+40% MFE >= +35% target) -> Uncapped Runner stays OPEN and locks exchange SL >= ₹134.0 (+34%)!
+        exits_t2 = live_eng.check_and_execute_live_exits(
+            {"NSE_FO|23350CE": {"bid": 140.0, "ask": 140.5, "ltp": 140.0}}
+        )
+        self.assertEqual(len(exits_t2), 0)
+        with live_eng._get_db_conn() as conn:
+            sl_t2 = float(conn.execute("SELECT stop_loss_trigger FROM option_live_order_intents WHERE order_intent_id = ?;", (intent_id,)).fetchone()[0])
+        self.assertGreaterEqual(sl_t2, 134.0)
+
 
 if __name__ == "__main__":
     unittest.main()

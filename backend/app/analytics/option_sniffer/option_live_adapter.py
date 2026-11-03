@@ -311,20 +311,20 @@ class OptionLiveAdapter:
                 cur = conn.cursor()
                 if today_only:
                     cur.execute("""
-                        SELECT signal_id, created_at AS timestamp, instrument_key, trading_symbol, underlying,
-                               option_type, strike, direction AS action, option_ask AS suggested_entry,
+                        SELECT signal_id, created_at AS timestamp, created_at, instrument_key, trading_symbol, underlying,
+                               option_type, strike, expiry, direction AS action, option_ask AS suggested_entry, option_ask,
                                calibrated_prob, expected_net_return AS expected_net_return_pct, status,
-                               spot_price, option_bid, spread_pct
+                               spot_price, option_bid, spread_pct, delta, iv
                         FROM option_sniffer_signals
                         WHERE DATE(created_at) = DATE('now', 'localtime')
                         ORDER BY id DESC LIMIT ?;
                     """, (limit,))
                 else:
                     cur.execute("""
-                        SELECT signal_id, created_at AS timestamp, instrument_key, trading_symbol, underlying,
-                               option_type, strike, direction AS action, option_ask AS suggested_entry,
+                        SELECT signal_id, created_at AS timestamp, created_at, instrument_key, trading_symbol, underlying,
+                               option_type, strike, expiry, direction AS action, option_ask AS suggested_entry, option_ask,
                                calibrated_prob, expected_net_return AS expected_net_return_pct, status,
-                               spot_price, option_bid, spread_pct
+                               spot_price, option_bid, spread_pct, delta, iv
                         FROM option_sniffer_signals
                         ORDER BY id DESC LIMIT ?;
                     """, (limit,))

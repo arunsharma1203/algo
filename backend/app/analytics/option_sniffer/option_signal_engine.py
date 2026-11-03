@@ -880,6 +880,11 @@ class OptionSignalEngine:
                 rejection_reasons.append(
                     f"Anti-Clustering Shield: Active {u_str} position/wave lock exists in Live and Paper ({existing_syms}). Max 1 winner per sweep & 1 live entry per wave strictly enforced."
                 )
+            elif u_open_trades and not paper_same_instrument_open and paper_underlying_full:
+                existing_syms = ", ".join(t.get('trading_symbol', u_str) for t in u_open_trades) or u_str
+                rejection_reasons.append(
+                    f"Anti-Clustering Shield: Paper is already holding {existing_syms}; Live Autopilot is locked to the active wave contract and cannot open a different strike ({tsym})."
+                )
             if live_capacity_reached and paper_capacity_reached:
                 rejection_reasons.append(
                     f"Max concurrent trades reached (Paper {len(open_trades)}/{self._MAX_CONCURRENT_OPEN_TRADES}, Live {MAX_CONCURRENT_POSITIONS}/{MAX_CONCURRENT_POSITIONS})"
@@ -1007,7 +1012,12 @@ class OptionSignalEngine:
 
         # Gate 10: Cooldown Hysteresis (Per-Contract & Direction-Level SL Cooldown)
         last_sig_time = self._COOLDOWNS.get(ikey, 0.0)
-        cooldown_rem = int(SIGNAL_COOLDOWN_SECONDS - (now_epoch - last_sig_time))
+        effective_sig_cooldown = (
+            60
+            if (is_live_armed and not live_underlying_full and paper_same_instrument_open)
+            else SIGNAL_COOLDOWN_SECONDS
+        )
+        cooldown_rem = int(effective_sig_cooldown - (now_epoch - last_sig_time))
         if cooldown_rem > 0:
             rejection_reasons.append(f"Signal cooldown active ({cooldown_rem}s remaining)")
 
