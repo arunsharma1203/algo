@@ -346,17 +346,42 @@ class OptionSnifferOrchestrator:
                         except Exception:
                             pass
                     if spot_val > 0 and strike_val > 0:
-                        return (abs(strike_val - spot_val), exp_penalty, exp_str, strike_val)
-                    return (0.0, exp_penalty, exp_str, strike_val)
+                        return (exp_penalty, abs(strike_val - spot_val), exp_str, strike_val)
+                    return (exp_penalty, 0.0, exp_str, strike_val)
+
+                # Expiry-Day 0-DTE Rollover Guard:
+                # When a valid next-week/next-expiry contract (dte >= 1) is monitored for an underlying,
+                # strictly skip 0-DTE (dte <= 0) contracts from Option Buying candidate evaluation to prevent
+                # severe expiry-day Theta decay if a next-expiry strike fails a gate or is on cooldown.
+                underlyings_with_next_expiry = set()
+                for c_item in self.contracts:
+                    c_u = str(c_item.get("underlying") or "NIFTY").upper()
+                    c_exp = str(c_item.get("expiry") or "")
+                    if c_exp:
+                        try:
+                            c_dte = (datetime.strptime(c_exp[:10], "%Y-%m-%d").date() - now_dt.date()).days
+                            if c_dte >= 1:
+                                underlyings_with_next_expiry.add(c_u)
+                        except Exception:
+                            pass
 
                 ordered_contracts = sorted(self.contracts, key=_atm_priority_key)
                 for contract in ordered_contracts:
+                    u_sym = contract.get("underlying", "NIFTY")
+                    c_exp_str = str(contract.get("expiry") or "")
+                    if c_exp_str and str(u_sym).upper() in underlyings_with_next_expiry:
+                        try:
+                            c_dte_days = (datetime.strptime(c_exp_str[:10], "%Y-%m-%d").date() - now_dt.date()).days
+                            if c_dte_days <= 0:
+                                continue
+                        except Exception:
+                            pass
+
                     ikey = contract.get("instrument_key")
                     quote = self.stream_manager.get_option_quote(ikey)
                     if not quote:
                         continue
 
-                    u_sym = contract.get("underlying", "NIFTY")
                     u_quote = self.stream_manager.get_underlying_quote(u_sym)
                     if not u_quote:
                         continue

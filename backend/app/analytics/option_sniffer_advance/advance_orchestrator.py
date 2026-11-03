@@ -315,16 +315,37 @@ class OptionSnifferAdvanceOrchestrator:
                         except Exception:
                             pass
                     if spot_val > 0 and strike_val > 0:
-                        return (abs(strike_val - spot_val), exp_penalty, exp_str, strike_val)
-                    return (0.0, exp_penalty, exp_str, strike_val)
+                        return (exp_penalty, abs(strike_val - spot_val), exp_str, strike_val)
+                    return (exp_penalty, 0.0, exp_str, strike_val)
+
+                underlyings_with_next_expiry = set()
+                for c_item in contracts:
+                    c_u = str(c_item.get("underlying") or "NIFTY").upper()
+                    c_exp = str(c_item.get("expiry") or "")
+                    if c_exp:
+                        try:
+                            c_dte = (datetime.strptime(c_exp[:10], "%Y-%m-%d").date() - now_dt.date()).days
+                            if c_dte >= 1:
+                                underlyings_with_next_expiry.add(c_u)
+                        except Exception:
+                            pass
 
                 ordered_contracts = sorted(contracts, key=_atm_sort_key)
                 for contract in ordered_contracts:
+                    u_sym = str(contract.get("underlying") or "NIFTY").upper()
+                    c_exp_str = str(contract.get("expiry") or "")
+                    if c_exp_str and u_sym in underlyings_with_next_expiry:
+                        try:
+                            c_dte_days = (datetime.strptime(c_exp_str[:10], "%Y-%m-%d").date() - now_dt.date()).days
+                            if c_dte_days <= 0:
+                                continue
+                        except Exception:
+                            pass
+
                     ikey = contract.get("instrument_key")
                     quote = live_quotes.get(ikey) or self.stream_manager.get_option_quote(ikey)
                     if not quote:
                         continue
-                    u_sym = str(contract.get("underlying") or "NIFTY").upper()
                     u_quote = underlying_quotes.get(u_sym)
                     if not u_quote or float(u_quote.get("spot_ltp") or 0.0) <= 0:
                         continue

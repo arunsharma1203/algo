@@ -686,6 +686,33 @@ class TestMainOptionSnifferQuantHardening(unittest.TestCase):
             sl_t2 = float(conn.execute("SELECT stop_loss_trigger FROM option_live_order_intents WHERE order_intent_id = ?;", (intent_id,)).fetchone()[0])
         self.assertGreaterEqual(sl_t2, 134.0)
 
+        # ── 5. Expiry-Day 0-DTE Rollover Protection (Prioritizes 6-DTE 2026-11-09 and skips 0-DTE 2026-11-03) ──
+        from app.analytics.option_sniffer.option_sniffer_orchestrator import OptionSnifferOrchestrator
+        orch = OptionSnifferOrchestrator()
+        orch.contracts = [
+            {"instrument_key": "NSE_FO|0DTE_23450CE", "trading_symbol": "NIFTY 23450 CE 03 NOV 26", "underlying": "NIFTY", "strike": 23450.0, "option_type": "CE", "expiry": "2026-11-03"},
+            {"instrument_key": "NSE_FO|6DTE_23400CE", "trading_symbol": "NIFTY 23400 CE 09 NOV 26", "underlying": "NIFTY", "strike": 23400.0, "option_type": "CE", "expiry": "2026-11-09"},
+            {"instrument_key": "NSE_FO|6DTE_23450CE", "trading_symbol": "NIFTY 23450 CE 09 NOV 26", "underlying": "NIFTY", "strike": 23450.0, "option_type": "CE", "expiry": "2026-11-09"},
+        ]
+        orch._last_discovery_date = "2026-11-03"
+        orch._last_discovery_time = 9999999999.0
+        evaluated_keys = []
+        with patch("app.analytics.option_sniffer.option_sniffer_orchestrator.to_ist_naive", return_value=datetime(2026, 11, 3, 10, 0, 0)), \
+             patch("app.analytics.option_sniffer.option_sniffer_orchestrator.is_option_trading_window", return_value=True), \
+             patch.object(orch.stream_manager, "get_all_active_option_quotes", return_value=[
+                 {"instrument_key": "NSE_FO|0DTE_23450CE", "bid": 45.0, "ask": 45.5, "quote_age_ms": 100},
+                 {"instrument_key": "NSE_FO|6DTE_23400CE", "bid": 115.0, "ask": 115.5, "quote_age_ms": 100},
+                 {"instrument_key": "NSE_FO|6DTE_23450CE", "bid": 92.0, "ask": 92.5, "quote_age_ms": 100},
+             ]), \
+             patch.object(orch.stream_manager, "get_option_quote", side_effect=lambda k: {"instrument_key": k, "bid": 90.0, "ask": 90.5, "quote_age_ms": 100}), \
+             patch.object(orch.stream_manager, "get_underlying_quote", return_value={"spot_ltp": 23440.8, "quote_age_ms": 100}), \
+             patch.object(orch.signal_engine, "evaluate_contract", side_effect=lambda **kw: (evaluated_keys.append(kw["contract"]["instrument_key"]) or {"status": "WATCH"})):
+            orch.run_surveillance_sweep()
+
+        # Verify 0-DTE contract was skipped and 6-DTE ATM (23450) was evaluated before 6-DTE 23400!
+        self.assertEqual(evaluated_keys, ["NSE_FO|6DTE_23450CE", "NSE_FO|6DTE_23400CE"])
+        self.assertNotIn("NSE_FO|0DTE_23450CE", evaluated_keys)
+
 
 if __name__ == "__main__":
     unittest.main()
