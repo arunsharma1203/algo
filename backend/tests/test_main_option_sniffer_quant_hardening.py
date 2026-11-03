@@ -713,6 +713,19 @@ class TestMainOptionSnifferQuantHardening(unittest.TestCase):
         self.assertEqual(evaluated_keys, ["NSE_FO|6DTE_23450CE", "NSE_FO|6DTE_23400CE"])
         self.assertNotIn("NSE_FO|0DTE_23450CE", evaluated_keys)
 
+        # 6. Verify OptionMicrostructureEvaluator.get_atm_spread_pct skips 0-DTE wide spreads in favor of active 6-DTE ATM
+        from app.analytics.option_sniffer.option_microstructure_evaluator import OptionMicrostructureEvaluator
+        OptionMicrostructureEvaluator._mock_spread_atm = None
+        with patch("app.analytics.option_sniffer.option_microstructure_evaluator.to_ist_naive", return_value=datetime(2026, 11, 3, 9, 36, 0)), \
+             patch.object(orch.stream_manager, "get_underlying_quote", return_value={"spot_ltp": 23650.0}), \
+             patch.object(orch.stream_manager, "get_all_active_option_quotes", return_value=[
+                 {"underlying": "NIFTY", "strike": 23650.0, "expiry": "2026-11-03", "spread_pct": 2.0},
+                 {"underlying": "NIFTY", "strike": 23650.0, "expiry": "2026-11-09", "spread_pct": 0.25},
+             ]):
+            sp_val, sp_ok = OptionMicrostructureEvaluator.get_atm_spread_pct("NIFTY")
+            self.assertEqual(sp_val, 0.25)
+            self.assertTrue(sp_ok)
+
 
 if __name__ == "__main__":
     unittest.main()

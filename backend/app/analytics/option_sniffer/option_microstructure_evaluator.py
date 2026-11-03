@@ -158,17 +158,59 @@ class OptionMicrostructureEvaluator:
                     return 0.50, True # Conservative normal fallback if quotes cold
 
             if spot > 0 and quotes:
-                # Find nearest ATM quote
-                best_quote = None
-                best_dist = float("inf")
-                for q in quotes:
-                    if q.get("underlying", "").upper() == underlying.upper() and q.get("strike"):
-                        dist = abs(float(q["strike"]) - spot)
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_quote = q
-                
-                if best_quote and best_quote.get("spread_pct") is not None:
+                today_d = to_ist_naive().date()
+                u_target = underlying.upper()
+                u_quotes = [
+                    q for q in quotes
+                    if str(q.get("underlying") or "").upper() == u_target
+                    and q.get("strike")
+                    and q.get("spread_pct") is not None
+                ]
+                has_rollover_expiry = False
+                for q in u_quotes:
+                    exp_s = str(q.get("expiry") or "")[:10]
+                    if exp_s:
+                        try:
+                            if (datetime.strptime(exp_s, "%Y-%m-%d").date() - today_d).days >= 1:
+                                has_rollover_expiry = True
+                                break
+                        except Exception:
+                            pass
+
+                def _atm_spread_sort_key(q: Dict[str, Any]) -> Tuple[int, float, float]:
+                    strike_v = float(q.get("strike") or 0.0)
+                    sp_v = float(q.get("spread_pct") or 999.0)
+                    exp_s = str(q.get("expiry") or "")[:10]
+                    exp_pen = 1
+                    if exp_s:
+                        try:
+                            dte_d = (datetime.strptime(exp_s, "%Y-%m-%d").date() - today_d).days
+                            if 1 <= dte_d <= 7:
+                                exp_pen = 0
+                            elif dte_d > 7:
+                                exp_pen = 1
+                            else:
+                                exp_pen = 2
+                        except Exception:
+                            exp_pen = 1
+                    return (exp_pen, abs(strike_v - spot), sp_v)
+
+                if has_rollover_expiry:
+                    filtered_quotes = []
+                    for q in u_quotes:
+                        exp_s = str(q.get("expiry") or "")[:10]
+                        try:
+                            if exp_s and (datetime.strptime(exp_s, "%Y-%m-%d").date() - today_d).days <= 0:
+                                continue
+                        except Exception:
+                            pass
+                        filtered_quotes.append(q)
+                    if filtered_quotes:
+                        u_quotes = filtered_quotes
+
+                if u_quotes:
+                    u_quotes.sort(key=_atm_spread_sort_key)
+                    best_quote = u_quotes[0]
                     sp = float(best_quote["spread_pct"])
                     return round(sp, 2), (sp <= cls.SPREAD_ATM_MAX_PCT)
 
@@ -314,6 +356,8 @@ class OptionMicrostructureEvaluator:
 
             or_high_15m = 0.0
             or_low_15m = 0.0
+            post_orb_bar_close = 0.0
+            live_vol_ratio: Optional[float] = None
 
             # Always query continuous_index_ohlcv in SQLite for the true immutable 09:15-09:30 Opening Range
             try:
@@ -324,7 +368,9 @@ class OptionMicrostructureEvaluator:
                 row = cur.execute("""
                     SELECT MIN(low), MAX(high), open, close
                     FROM continuous_index_ohlcv
-                    WHERE ticker = ? AND timestamp >= ? AND timestamp <= ?;
+                    WHERE ticker = ?
+                      AND substr(replace(timestamp, 'T', ' '), 1, 19) >= ?
+                      AND substr(replace(timestamp, 'T', ' '), 1, 19) <= ?;
                 """, (underlying.upper(), f"{date_str} 09:15:00", f"{date_str} 09:30:00")).fetchone()
                 if row and row[0] is not None and row[1] is not None:
                     or_low_15m = float(row[0])
@@ -335,16 +381,58 @@ class OptionMicrostructureEvaluator:
                         day_low = or_low_15m
                     if day_high <= 0:
                         day_high = or_high_15m
+                post_row = cur.execute("""
+                    SELECT close FROM continuous_index_ohlcv
+                    WHERE ticker = ?
+                      AND substr(replace(timestamp, 'T', ' '), 1, 19) > ?
+                      AND substr(replace(timestamp, 'T', ' '), 1, 19) <= ?
+                    ORDER BY timestamp DESC LIMIT 1;
+                """, (underlying.upper(), f"{date_str} 09:30:00", f"{date_str} {curr.strftime('%H:%M:%S')}")).fetchone()
+                if post_row and post_row[0]:
+                    post_orb_bar_close = float(post_row[0])
                 if spot_ltp <= 0:
                     last_row = cur.execute("""
                         SELECT close FROM continuous_index_ohlcv
-                        WHERE ticker = ? AND timestamp >= ? ORDER BY timestamp DESC LIMIT 1;
+                        WHERE ticker = ? AND substr(replace(timestamp, 'T', ' '), 1, 19) >= ?
+                        ORDER BY timestamp DESC LIMIT 1;
                     """, (underlying.upper(), f"{date_str} 09:15:00")).fetchone()
                     if last_row and last_row[0]:
                         spot_ltp = float(last_row[0])
+                sig_vol_row = cur.execute("""
+                    SELECT volume_surge_ratio FROM option_sniffer_signals
+                    WHERE underlying = ? AND substr(replace(created_at, 'T', ' '), 1, 19) >= ?
+                      AND volume_surge_ratio > 0
+                    ORDER BY id DESC LIMIT 1;
+                """, (underlying.upper(), f"{date_str} 09:15:00")).fetchone()
+                if sig_vol_row and sig_vol_row[0]:
+                    live_vol_ratio = round(float(sig_vol_row[0]), 2)
                 conn.close()
             except Exception as db_e:
                 logger.debug(f"[MicrostructureEvaluator] SQLite OR query note: {db_e}")
+
+            # Compute live ATM option volume ratio from active stream quotes when signal surge ratio is not yet recorded
+            if live_vol_ratio is None and spot_ltp > 0:
+                try:
+                    today_d = curr.date()
+                    u_quotes = [
+                        q for q in sm.get_all_active_option_quotes()
+                        if str(q.get("underlying") or "").upper() == underlying.upper()
+                        and float(q.get("volume") or 0) > 0
+                    ]
+                    rollover_q = [
+                        q for q in u_quotes
+                        if str(q.get("expiry") or "")[:10]
+                        and (datetime.strptime(str(q.get("expiry"))[:10], "%Y-%m-%d").date() - today_d).days >= 1
+                    ]
+                    active_q = rollover_q if rollover_q else u_quotes
+                    if len(active_q) >= 2:
+                        mean_chain_vol = sum(float(q.get("volume") or 0) for q in active_q) / len(active_q)
+                        active_q.sort(key=lambda q: abs(float(q.get("strike") or 0.0) - spot_ltp))
+                        atm_vol = max(float(q.get("volume") or 0) for q in active_q[:2])
+                        if mean_chain_vol > 0:
+                            live_vol_ratio = round(max(0.5, min(5.0, atm_vol / mean_chain_vol)), 2)
+                except Exception:
+                    pass
 
             # Anchor OR High/Low to true 09:15-09:30 window when available; fallback to day high/low
             if spot_ltp > 0 and day_open > 0:
@@ -358,19 +446,23 @@ class OptionMicrostructureEvaluator:
                 result["range_pts"] = round(range_pts, 2)
                 result["range_pct"] = round(range_pct, 2)
                 result["vol_floor_passed"] = (range_pct >= OPENING_RANGE_VOL_MIN_PCT) if OPENING_RANGE_VOL_MIN_PCT > 0 else True
+                if live_vol_ratio is not None:
+                    result["volume_ratio"] = live_vol_ratio
 
-                # After 09:35:00, check if spot is expanding beyond opening bounds
+                # After 09:35:00, check if completed post-ORB candle close or live spot expands beyond opening bounds
                 if curr_time >= cls.EARLIEST_DYNAMIC_UNLOCK:
-                    if spot_ltp > result["or_high"]:
+                    eval_price_high = max(spot_ltp, post_orb_bar_close) if post_orb_bar_close > 0 else spot_ltp
+                    eval_price_low = min(spot_ltp, post_orb_bar_close) if post_orb_bar_close > 0 else spot_ltp
+                    if eval_price_high > result["or_high"]:
                         result["breakout_direction"] = "BULL_EXPANSION"
                         result["is_accepted"] = True
-                        result["volume_ratio"] = 1.65
-                        result["volume_ok"] = True
-                    elif spot_ltp < result["or_low"]:
+                        result["volume_ratio"] = live_vol_ratio if live_vol_ratio is not None else 1.35
+                        result["volume_ok"] = result["volume_ratio"] >= cls.ORB_MIN_VOLUME_RATIO
+                    elif eval_price_low < result["or_low"]:
                         result["breakout_direction"] = "BEAR_BREAKDOWN"
                         result["is_accepted"] = True
-                        result["volume_ratio"] = 1.45
-                        result["volume_ok"] = True
+                        result["volume_ratio"] = live_vol_ratio if live_vol_ratio is not None else 1.25
+                        result["volume_ok"] = result["volume_ratio"] >= cls.ORB_MIN_VOLUME_RATIO
                     else:
                         result["breakout_direction"] = "INSIDE_RANGE"
                         # If past static fallback (09:45), accept range expansion as acceptable
