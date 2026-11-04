@@ -431,6 +431,7 @@ class OptionSignalEngine:
 
         # Causal Opening Range (09:15-09:30 IST) & Extrema Ordering Inspection
         is_trapped_inside_orb = False
+        is_mid_air_no_mans_land = False
         orb_high_val = 0.0
         orb_low_val = 0.0
         df_bounced_off_low = True
@@ -464,12 +465,20 @@ class OptionSignalEngine:
                             orb_high_val = float(np.max(h_vals[orb_indices]))
                             orb_low_val = float(np.min(l_vals[orb_indices]))
                             orb_tol = 20.0 if is_banknifty else 8.0
+                            ext_breakout_tol = 28.0 if is_banknifty else 12.0
+                            orb_retest_tol = 35.0 if is_banknifty else 15.0
                             bar_curr_hi = max(spot_ltp, float(h_vals[-1]))
                             bar_curr_lo = min(spot_ltp, float(l_vals[-1]))
-                            if opt_type == "CE" and bar_curr_hi < (orb_high_val - orb_tol):
-                                is_trapped_inside_orb = True
-                            elif opt_type == "PE" and bar_curr_lo > (orb_low_val + orb_tol):
-                                is_trapped_inside_orb = True
+                            if opt_type == "CE":
+                                if bar_curr_hi < (orb_high_val - orb_tol):
+                                    is_trapped_inside_orb = True
+                                elif drop_off_high_pts > ext_breakout_tol and (spot_ltp - orb_high_val) > orb_retest_tol:
+                                    is_mid_air_no_mans_land = True
+                            elif opt_type == "PE":
+                                if bar_curr_lo > (orb_low_val + orb_tol):
+                                    is_trapped_inside_orb = True
+                                elif rally_off_low_pts > ext_breakout_tol and (orb_low_val - spot_ltp) > orb_retest_tol:
+                                    is_mid_air_no_mans_land = True
             except Exception:
                 pass
 
@@ -578,12 +587,23 @@ class OptionSignalEngine:
         is_underlying_flat = abs(drift_from_open) < 0.20 and abs(pullback_from_high) < 0.20 and abs(rally_from_low) < 0.20
 
         # ── HIERARCHICAL REGIME DECISION ──
-        # 0. OPENING RANGE (09:15-09:30) TRAP GUARD
+        # 0. OPENING RANGE (09:15-09:30) TRAP GUARD & ZONE 2B MID-AIR NO-MAN'S-LAND GUARD
         if is_trapped_inside_orb and not (is_day_high_breakout or is_day_low_breakdown):
             rejection_reasons.append(
                 f"Opening Range Trap Guard: Spot ({spot_ltp:.1f}) is trapped inside the 09:15-09:30 Opening Range [{orb_low_val:.1f}, {orb_high_val:.1f}]. "
                 f"{opt_type} buying halted until Opening Range breakout."
             )
+        elif is_mid_air_no_mans_land and not (is_day_high_breakout or is_day_low_breakdown):
+            if opt_type == "CE":
+                rejection_reasons.append(
+                    f"Mid-Air No-Man's-Land Guard (Zone 2B): Spot ({spot_ltp:.1f}) is {drop_off_high_pts:.1f} pts below Day High ({u_high:.1f}) "
+                    f"and {spot_ltp - orb_high_val:.1f} pts above ORB High ({orb_high_val:.1f}). CE buying requires Day High breakout or ORB High support retest."
+                )
+            else:
+                rejection_reasons.append(
+                    f"Mid-Air No-Man's-Land Guard (Zone 2B): Spot ({spot_ltp:.1f}) is {rally_off_low_pts:.1f} pts above Day Low ({u_low:.1f}) "
+                    f"and {orb_low_val - spot_ltp:.1f} pts below ORB Low ({orb_low_val:.1f}). PE buying requires Day Low breakdown or ORB Low resistance retest."
+                )
 
         # 1. SIDEWAYS / RANGEBOUND / CHOP SHIELD (SUPREME PRIORITY)
         if (is_macro_chop or is_compressed_10m or is_trapped_in_day_range or is_chaotic_chop) and not (is_day_high_breakout or is_day_low_breakdown or is_strong_underlying_bear or is_strong_underlying_bull):

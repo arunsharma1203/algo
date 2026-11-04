@@ -54,6 +54,7 @@ from app.analytics.option_sniffer.option_sniffer_orchestrator import OptionSniff
 from app.analytics.option_sniffer.option_microstructure_evaluator import OptionMicrostructureEvaluator
 from app.analytics.option_sniffer.option_live_order_intent import OrderIntentEngine, init_live_order_tables
 from app.analytics.option_sniffer.option_live_adapter import OptionLiveAdapter
+from app.analytics.option_sniffer.option_paper_execution import OptionPaperExecution
 from app.analytics.option_sniffer.option_db import OptionDB, init_option_sniffer_tables
 
 
@@ -489,6 +490,171 @@ class TestOptionSnifferInstitutional12Fixes(unittest.TestCase):
         with patch.object(eng, "_call_upstox_broker_api", return_value=(True, 200, {"status": "success"})):
             mod_res = eng.modify_broker_stop_loss_order("INTENT_CB_OPEN", "SL_CB_1", 100.0, 65, custom_trigger_price=100.15)
             self.assertAlmostEqual(mod_res["trigger_price"], 100.15, places=2)
+
+    def test_pillar1_and_3_zone2a_orb_retest_allowed_zone2b_midair_blocked_and_paper_18pt_exit_dormant(self):
+        """
+        Verifies the two stress-test refinements:
+          1. Zone 2A (ORB Support Retest Bounce, 0–15 pts above ORB_High) is ALLOWED even when >12 pts below Day High.
+          2. Zone 2B (Mid-Air No-Man's-Land, >12 pts below Day High AND >15 pts above ORB_High) is BLOCKED.
+          3. OptionPaperExecution.evaluate_exit_conditions uses raw_broker_vwap so the 3-minute / 18-point
+             STRUCTURE_INVALIDATION early exit stays dormant on Upstox indices where raw broker VWAP == spot_ltp.
+        """
+        # Build a realistic intraday session from 09:15 with ORB_High = 24020.0, ORB_Low = 23980.0
+        # followed by a rally to Day High = 24058.0, then a pullback:
+        # Case A (Zone 2A ORB Support Retest): Spot = 24027.7 (+7.7 pts above ORB_High, 30.3 pts below Day High)
+        base_dt = datetime(2026, 10, 30, 9, 15, 0)
+        rows = []
+        # 15 ORB bars (09:15 to 09:29): Range [23980, 24020]
+        for i in range(15):
+            dt = base_dt + timedelta(minutes=i)
+            c = 23990.0 + i * 1.5
+            rows.append({
+                "timestamp": dt,
+                "open": c - 2.0,
+                "high": 24020.0 if i == 14 else c + 3.0,
+                "low": 23980.0 if i == 0 else c - 3.0,
+                "close": c,
+                "volume": 1000.0,
+                "vwap": 24000.0,
+                "is_complete": 1,
+                "is_synthetic": 0,
+            })
+        # Next 15 bars (09:30 to 09:44): Rally to Day High 24058.0, then pullback to 24027.7 (Zone 2A ORB Retest)
+        for i in range(15):
+            dt = base_dt + timedelta(minutes=15 + i)
+            if i < 8:
+                c = 24022.0 + i * 4.5
+                h = 24058.0 if i == 7 else c + 2.0
+            else:
+                # Smooth pullback to 24027.7 with bullish bounce on final bars
+                c = 24027.7 if i == 14 else (24025.0 if i >= 11 else 24035.0)
+                h = c + 2.0
+            rows.append({
+                "timestamp": dt,
+                "open": c - 1.5,
+                "high": h,
+                "low": c - 2.0,
+                "close": c,
+                "volume": 1000.0,
+                "vwap": 24015.0,
+                "is_complete": 1,
+                "is_synthetic": 0,
+            })
+
+        df_zone2a = pd.DataFrame(rows)
+        u_quote_2a = {
+            "spot_ltp": 24027.7,
+            "vwap": 24015.0,
+            "raw_broker_vwap": 24027.7,
+            "high": 24058.0,
+            "low": 23980.0,
+            "open": 23988.0,
+            "close": 23988.0,
+            "quote_age_ms": 50,
+        }
+        contract_quote = {
+            "ltp": 144.0,
+            "bid": 143.8,
+            "ask": 144.2,
+            "spread_pct": 0.28,
+            "quote_age_ms": 50,
+            "volume": 150000,
+            "oi": 2200000,
+            "iv": 14.2,
+            "delta": 0.52,
+            "gamma": 0.0018,
+            "theta": -8.0,
+            "vega": 11.5,
+        }
+        contract_meta = {
+            "instrument_key": "NSE_FO|ZONE2A",
+            "trading_symbol": "NIFTY 24000 CE",
+            "underlying": "NIFTY",
+            "strike": 24000.0,
+            "option_type": "CE",
+            "expiry": "2026-11-05",
+            "lot_size": 65,
+        }
+
+        engine = OptionSignalEngine()
+        res_2a = engine.evaluate_contract(
+            contract=contract_meta,
+            quote=contract_quote,
+            underlying_quote=u_quote_2a,
+            underlying_df=df_zone2a,
+            as_of_time=datetime(2026, 10, 30, 9, 44, 0),
+            enforce_cutoff=True,
+            enforce_regime_gate=False,
+        )
+        # Zone 2A ORB Retest (+7.7 pts above ORB_High 24020.0) must NOT be blocked by Mid-Air No-Man's-Land Guard
+        self.assertFalse(
+            any("Mid-Air No-Man's-Land Guard (Zone 2B)" in r for r in res_2a.get("rejection_reasons", [])),
+            f"Zone 2A ORB Retest was falsely blocked: {res_2a.get('rejection_reasons')}",
+        )
+
+        # Case B (Zone 2B Mid-Air No-Man's-Land):
+        # Rally to Day High 24090.0, then pullback to Spot = 24055.0 (+35.0 pts above ORB_High 24020.0 AND 35.0 pts below Day High 24090.0)
+        rows_2b = [dict(r) for r in rows]
+        rows_2b[22]["high"] = 24090.0
+        rows_2b[-1]["close"] = 24055.0
+        rows_2b[-1]["high"] = 24056.0
+        rows_2b[-1]["low"] = 24053.0
+        df_zone2b = pd.DataFrame(rows_2b)
+        u_quote_2b = dict(u_quote_2a, spot_ltp=24055.0, high=24090.0, raw_broker_vwap=24055.0)
+
+        OptionSignalEngine.reset_class_state()
+        res_2b = engine.evaluate_contract(
+            contract=contract_meta,
+            quote=contract_quote,
+            underlying_quote=u_quote_2b,
+            underlying_df=df_zone2b,
+            as_of_time=datetime(2026, 10, 30, 9, 44, 0),
+            enforce_cutoff=True,
+            enforce_regime_gate=False,
+        )
+        self.assertFalse(res_2b["hurdles_passed"])
+        self.assertEqual(res_2b["status"], STATE_WATCH)
+        self.assertTrue(
+            any("Mid-Air No-Man's-Land Guard (Zone 2B)" in r for r in res_2b.get("rejection_reasons", [])),
+            f"Expected Zone 2B Mid-Air No-Man's-Land rejection, got: {res_2b.get('rejection_reasons')}",
+        )
+
+        # Case C: Verify OptionPaperExecution.evaluate_exit_conditions keeps 18-pt STRUCTURE_INVALIDATION dormant
+        # when raw_broker_vwap == curr_spot (Upstox index feed where atp=0), even though vwap holds session_benchmark
+        now_dt = datetime(2026, 10, 30, 10, 15, 0)
+        trade = {
+            "trade_id": "PAPER_DORMANT_TEST",
+            "underlying": "NIFTY",
+            "option_type": "CE",
+            "entry_ask": 150.0,
+            "initial_entry_ask": 150.0,
+            "peak_price": 152.0,
+            "trough_price": 139.0,
+            "entry_spot_price": 24050.0,
+            "entry_time": (now_dt - timedelta(minutes=6)).isoformat(),
+            "lot_size": 65,
+            "quantity": 65,
+        }
+        current_opt_quote = {"ltp": 139.0, "bid": 138.8, "ask": 139.2}
+        # Spot dipped 30 pts below entry_spot (24020 vs 24050) and 22 pts below session_benchmark (24020 vs 24042),
+        # which is >18 pts, but raw_broker_vwap == spot_ltp (24020.0), so STRUCTURE_INVALIDATION must remain dormant (None)
+        current_u_quotes_map = {
+            "NIFTY": {
+                "spot_ltp": 24020.0,
+                "vwap": 24042.0,           # session_benchmark populated for entry gates
+                "raw_broker_vwap": 24020.0 # raw broker vwap == spot_ltp on Upstox index feed
+            }
+        }
+        exit_eval = OptionPaperExecution.evaluate_exit_conditions(
+            trade=trade,
+            current_bid=138.8,
+            quote=current_opt_quote,
+            now_dt=now_dt,
+            underlying_quotes_map=current_u_quotes_map,
+            enforce_cutoff=False,
+            is_aggregate_halt=False,
+        )
+        self.assertIsNone(exit_eval, f"Expected dormant None exit when raw_broker_vwap == spot_ltp, got {exit_eval}")
 
 
 if __name__ == "__main__":

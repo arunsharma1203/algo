@@ -437,12 +437,16 @@ class OptionPaperExecution:
             u_quote = underlying_quotes_map.get(u_sym)
             if u_quote:
                 curr_spot = float(u_quote.get("spot_ltp") or 0.0)
-                curr_vwap = float(u_quote.get("vwap") or 0.0)
+                curr_vwap = float(
+                    u_quote.get("raw_broker_vwap")
+                    if "raw_broker_vwap" in u_quote
+                    else (u_quote.get("vwap") or 0.0)
+                )
                 entry_spot = float(trade.get("entry_spot_price") or 0.0)
                 is_bn = "BANK" in u_sym
                 min_pts = STRUCTURE_INVALIDATION_MIN_PTS_BANKNIFTY if is_bn else STRUCTURE_INVALIDATION_MIN_PTS_NIFTY
 
-                # Earlier baseline: requires valid broker VWAP != spot_ltp
+                # Earlier baseline: requires valid broker VWAP != spot_ltp (dormant when raw_broker_vwap == curr_spot)
                 if curr_vwap > 0 and abs(curr_vwap - curr_spot) > 0.01:
                     if trade.get("option_type") == "CE":
                         if curr_spot < (curr_vwap * (1.0 - STRUCTURE_INVALIDATION_BUFFER_PCT / 100.0)):

@@ -560,8 +560,9 @@ class OptionStreamManager:
         if quote:
             benchmark = self.compute_session_index_benchmark(u_upper)
             quote["session_benchmark"] = benchmark
+            curr_vwap = float(quote.get("vwap") or 0.0)
+            quote["raw_broker_vwap"] = curr_vwap
             if benchmark and float(benchmark) > 0:
-                curr_vwap = float(quote.get("vwap") or 0.0)
                 spot_val = float(quote.get("spot_ltp") or 0.0)
                 if curr_vwap <= 0 or abs(curr_vwap - spot_val) < 1e-4:
                     quote["vwap"] = float(benchmark)
