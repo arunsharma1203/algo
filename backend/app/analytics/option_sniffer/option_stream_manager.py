@@ -560,6 +560,11 @@ class OptionStreamManager:
         if quote:
             benchmark = self.compute_session_index_benchmark(u_upper)
             quote["session_benchmark"] = benchmark
+            if benchmark and float(benchmark) > 0:
+                curr_vwap = float(quote.get("vwap") or 0.0)
+                spot_val = float(quote.get("spot_ltp") or 0.0)
+                if curr_vwap <= 0 or abs(curr_vwap - spot_val) < 1e-4:
+                    quote["vwap"] = float(benchmark)
         return quote
 
     def get_underlying_history_df(self, underlying: str = "NIFTY", limit: int = 375) -> Optional[Any]:
@@ -590,6 +595,9 @@ class OptionStreamManager:
                 FROM continuous_index_ohlcv
                 WHERE ticker = ?
                   AND substr(replace(timestamp, 'T', ' '), 1, 19) >= ?
+                  AND COALESCE(is_complete, 1) = 1
+                  AND COALESCE(is_synthetic, 0) = 0
+                  AND COALESCE(is_gap, 0) = 0
                 ORDER BY timestamp DESC
                 LIMIT ?
             """
@@ -599,6 +607,9 @@ class OptionStreamManager:
                     SELECT timestamp, open, high, low, close, volume
                     FROM continuous_index_ohlcv
                     WHERE ticker = ?
+                      AND COALESCE(is_complete, 1) = 1
+                      AND COALESCE(is_synthetic, 0) = 0
+                      AND COALESCE(is_gap, 0) = 0
                     ORDER BY timestamp DESC
                     LIMIT ?
                 """

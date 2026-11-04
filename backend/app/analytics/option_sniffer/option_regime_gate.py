@@ -519,6 +519,34 @@ class OptionRegimeGate:
         if continuous_bars is not None and len(continuous_bars) >= MIN_WARMUP_BARS:
             bars_df = continuous_bars
             ok_bars, bar_msg = True, "PASSED_MOCK"
+            try:
+                if "is_synthetic" in bars_df.columns and (bars_df["is_synthetic"] == 1).any():
+                    ok_bars, bar_msg = False, "FAIL_SYNTHETIC_BARS_DETECTED: Continuous stream contains synthetic bars"
+                elif "is_gap" in bars_df.columns and (bars_df["is_gap"] == 1).any():
+                    ok_bars, bar_msg = False, "FAIL_GAP_BARS_DETECTED: Continuous stream contains unhealed gap bars"
+                if ok_bars and "is_complete" in bars_df.columns:
+                    bars_df = bars_df[bars_df["is_complete"] == 1].reset_index(drop=True)
+                    if len(bars_df) < MIN_WARMUP_BARS:
+                        ok_bars, bar_msg = False, f"FAIL_INSUFFICIENT_WARMUP: Only {len(bars_df)}/{MIN_WARMUP_BARS} completed bars"
+                if ok_bars and enforce_cutoff and "timestamp" in bars_df.columns and len(bars_df) > 0:
+                    last_ts_raw = str(bars_df["timestamp"].iloc[-1]).replace("T", " ")[:19]
+                    last_bar_dt = datetime.strptime(last_ts_raw, "%Y-%m-%d %H:%M:%S")
+                    staleness_sec = (now_dt - last_bar_dt).total_seconds()
+                    if staleness_sec > MAX_DATA_STALENESS_SECONDS:
+                        ok_db, db_msg, db_df = self.get_completed_index_bars(
+                            ticker=underlying,
+                            session_date=session_date,
+                            as_of_time=now_dt,
+                            min_bars=MIN_WARMUP_BARS
+                        )
+                        if ok_db and db_df is not None:
+                            bars_df = db_df
+                            ok_bars, bar_msg = True, db_msg
+                        else:
+                            ok_bars = False
+                            bar_msg = f"FAIL_STALE_INDEX_BARS: Latest completed bar ({last_ts_raw}) is {int(staleness_sec)}s old (> {MAX_DATA_STALENESS_SECONDS}s ceiling)"
+            except Exception as val_err:
+                logger.debug(f"[OptionRegimeGate] Continuous bars integrity validation note: {val_err}")
         else:
             ok_bars, bar_msg, bars_df = self.get_completed_index_bars(
                 ticker=underlying,

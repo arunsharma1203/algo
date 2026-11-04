@@ -107,8 +107,9 @@ class OptionSignalEngine:
         """Places underlying+opt_type on a 60m Post-Harvest Wave Exhaustion Cooldown after closing a >= +15% MFE winner."""
         if epoch is not None:
             curr_epoch = float(epoch)
-        elif as_of_time is not None and hasattr(as_of_time, "timestamp"):
-            curr_epoch = float(as_of_time.timestamp())
+        elif as_of_time is not None:
+            from app.analytics.option_sniffer.option_constants import to_ist_datetime
+            curr_epoch = float(to_ist_datetime(as_of_time).timestamp())
         else:
             curr_epoch = time.time()
         key = f"{str(underlying or 'NIFTY').upper()}_{str(opt_type or 'CE').upper()}"
@@ -128,8 +129,9 @@ class OptionSignalEngine:
         """Places all contracts of underlying+opt_type on cooldown and manages portfolio introspection entropy."""
         if epoch is not None:
             curr_epoch = float(epoch)
-        elif as_of_time is not None and hasattr(as_of_time, "timestamp"):
-            curr_epoch = float(as_of_time.timestamp())
+        elif as_of_time is not None:
+            from app.analytics.option_sniffer.option_constants import to_ist_datetime
+            curr_epoch = float(to_ist_datetime(as_of_time).timestamp())
         else:
             curr_epoch = time.time()
         key = f"{str(underlying or 'NIFTY').upper()}_{str(opt_type or 'CE').upper()}"
@@ -192,14 +194,16 @@ class OptionSignalEngine:
         heavyweight_quotes: Optional[Dict[str, Dict[str, Any]]] = None,
         as_of_time: Optional[datetime] = None,
         enforce_cutoff: bool = False,
-        enforce_regime_gate: Optional[bool] = None
+        enforce_regime_gate: Optional[bool] = None,
+        defer_execution: bool = False
     ) -> Dict[str, Any]:
         """
         Processes a point-in-time option quote through the 10 quality gates.
         Returns evaluation state dictionary.
         """
+        from app.analytics.option_sniffer.option_constants import to_ist_datetime
         now_dt = to_ist_naive(as_of_time)
-        now_epoch = time.time() if as_of_time is None else as_of_time.timestamp()
+        now_epoch = time.time() if as_of_time is None else float(to_ist_datetime(as_of_time).timestamp())
         now_iso = now_dt.isoformat()
         ikey = contract.get("instrument_key")
         tsym = contract.get("trading_symbol")
@@ -277,7 +281,27 @@ class OptionSignalEngine:
         u_high = float(underlying_quote.get("high") or spot_ltp)
         u_low = float(underlying_quote.get("low") or spot_ltp)
         u_close = float(underlying_quote.get("close") or u_open)
-        u_vwap = float(underlying_quote.get("vwap") or spot_ltp)
+        u_vwap = float(underlying_quote.get("vwap") or 0.0)
+        if u_vwap <= 0 or abs(u_vwap - spot_ltp) < 1e-4:
+            bench_vwap = float(underlying_quote.get("session_benchmark") or 0.0)
+            if bench_vwap > 0:
+                u_vwap = bench_vwap
+            elif underlying_df is not None and hasattr(underlying_df, "__len__") and len(underlying_df) >= 2:
+                try:
+                    hc = "high" if "high" in underlying_df.columns else "High"
+                    lc = "low" if "low" in underlying_df.columns else "Low"
+                    cc = "close" if "close" in underlying_df.columns else "Close"
+                    if hc in underlying_df.columns and lc in underlying_df.columns and cc in underlying_df.columns:
+                        tp_arr = (
+                            underlying_df[hc].astype(float)
+                            + underlying_df[lc].astype(float)
+                            + underlying_df[cc].astype(float)
+                        ) / 3.0
+                        u_vwap = float(tp_arr.mean())
+                except Exception:
+                    pass
+            if u_vwap <= 0:
+                u_vwap = spot_ltp
 
         pullback_from_high = ((spot_ltp - u_high) / u_high * 100.0) if u_high > 0 else 0.0
         rally_from_low = ((spot_ltp - u_low) / u_low * 100.0) if u_low > 0 else 0.0
@@ -1087,6 +1111,15 @@ class OptionSignalEngine:
         dir_sl_key = f"{str(underlying or 'NIFTY').upper()}_{str(opt_type or 'CE').upper()}"
         last_sl_time = self._DIRECTION_SL_COOLDOWNS.get(dir_sl_key, 0.0)
         sl_cooldown_rem = int(self._DIRECTION_SL_COOLDOWN_SECONDS - (now_epoch - last_sl_time))
+        if sl_cooldown_rem <= 0 and hasattr(OptionDB, "get_recent_direction_sl_exit"):
+            recent_sl_db = OptionDB.get_recent_direction_sl_exit(
+                underlying=underlying,
+                option_type=opt_type,
+                as_of_time=now_dt,
+                cooldown_seconds=self._DIRECTION_SL_COOLDOWN_SECONDS
+            )
+            if recent_sl_db is not None:
+                sl_cooldown_rem = int(recent_sl_db.get("remaining_seconds") or 0)
         if sl_cooldown_rem > 0:
             rejection_reasons.append(
                 f"Direction SL cooldown active for {underlying} {opt_type} ({sl_cooldown_rem}s remaining after recent Stop-Loss/Stagnation exit)"
@@ -1097,8 +1130,18 @@ class OptionSignalEngine:
         opp_sl_key = f"{str(underlying or 'NIFTY').upper()}_{opp_opt_type}"
         opp_sl_time = self._DIRECTION_SL_COOLDOWNS.get(opp_sl_key, 0.0)
         opp_elapsed_sec = now_epoch - opp_sl_time
-        if opp_elapsed_sec < (ANTI_PING_PONG_FLIP_MINUTES * 60):
-            rem_flip_m = int((ANTI_PING_PONG_FLIP_MINUTES * 60 - opp_elapsed_sec) / 60)
+        flip_cooldown_sec = ANTI_PING_PONG_FLIP_MINUTES * 60
+        if opp_elapsed_sec >= flip_cooldown_sec and hasattr(OptionDB, "get_recent_direction_sl_exit"):
+            recent_opp_sl_db = OptionDB.get_recent_direction_sl_exit(
+                underlying=underlying,
+                option_type=opp_opt_type,
+                as_of_time=now_dt,
+                cooldown_seconds=flip_cooldown_sec
+            )
+            if recent_opp_sl_db is not None:
+                opp_elapsed_sec = float(recent_opp_sl_db.get("elapsed_seconds") or 0.0)
+        if opp_elapsed_sec < flip_cooldown_sec:
+            rem_flip_m = int((flip_cooldown_sec - opp_elapsed_sec) / 60)
             if not (
                 (opt_type == "CE" and (is_day_high_breakout or is_strong_underlying_bull))
                 or (opt_type == "PE" and (is_day_low_breakdown or is_strong_underlying_bear))
@@ -1188,32 +1231,76 @@ class OptionSignalEngine:
         OptionDB.save_signal(signal_payload)
 
         # ── TRANSITION TO ACTIVE: TELEGRAM ALERT & PAPER ORDER ENTRY ─────────
-        if final_status == STATE_ACTIVE:
+        if final_status == STATE_ACTIVE and not defer_execution:
+            self.execute_active_signal(
+                signal_payload=signal_payload,
+                as_of_time=now_dt,
+                enforce_cutoff=enforce_cutoff,
+                paper_capacity_reached=paper_capacity_reached,
+                paper_underlying_full=paper_underlying_full,
+                open_trades_count=len(open_trades),
+                has_recent_u_lock=has_recent_u_lock,
+            )
+
+        return signal_payload
+
+    def execute_active_signal(
+        self,
+        signal_payload: Dict[str, Any],
+        as_of_time: Optional[datetime] = None,
+        enforce_cutoff: bool = False,
+        paper_capacity_reached: Optional[bool] = None,
+        paper_underlying_full: Optional[bool] = None,
+        open_trades_count: Optional[int] = None,
+        has_recent_u_lock: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Executes an ACTIVE signal (sets cooldowns & underlying locks, dispatches Telegram alert,
+        and opens Paper position). Separated from evaluate_contract when defer_execution=True so
+        OptionSnifferOrchestrator can apply Winner-Takes-All Convex Efficiency selection across a sweep.
+        """
+        from app.analytics.option_sniffer.option_constants import to_ist_datetime
+        now_dt = to_ist_naive(as_of_time)
+        now_epoch = time.time() if as_of_time is None else float(to_ist_datetime(as_of_time).timestamp())
+        ikey = signal_payload.get("instrument_key")
+        tsym = signal_payload.get("trading_symbol")
+        direction = signal_payload.get("direction")
+        calibrated_prob = float(signal_payload.get("calibrated_prob") or 0.0)
+        u_str = str(signal_payload.get("underlying") or "NIFTY").upper()
+
+        if paper_capacity_reached is None or paper_underlying_full is None:
+            open_trades = OptionDB.get_open_paper_trades()
+            open_trades_count = len(open_trades)
+            paper_capacity_reached = open_trades_count >= self._MAX_CONCURRENT_OPEN_TRADES
+            u_open_trades = [t for t in open_trades if str(t.get("underlying") or "").upper() == u_str]
+            paper_underlying_full = len(u_open_trades) >= MAX_POSITIONS_PER_UNDERLYING
+
+        self._COOLDNS_KEY = ikey
+        if ikey:
             self._COOLDOWNS[ikey] = now_epoch
-            self._ACTIVE_UNDERLYING_LOCKS[u_str] = now_epoch
-            logger.info(f"[OptionSignalEngine] 🚨 ACTIVE SIGNAL TRIGGERED: {tsym} {direction} (P={calibrated_prob*100:.1f}%)")
+        self._ACTIVE_UNDERLYING_LOCKS[u_str] = now_epoch
+        logger.info(f"[OptionSignalEngine] 🚨 ACTIVE SIGNAL TRIGGERED: {tsym} {direction} (P={calibrated_prob*100:.1f}%)")
 
-            # 1. Dispatch Immediate Telegram Alert
-            self._send_telegram_signal_alert(signal_payload)
-            signal_payload["telegram_sent"] = 1
-            signal_payload["telegram_sent_at"] = to_ist_naive().isoformat()
-            OptionDB.save_signal(signal_payload)
+        # 1. Dispatch Immediate Telegram Alert
+        self._send_telegram_signal_alert(signal_payload)
+        signal_payload["telegram_sent"] = 1
+        signal_payload["telegram_sent_at"] = to_ist_naive().isoformat()
+        OptionDB.save_signal(signal_payload)
 
-            # 2. Enter Paper Position (BUY at current ASK) if paper capacity allows and underlying not full
-            if not paper_capacity_reached and not paper_underlying_full:
-                trade_id = OptionPaperExecution.open_trade(
-                    signal_payload,
-                    as_of_time=now_dt,
-                    enforce_cutoff=enforce_cutoff
-                )
-                signal_payload["paper_trade_id"] = trade_id
-                if trade_id:
-                    self._ACTIVE_UNDERLYING_LOCKS[u_str] = now_epoch
-            else:
-                logger.info(
-                    f"[OptionSignalEngine] Paper capacity full or underlying occupied ({len(open_trades)}/{self._MAX_CONCURRENT_OPEN_TRADES}, lock={has_recent_u_lock}); skipped paper entry for {tsym}"
-                )
-
+        # 2. Enter Paper Position (BUY at current ASK) if paper capacity allows and underlying not full
+        if not paper_capacity_reached and not paper_underlying_full:
+            trade_id = OptionPaperExecution.open_trade(
+                signal_payload,
+                as_of_time=now_dt,
+                enforce_cutoff=enforce_cutoff
+            )
+            signal_payload["paper_trade_id"] = trade_id
+            if trade_id:
+                self._ACTIVE_UNDERLYING_LOCKS[u_str] = now_epoch
+        else:
+            logger.info(
+                f"[OptionSignalEngine] Paper capacity full or underlying occupied ({open_trades_count}/{self._MAX_CONCURRENT_OPEN_TRADES}, lock={has_recent_u_lock}); skipped paper entry for {tsym}"
+            )
         return signal_payload
 
     @classmethod

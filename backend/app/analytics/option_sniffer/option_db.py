@@ -834,6 +834,64 @@ class OptionDB:
                 return None
 
     @classmethod
+    def get_recent_direction_sl_exit(
+        cls,
+        underlying: str,
+        option_type: str,
+        as_of_time: Optional[datetime] = None,
+        cooldown_seconds: int = 1200
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Checks if a losing / stop-loss / stagnation trade on the given (underlying, option_type)
+        closed during the current trading session within cooldown_seconds before as_of_time.
+        Guarantees process-restart immunity for Direction SL Cooldown and Anti-Ping-Pong Flip Lockout.
+        """
+        now_dt = to_ist_naive(as_of_time)
+        date_str = now_dt.strftime("%Y-%m-%d")
+        u_clean = str(underlying or "NIFTY").upper().strip()
+        ot_clean = str(option_type or "CE").upper().strip()
+
+        with _DB_LOCK:
+            try:
+                conn = cls.get_connection()
+                rows = conn.execute("""
+                    SELECT trade_id, trading_symbol, underlying, option_type, entry_time, exit_time,
+                           entry_ask, exit_bid, mfe_pct, net_pnl, exit_reason
+                    FROM option_sniffer_paper_trades
+                    WHERE status = 'CLOSED'
+                      AND UPPER(underlying) = ?
+                      AND UPPER(option_type) = ?
+                      AND substr(exit_time, 1, 10) = ?
+                      AND COALESCE(net_pnl, 0.0) < 0.0
+                      AND (
+                          UPPER(COALESCE(exit_reason, '')) LIKE '%STOP%'
+                          OR UPPER(COALESCE(exit_reason, '')) LIKE '%STAGNATION%'
+                          OR UPPER(COALESCE(exit_reason, '')) LIKE '%INVALIDATION%'
+                      )
+                    ORDER BY exit_time DESC
+                """, (u_clean, ot_clean, date_str)).fetchall()
+                conn.close()
+
+                for r in rows:
+                    d = dict(r)
+                    xt_str = str(d.get("exit_time") or "")
+                    if not xt_str:
+                        continue
+                    try:
+                        xt_dt = to_ist_naive(datetime.fromisoformat(xt_str))
+                        elapsed = (now_dt - xt_dt).total_seconds()
+                        if 0 <= elapsed < cooldown_seconds:
+                            d["elapsed_seconds"] = int(elapsed)
+                            d["remaining_seconds"] = int(cooldown_seconds - elapsed)
+                            return d
+                    except Exception:
+                        continue
+                return None
+            except Exception as e:
+                logger.debug(f"[OptionDB] get_recent_direction_sl_exit note: {e}")
+                return None
+
+    @classmethod
     def get_open_paper_trades(cls) -> List[Dict[str, Any]]:
         """Retrieves currently open paper positions."""
         with _DB_LOCK:

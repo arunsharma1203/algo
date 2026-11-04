@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, date
 from typing import Dict, Any, List, Optional, Tuple
+from app.analytics.option_sniffer.option_constants import to_ist_naive
 
 FEATURE_NAMES = [
     "spot_price",
@@ -91,7 +92,7 @@ class OptionFeatureExtractor:
         """
         Extracts a clean dictionary of features available strictly at decision time T.
         """
-        now_dt = as_of_time or datetime.now()
+        now_dt = to_ist_naive(as_of_time)
         macro_context = macro_context or {}
         upstream_signals = upstream_signals or {}
 
@@ -191,13 +192,27 @@ class OptionFeatureExtractor:
             # Blend micro candle RSI (50%) with structural session RSI (50%) to prevent 3-minute micro-pauses from whipsawing RSI
             spot_rsi = round(0.50 * candle_rsi + 0.50 * structural_rsi, 2)
             atr_val = cls.calculate_atr(underlying_df, period=period_rsi)
-            spot_atr_pct = (atr_val / curr_c * 100.0) if curr_c > 0 else 0.80
+            spot_atr_5m = atr_val * math.sqrt(5.0)
+            spot_atr_pct = (spot_atr_5m / curr_c * 100.0) if curr_c > 0 else 0.80
 
-            vwap_val = float(underlying_quote.get("vwap") or curr_c)
+            vwap_val = float(underlying_quote.get("vwap") or 0.0)
+            if vwap_val <= 0 or abs(vwap_val - curr_c) < 1e-4 or abs(vwap_val - spot) < 1e-4:
+                bench_val = float(underlying_quote.get("session_benchmark") or 0.0)
+                if bench_val > 0:
+                    vwap_val = bench_val
+                elif "high" in underlying_df.columns and "low" in underlying_df.columns:
+                    tp_series = (underlying_df["high"].astype(float) + underlying_df["low"].astype(float) + closes.astype(float)) / 3.0
+                    vwap_val = float(tp_series.mean())
+                else:
+                    vwap_val = float(closes.astype(float).mean())
             spot_vwap_dist = float((curr_c - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
         else:
-            vwap_val = float(underlying_quote.get("vwap") or (u_open if u_open > 0 else spot))
+            vwap_val = float(underlying_quote.get("vwap") or 0.0)
+            if vwap_val <= 0 or abs(vwap_val - spot) < 1e-4:
+                bench_val = float(underlying_quote.get("session_benchmark") or 0.0)
+                vwap_val = bench_val if bench_val > 0 else (u_open if u_open > 0 else spot)
             spot_vwap_dist = float((spot - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
+            spot_atr_5m = max(15.0, spot * (spot_atr_pct / 100.0) * 0.25)
             spot_rsi = structural_rsi
             if u_open > 0:
                 if pullback_from_high_pct <= -0.22 and (rally_from_low_pct < abs(pullback_from_high_pct)):
@@ -249,6 +264,10 @@ class OptionFeatureExtractor:
             "spot_rsi": round(spot_rsi, 2),
             "spot_atr_pct": round(spot_atr_pct, 3),
             "spot_vwap_dist_pct": round(spot_vwap_dist, 3),
+            "vwap": round(vwap_val, 2),
+            "spot_atr": round(spot_atr_5m, 2),
+            "pullback_from_high_pct": round(pullback_from_high_pct, 3),
+            "rally_from_low_pct": round(rally_from_low_pct, 3),
             "india_vix": round(india_vix, 2),
             "macro_bullish": macro_bullish,
             "macro_bearish": macro_bearish,

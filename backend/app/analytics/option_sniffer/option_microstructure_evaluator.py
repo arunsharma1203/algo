@@ -222,7 +222,7 @@ class OptionMicrostructureEvaluator:
                 date_str = to_ist_naive().strftime("%Y-%m-%d")
                 row = cur.execute("""
                     SELECT spread_pct FROM option_sniffer_signals
-                    WHERE (underlying = ? OR underlying = 'BANKNIFTY' OR underlying = 'NIFTY')
+                    WHERE UPPER(underlying) = ?
                       AND created_at >= ? AND spread_pct > 0
                     ORDER BY id DESC LIMIT 1;
                 """, (underlying.upper(), f"{date_str} 09:15:00")).fetchone()
@@ -236,10 +236,7 @@ class OptionMicrostructureEvaluator:
             return 0.40, True
         except Exception as e:
             logger.debug(f"[MicrostructureEvaluator] Spread check note: {e}")
-            return 0.40, True
-        except Exception as e:
-            logger.debug(f"[MicrostructureEvaluator] Spread check note: {e}")
-            return 0.40, True
+            return 99.9, False
 
     @classmethod
     def get_spot_kaufman_er(cls, underlying: str = "NIFTY", as_of_date: Optional[str] = None) -> Tuple[float, bool]:
@@ -459,20 +456,17 @@ class OptionMicrostructureEvaluator:
                     eval_price_low = min(spot_ltp, post_orb_bar_close) if post_orb_bar_close > 0 else spot_ltp
                     if eval_price_high > result["or_high"]:
                         result["breakout_direction"] = "BULL_EXPANSION"
-                        result["is_accepted"] = True
                         result["volume_ratio"] = live_vol_ratio if live_vol_ratio is not None else 1.35
                         result["volume_ok"] = result["volume_ratio"] >= cls.ORB_MIN_VOLUME_RATIO
+                        result["is_accepted"] = bool(result["volume_ok"])
                     elif eval_price_low < result["or_low"]:
                         result["breakout_direction"] = "BEAR_BREAKDOWN"
-                        result["is_accepted"] = True
                         result["volume_ratio"] = live_vol_ratio if live_vol_ratio is not None else 1.25
                         result["volume_ok"] = result["volume_ratio"] >= cls.ORB_MIN_VOLUME_RATIO
+                        result["is_accepted"] = bool(result["volume_ok"])
                     else:
                         result["breakout_direction"] = "INSIDE_RANGE"
-                        # If past static fallback (09:45), accept range expansion as acceptable
-                        if curr_time >= cls.STATIC_FALLBACK_UNLOCK:
-                            result["is_accepted"] = True
-                            result["volume_ok"] = True
+                        result["is_accepted"] = False
 
             return result
         except Exception as e:

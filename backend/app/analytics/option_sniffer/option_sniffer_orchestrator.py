@@ -166,7 +166,7 @@ class OptionSnifferOrchestrator:
                 logger.error(f"[OptionSnifferOrchestrator] Surveillance loop error: {e}", exc_info=True)
                 time.sleep(5.0)
 
-    def run_surveillance_sweep(self) -> Dict[str, Any]:
+    def run_surveillance_sweep(self, as_of_time: Optional[datetime] = None) -> Dict[str, Any]:
         """
         Executes an evaluation sweep across all active option contracts:
           1. Surveillance of existing open paper positions.
@@ -175,7 +175,7 @@ class OptionSnifferOrchestrator:
           4. Record data health.
         """
         sweep_start = time.time()
-        now_dt = to_ist_naive()
+        now_dt = to_ist_naive(as_of_time)
         now_iso = now_dt.isoformat()
 
         with self._lock:
@@ -366,6 +366,8 @@ class OptionSnifferOrchestrator:
                             pass
 
                 ordered_contracts = sorted(self.contracts, key=_atm_priority_key)
+                candidate_active_signals: List[Dict[str, Any]] = []
+                supports_deferred = hasattr(self.signal_engine, "execute_active_signal")
                 for contract in ordered_contracts:
                     u_sym = contract.get("underlying", "NIFTY")
                     c_exp_str = str(contract.get("expiry") or "")
@@ -395,7 +397,7 @@ class OptionSnifferOrchestrator:
                         u_df = None
 
                     evaluated_count += 1
-                    res = self.signal_engine.evaluate_contract(
+                    eval_kwargs = dict(
                         contract=contract,
                         quote=quote,
                         underlying_quote=u_quote,
@@ -403,13 +405,46 @@ class OptionSnifferOrchestrator:
                         macro_context=macro_info,
                         upstream_signals=upstream_signals,
                         as_of_time=now_dt,
-                        enforce_cutoff=True
+                        enforce_cutoff=True,
                     )
+                    if supports_deferred:
+                        try:
+                            res = self.signal_engine.evaluate_contract(**eval_kwargs, defer_execution=True)
+                        except TypeError:
+                            supports_deferred = False
+                            res = self.signal_engine.evaluate_contract(**eval_kwargs)
+                    else:
+                        res = self.signal_engine.evaluate_contract(**eval_kwargs)
 
                     if res.get("status") == "QUALIFIED":
                         qualified_signals.append(res)
                     elif res.get("status") == "ACTIVE":
-                        active_signals.append(res)
+                        if supports_deferred:
+                            candidate_active_signals.append(res)
+                        else:
+                            active_signals.append(res)
+
+                if supports_deferred and candidate_active_signals:
+                    winning_candidates = self._select_winner_takes_all_candidates(candidate_active_signals)
+                    winning_ids = {id(w) for w in winning_candidates}
+                    for cand in candidate_active_signals:
+                        if id(cand) in winning_ids:
+                            executed_sig = self.signal_engine.execute_active_signal(
+                                cand,
+                                as_of_time=now_dt,
+                                enforce_cutoff=True,
+                            )
+                            active_signals.append(executed_sig)
+                        else:
+                            cand["status"] = "QUALIFIED"
+                            cand["hurdles_passed"] = False
+                            reasons = list(cand.get("rejection_reasons") or [])
+                            reasons.append(
+                                "Sweep Winner-Takes-All: Suppressed in favor of higher Convex Efficiency strike in same sweep."
+                            )
+                            cand["rejection_reasons"] = reasons
+                            OptionDB.save_signal(cand)
+                            qualified_signals.append(cand)
 
             # 5. Record Health Snapshot
             health_telem = self.stream_manager.get_health_status()

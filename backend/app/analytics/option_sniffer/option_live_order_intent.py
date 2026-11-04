@@ -159,6 +159,8 @@ def init_live_order_tables() -> None:
                 cur.execute("ALTER TABLE option_live_order_intents ADD COLUMN gross_pnl REAL DEFAULT 0.0;")
             if "statutory_charges" not in intent_cols:
                 cur.execute("ALTER TABLE option_live_order_intents ADD COLUMN statutory_charges REAL DEFAULT 0.0;")
+            if "peak_bid" not in intent_cols:
+                cur.execute("ALTER TABLE option_live_order_intents ADD COLUMN peak_bid REAL DEFAULT 0.0;")
 
             # 2. Risk & Circuit Breaker Ledger
             cur.execute("""
@@ -672,7 +674,7 @@ class OrderIntentEngine:
                 """)
                 submitted_rows = cur.fetchall()
 
-            now_dt = datetime.now()
+            now_dt = to_ist_naive()
             for s_row in submitted_rows:
                 s_id, amb_sym, created_str, st = s_row
                 if st in ('SUBMITTED_AMBIGUOUS', 'AMBIGUOUS_ORDER_PENDING'):
@@ -784,7 +786,8 @@ class OrderIntentEngine:
 
             # 7. Per-Trade Risk & Margin / Capital Check
             underlying = signal_payload.get("underlying", "NIFTY")
-            lot_size = 65 if underlying == "NIFTY" else (30 if underlying == "BANKNIFTY" else 50)
+            default_lot = 65 if underlying == "NIFTY" else (30 if underlying == "BANKNIFTY" else 50)
+            lot_size = int(signal_payload.get("lot_size") or lq.get("lot_size") or default_lot)
             
             # Dynamic 2.0 SL and Target Calculation (anchored to Spot ATR x Delta)
             engine_mode = OPTION_EXECUTION_ENGINE_MODE
@@ -1272,8 +1275,33 @@ class OrderIntentEngine:
         if not open_live:
             return []
 
-        now_dt = datetime.now()
+        now_dt = to_ist_naive()
         closed_records = []
+
+        # Portfolio Circuit Breaker Parity Check (Realized + Unrealized MTM across open live positions)
+        is_live_cb_halt = False
+        try:
+            live_cb = self.get_live_circuit_breaker_telemetry(as_of_time=now_dt)
+            if isinstance(live_cb, dict) and (
+                live_cb.get("is_max_loss_limit_hit") is True
+                or live_cb.get("is_peak_lock_tripped") is True
+                or float(live_cb.get("total_net_pnl_exposure") or 0.0) <= -abs(MAX_DAILY_LOSS_INR)
+            ):
+                is_live_cb_halt = True
+            else:
+                realized_today = float((live_cb or {}).get("today_realized_pnl") or 0.0)
+                floating_mtm = 0.0
+                for p_chk in open_live:
+                    q_chk = live_quotes_map.get(p_chk["instrument_key"]) or {}
+                    b_chk = float(q_chk.get("bid") or q_chk.get("ltp") or 0.0)
+                    e_chk = float(p_chk.get("average_fill_price") or p_chk.get("limit_price") or 0.0)
+                    qty_chk = int(p_chk.get("filled_quantity") or p_chk.get("target_quantity") or p_chk.get("lot_size") or 0)
+                    if b_chk > 0 and e_chk > 0 and qty_chk > 0:
+                        floating_mtm += (b_chk - e_chk) * qty_chk - 55.0
+                if (realized_today + floating_mtm) <= -abs(MAX_DAILY_LOSS_INR):
+                    is_live_cb_halt = True
+        except Exception as cb_chk_err:
+            logger.debug(f"[OrderIntentEngine] Live exit circuit breaker check note: {cb_chk_err}")
 
         for pos in open_live:
             ikey = pos["instrument_key"]
@@ -1289,23 +1317,37 @@ class OrderIntentEngine:
             if entry_fill <= 0:
                 continue
 
-            # Premium P&L % & Peak MFE Tracking for Trailing Stop Ratchet
+            # Premium P&L % & Peak MFE Tracking for Trailing Stop Ratchet (Crash-Immune via SQLite peak_bid)
             current_pnl_pct = ((current_bid - entry_fill) / entry_fill) * 100.0
             intent_id = pos["order_intent_id"]
-            prev_peak = self._peak_bids.get(intent_id, entry_fill)
+            db_peak_bid = float(pos.get("peak_bid") or 0.0)
+            prev_peak = max(db_peak_bid, float(self._peak_bids.get(intent_id, entry_fill)), entry_fill)
             prev_mfe_pct = ((prev_peak - entry_fill) / entry_fill) * 100.0 if entry_fill > 0 else 0.0
             current_peak = max(prev_peak, current_bid, entry_fill)
             self._peak_bids[intent_id] = current_peak
+            if current_peak > db_peak_bid:
+                try:
+                    with self._get_db_conn() as pconn:
+                        pcur = pconn.cursor()
+                        pcols = [c[1] for c in pcur.execute("PRAGMA table_info(option_live_order_intents);").fetchall()]
+                        if "peak_bid" in pcols:
+                            pcur.execute(
+                                "UPDATE option_live_order_intents SET peak_bid = ? WHERE order_intent_id = ?;",
+                                (current_peak, intent_id),
+                            )
+                            pconn.commit()
+                except Exception:
+                    pass
             mfe_pct = round(((current_peak - entry_fill) / entry_fill) * 100.0, 2)
 
             # Holding duration
             try:
-                created_dt = datetime.fromisoformat(pos["created_at"])
+                created_dt = to_ist_naive(datetime.fromisoformat(pos["created_at"]))
                 duration_min = (now_dt - created_dt).total_seconds() / 60.0
             except Exception:
                 duration_min = 0.0
 
-            exit_reason = None
+            exit_reason = "CIRCUIT_BREAKER_HALT" if is_live_cb_halt else None
             # Target & Ratchet thresholds (Dynamic V2, Uncapped Convex Runner, or Classic V1)
             engine_ver = pos.get("engine_version") or OPTION_EXECUTION_ENGINE_MODE
             target_hurdle = float(pos.get("dynamic_target_pct") or DEFAULT_TARGET_PCT)
@@ -1322,7 +1364,9 @@ class OrderIntentEngine:
             )
 
             # 1. Take Profit Hurdle (Dynamic or Classic, bypassed when Uncapped Target-Lock Runner is active)
-            if not is_uncapped_mode and current_pnl_pct >= target_hurdle:
+            if exit_reason:
+                pass
+            elif not is_uncapped_mode and current_pnl_pct >= target_hurdle:
                 exit_reason = "TARGET_MET"
             # 2. Hard Stop Loss Hurdle (Backup defense in case broker exchange SL is delayed)
             elif current_pnl_pct <= -stop_hurdle:
@@ -1413,7 +1457,7 @@ class OrderIntentEngine:
         if not adapter._is_live_armed:
             return []
 
-        now_dt = datetime.now()
+        now_dt = to_ist_naive()
         # Gate 0A: Live Canary Scout & Dynamic Microstructure Window (09:35 / 09:45 - 13:15 IST)
         from app.analytics.option_sniffer.option_microstructure_evaluator import OptionMicrostructureEvaluator
         ms_eval = OptionMicrostructureEvaluator.evaluate_microstructure_gate(dt=now_dt)
@@ -1529,7 +1573,7 @@ class OrderIntentEngine:
                 )
                 if ts_str and effective_max_age > 0:
                     try:
-                        sig_dt = datetime.fromisoformat(str(ts_str))
+                        sig_dt = to_ist_naive(datetime.fromisoformat(str(ts_str)))
                         age_sec = (now_dt - sig_dt).total_seconds()
                         if age_sec > effective_max_age or age_sec < -5.0:
                             continue
@@ -1878,7 +1922,11 @@ class OrderIntentEngine:
             return {"status": "BLOCKED", "reason": "LIVE_TRADING_NOT_ARMED: Real broker orders are disabled. Mode is Paper."}
 
         # Guard 2: Market Cutoff (15:15 IST) & Canary Scout Live Window (09:45 - 13:15 IST)
-        now = datetime.now()
+        import pytz
+        try:
+            now = to_ist_naive(datetime.now(pytz.timezone("Asia/Kolkata")))
+        except TypeError:
+            now = to_ist_naive(datetime.now())
         if now.time() >= datetime.strptime("15:15", "%H:%M").time():
             adapter._is_live_armed = False
             return {"status": "BLOCKED", "reason": "SESSION_CLOSED: Market cutoff 15:15 IST passed."}
@@ -1950,7 +1998,7 @@ class OrderIntentEngine:
         }
 
         success, status_code, data = self._call_upstox_broker_api("POST", "/order/place", payload=payload)
-        now_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_iso = to_ist_naive().strftime("%Y-%m-%d %H:%M:%S")
 
         with self._get_db_conn() as conn:
             cur = conn.cursor()
@@ -2041,10 +2089,10 @@ class OrderIntentEngine:
                 filled_price, filled_qty, effective_sl_pct
             )
         if custom_trigger_price is not None and custom_trigger_price > 0:
-            trigger_price = align_to_nse_tick(round(custom_trigger_price, 1))
+            trigger_price = align_to_nse_tick(custom_trigger_price)
         else:
-            trigger_price = align_to_nse_tick(round(filled_price * (1.0 - (effective_sl_pct / 100.0)), 1))
-        limit_price = align_to_nse_tick(round(trigger_price * 0.985, 1))
+            trigger_price = align_to_nse_tick(filled_price * (1.0 - (effective_sl_pct / 100.0)))
+        limit_price = align_to_nse_tick(trigger_price * 0.985)
 
         mod_payload = {
             "order_id": str(broker_sl_order_id),
@@ -2058,7 +2106,7 @@ class OrderIntentEngine:
         success, status_code, data = self._call_upstox_broker_api(
             "PUT", "/order/modify", payload=mod_payload, is_emergency=True
         )
-        now_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_iso = to_ist_naive().strftime("%Y-%m-%d %H:%M:%S")
         if success and isinstance(data, dict) and data.get("status") == "success":
             with self._get_db_conn() as conn:
                 cur = conn.cursor()
@@ -2131,8 +2179,8 @@ class OrderIntentEngine:
                 effective_sl_pct = OptionPaperExecution.calculate_rupee_capped_sl_pct(
                     filled_price, filled_qty, effective_sl_pct
                 )
-            trigger_price = align_to_nse_tick(round(filled_price * (1.0 - (effective_sl_pct / 100.0)), 1))
-            limit_price = align_to_nse_tick(round(trigger_price * 0.985, 1))
+            trigger_price = align_to_nse_tick(filled_price * (1.0 - (effective_sl_pct / 100.0)))
+            limit_price = align_to_nse_tick(trigger_price * 0.985)
 
             sl_tag = sanitize_upstox_tag(f"SL-{order_intent_id}")
             payload = {

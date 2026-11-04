@@ -310,15 +310,16 @@ class OptionLiveAdapter:
             with self._get_read_only_conn() as conn:
                 cur = conn.cursor()
                 if today_only:
+                    today_ist = to_ist_naive().strftime("%Y-%m-%d")
                     cur.execute("""
                         SELECT signal_id, created_at AS timestamp, created_at, instrument_key, trading_symbol, underlying,
                                option_type, strike, expiry, direction AS action, option_ask AS suggested_entry, option_ask,
                                calibrated_prob, expected_net_return AS expected_net_return_pct, status,
                                spot_price, option_bid, spread_pct, delta, iv
                         FROM option_sniffer_signals
-                        WHERE DATE(created_at) = DATE('now', 'localtime')
+                        WHERE SUBSTR(created_at, 1, 10) = ?
                         ORDER BY id DESC LIMIT ?;
-                    """, (limit,))
+                    """, (today_ist, limit))
                 else:
                     cur.execute("""
                         SELECT signal_id, created_at AS timestamp, created_at, instrument_key, trading_symbol, underlying,
@@ -412,7 +413,8 @@ class OptionLiveAdapter:
                     seen_contracts.add(dedup_key)
 
                 underlying = s.get("underlying", "")
-                lot_size = 65 if underlying == "NIFTY" else (30 if underlying == "BANKNIFTY" else 50)
+                default_lot = 65 if underlying == "NIFTY" else (30 if underlying == "BANKNIFTY" else 50)
+                lot_size = int(s.get("lot_size") or default_lot)
                 entry = float(s.get("suggested_entry") or 0.0)
 
                 # Check streaming live quote if available to ensure live price reactivity
@@ -678,7 +680,7 @@ class OptionLiveAdapter:
                 info["avg_price"] = (info["total_val"] / t_qty) if t_qty > 0 else 0.0
 
         updated = 0
-        now_iso = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_iso = to_ist_naive().strftime("%Y-%m-%d %H:%M:%S")
 
         try:
             with sqlite3.connect(get_db_path(), timeout=5.0) as conn:
@@ -692,6 +694,34 @@ class OptionLiveAdapter:
                 """)
                 rows = cur.fetchall()
 
+                # Track order_ids already explicitly bound to an intent so same-day multi-trade token fallback
+                # never blends fills or double-counts quantities from another intent on the same strike!
+                claimed_buy_order_ids = {
+                    str(r[2]) for r in rows if r[2] and str(r[2]) in buys
+                }
+                claimed_sell_order_ids = {
+                    str(oid) for r in rows for oid in (r[3], r[4]) if oid and str(oid) in sells
+                }
+
+                def _build_unclaimed_token_agg(token_info: Optional[Dict[str, Any]], source_orders: Dict[str, Dict[str, Any]], claimed_set: set) -> Optional[Dict[str, Any]]:
+                    if not token_info:
+                        return None
+                    unclaimed_oids = [oid for oid in token_info.get("order_ids", []) if oid in source_orders and oid not in claimed_set]
+                    if not unclaimed_oids:
+                        return None
+                    tot_q = sum(int(source_orders[oid]["total_qty"]) for oid in unclaimed_oids)
+                    tot_v = sum(float(source_orders[oid]["total_val"]) for oid in unclaimed_oids)
+                    t_ids = []
+                    for oid in unclaimed_oids:
+                        t_ids.extend(source_orders[oid].get("trade_ids", []))
+                    return {
+                        "total_qty": tot_q,
+                        "total_val": tot_v,
+                        "avg_price": (tot_v / tot_q) if tot_q > 0 else 0.0,
+                        "order_ids": unclaimed_oids,
+                        "trade_ids": t_ids,
+                    }
+
                 for r in rows:
                     (r_id, intent_id, b_id, sl_id, exit_id,
                      qty, avg_fill, exit_fill, cur_gross, cur_charges, cur_pnl, exit_st,
@@ -699,7 +729,9 @@ class OptionLiveAdapter:
 
                     actual_buy = buys.get(str(b_id)) if b_id else None
                     if not actual_buy and ikey and ikey in buys_by_token:
-                        actual_buy = buys_by_token[ikey]
+                        actual_buy = _build_unclaimed_token_agg(buys_by_token[ikey], buys, claimed_buy_order_ids)
+                        if actual_buy and actual_buy.get("order_ids"):
+                            claimed_buy_order_ids.update(actual_buy["order_ids"])
 
                     # Sum all sell executions across both exit order and stop loss order
                     total_sell_qty = 0
@@ -712,34 +744,47 @@ class OptionLiveAdapter:
                         total_sell_val += sells[str(exit_id)]["total_val"]
                         sell_trade_ids.extend(sells[str(exit_id)]["trade_ids"])
                         matched_sell_order_id = str(exit_id)
+                        claimed_sell_order_ids.add(str(exit_id))
                     if sl_id and str(sl_id) in sells:
                         total_sell_qty += sells[str(sl_id)]["total_qty"]
                         total_sell_val += sells[str(sl_id)]["total_val"]
                         sell_trade_ids.extend(sells[str(sl_id)]["trade_ids"])
                         matched_sell_order_id = str(sl_id)
+                        claimed_sell_order_ids.add(str(sl_id))
 
-                    # Multi-Factor Fallback: If no sells matched via exit_id/sl_id, check sells by instrument_token or symbol
+                    # Multi-Factor Fallback: If no sells matched via exit_id/sl_id, check unclaimed sells by instrument_token or symbol
                     clean_tsym = "".join(c for c in str(tsym or "") if c.isalnum()).upper()
                     if total_sell_qty == 0:
-                        token_sell = None
+                        raw_token_sell = None
                         if ikey and ikey in sells_by_token:
-                            token_sell = sells_by_token[ikey]
+                            raw_token_sell = sells_by_token[ikey]
                         elif tsym and tsym in sells_by_token:
-                            token_sell = sells_by_token[tsym]
+                            raw_token_sell = sells_by_token[tsym]
                         elif clean_tsym and clean_tsym in sells_by_token:
-                            token_sell = sells_by_token[clean_tsym]
+                            raw_token_sell = sells_by_token[clean_tsym]
                         else:
                             for k_cand, v_cand in sells_by_token.items():
                                 if ikey and (ikey in k_cand or k_cand in ikey):
-                                    token_sell = v_cand
+                                    raw_token_sell = v_cand
                                     break
 
+                        token_sell = _build_unclaimed_token_agg(raw_token_sell, sells, claimed_sell_order_ids)
                         if token_sell and token_sell.get("total_qty", 0) > 0:
-                            total_sell_qty = token_sell["total_qty"]
-                            total_sell_val = token_sell["total_val"]
-                            sell_trade_ids.extend(token_sell.get("trade_ids", []))
-                            if token_sell.get("order_ids"):
-                                matched_sell_order_id = token_sell["order_ids"][0]
+                            # Claim only up to this intent's order quantity (or first unclaimed sell order)
+                            first_oid = token_sell["order_ids"][0]
+                            if len(token_sell["order_ids"]) > 1 and int(sells[first_oid]["total_qty"]) == int(qty or 0):
+                                total_sell_qty = int(sells[first_oid]["total_qty"])
+                                total_sell_val = float(sells[first_oid]["total_val"])
+                                sell_trade_ids.extend(sells[first_oid].get("trade_ids", []))
+                                matched_sell_order_id = first_oid
+                                claimed_sell_order_ids.add(first_oid)
+                            else:
+                                total_sell_qty = token_sell["total_qty"]
+                                total_sell_val = token_sell["total_val"]
+                                sell_trade_ids.extend(token_sell.get("trade_ids", []))
+                                if token_sell.get("order_ids"):
+                                    matched_sell_order_id = token_sell["order_ids"][0]
+                                    claimed_sell_order_ids.update(token_sell["order_ids"])
 
                     has_sell_trades = total_sell_qty > 0
 
@@ -876,14 +921,15 @@ class OptionLiveAdapter:
                 has_gross = "gross_pnl" in cols
                 has_stat = "statutory_charges" in cols
 
+                today_ist = to_ist_naive().strftime("%Y-%m-%d")
                 if has_gross and has_stat:
                     cur.execute("""
                         SELECT realized_pnl, gross_pnl, statutory_charges, average_fill_price, exit_fill_price, filled_quantity
                         FROM option_live_order_intents
                         WHERE exit_state IN ('CONFIRMED_FLAT', 'PARTIALLY_CLOSED')
-                          AND DATE(created_at) = DATE('now', 'localtime')
+                          AND SUBSTR(created_at, 1, 10) = ?
                           AND broker_order_id NOT LIKE 'UPSTOX_%';
-                    """)
+                    """, (today_ist,))
                     for row in cur.fetchall():
                         net_p = float(row[0] or 0.0)
                         gross_p = float(row[1] or 0.0)
@@ -909,9 +955,9 @@ class OptionLiveAdapter:
                         SELECT realized_pnl, average_fill_price, exit_fill_price, filled_quantity
                         FROM option_live_order_intents
                         WHERE exit_state IN ('CONFIRMED_FLAT', 'PARTIALLY_CLOSED')
-                          AND DATE(created_at) = DATE('now', 'localtime')
+                          AND SUBSTR(created_at, 1, 10) = ?
                           AND broker_order_id NOT LIKE 'UPSTOX_%';
-                    """)
+                    """, (today_ist,))
                     for row in cur.fetchall():
                         net_p = float(row[0] or 0.0)
                         avg_p = float(row[1] or 0.0)
@@ -974,7 +1020,7 @@ class OptionLiveAdapter:
             return False, "INVALID_CODE: The 4-digit verification code entered is invalid.", {}
 
         # 2. Session Cutoff & Autonomous Pre-Arm Standby Evaluation
-        now = datetime.now()
+        now = to_ist_naive()
         now_time = now.time()
         from datetime import time as dt_time
         from app.analytics.option_sniffer.option_constants import (

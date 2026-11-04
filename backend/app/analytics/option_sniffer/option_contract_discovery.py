@@ -27,6 +27,7 @@ from app.analytics.option_sniffer.option_constants import (
     STRIKE_INTERVALS,
     DEFAULT_LOT_SIZES,
     MAX_OPTION_EXPIRY_DTE,
+    to_ist_naive,
 )
 from app.analytics.option_sniffer.option_db import OptionDB
 
@@ -75,7 +76,7 @@ class OptionContractDiscovery:
         def _sqlite_fallback() -> List[Dict[str, Any]]:
             try:
                 import json as _json
-                today_s = date.today().strftime("%Y-%m-%d")
+                today_s = to_ist_naive().date().strftime("%Y-%m-%d")
                 conn = OptionDB.get_connection()
                 cur = conn.cursor()
                 cur.execute(
@@ -144,7 +145,7 @@ class OptionContractDiscovery:
     ) -> List[str]:
         """Returns sorted list of future expiry dates (YYYY-MM-DD) for the underlying within max_dte."""
         contracts = cls.fetch_raw_contracts(underlying, force_refresh=force_refresh)
-        today = date.today()
+        today = to_ist_naive().date()
         today_str = today.strftime("%Y-%m-%d")
         limit_dte = MAX_OPTION_EXPIRY_DTE if max_dte is None else max_dte
 
@@ -246,7 +247,7 @@ class OptionContractDiscovery:
             # Include next expiry if current expiry is today or tomorrow (rollover awareness)
             try:
                 curr_dt = datetime.strptime(current_expiry, "%Y-%m-%d").date()
-                if (curr_dt - date.today()).days <= 1 and len(expiries) > 1:
+                if (curr_dt - to_ist_naive().date()).days <= 1 and len(expiries) > 1:
                     selected_expiries.append(expiries[1])
             except Exception:
                 pass
