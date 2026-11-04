@@ -449,8 +449,14 @@ class OptionSignalEngine:
             except Exception:
                 pass
 
-        # Never allow a pre-spike 09:15 low (is_v_bottom_recovery) to bypass a >1.20x ATR drop from Day High
-        is_v_bottom_recovery = False
+        # Never allow a pre-spike 09:15 low (is_v_bottom_recovery) to bypass a >1.20x ATR drop from Day High in is_bull_reversal_broken,
+        # while preserving causal post-selloff V-bottom detection above the Opening Range for OptionRegimeGate Step 6.
+        is_v_bottom_recovery = (
+            (rally_from_low >= 0.35)
+            and (recent_ret_pct >= 0.05)
+            and not is_trapped_inside_orb
+            and (underlying_df is None or not df_dropped_off_high)
+        )
         is_v_top_reversal = (
             (pullback_from_high <= -0.35)
             and (recent_ret_pct <= -0.05)

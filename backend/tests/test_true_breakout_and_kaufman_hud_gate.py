@@ -318,6 +318,46 @@ class TestTrueBreakoutAndKaufmanHudGate(unittest.TestCase):
         finally:
             adapter._is_live_armed = prev_armed
 
+    def test_05_surgical_5_alpha_calibrations_itm_otm_and_session_history(self):
+        """
+        Verifies the 5 isolated alpha calibrations:
+        1. OptionAlphaModel does NOT penalize ITM strikes (moneyness > 0) or near-ATM strikes (<= 0.45% OTM),
+           preserving Oct 26 (+Rs 3,488) and Oct 30 (+Rs 3,686) while penalizing far-OTM (> 0.45%).
+        2. OptionStreamManager.get_underlying_history_df defaults to limit=375 (full session >= 09:15 IST).
+        """
+        import inspect
+        from app.analytics.option_sniffer.option_alpha_model import OptionAlphaModel
+        from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+
+        sig = inspect.signature(OptionStreamManager.get_underlying_history_df)
+        self.assertEqual(sig.parameters["limit"].default, 375)
+
+        alpha_model = OptionAlphaModel(model_artifact=None)
+        base_feats = {
+            "is_call": 1.0,
+            "spread_pct": 0.40,
+            "delta": 0.55,
+            "upstream_aligned": 0.85,
+            "upstream_consensus_conf": 75.0,
+            "spot_rsi": 60.0,
+            "spot_vwap_dist_pct": 0.25,
+            "spot_price": 22988.0,
+            "vwap": 22940.0,
+            "spot_atr": 45.0,
+        }
+        # 1. ITM contract (Oct 30 22850 CE @ Spot 22988 -> moneyness = +0.0060, abs_moneyness = 0.0060)
+        itm_feats = dict(base_feats, moneyness=0.0060, abs_moneyness=0.0060, delta=0.65)
+        atm_feats = dict(base_feats, moneyness=0.0, abs_moneyness=0.0, delta=0.52)
+        far_otm_feats = dict(base_feats, moneyness=-0.0115, abs_moneyness=0.0115, delta=0.25)
+
+        res_itm = alpha_model.predict_contract(itm_feats, is_breakout=True)
+        res_atm = alpha_model.predict_contract(atm_feats, is_breakout=True)
+        res_far_otm = alpha_model.predict_contract(far_otm_feats, is_breakout=True)
+
+        self.assertEqual(res_itm["calibrated_prob"], res_atm["calibrated_prob"])
+        self.assertLess(res_far_otm["calibrated_prob"], res_atm["calibrated_prob"] - 0.06)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -1617,24 +1617,52 @@ class OrderIntentEngine:
 
                             u_quote = stream_mgr.get_underlying_quote(und) or {}
                             open_col = "open" if "open" in u_df.columns else "Open"
-                            u_open = float(u_quote.get("open") or (u_df[open_col].iloc[0] if open_col in u_df.columns else current_spot))
-                            u_high = float(u_quote.get("high") or u_df[high_col].max() or current_spot)
-                            u_low = float(u_quote.get("low") or u_df[low_col].min() or current_spot)
+                            session_df = u_df
+                            if "timestamp" in u_df.columns:
+                                today_prefix = now_dt.strftime("%Y-%m-%d")
+                                ts_norm = u_df["timestamp"].astype(str).str.replace("T", " ", regex=False)
+                                s_mask = ts_norm.str.startswith(today_prefix) & (ts_norm.str.slice(11, 16) >= "09:15")
+                                if s_mask.any():
+                                    session_df = u_df[s_mask]
+
+                            df_s_open = float(session_df[open_col].iloc[0]) if open_col in session_df.columns and len(session_df) > 0 else current_spot
+                            df_s_high = float(session_df[high_col].max()) if len(session_df) > 0 else current_spot
+                            df_s_low = float(session_df[low_col].min()) if len(session_df) > 0 else current_spot
+                            q_high = float(u_quote.get("high") or 0.0)
+                            q_low = float(u_quote.get("low") or 0.0)
+                            # Use session candle high/low (>= 09:15 IST) when quote high/low is absent or contaminated by 09:00 pre-market spikes
+                            u_open = float(u_quote.get("open") or df_s_open)
+                            u_high = df_s_high if (df_s_high > 0 and (q_high <= 0 or (q_high - df_s_high) > (120.0 if is_bnf_u else 45.0))) else max(q_high, df_s_high)
+                            u_low = df_s_low if (df_s_low > 0 and (q_low <= 0 or (df_s_low - q_low) > (120.0 if is_bnf_u else 45.0))) else (min(q_low, df_s_low) if q_low > 0 else df_s_low)
+
                             drift_from_open = ((current_spot - u_open) / u_open * 100.0) if u_open > 0 else 0.0
                             rally_from_low = ((current_spot - u_low) / u_low * 100.0) if u_low > 0 else 0.0
                             pullback_from_high = ((current_spot - u_high) / u_high * 100.0) if u_high > 0 else 0.0
                             act_dir = cand.get("action", "")
 
-                            # Opening Range (09:15-09:30) Trap & Day-Extrema Pullback Guard
-                            max_pullback_pts = 55.0 if is_bnf_u else 22.0
+                            # Volatility-scaled Day-Extrema Pullback Guard (1.20x 5m ATR, floored at 35 pts NIFTY / 85 pts BANKNIFTY)
+                            s_highs = session_df[high_col].astype(float).values
+                            s_lows = session_df[low_col].astype(float).values
+                            s_closes = session_df["close"].astype(float).values if "close" in session_df.columns else s_highs
+                            if len(s_closes) >= 2:
+                                tr_list = [
+                                    max(s_highs[i] - s_lows[i], abs(s_highs[i] - s_closes[i - 1]), abs(s_lows[i] - s_closes[i - 1]))
+                                    for i in range(1, len(s_closes))
+                                ]
+                                atr_1m_val = float(sum(tr_list[-14:]) / min(14, len(tr_list)))
+                            else:
+                                atr_1m_val = 40.0 if is_bnf_u else 15.0
+                            spot_atr_5m_val = max(45.0 if is_bnf_u else 18.0, atr_1m_val * (5.0 ** 0.5))
+                            max_pullback_pts = max(85.0 if is_bnf_u else 35.0, 1.20 * spot_atr_5m_val)
+
                             if act_dir == "BUY_CE" and (u_high - current_spot) > max_pullback_pts:
                                 logger.info(
-                                    f"[Autopilot] Day-High Pullback Guard: {cand.get('trading_symbol')} CE blocked because {und} is {u_high - current_spot:.1f} pts below Day High ({u_high:.1f})."
+                                    f"[Autopilot] Day-High Pullback Guard: {cand.get('trading_symbol')} CE blocked because {und} is {u_high - current_spot:.1f} pts below Day High ({u_high:.1f}, max {max_pullback_pts:.1f} pts)."
                                 )
                                 continue
                             if act_dir == "BUY_PE" and (current_spot - u_low) > max_pullback_pts:
                                 logger.info(
-                                    f"[Autopilot] Day-Low Bounce Guard: {cand.get('trading_symbol')} PE blocked because {und} is {current_spot - u_low:.1f} pts above Day Low ({u_low:.1f})."
+                                    f"[Autopilot] Day-Low Bounce Guard: {cand.get('trading_symbol')} PE blocked because {und} is {current_spot - u_low:.1f} pts above Day Low ({u_low:.1f}, max {max_pullback_pts:.1f} pts)."
                                 )
                                 continue
 

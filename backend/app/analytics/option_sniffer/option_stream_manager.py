@@ -562,10 +562,11 @@ class OptionStreamManager:
             quote["session_benchmark"] = benchmark
         return quote
 
-    def get_underlying_history_df(self, underlying: str = "NIFTY", limit: int = 60) -> Optional[Any]:
+    def get_underlying_history_df(self, underlying: str = "NIFTY", limit: int = 375) -> Optional[Any]:
         """
         Retrieves recent continuous 1-minute OHLCV bars for the underlying index
-        from continuous_index_ohlcv SQLite table.
+        from continuous_index_ohlcv SQLite table (prioritizing current session >= 09:15 IST
+        so Opening Range 09:15-09:30 bars remain available all day without T-1/pre-market contamination).
         Cached for 1.5 seconds to eliminate SQLite contention during rapid surveillance sweeps.
         """
         u_upper = underlying.upper().strip()
@@ -582,14 +583,26 @@ class OptionStreamManager:
             import pandas as pd
             from app.analytics.option_sniffer.option_db import OptionDB as _ActiveOptionDB
             conn = _ActiveOptionDB.get_connection()
-            query = """
+            today_str = to_ist_naive().strftime("%Y-%m-%d")
+            session_start = f"{today_str} 09:15:00"
+            session_query = """
                 SELECT timestamp, open, high, low, close, volume
                 FROM continuous_index_ohlcv
                 WHERE ticker = ?
+                  AND substr(replace(timestamp, 'T', ' '), 1, 19) >= ?
                 ORDER BY timestamp DESC
                 LIMIT ?
             """
-            df = pd.read_sql_query(query, conn, params=(u_upper, limit))
+            df = pd.read_sql_query(session_query, conn, params=(u_upper, session_start, limit))
+            if df is None or df.empty:
+                fallback_query = """
+                    SELECT timestamp, open, high, low, close, volume
+                    FROM continuous_index_ohlcv
+                    WHERE ticker = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """
+                df = pd.read_sql_query(fallback_query, conn, params=(u_upper, limit))
             conn.close()
 
             if df is not None and not df.empty:

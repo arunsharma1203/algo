@@ -218,8 +218,12 @@ class OptionAlphaModel:
 
         # Spread friction penalty
         spread_penalty = max(0.0, (spread_pct - 1.0) * 0.03)
-        # Moneyness & Low-Delta penalty for OTM strikes (starts beyond ~0.25% distance from ATM)
-        otm_penalty = max(0.0, (abs_moneyness - 0.0025) * 8.0)
+        # OTM Moneyness & Low-Delta penalty (strictly penalizes OTM distance > 0.45% / ~2 strikes; zero penalty on ITM strikes)
+        if "moneyness" in features and features.get("moneyness") is not None:
+            otm_moneyness = max(0.0, -float(features.get("moneyness") or 0.0))
+        else:
+            otm_moneyness = abs_moneyness
+        otm_penalty = max(0.0, (otm_moneyness - 0.0045) * 5.0)
         abs_delta = abs(float(features.get("delta") or 0.50))
         low_delta_penalty = max(0.0, (0.38 - abs_delta) * 0.35)
 

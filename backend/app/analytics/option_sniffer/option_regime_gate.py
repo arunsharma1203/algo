@@ -598,9 +598,10 @@ class OptionRegimeGate:
             rejection_reasons.append("Regime Gate: Fail-Closed: Kaufman ER calculation returned None")
 
         # 4. ATR Volatility Expansion/Compression Ratio & Conditional Low-RV VRP Pinning Shield (H1 + H2_COND)
-        if atr_ratio is not None and atr_ratio < ATR_COMPRESSION_RATIO_MIN:
+        active_atr_min = 0.75 if (ENABLE_APEX_QUANT_ENGINE and is_breakout) else ATR_COMPRESSION_RATIO_MIN
+        if atr_ratio is not None and atr_ratio < active_atr_min:
             rejection_reasons.append(
-                f"Volatility Compression: ATR ratio ({atr_ratio:.2f} < {ATR_COMPRESSION_RATIO_MIN:.2f}) indicates contracting volatility."
+                f"Volatility Compression: ATR ratio ({atr_ratio:.2f} < {active_atr_min:.2f}) indicates contracting volatility."
             )
 
         rv_15m_ann = compute_realized_vol_15m_annualized(c_arr, period=15)
