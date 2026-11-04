@@ -630,7 +630,32 @@ class OptionRegimeGate:
         if not ok_hw:
             rejection_reasons.append(f"Heavyweight Concurrence: {hw_msg}")
 
-        # 6. Reversal Risk / Extrema Displacement
+        # 6. Opening Range (09:15-09:30) Trap Guard & Reversal Risk / Extrema Displacement
+        if spot_ltp is not None and not is_breakout:
+            try:
+                if "timestamp" in bars_df.columns and now_dt.strftime("%H:%M") >= "09:30":
+                    ts_list = bars_df["timestamp"].astype(str).tolist()
+                    orb_idx = [
+                        i for i, ts_s in enumerate(ts_list)
+                        if "09:15" <= ts_s[11:16] < "09:30" or "T09:15" <= ts_s[10:16] < "T09:30"
+                    ]
+                    if len(orb_idx) >= 5:
+                        orb_hi = float(np.max(h_arr[orb_idx]))
+                        orb_lo = float(np.min(l_arr[orb_idx]))
+                        orb_tol = 20.0 if "BANK" in str(underlying).upper() else 8.0
+                        curr_bar_hi = max(float(spot_ltp), float(h_arr[-1]))
+                        curr_bar_lo = min(float(spot_ltp), float(l_arr[-1]))
+                        if opt_type == "CE" and curr_bar_hi < (orb_hi - orb_tol):
+                            rejection_reasons.append(
+                                f"Opening Range Trap Guard: Spot ({spot_ltp:.1f}) is trapped inside the 09:15-09:30 Opening Range [{orb_lo:.1f}, {orb_hi:.1f}]. CE entry blocked until Opening Range High breakout."
+                            )
+                        elif opt_type == "PE" and curr_bar_lo > (orb_lo + orb_tol):
+                            rejection_reasons.append(
+                                f"Opening Range Trap Guard: Spot ({spot_ltp:.1f}) is trapped inside the 09:15-09:30 Opening Range [{orb_lo:.1f}, {orb_hi:.1f}]. PE entry blocked until Opening Range Low breakdown."
+                            )
+            except Exception:
+                pass
+
         if spot_ltp is not None and day_high is not None and day_low is not None:
             # Estimate current spot ATR from the 14-bar window
             spot_atr = float(np.mean(h_arr[-14:] - l_arr[-14:]))

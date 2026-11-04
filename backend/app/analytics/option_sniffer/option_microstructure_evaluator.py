@@ -254,7 +254,8 @@ class OptionMicrostructureEvaluator:
         date_filter = as_of_date or curr.strftime("%Y-%m-%d")
         u_sym = underlying.upper().strip()
 
-        # 1. Primary Source: In-memory real-time 1m candles from stream manager
+        # 1. Primary Source: In-memory real-time 1m candles from stream manager (strictly completed bars matching OptionRegimeGate)
+        curr_min_str = curr.strftime("%Y-%m-%d %H:%M:00")
         try:
             from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
             mgr = OptionStreamManager()
@@ -262,6 +263,9 @@ class OptionMicrostructureEvaluator:
             if df is not None and not df.empty and "close" in df.columns:
                 if "timestamp" in df.columns:
                     df = df[df["timestamp"].astype(str).str.startswith(date_filter)]
+                    comp_df = df[df["timestamp"].astype(str) < curr_min_str]
+                    if len(comp_df) >= 3:
+                        df = comp_df
                 closes = [float(x) for x in df["close"].dropna().tolist()]
                 if len(closes) >= 3:
                     prices = closes[-15:]
@@ -270,7 +274,7 @@ class OptionMicrostructureEvaluator:
         except Exception as sm_err:
             logger.debug(f"[MicrostructureEvaluator] StreamManager ER query note: {sm_err}")
 
-        # 2. Secondary Source: continuous_index_ohlcv SQLite table (real-time 1m index feed)
+        # 2. Secondary Source: continuous_index_ohlcv SQLite table (completed 1m index feed)
         try:
             from app.analytics.option_sniffer.option_db import OptionDB
             conn = OptionDB.get_connection()
@@ -278,9 +282,9 @@ class OptionMicrostructureEvaluator:
             rows = cur.execute("""
                 SELECT close 
                 FROM continuous_index_ohlcv 
-                WHERE ticker = ? AND timestamp >= ? 
+                WHERE ticker = ? AND timestamp >= ? AND timestamp < ?
                 ORDER BY timestamp ASC;
-            """, (u_sym, f"{date_filter} 09:15:00")).fetchall()
+            """, (u_sym, f"{date_filter} 09:15:00", curr_min_str)).fetchall()
             conn.close()
 
             if rows and len(rows) >= 3:
@@ -552,10 +556,18 @@ class OptionMicrostructureEvaluator:
                     unlock_reason = f"DYNAMIC_EVALUATING: Waiting for microstructure qualification ({', '.join(blockers)}). Static fallback at 09:45 IST."
             # RULE E: Static Fallback Window (09:45:00 to 13:15:00 IST)
             elif curr_time >= cls.STATIC_FALLBACK_UNLOCK and curr_time < cls.SESSION_ENTRY_CUTOFF:
-                if spread_ok and (kaufman_ok or kaufman_er >= 0.28):
+                is_trapped_in_orb = (
+                    float(orb_status.get("or_high") or 0.0) > 0.0
+                    and orb_status.get("breakout_direction") == "INSIDE_RANGE"
+                )
+                er_passed_post_945 = kaufman_ok if is_trapped_in_orb else (kaufman_ok or kaufman_er >= 0.28)
+                if spread_ok and er_passed_post_945 and not is_trapped_in_orb:
                     is_unlocked = True
                     dynamic_unlock_time = f"{cls.STATIC_FALLBACK_UNLOCK.strftime('%H:%M:%S')} IST"
                     unlock_reason = f"STATIC_FALLBACK_QUALIFIED: Reached 09:45 fallback window with healthy liquidity (Spread: {spread_pct:.2f}%, ER: {kaufman_er:.2f})."
+                elif is_trapped_in_orb:
+                    is_unlocked = False
+                    unlock_reason = f"OPENING_RANGE_TRAP_LOCKED: Spot is trapped inside the 09:15-09:30 Opening Range [{orb_status.get('or_low')}, {orb_status.get('or_high')}] (ER: {kaufman_er:.2f}). Waiting for range breakout."
                 else:
                     is_unlocked = False
                     unlock_reason = f"MICROSTRUCTURE_CHOP_BLOCKED: Severe chop detected even at 09:45 (ER: {kaufman_er:.2f}, Spread: {spread_pct:.2f}%)."

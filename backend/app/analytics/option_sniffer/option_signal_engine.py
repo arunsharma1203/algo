@@ -405,11 +405,61 @@ class OptionSignalEngine:
         rally_atr_ratio = (rally_off_low_pts / spot_atr_5m) if spot_atr_5m > 0 else 0.0
         drop_atr_ratio = (drop_off_high_pts / spot_atr_5m) if spot_atr_5m > 0 else 0.0
 
-        is_v_bottom_recovery = (rally_from_low >= 0.35) and (recent_ret_pct >= 0.05)
-        is_v_top_reversal = (pullback_from_high <= -0.35) and (recent_ret_pct <= -0.05)
+        # Causal Opening Range (09:15-09:30 IST) & Extrema Ordering Inspection
+        is_trapped_inside_orb = False
+        orb_high_val = 0.0
+        orb_low_val = 0.0
+        df_bounced_off_low = True
+        df_dropped_off_high = True
+        if underlying_df is not None and hasattr(underlying_df, "__len__") and len(underlying_df) >= 15:
+            try:
+                h_col = "high" if "high" in underlying_df.columns else "High"
+                l_col = "low" if "low" in underlying_df.columns else "Low"
+                ts_col = "timestamp" if "timestamp" in underlying_df.columns else ("datetime" if "datetime" in underlying_df.columns else None)
+                if h_col in underlying_df.columns and l_col in underlying_df.columns:
+                    h_vals = underlying_df[h_col].astype(float).values
+                    l_vals = underlying_df[l_col].astype(float).values
+                    df_min_low = float(np.min(l_vals))
+                    df_max_high = float(np.max(h_vals))
+                    df_low_idx = int(np.argmin(l_vals))
+                    df_high_idx = int(np.argmax(h_vals))
+
+                    # Check if price in the actual candle series has bounced off the candle low or dropped off the candle high
+                    df_rally_pts = spot_ltp - df_min_low
+                    df_drop_pts = df_max_high - spot_ltp
+                    df_bounced_off_low = (df_rally_pts >= EXTREMA_DISPLACEMENT_MAX_ATR_RATIO * spot_atr_5m) and (df_low_idx < len(l_vals) - 2)
+                    df_dropped_off_high = (df_drop_pts >= EXTREMA_DISPLACEMENT_MAX_ATR_RATIO * spot_atr_5m) or (df_high_idx > df_low_idx)
+
+                    if ts_col and ts_col in underlying_df.columns:
+                        ts_strs = underlying_df[ts_col].astype(str).tolist()
+                        orb_indices = [
+                            idx for idx, s in enumerate(ts_strs)
+                            if "09:15" <= s[11:16] < "09:30" or "T09:15" <= s[10:16] < "T09:30"
+                        ]
+                        if len(orb_indices) >= 5 and now_dt.strftime("%H:%M") >= "09:30":
+                            orb_high_val = float(np.max(h_vals[orb_indices]))
+                            orb_low_val = float(np.min(l_vals[orb_indices]))
+                            orb_tol = 20.0 if is_banknifty else 8.0
+                            bar_curr_hi = max(spot_ltp, float(h_vals[-1]))
+                            bar_curr_lo = min(spot_ltp, float(l_vals[-1]))
+                            if opt_type == "CE" and bar_curr_hi < (orb_high_val - orb_tol):
+                                is_trapped_inside_orb = True
+                            elif opt_type == "PE" and bar_curr_lo > (orb_low_val + orb_tol):
+                                is_trapped_inside_orb = True
+            except Exception:
+                pass
+
+        # Never allow a pre-spike 09:15 low (is_v_bottom_recovery) to bypass a >1.20x ATR drop from Day High
+        is_v_bottom_recovery = False
+        is_v_top_reversal = (
+            (pullback_from_high <= -0.35)
+            and (recent_ret_pct <= -0.05)
+            and not is_trapped_inside_orb
+            and (underlying_df is None or not df_bounced_off_low)
+        )
 
         is_bear_reversal_broken = (rally_atr_ratio >= EXTREMA_DISPLACEMENT_MAX_ATR_RATIO) and (spot_ltp > (u_low + 15.0)) and not is_v_top_reversal
-        is_bull_reversal_broken = (drop_atr_ratio >= EXTREMA_DISPLACEMENT_MAX_ATR_RATIO) and (spot_ltp < (u_high - 15.0)) and not is_v_bottom_recovery
+        is_bull_reversal_broken = (drop_atr_ratio >= EXTREMA_DISPLACEMENT_MAX_ATR_RATIO) and (spot_ltp < (u_high - 15.0))
 
         # Climax Overextension Guard (Pillar 2: Anti-Peak / Anti-Trough)
         # Prevents buying Call options at the top of an exhausted spike or Put options at the bottom of a dump
@@ -492,12 +542,19 @@ class OptionSignalEngine:
         # In-Range determination (Spot between day high and day low boundaries)
         is_in_day_range = (spot_ltp > (u_low + 4.0)) and (spot_ltp < (u_high - 4.0))
 
-        # Strong independent underlying expansion check (reversal-immune)
-        is_strong_underlying_bear = ((drift_from_open <= -0.30) or (pullback_from_high <= -0.30)) and (recent_ret_pct <= 0.08) and not is_bear_reversal_broken
-        is_strong_underlying_bull = ((drift_from_open >= 0.30) or (rally_from_low >= 0.30)) and (recent_ret_pct >= -0.08) and not is_bull_reversal_broken
+        # Strong independent underlying expansion check (reversal-immune & ORB-breakout verified)
+        is_strong_underlying_bear = ((drift_from_open <= -0.30) or (pullback_from_high <= -0.30)) and (recent_ret_pct <= 0.08) and not is_bear_reversal_broken and not is_trapped_inside_orb
+        is_strong_underlying_bull = ((drift_from_open >= 0.30) or (rally_from_low >= 0.30)) and (recent_ret_pct >= -0.08) and not is_bull_reversal_broken and not is_trapped_inside_orb
         is_underlying_flat = abs(drift_from_open) < 0.20 and abs(pullback_from_high) < 0.20 and abs(rally_from_low) < 0.20
 
         # ── HIERARCHICAL REGIME DECISION ──
+        # 0. OPENING RANGE (09:15-09:30) TRAP GUARD
+        if is_trapped_inside_orb and not (is_day_high_breakout or is_day_low_breakdown):
+            rejection_reasons.append(
+                f"Opening Range Trap Guard: Spot ({spot_ltp:.1f}) is trapped inside the 09:15-09:30 Opening Range [{orb_low_val:.1f}, {orb_high_val:.1f}]. "
+                f"{opt_type} buying halted until Opening Range breakout."
+            )
+
         # 1. SIDEWAYS / RANGEBOUND / CHOP SHIELD (SUPREME PRIORITY)
         if (is_macro_chop or is_compressed_10m or is_trapped_in_day_range or is_chaotic_chop) and not (is_day_high_breakout or is_day_low_breakdown or is_strong_underlying_bear or is_strong_underlying_bull):
             if is_chaotic_chop:

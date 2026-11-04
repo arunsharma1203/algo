@@ -1600,7 +1600,7 @@ class OrderIntentEngine:
                         logger.info(f"[Autopilot] Counter-move guard: {cand.get('trading_symbol')} PE blocked because {und} is bouncing (+{ret_3m:.2f}% over last 3m).")
                         continue
 
-                # 10-Minute Range Compression Check (Theta Defense — with Strong Trend / Breakout Exemption matching OptionSignalEngine)
+                # 10-Minute Range Compression & Opening Range / Day-Extrema Breakout Guard
                 if u_df is not None and len(u_df) >= 10:
                     high_col = "high" if "high" in u_df.columns else "High"
                     low_col = "low" if "low" in u_df.columns else "Low"
@@ -1611,10 +1611,10 @@ class OrderIntentEngine:
                         if low_10m > 0:
                             range_10m_pct = (high_10m - low_10m) / low_10m * 100.0
                             range_pts = high_10m - low_10m
-                            threshold_pts = 45.0 if "BANK" in und else 18.0
+                            is_bnf_u = "BANK" in und
+                            threshold_pts = 45.0 if is_bnf_u else 18.0
                             current_spot = float(u_df["close"].iloc[-1])
 
-                            # Check strong underlying expansion or confirmed breakout (100% parity with OptionSignalEngine Gate 5B)
                             u_quote = stream_mgr.get_underlying_quote(und) or {}
                             open_col = "open" if "open" in u_df.columns else "Open"
                             u_open = float(u_quote.get("open") or (u_df[open_col].iloc[0] if open_col in u_df.columns else current_spot))
@@ -1624,10 +1624,49 @@ class OrderIntentEngine:
                             rally_from_low = ((current_spot - u_low) / u_low * 100.0) if u_low > 0 else 0.0
                             pullback_from_high = ((current_spot - u_high) / u_high * 100.0) if u_high > 0 else 0.0
                             act_dir = cand.get("action", "")
+
+                            # Opening Range (09:15-09:30) Trap & Day-Extrema Pullback Guard
+                            max_pullback_pts = 55.0 if is_bnf_u else 22.0
+                            if act_dir == "BUY_CE" and (u_high - current_spot) > max_pullback_pts:
+                                logger.info(
+                                    f"[Autopilot] Day-High Pullback Guard: {cand.get('trading_symbol')} CE blocked because {und} is {u_high - current_spot:.1f} pts below Day High ({u_high:.1f})."
+                                )
+                                continue
+                            if act_dir == "BUY_PE" and (current_spot - u_low) > max_pullback_pts:
+                                logger.info(
+                                    f"[Autopilot] Day-Low Bounce Guard: {cand.get('trading_symbol')} PE blocked because {und} is {current_spot - u_low:.1f} pts above Day Low ({u_low:.1f})."
+                                )
+                                continue
+
+                            if "timestamp" in u_df.columns and now_dt.strftime("%H:%M") >= "09:30":
+                                ts_vals = u_df["timestamp"].astype(str).tolist()
+                                orb_rows = [
+                                    idx for idx, s_ts in enumerate(ts_vals)
+                                    if "09:15" <= s_ts[11:16] < "09:30" or "T09:15" <= s_ts[10:16] < "T09:30"
+                                ]
+                                if len(orb_rows) >= 5:
+                                    orb_hi = float(u_df[high_col].iloc[orb_rows].max())
+                                    orb_lo = float(u_df[low_col].iloc[orb_rows].min())
+                                    orb_tol = 20.0 if is_bnf_u else 8.0
+                                    curr_b_hi = max(current_spot, float(u_df[high_col].iloc[-1]))
+                                    curr_b_lo = min(current_spot, float(u_df[low_col].iloc[-1]))
+                                    if act_dir == "BUY_CE" and curr_b_hi < (orb_hi - orb_tol):
+                                        logger.info(
+                                            f"[Autopilot] Opening Range Trap Guard: {cand.get('trading_symbol')} CE blocked because {und} ({curr_b_hi:.1f}) is inside 09:15-09:30 Opening Range [{orb_lo:.1f}, {orb_hi:.1f}]."
+                                        )
+                                        continue
+                                    if act_dir == "BUY_PE" and curr_b_lo > (orb_lo + orb_tol):
+                                        logger.info(
+                                            f"[Autopilot] Opening Range Trap Guard: {cand.get('trading_symbol')} PE blocked because {und} ({curr_b_lo:.1f}) is inside 09:15-09:30 Opening Range [{orb_lo:.1f}, {orb_hi:.1f}]."
+                                        )
+                                        continue
+
                             is_trend_exempt = bool(cand.get("is_breakout", False))
-                            if act_dir == "BUY_CE" and ((drift_from_open >= 0.30) or (rally_from_low >= 0.30) or (current_spot >= u_high - 2.0)):
+                            if act_dir == "BUY_CE" and ((drift_from_open >= 0.30) or (rally_from_low >= 0.30)) and ((u_high - current_spot) <= max_pullback_pts):
                                 is_trend_exempt = True
-                            elif act_dir == "BUY_PE" and ((drift_from_open <= -0.30) or (pullback_from_high <= -0.30) or (current_spot <= u_low + 2.0)):
+                            elif act_dir == "BUY_PE" and ((drift_from_open <= -0.30) or (pullback_from_high <= -0.30)) and ((current_spot - u_low) <= max_pullback_pts):
+                                is_trend_exempt = True
+                            elif (act_dir == "BUY_CE" and current_spot >= u_high - 2.0) or (act_dir == "BUY_PE" and current_spot <= u_low + 2.0):
                                 is_trend_exempt = True
 
                             if not is_trend_exempt and (range_10m_pct < 0.08 or range_pts < threshold_pts) and (low_10m <= current_spot <= high_10m):
@@ -1822,6 +1861,15 @@ class OrderIntentEngine:
             return {
                 "status": "BLOCKED",
                 "reason": f"OUTSIDE_LIVE_WINDOW (OUTSIDE_GOLDEN_WINDOW): Live option entries restricted. Dynamic microstructure status: {ms_eval.get('unlock_reason')}"
+            }
+        ms_reason = str(ms_eval.get("unlock_reason") or "")
+        if not is_dynamic_unlocked and (
+            ms_reason.startswith("OPENING_RANGE_TRAP_LOCKED")
+            or OptionMicrostructureEvaluator._mock_kaufman_er is not None
+        ):
+            return {
+                "status": "BLOCKED",
+                "reason": f"MICROSTRUCTURE_GATE_LOCKED: Live option entry blocked because HUD is locked: {ms_reason}"
             }
 
         # Guard 2B: Canary Scout Interlock (Zero paper stop losses today)
