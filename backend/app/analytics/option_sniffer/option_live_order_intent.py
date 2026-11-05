@@ -1255,7 +1255,11 @@ class OrderIntentEngine:
                             updated_records.append({"order_intent_id": intent["order_intent_id"], "state": STATE_REJECTED})
         return updated_records
 
-    def check_and_execute_live_exits(self, live_quotes_map: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def check_and_execute_live_exits(
+        self,
+        live_quotes_map: Dict[str, Dict[str, Any]],
+        as_of_time: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Monitors active filled live positions against incoming live stream quotes.
         Automatically triggers market exits for:
@@ -1275,7 +1279,7 @@ class OrderIntentEngine:
         if not open_live:
             return []
 
-        now_dt = to_ist_naive()
+        now_dt = to_ist_naive(as_of_time)
         closed_records = []
 
         # Portfolio Circuit Breaker Parity Check (Realized + Unrealized MTM across open live positions)

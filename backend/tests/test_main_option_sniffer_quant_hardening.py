@@ -670,7 +670,8 @@ class TestMainOptionSnifferQuantHardening(unittest.TestCase):
 
         # Tick 1: Bid rises to ₹120.0 (+20% MFE >= +15% trigger) -> Does NOT exit, ratchets exchange SL trigger up from ₹80.0 to ₹110.40
         exits_t1 = live_eng.check_and_execute_live_exits(
-            {"NSE_FO|23350CE": {"bid": 120.0, "ask": 120.5, "ltp": 120.0}}
+            {"NSE_FO|23350CE": {"bid": 120.0, "ask": 120.5, "ltp": 120.0}},
+            as_of_time=datetime(2026, 11, 2, 11, 0, 0),
         )
         self.assertEqual(len(exits_t1), 0)
         with live_eng._get_db_conn() as conn:
@@ -679,7 +680,8 @@ class TestMainOptionSnifferQuantHardening(unittest.TestCase):
 
         # Tick 2: Bid surges to ₹140.0 (+40% MFE >= +35% target) -> Uncapped Runner stays OPEN and locks exchange SL >= ₹134.0 (+34%)!
         exits_t2 = live_eng.check_and_execute_live_exits(
-            {"NSE_FO|23350CE": {"bid": 140.0, "ask": 140.5, "ltp": 140.0}}
+            {"NSE_FO|23350CE": {"bid": 140.0, "ask": 140.5, "ltp": 140.0}},
+            as_of_time=datetime(2026, 11, 2, 11, 2, 0),
         )
         self.assertEqual(len(exits_t2), 0)
         with live_eng._get_db_conn() as conn:

@@ -699,8 +699,14 @@ class OptionRegimeGate:
                 pass
 
         if spot_ltp is not None and day_high is not None and day_low is not None:
-            # Estimate current spot ATR from the 14-bar window
-            spot_atr = float(np.mean(h_arr[-14:] - l_arr[-14:]))
+            # Estimate current 5m-equivalent spot ATR from the 14-bar 1m window (consistent with SignalEngine & FeatureExtractor)
+            is_bn_atr = "BANK" in str(underlying).upper()
+            default_spot_atr = 90.0 if is_bn_atr else 35.0
+            if len(h_arr) >= 14:
+                spot_atr_1m = float(np.mean(h_arr[-14:] - l_arr[-14:]))
+                spot_atr = max(default_spot_atr * 0.70, spot_atr_1m * (5.0 ** 0.5))
+            else:
+                spot_atr = default_spot_atr
             ok_rev, rev_msg = self.evaluate_reversal_displacement(
                 spot_ltp=spot_ltp,
                 day_high=day_high,

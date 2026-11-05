@@ -230,7 +230,8 @@ class OptionFeatureExtractor:
                     vwap_val = float(tp_series.mean())
                 else:
                     vwap_val = float(closes.astype(float).mean())
-            spot_vwap_dist = float((curr_c - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
+            px_ref = spot if spot > 0 else curr_c
+            spot_vwap_dist = float((px_ref - vwap_val) / vwap_val * 100.0) if vwap_val > 0 else 0.0
         else:
             vwap_val = float(underlying_quote.get("vwap") or 0.0)
             if vwap_val <= 0 or abs(vwap_val - spot) < 1e-4:
