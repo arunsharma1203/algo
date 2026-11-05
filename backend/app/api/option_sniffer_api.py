@@ -357,4 +357,163 @@ def execute_sos_panic_exit_all() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/index-charts")
+def get_sniffer_index_charts() -> Dict[str, Any]:
+    """
+    Returns authoritative regular-session (09:15–15:30 IST) 1m and 5m OHLCV + Session VWAP
+    series, Opening Range (09:15–09:30) High/Low, and Day High/Low for NIFTY and BANKNIFTY
+    from continuous_index_ohlcv, along with market-hours status.
+    """
+    try:
+        from datetime import datetime, time as dtime
+        import pytz
+
+        now_ist = datetime.now(pytz.timezone("Asia/Kolkata")).replace(tzinfo=None)
+        is_market_open = bool(
+            now_ist.weekday() < 5 and dtime(9, 15) <= now_ist.time() <= dtime(15, 30)
+        )
+
+        conn = OptionDB.get_connection()
+        cur = conn.cursor()
+        underlyings_payload: Dict[str, Any] = {}
+
+        for ticker in ("NIFTY", "BANKNIFTY"):
+            cur.execute(
+                """
+                SELECT substr(replace(timestamp, 'T', ' '), 1, 10) AS sdate
+                FROM continuous_index_ohlcv
+                WHERE ticker = ?
+                  AND substr(replace(timestamp, 'T', ' '), 12, 8) BETWEEN '09:15:00' AND '15:30:00'
+                  AND COALESCE(is_complete, 1) = 1
+                  AND COALESCE(is_synthetic, 0) = 0
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (ticker,),
+            )
+            row = cur.fetchone()
+            session_date = str(row[0]) if row and row[0] else now_ist.strftime("%Y-%m-%d")
+
+            cur.execute(
+                """
+                SELECT substr(replace(timestamp, 'T', ' '), 1, 19) AS ts,
+                       open, high, low, close, COALESCE(volume, 1) AS volume
+                FROM continuous_index_ohlcv
+                WHERE ticker = ?
+                  AND substr(replace(timestamp, 'T', ' '), 1, 10) = ?
+                  AND substr(replace(timestamp, 'T', ' '), 12, 8) BETWEEN '09:15:00' AND '15:30:00'
+                  AND COALESCE(is_complete, 1) = 1
+                  AND COALESCE(is_synthetic, 0) = 0
+                ORDER BY ts ASC
+                """,
+                (ticker, session_date),
+            )
+            raw_rows = cur.fetchall()
+
+            bars_1m: List[Dict[str, Any]] = []
+            bars_5m: List[Dict[str, Any]] = []
+            cum_pv = 0.0
+            cum_v = 0.0
+            orb_high = 0.0
+            orb_low = float("inf")
+            day_high = 0.0
+            day_low = float("inf")
+
+            bucket_map: Dict[str, Dict[str, Any]] = {}
+            bucket_order: List[str] = []
+
+            for r in raw_rows:
+                ts_str = str(r[0])
+                o = float(r[1] or r[4] or 0.0)
+                h = float(r[2] or o)
+                l = float(r[3] or o)
+                c = float(r[4] or o)
+                v = max(1.0, float(r[5] or 1.0))
+                if c <= 0:
+                    continue
+
+                tp = (h + l + c) / 3.0
+                cum_pv += tp * v
+                cum_v += v
+                vwap_val = round(cum_pv / cum_v, 2) if cum_v > 0 else round(c, 2)
+
+                hhmm = ts_str[11:16] if len(ts_str) >= 16 else ts_str
+                if "09:15" <= hhmm <= "09:29":
+                    if h > orb_high:
+                        orb_high = h
+                    if l < orb_low:
+                        orb_low = l
+
+                if h > day_high:
+                    day_high = h
+                if l < day_low:
+                    day_low = l
+
+                bars_1m.append({
+                    "time": ts_str,
+                    "open": round(o, 2),
+                    "high": round(h, 2),
+                    "low": round(l, 2),
+                    "close": round(c, 2),
+                    "volume": round(v, 2),
+                    "vwap": vwap_val,
+                })
+
+                # 5-minute bucket aggregation (e.g. 09:15..09:19 -> 09:15)
+                try:
+                    hr = int(ts_str[11:13])
+                    mn = (int(ts_str[14:16]) // 5) * 5
+                    b_ts = f"{ts_str[:10]} {hr:02d}:{mn:02d}:00"
+                except Exception:
+                    b_ts = ts_str
+
+                if b_ts not in bucket_map:
+                    bucket_order.append(b_ts)
+                    bucket_map[b_ts] = {
+                        "time": b_ts,
+                        "open": round(o, 2),
+                        "high": round(h, 2),
+                        "low": round(l, 2),
+                        "close": round(c, 2),
+                        "volume": round(v, 2),
+                        "vwap": vwap_val,
+                    }
+                else:
+                    b_obj = bucket_map[b_ts]
+                    b_obj["high"] = round(max(b_obj["high"], h), 2)
+                    b_obj["low"] = round(min(b_obj["low"], l), 2)
+                    b_obj["close"] = round(c, 2)
+                    b_obj["volume"] = round(b_obj["volume"] + v, 2)
+                    b_obj["vwap"] = vwap_val
+
+            bars_5m = [bucket_map[k] for k in bucket_order]
+            day_open = bars_1m[0]["open"] if bars_1m else 0.0
+            day_close = bars_1m[-1]["close"] if bars_1m else 0.0
+            session_vwap = bars_1m[-1]["vwap"] if bars_1m else 0.0
+
+            underlyings_payload[ticker] = {
+                "session_date": session_date,
+                "day_open": round(day_open, 2),
+                "day_high": round(day_high if day_high > 0 else day_close, 2),
+                "day_low": round(day_low if day_low < float("inf") else day_close, 2),
+                "day_close": round(day_close, 2),
+                "orb_high": round(orb_high if orb_high > 0 else day_high, 2),
+                "orb_low": round(orb_low if orb_low < float("inf") else day_low, 2),
+                "session_vwap": round(session_vwap, 2),
+                "bars_1m": bars_1m,
+                "bars_5m": bars_5m,
+            }
+
+        conn.close()
+        return {
+            "is_market_open": is_market_open,
+            "server_time_ist": now_ist.strftime("%Y-%m-%d %H:%M:%S"),
+            "underlyings": underlyings_payload,
+        }
+    except Exception as e:
+        logger.error(f"[OptionSnifferAPI] Failed to build index charts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
 

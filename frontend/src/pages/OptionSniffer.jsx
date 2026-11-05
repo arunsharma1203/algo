@@ -40,19 +40,168 @@ import {
   YAxis,
   Tooltip,
   ReferenceLine,
+  ReferenceArea,
+  ReferenceDot,
   CartesianGrid
 } from 'recharts';
 import { API_BASE } from '../services/api';
 
-function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallbackOrb = null, intel = null) {
+function classifyPointZone(spotVal, vwapVal, orbHigh, orbLow, dayHigh, dayLow, underlyingKey = 'NIFTY') {
+  if (!(spotVal > 0 && orbHigh > 0 && orbLow > 0)) {
+    return {
+      code: 'ZONE_1_INSIDE_ORB',
+      shortLabel: 'ZONE 1: INSIDE ORB',
+      fullLabel: 'ZONE 1: INSIDE ORB BOX (CHOP — BLOCKED)',
+      pass: false,
+    };
+  }
+  const wickTol = underlyingKey === 'BANKNIFTY' ? 10.0 : 4.5;
+  const distFromHighPct = dayHigh > 0 ? ((dayHigh - spotVal) / dayHigh) * 100.0 : 99;
+  const distFromLowPct = dayLow > 0 ? ((spotVal - dayLow) / dayLow) * 100.0 : 99;
+  const distAboveOrbHighPct = orbHigh > 0 ? ((spotVal - orbHigh) / orbHigh) * 100.0 : 0;
+  const distBelowOrbLowPct = orbLow > 0 ? ((orbLow - spotVal) / orbLow) * 100.0 : 0;
+
+  if (spotVal > orbHigh) {
+    if (distFromHighPct <= 0.15 || (dayHigh - spotVal) <= wickTol) {
+      return {
+        code: 'ZONE_3_BREAKOUT',
+        shortLabel: 'ZONE 3: DAY HIGH BREAKOUT',
+        fullLabel: 'ZONE 3: DAY HIGH BREAKOUT (ALLOWED)',
+        pass: true,
+      };
+    }
+    if (distAboveOrbHighPct <= 0.12 && spotVal >= vwapVal) {
+      return {
+        code: 'ZONE_2A_ORB_RETEST',
+        shortLabel: 'ZONE 2A: ORB HIGH RETEST',
+        fullLabel: 'ZONE 2A: ORB HIGH RETEST POCKET (ALLOWED)',
+        pass: true,
+      };
+    }
+    return {
+      code: 'ZONE_2B_MID_AIR',
+      shortLabel: 'ZONE 2B: MID-AIR PULLBACK',
+      fullLabel: 'ZONE 2B: MID-AIR PULLBACK (BLOCKED)',
+      pass: false,
+    };
+  }
+
+  if (spotVal < orbLow) {
+    if (distFromLowPct <= 0.15 || (spotVal - dayLow) <= wickTol) {
+      return {
+        code: 'ZONE_3_BREAKOUT',
+        shortLabel: 'ZONE 3: DAY LOW BREAKDOWN',
+        fullLabel: 'ZONE 3: DAY LOW BREAKDOWN (ALLOWED)',
+        pass: true,
+      };
+    }
+    if (distBelowOrbLowPct <= 0.12 && spotVal <= vwapVal) {
+      return {
+        code: 'ZONE_2A_ORB_RETEST',
+        shortLabel: 'ZONE 2A: ORB LOW RETEST',
+        fullLabel: 'ZONE 2A: ORB LOW RETEST POCKET (ALLOWED)',
+        pass: true,
+      };
+    }
+    return {
+      code: 'ZONE_2B_MID_AIR',
+      shortLabel: 'ZONE 2B: MID-AIR PULLBACK',
+      fullLabel: 'ZONE 2B: MID-AIR PULLBACK (BLOCKED)',
+      pass: false,
+    };
+  }
+
+  return {
+    code: 'ZONE_1_INSIDE_ORB',
+    shortLabel: 'ZONE 1: INSIDE ORB',
+    fullLabel: 'ZONE 1: INSIDE ORB BOX (CHOP — BLOCKED)',
+    pass: false,
+  };
+}
+
+function QuantChartTooltip({ active, payload, label, chart }) {
+  if (!active || !Array.isArray(payload) || payload.length === 0) return null;
+  const pt = payload[0]?.payload;
+  if (!pt) return null;
+
+  const vwapSpread = (pt.spot || 0) - (pt.vwap || 0);
+  const vwapSpreadPct = pt.vwap > 0 ? (vwapSpread / pt.vwap) * 100.0 : 0;
+  const distToDayHigh = (chart?.dayHigh || 0) - (pt.spot || 0);
+  const distToOrbHigh = (pt.spot || 0) - (chart?.orbHigh || 0);
+
+  return (
+    <div className="bg-slate-950/95 border border-slate-700/90 rounded-xl p-3 shadow-2xl text-[11px] font-mono text-slate-100 space-y-2 min-w-[235px] backdrop-blur-md">
+      <div className="flex items-center justify-between border-b border-slate-800 pb-1.5 gap-3">
+        <span className="font-black text-indigo-300">{chart?.sessionDate || 'Session'} • {label} IST</span>
+        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border ${
+          pt.zonePass
+            ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500/60'
+            : 'bg-rose-950/90 text-rose-300 border-rose-500/60'
+        }`}>
+          {pt.zoneShort || 'ZONE 1'}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+        <div className="flex justify-between">
+          <span className="text-slate-400">Spot Close:</span>
+          <strong className="text-white">₹{Number(pt.spot || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-slate-400">VWAP:</span>
+          <strong className="text-amber-400">₹{Number(pt.vwap || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</strong>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-slate-400">Candle H/L:</span>
+          <span className="text-slate-200">{Number(pt.high || 0).toFixed(1)} / {Number(pt.low || 0).toFixed(1)}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-slate-400">vs VWAP:</span>
+          <span className={vwapSpread >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+            {vwapSpread >= 0 ? '+' : ''}{vwapSpread.toFixed(1)} ({vwapSpread >= 0 ? '+' : ''}{vwapSpreadPct.toFixed(2)}%)
+          </span>
+        </div>
+      </div>
+
+      <div className="border-t border-slate-800 pt-1.5 flex items-center justify-between text-[10px] text-slate-400">
+        <span>To Day High: <strong className="text-emerald-300">{distToDayHigh <= 0.1 ? 'AT HIGH' : `-${distToDayHigh.toFixed(1)} pts`}</strong></span>
+        <span>vs ORB High: <strong className={distToOrbHigh >= 0 ? 'text-emerald-300' : 'text-rose-300'}>{distToOrbHigh >= 0 ? `+${distToOrbHigh.toFixed(1)}` : distToOrbHigh.toFixed(1)} pts</strong></span>
+      </div>
+
+      {pt.tradeTag && (
+        <div className="bg-indigo-950/80 border border-indigo-500/60 rounded-lg px-2 py-1 text-[10px] text-indigo-200 font-bold">
+          ⚡ {pt.tradeTag}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function buildIntradayChartModel(
+  rawBars = [],
+  liveSpot = 0,
+  liveVwap = 0,
+  fallbackOrb = null,
+  intel = null,
+  chartMeta = null,
+  isMarketOpen = false,
+  underlyingKey = 'NIFTY',
+  tradeEvents = []
+) {
   const normalizedBars = Array.isArray(rawBars)
     ? rawBars
         .map(b => {
           if (!b) return null;
           const c = Number(b.close ?? b.spot ?? b.ltp ?? 0);
           if (!(c > 0)) return null;
+          const rawTime = String(b.time || b.date || b.timestamp || '');
+          const hhmm = rawTime.length >= 16 ? rawTime.slice(11, 16) : rawTime;
+          // Strictly filter out pre-09:15 and post-15:30 synthetic bars
+          if (hhmm.length === 5 && /^\d{2}:\d{2}$/.test(hhmm)) {
+            if (hhmm < '09:15' || hhmm > '15:30') return null;
+          }
           return {
-            time: String(b.time || b.date || b.timestamp || ''),
+            time: rawTime,
             open: Number(b.open || c),
             high: Number(b.high || c),
             low: Number(b.low || c),
@@ -65,24 +214,64 @@ function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallb
     : [];
 
   let sessionBars = normalizedBars;
-  let sessionDate = '';
+  let sessionDate = String(chartMeta?.session_date || '');
   if (normalizedBars.length > 0) {
     const lastTime = String(normalizedBars[normalizedBars.length - 1].time || '');
-    sessionDate = lastTime.slice(0, 10);
-    const sameDay = normalizedBars.filter(b => String(b.time || '').startsWith(sessionDate));
-    if (sameDay.length >= 3) {
-      sessionBars = sameDay;
-    } else {
-      sessionBars = normalizedBars.slice(-45);
+    if (!sessionDate && lastTime.length >= 10) {
+      sessionDate = lastTime.slice(0, 10);
+    }
+    if (sessionDate) {
+      const sameDay = normalizedBars.filter(b => String(b.time || '').startsWith(sessionDate));
+      if (sameDay.length >= 3) {
+        sessionBars = sameDay;
+      }
     }
   }
 
   let cumPV = 0;
   let cumV = 0;
-  let runningHigh = 0;
-  let runningLow = Infinity;
-  let orbHigh = 0;
-  let orbLow = Infinity;
+  let runningHigh = Number(chartMeta?.day_high || 0);
+  let runningLow = Number(chartMeta?.day_low || 0) > 0 ? Number(chartMeta.day_low) : Infinity;
+  let orbHigh = Number(chartMeta?.orb_high || 0);
+  let orbLow = Number(chartMeta?.orb_low || 0) > 0 ? Number(chartMeta.orb_low) : Infinity;
+
+  const fbOrbHigh = Number(
+    chartMeta?.orb_high ?? fallbackOrb?.or_high ?? fallbackOrb?.orb_high ?? intel?.orb_high ?? 0
+  );
+  const fbOrbLow = Number(
+    chartMeta?.orb_low ?? fallbackOrb?.or_low ?? fallbackOrb?.orb_low ?? intel?.orb_low ?? 0
+  );
+  if (fbOrbHigh > 0 && fbOrbLow > 0) {
+    orbHigh = fbOrbHigh;
+    orbLow = fbOrbLow;
+  }
+
+  // First pass to establish ORB & session high/low if not pre-supplied
+  sessionBars.forEach((b, idx) => {
+    const h = Number(b.high) || Number(b.close);
+    const l = Number(b.low) || Number(b.close);
+    if (h > runningHigh) runningHigh = h;
+    if (l < runningLow) runningLow = l;
+    const rawT = String(b.time || '');
+    const tLabel = rawT.length >= 16 ? rawT.slice(11, 16) : (rawT.slice(5) || `#${idx + 1}`);
+    const isOrbBar = tLabel >= '09:15' && tLabel <= '09:29';
+    if (isOrbBar && !(fbOrbHigh > 0 && fbOrbLow > 0)) {
+      if (h > orbHigh) orbHigh = h;
+      if (l < orbLow) orbLow = l;
+    }
+  });
+
+  // Index trade events by HH:MM (and 5m bucket) for plotting execution pins on the curve
+  const tradeByTime = {};
+  if (Array.isArray(tradeEvents)) {
+    tradeEvents.forEach(ev => {
+      if (!ev || !ev.hhmm) return;
+      tradeByTime[ev.hhmm] = ev;
+      if (ev.bucket5m && !tradeByTime[ev.bucket5m]) {
+        tradeByTime[ev.bucket5m] = ev;
+      }
+    });
+  }
 
   const series = sessionBars.map((b, idx) => {
     const o = Number(b.open) || Number(b.close);
@@ -96,16 +285,10 @@ function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallb
     const computedVwap = cumV > 0 ? Number((cumPV / cumV).toFixed(2)) : Number(tp.toFixed(2));
     const vwapVal = b.vwap > 0 ? Number(b.vwap.toFixed(2)) : computedVwap;
 
-    if (h > runningHigh) runningHigh = h;
-    if (l < runningLow) runningLow = l;
-
     const rawT = String(b.time || '');
     const tLabel = rawT.length >= 16 ? rawT.slice(11, 16) : (rawT.slice(5) || `#${idx + 1}`);
-    const isOrbBar = idx < 3 || (tLabel >= '09:15' && tLabel <= '09:30');
-    if (isOrbBar) {
-      if (h > orbHigh) orbHigh = h;
-      if (l < orbLow) orbLow = l;
-    }
+    const ptZone = classifyPointZone(c, vwapVal, orbHigh, orbLow, runningHigh, runningLow, underlyingKey);
+    const matchedTrade = tradeByTime[tLabel] || null;
 
     return {
       time: tLabel,
@@ -114,22 +297,25 @@ function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallb
       low: Number(l.toFixed(2)),
       open: Number(o.toFixed(2)),
       vwap: vwapVal,
+      zoneCode: ptZone.code,
+      zoneShort: ptZone.shortLabel,
+      zonePass: ptZone.pass,
+      tradeTag: matchedTrade ? matchedTrade.label : null,
+      tradeSide: matchedTrade ? matchedTrade.side : null,
     };
   });
 
-  const effectiveSpot = Number(liveSpot) > 0
+  // When market is closed, use the final regular-session bar's close/vwap so post-market noise never distorts the chart
+  const lastSessionPt = series.length > 0 ? series[series.length - 1] : null;
+  const effectiveSpot = isMarketOpen && Number(liveSpot) > 0
     ? Number(liveSpot)
-    : (series.length > 0 ? series[series.length - 1].spot : 0);
-  const effectiveVwap = Number(liveVwap) > 0
+    : (lastSessionPt ? lastSessionPt.spot : (Number(chartMeta?.day_close) || Number(liveSpot) || 0));
+  const effectiveVwap = isMarketOpen && Number(liveVwap) > 0
     ? Number(liveVwap)
-    : (series.length > 0 ? series[series.length - 1].vwap : effectiveSpot);
-
-  const fbOrbHigh = Number(fallbackOrb?.or_high ?? fallbackOrb?.orb_high ?? intel?.orb_high ?? 0);
-  const fbOrbLow = Number(fallbackOrb?.or_low ?? fallbackOrb?.orb_low ?? intel?.orb_low ?? 0);
+    : (lastSessionPt ? lastSessionPt.vwap : (Number(chartMeta?.session_vwap) || Number(liveVwap) || effectiveSpot));
 
   if (effectiveSpot > 0) {
     if (series.length < 2) {
-      // Guarantee at least 4 structural session points so Recharts SVG always renders a visible curve & bands
       const baseVwap = effectiveVwap > 0 ? effectiveVwap : effectiveSpot;
       const anchorHigh = fbOrbHigh > 0 ? fbOrbHigh : Math.max(effectiveSpot, baseVwap) * 1.0008;
       const anchorLow = fbOrbLow > 0 ? fbOrbLow : Math.min(effectiveSpot, baseVwap) * 0.9992;
@@ -143,37 +329,47 @@ function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallb
           low: Number(anchorLow.toFixed(2)),
           open: anchorOpen,
           vwap: Number(baseVwap.toFixed(2)),
-        },
-        {
-          time: '09:20',
-          spot: Number(anchorLow.toFixed(2)),
-          high: Number(anchorOpen.toFixed(2)),
-          low: Number(anchorLow.toFixed(2)),
-          open: anchorOpen,
-          vwap: Number(baseVwap.toFixed(2)),
+          zoneCode: 'ZONE_1_INSIDE_ORB',
+          zoneShort: 'ZONE 1: INSIDE ORB',
+          zonePass: false,
         },
         {
           time: '09:30',
           spot: Number(anchorHigh.toFixed(2)),
           high: Number(anchorHigh.toFixed(2)),
           low: Number(anchorLow.toFixed(2)),
-          open: Number(anchorLow.toFixed(2)),
+          open: anchorOpen,
           vwap: Number(baseVwap.toFixed(2)),
+          zoneCode: 'ZONE_1_INSIDE_ORB',
+          zoneShort: 'ZONE 1: INSIDE ORB',
+          zonePass: false,
         },
         {
-          time: 'LIVE',
+          time: isMarketOpen ? 'LIVE' : '15:30',
           spot: Number(effectiveSpot.toFixed(2)),
           high: Number(Math.max(anchorHigh, effectiveSpot).toFixed(2)),
           low: Number(Math.min(anchorLow, effectiveSpot).toFixed(2)),
           open: Number(anchorHigh.toFixed(2)),
           vwap: Number(baseVwap.toFixed(2)),
+          zoneCode: 'ZONE_1_INSIDE_ORB',
+          zoneShort: 'ZONE 1: INSIDE ORB',
+          zonePass: false,
         }
       );
       runningHigh = Math.max(anchorHigh, effectiveSpot);
       runningLow = Math.min(anchorLow, effectiveSpot);
-    } else {
+    } else if (isMarketOpen) {
       const lastPt = series[series.length - 1];
       if (Math.abs(lastPt.spot - effectiveSpot) >= 0.05) {
+        const liveZone = classifyPointZone(
+          effectiveSpot,
+          effectiveVwap || lastPt.vwap,
+          orbHigh,
+          orbLow,
+          Math.max(runningHigh, effectiveSpot),
+          Math.min(runningLow, effectiveSpot),
+          underlyingKey
+        );
         series.push({
           time: 'LIVE',
           spot: Number(effectiveSpot.toFixed(2)),
@@ -181,69 +377,62 @@ function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallb
           low: Number(Math.min(lastPt.low, effectiveSpot).toFixed(2)),
           open: lastPt.spot,
           vwap: Number((effectiveVwap || lastPt.vwap).toFixed(2)),
+          zoneCode: liveZone.code,
+          zoneShort: liveZone.shortLabel,
+          zonePass: liveZone.pass,
         });
       }
+      if (effectiveSpot > runningHigh) runningHigh = effectiveSpot;
+      if (effectiveSpot < runningLow) runningLow = effectiveSpot;
     }
-    if (effectiveSpot > runningHigh) runningHigh = effectiveSpot;
-    if (effectiveSpot < runningLow) runningLow = effectiveSpot;
   }
 
-  if (fbOrbHigh > 0 && fbOrbLow > 0) {
-    orbHigh = fbOrbHigh;
-    orbLow = fbOrbLow;
-  } else if (orbHigh <= 0 || orbLow === Infinity || orbHigh === orbLow) {
+  if (orbHigh <= 0 || orbLow === Infinity || orbHigh === orbLow) {
     const refMid = effectiveVwap > 0 ? effectiveVwap : effectiveSpot;
     orbHigh = runningHigh > refMid ? runningHigh : Number((refMid * 1.0008).toFixed(2));
     orbLow = runningLow < refMid ? runningLow : Number((refMid * 0.9992).toFixed(2));
   }
 
-  const dayOpen = series.length > 0 ? series[0].open : effectiveSpot;
+  const dayOpen = Number(chartMeta?.day_open) > 0
+    ? Number(chartMeta.day_open)
+    : (series.length > 0 ? series[0].open : effectiveSpot);
   const dayHigh = runningHigh > 0 ? runningHigh : effectiveSpot;
   const dayLow = runningLow < Infinity ? runningLow : effectiveSpot;
   const changePts = effectiveSpot > 0 && dayOpen > 0 ? effectiveSpot - dayOpen : 0;
   const changePct = dayOpen > 0 ? (changePts / dayOpen) * 100.0 : 0;
 
-  // Determine exact Structural Zone (Zone 1 Breakout | Zone 2A ORB Retest | Zone 2B Mid-Air | Zone 3 Inside ORB)
-  let zoneCode = 'ZONE_3_INSIDE_ORB';
-  let zoneLabel = 'ZONE 3: INSIDE ORB (NO TRADE)';
-  let zonePass = false;
+  const activeZone = classifyPointZone(
+    effectiveSpot,
+    effectiveVwap,
+    orbHigh,
+    orbLow,
+    dayHigh,
+    dayLow,
+    underlyingKey
+  );
 
-  if (effectiveSpot > 0 && orbHigh > 0 && orbLow > 0) {
-    const distFromHighPct = dayHigh > 0 ? ((dayHigh - effectiveSpot) / dayHigh) * 100.0 : 0;
-    const distFromLowPct = dayLow > 0 ? ((effectiveSpot - dayLow) / dayLow) * 100.0 : 0;
-    const distAboveOrbHighPct = orbHigh > 0 ? ((effectiveSpot - orbHigh) / orbHigh) * 100.0 : 0;
-    const distBelowOrbLowPct = orbLow > 0 ? ((orbLow - effectiveSpot) / orbLow) * 100.0 : 0;
+  // Compute padded Y-axis domain so Day High, ORB High, VWAP, ORB Low, and Day Low are NEVER clipped
+  const keyPrices = [dayLow, orbLow, effectiveVwap, effectiveSpot, orbHigh, dayHigh].filter(v => v > 0 && Number.isFinite(v));
+  const rawMin = keyPrices.length > 0 ? Math.min(...keyPrices) : effectiveSpot * 0.995;
+  const rawMax = keyPrices.length > 0 ? Math.max(...keyPrices) : effectiveSpot * 1.005;
+  const span = Math.max(rawMax - rawMin, effectiveSpot * 0.002, 20);
+  const pad = span * 0.14;
+  const yMin = Number((rawMin - pad).toFixed(0));
+  const yMax = Number((rawMax + pad).toFixed(0));
 
-    if (effectiveSpot > orbHigh) {
-      if (distFromHighPct <= 0.15) {
-        zoneCode = 'ZONE_1_BREAKOUT';
-        zoneLabel = 'ZONE 1: DAY HIGH BREAKOUT';
-        zonePass = true;
-      } else if (distAboveOrbHighPct <= 0.12 && effectiveSpot >= effectiveVwap) {
-        zoneCode = 'ZONE_2A_ORB_RETEST';
-        zoneLabel = 'ZONE 2A: ORB HIGH RETEST';
-        zonePass = true;
-      } else {
-        zoneCode = 'ZONE_2B_MID_AIR';
-        zoneLabel = 'ZONE 2B: MID-AIR PULLBACK (BLOCKED)';
-        zonePass = false;
-      }
-    } else if (effectiveSpot < orbLow) {
-      if (distFromLowPct <= 0.15) {
-        zoneCode = 'ZONE_1_BREAKOUT';
-        zoneLabel = 'ZONE 1: DAY LOW BREAKDOWN';
-        zonePass = true;
-      } else if (distBelowOrbLowPct <= 0.12 && effectiveSpot <= effectiveVwap) {
-        zoneCode = 'ZONE_2A_ORB_RETEST';
-        zoneLabel = 'ZONE 2A: ORB LOW RETEST';
-        zonePass = true;
-      } else {
-        zoneCode = 'ZONE_2B_MID_AIR';
-        zoneLabel = 'ZONE 2B: MID-AIR PULLBACK (BLOCKED)';
-        zonePass = false;
-      }
-    }
-  }
+  // Compute exact structural zone band boundaries for Recharts <ReferenceArea>
+  const retestHighTop = Math.min(dayHigh, Number((orbHigh * 1.0012).toFixed(2)));
+  const retestLowBot = Math.max(dayLow, Number((orbLow * 0.9988).toFixed(2)));
+  const wickTol = underlyingKey === 'BANKNIFTY' ? 10.0 : 4.5;
+  const breakoutHighFloor = Math.max(orbHigh, Number(Math.min(dayHigh - wickTol, dayHigh * 0.9985).toFixed(2)));
+  const breakoutLowCeil = Math.min(orbLow, Number(Math.max(dayLow + wickTol, dayLow * 1.0015).toFixed(2)));
+
+  // Actionable trigger distance telemetry
+  const bullBreakoutTrigger = Number((dayHigh - wickTol).toFixed(1));
+  const bullBreakoutPtsAway = Math.max(0, Number((bullBreakoutTrigger - effectiveSpot).toFixed(1)));
+  const bearBreakdownTrigger = Number((dayLow + wickTol).toFixed(1));
+  const bearBreakdownPtsAway = Math.max(0, Number((effectiveSpot - bearBreakdownTrigger).toFixed(1)));
+  const tradeDots = series.filter(pt => pt.tradeTag);
 
   return {
     sessionDate,
@@ -257,9 +446,21 @@ function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallb
     orbLow,
     changePts,
     changePct,
-    zoneCode,
-    zoneLabel,
-    zonePass,
+    zoneCode: activeZone.code,
+    zoneLabel: activeZone.fullLabel,
+    zoneShort: activeZone.shortLabel,
+    zonePass: activeZone.pass,
+    yDomain: [yMin, yMax],
+    retestHighTop,
+    retestLowBot,
+    breakoutHighFloor,
+    breakoutLowCeil,
+    bullBreakoutTrigger,
+    bullBreakoutPtsAway,
+    bearBreakdownTrigger,
+    bearBreakdownPtsAway,
+    tradeDots,
+    isMarketOpen,
   };
 }
 
@@ -271,6 +472,9 @@ export default function OptionSniffer() {
   const [paperTrades, setPaperTrades] = useState({ open_trades: [], closed_trades: [], pnl_summary: {} });
   const [chainIntel, setChainIntel] = useState({ NIFTY: null, BANKNIFTY: null });
   const [indexBars, setIndexBars] = useState({ NIFTY: [], BANKNIFTY: [] });
+  const [indexBars1m, setIndexBars1m] = useState({ NIFTY: [], BANKNIFTY: [] });
+  const [indexChartMeta, setIndexChartMeta] = useState({ is_market_open: false, NIFTY: null, BANKNIFTY: null });
+  const [chartResolution, setChartResolution] = useState('5m'); // '5m' | '1m'
   const [liveReadiness, setLiveReadiness] = useState(null);
   const [liveStatusData, setLiveStatusData] = useState(null);
   const [allocationSim, setAllocationSim] = useState(null);
@@ -368,70 +572,30 @@ export default function OptionSniffer() {
 
   const fetchIndexCharts = useCallback(async () => {
     try {
-      const endDt = new Date();
-      const startDt = new Date(endDt.getTime() - 5 * 24 * 60 * 60 * 1000);
-      const endDate = endDt.toISOString().slice(0, 10);
-      const startDate = startDt.toISOString().slice(0, 10);
-      const noopCond = [{ indicator: 'RSI_14', operator: '<', value: -999 }];
-
-      const [niftyBtRes, bnfBtRes] = await Promise.all([
-        fetch(`${API_BASE}/backtest/`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ticker: 'NIFTY',
-            start_date: startDate,
-            end_date: endDate,
-            interval: '15m',
-            initial_capital: 100000,
-            entry_conditions: noopCond,
-            exit_conditions: noopCond,
-          }),
-        }),
-        fetch(`${API_BASE}/backtest/`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ticker: 'BANKNIFTY',
-            start_date: startDate,
-            end_date: endDate,
-            interval: '15m',
-            initial_capital: 100000,
-            entry_conditions: noopCond,
-            exit_conditions: noopCond,
-          }),
-        }),
-      ]);
-
-      const nextBars = {};
-      if (niftyBtRes.ok) {
-        const nd = await niftyBtRes.json();
-        const curve = Array.isArray(nd?.equity_curve) ? nd.equity_curve : (Array.isArray(nd?.data) ? nd.data : []);
-        nextBars.NIFTY = curve.map(pt => ({
-          time: String(pt.date || pt.time || ''),
-          open: Number(pt.open || pt.close || 0),
-          high: Number(pt.high || pt.close || 0),
-          low: Number(pt.low || pt.close || 0),
-          close: Number(pt.close || 0),
-          volume: Number(pt.volume || 1),
-        })).filter(b => b.close > 0);
+      const res = await fetch(`${API_BASE}/option-sniffer/index-charts`);
+      if (res.ok) {
+        const data = await res.json();
+        const u = data?.underlyings || {};
+        const nMeta = u.NIFTY || null;
+        const bMeta = u.BANKNIFTY || null;
+        setIndexChartMeta({
+          is_market_open: Boolean(data?.is_market_open),
+          NIFTY: nMeta,
+          BANKNIFTY: bMeta,
+        });
+        if (nMeta?.bars_5m?.length || bMeta?.bars_5m?.length) {
+          setIndexBars(prev => ({
+            NIFTY: nMeta?.bars_5m?.length ? nMeta.bars_5m : prev.NIFTY,
+            BANKNIFTY: bMeta?.bars_5m?.length ? bMeta.bars_5m : prev.BANKNIFTY,
+          }));
+        }
+        if (nMeta?.bars_1m?.length || bMeta?.bars_1m?.length) {
+          setIndexBars1m(prev => ({
+            NIFTY: nMeta?.bars_1m?.length ? nMeta.bars_1m : prev.NIFTY,
+            BANKNIFTY: bMeta?.bars_1m?.length ? bMeta.bars_1m : prev.BANKNIFTY,
+          }));
+        }
       }
-      if (bnfBtRes.ok) {
-        const bd = await bnfBtRes.json();
-        const curve = Array.isArray(bd?.equity_curve) ? bd.equity_curve : (Array.isArray(bd?.data) ? bd.data : []);
-        nextBars.BANKNIFTY = curve.map(pt => ({
-          time: String(pt.date || pt.time || ''),
-          open: Number(pt.open || pt.close || 0),
-          high: Number(pt.high || pt.close || 0),
-          low: Number(pt.low || pt.close || 0),
-          close: Number(pt.close || 0),
-          volume: Number(pt.volume || 1),
-        })).filter(b => b.close > 0);
-      }
-      setIndexBars(prev => ({
-        NIFTY: nextBars.NIFTY?.length ? nextBars.NIFTY : prev.NIFTY,
-        BANKNIFTY: nextBars.BANKNIFTY?.length ? nextBars.BANKNIFTY : prev.BANKNIFTY,
-      }));
     } catch (err) {
       console.error('Failed to fetch NIFTY/BANKNIFTY chart history:', err);
     }
@@ -461,49 +625,50 @@ export default function OptionSniffer() {
         setChainIntel(nextIntel);
       }
 
-      // Append live 4-second spot & VWAP ticks so NIFTY and BANKNIFTY intraday curves grow continuously
+      // Append live 4-second spot & VWAP ticks ONLY during active NSE market hours (09:15 - 15:30 IST Mon-Fri)
       const uMap = nextIntel?.underlyings || nextIntel || {};
       const nSpot = Number(uMap?.NIFTY?.spot_price || uMap?.NIFTY?.spot_ltp || nextStatus?.market_regime?.spot || 0);
       const nVwap = Number(uMap?.NIFTY?.session_tpb || nextStatus?.market_regime?.day_vwap || nSpot);
       const bSpot = Number(uMap?.BANKNIFTY?.spot_price || uMap?.BANKNIFTY?.spot_ltp || 0);
       const bVwap = Number(uMap?.BANKNIFTY?.session_tpb || bSpot);
       const nowIso = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata' }).replace(' ', 'T');
+      const hhmm = nowIso.slice(11, 16);
+      const istDay = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })).getDay();
+      const isLiveMarketNow = istDay >= 1 && istDay <= 5 && hhmm >= '09:15' && hhmm <= '15:30';
 
-      if (nSpot > 0 || bSpot > 0) {
-        setIndexBars(prev => {
-          const appendTick = (arr = [], spot, vwap) => {
-            if (!(spot > 0)) return arr;
-            const last = arr[arr.length - 1];
-            const minBucket = nowIso.slice(0, 16);
-            if (last && String(last.time || '').slice(0, 16) === minBucket) {
-              const updated = [...arr];
-              updated[updated.length - 1] = {
-                ...last,
-                high: Math.max(Number(last.high || spot), spot),
-                low: Math.min(Number(last.low || spot), spot),
-                close: spot,
-                vwap: vwap > 0 ? vwap : spot,
-              };
-              return updated;
-            }
-            return [
-              ...arr.slice(-119),
-              {
-                time: nowIso,
-                open: last ? Number(last.close || spot) : spot,
-                high: spot,
-                low: spot,
-                close: spot,
-                volume: 1,
-                vwap: vwap > 0 ? vwap : spot,
-              },
-            ];
-          };
-          return {
-            NIFTY: appendTick(prev.NIFTY, nSpot, nVwap),
-            BANKNIFTY: appendTick(prev.BANKNIFTY, bSpot, bVwap),
-          };
-        });
+      if (isLiveMarketNow && (nSpot > 0 || bSpot > 0)) {
+        const appendTick = (arr = [], spot, vwap, maxKeep = 375) => {
+          if (!(spot > 0)) return arr;
+          const last = arr[arr.length - 1];
+          const minBucket = nowIso.slice(0, 16);
+          if (last && String(last.time || '').slice(0, 16) === minBucket) {
+            const updated = [...arr];
+            updated[updated.length - 1] = {
+              ...last,
+              high: Math.max(Number(last.high || spot), spot),
+              low: Math.min(Number(last.low || spot), spot),
+              close: spot,
+              vwap: vwap > 0 ? vwap : spot,
+            };
+            return updated;
+          }
+          return [
+            ...arr.slice(-(maxKeep - 1)),
+            {
+              time: nowIso,
+              open: last ? Number(last.close || spot) : spot,
+              high: spot,
+              low: spot,
+              close: spot,
+              volume: 1,
+              vwap: vwap > 0 ? vwap : spot,
+            },
+          ];
+        };
+        setIndexBars1m(prev => ({
+          NIFTY: appendTick(prev.NIFTY, nSpot, nVwap, 375),
+          BANKNIFTY: appendTick(prev.BANKNIFTY, bSpot, bVwap, 375),
+        }));
       }
 
       setLastUpdated(new Date().toLocaleTimeString());
@@ -572,17 +737,89 @@ export default function OptionSniffer() {
     return cands.reduce((acc, c) => acc + Number(c.strike), 0) / cands.length;
   }, [candidates]);
 
+  const sessionTradeEventsByUnderlying = useMemo(() => {
+    const map = { NIFTY: [], BANKNIFTY: [] };
+    const allTrades = [
+      ...(Array.isArray(paperTrades.open_trades) ? paperTrades.open_trades : []),
+      ...(Array.isArray(paperTrades.closed_trades) ? paperTrades.closed_trades : []),
+    ];
+    allTrades.forEach(t => {
+      const sym = String(t.trading_symbol || t.underlying || '').toUpperCase();
+      const uKey = sym.includes('BANK') ? 'BANKNIFTY' : 'NIFTY';
+      const rawEntry = String(t.entry_time || t.created_at || '');
+      if (rawEntry.length >= 16) {
+        const hhmm = rawEntry.slice(11, 16);
+        const mn = Math.floor(Number(hhmm.slice(3, 5)) / 5) * 5;
+        const bucket5m = `${hhmm.slice(0, 2)}:${String(mn).padStart(2, '0')}`;
+        const isCe = sym.includes('CE');
+        map[uKey].push({
+          date: rawEntry.slice(0, 10),
+          hhmm,
+          bucket5m,
+          side: isCe ? 'CE' : 'PE',
+          label: `ENTRY ${t.trading_symbol || uKey} @ ₹${Number(t.entry_price || 0).toFixed(1)}`,
+        });
+      }
+    });
+    return map;
+  }, [paperTrades.open_trades, paperTrades.closed_trades]);
+
   const niftyChart = useMemo(() => {
     const liveSpot = Number(niftyIntel.spot_price || niftyIntel.spot_ltp || marketRegime.spot || fallbackNiftySpot || 0);
     const liveVwap = Number(niftyIntel.session_tpb || marketRegime.day_vwap || liveSpot || 0);
-    return buildIntradayChartModel(indexBars.NIFTY, liveSpot, liveVwap, ms.orb_status, niftyIntel);
-  }, [indexBars.NIFTY, niftyIntel, marketRegime.spot, marketRegime.day_vwap, fallbackNiftySpot, ms.orb_status]);
+    const activeBars = chartResolution === '1m' && indexBars1m.NIFTY?.length ? indexBars1m.NIFTY : indexBars.NIFTY;
+    const sDate = indexChartMeta.NIFTY?.session_date || '';
+    const tEvents = (sessionTradeEventsByUnderlying.NIFTY || []).filter(e => !sDate || e.date === sDate);
+    return buildIntradayChartModel(
+      activeBars,
+      liveSpot,
+      liveVwap,
+      ms.orb_status,
+      niftyIntel,
+      indexChartMeta.NIFTY,
+      Boolean(indexChartMeta.is_market_open),
+      'NIFTY',
+      tEvents
+    );
+  }, [
+    indexBars.NIFTY,
+    indexBars1m.NIFTY,
+    chartResolution,
+    niftyIntel,
+    marketRegime.spot,
+    marketRegime.day_vwap,
+    fallbackNiftySpot,
+    ms.orb_status,
+    indexChartMeta,
+    sessionTradeEventsByUnderlying.NIFTY,
+  ]);
 
   const bankniftyChart = useMemo(() => {
     const liveSpot = Number(bnfIntel.spot_price || bnfIntel.spot_ltp || fallbackBnfSpot || 0);
     const liveVwap = Number(bnfIntel.session_tpb || liveSpot || 0);
-    return buildIntradayChartModel(indexBars.BANKNIFTY, liveSpot, liveVwap, null, bnfIntel);
-  }, [indexBars.BANKNIFTY, bnfIntel, fallbackBnfSpot]);
+    const activeBars = chartResolution === '1m' && indexBars1m.BANKNIFTY?.length ? indexBars1m.BANKNIFTY : indexBars.BANKNIFTY;
+    const sDate = indexChartMeta.BANKNIFTY?.session_date || '';
+    const tEvents = (sessionTradeEventsByUnderlying.BANKNIFTY || []).filter(e => !sDate || e.date === sDate);
+    return buildIntradayChartModel(
+      activeBars,
+      liveSpot,
+      liveVwap,
+      null,
+      bnfIntel,
+      indexChartMeta.BANKNIFTY,
+      Boolean(indexChartMeta.is_market_open),
+      'BANKNIFTY',
+      tEvents
+    );
+  }, [
+    indexBars.BANKNIFTY,
+    indexBars1m.BANKNIFTY,
+    chartResolution,
+    bnfIntel,
+    fallbackBnfSpot,
+    indexChartMeta,
+    sessionTradeEventsByUnderlying.BANKNIFTY,
+  ]);
 
   // ── REAL-TIME TRAFFIC-LIGHT QUALITY GATES EVALUATION (ALL GREEN = TRADE, 1 RED = NO TRADE) ──
   const gatesSummary = useMemo(() => {
@@ -1505,16 +1742,17 @@ export default function OptionSniffer() {
           },
         ].map(({ symbol, keyName, chart, intel, accentHex, gradId }) => {
           const isUp = (chart.changePts || 0) >= 0;
+          const [yMin, yMax] = chart.yDomain || ['auto', 'auto'];
           return (
-            <div key={keyName} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
+            <div key={keyName} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-2.5">
               {/* Chart Card Header */}
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
                 <div className="flex items-center space-x-2.5">
-                  <div className="w-8 h-8 rounded-xl bg-slate-900 text-white flex items-center justify-center font-black text-xs">
+                  <div className="w-8 h-8 rounded-xl bg-slate-900 text-white flex items-center justify-center font-black text-xs shadow-xs">
                     {keyName === 'NIFTY' ? 'N50' : 'BNF'}
                   </div>
                   <div>
-                    <div className="flex items-center space-x-2">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <span className="text-xs font-black text-slate-900 tracking-wide">{symbol}</span>
                       <span className={`text-[10px] font-mono font-black px-2 py-0.5 rounded border ${
                         chart.zonePass
@@ -1523,85 +1761,244 @@ export default function OptionSniffer() {
                       }`}>
                         {chart.zonePass ? `🟢 ${chart.zoneLabel}` : `🔴 ${chart.zoneLabel}`}
                       </span>
+                      <span className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                        chart.isMarketOpen
+                          ? 'bg-emerald-950 text-emerald-300 border-emerald-700 animate-pulse'
+                          : 'bg-slate-100 text-slate-600 border-slate-300'
+                      }`}>
+                        {chart.isMarketOpen ? '● LIVE MARKET' : '⏸ MARKET CLOSED • FINAL SESSION'}
+                      </span>
                     </div>
-                    <div className="text-[10px] font-mono text-slate-400">
-                      Session: {chart.sessionDate || 'Intraday'} • 5m Candles + 4s Live Spot/VWAP
+                    <div className="text-[10px] font-mono text-slate-400 mt-0.5 flex items-center gap-2">
+                      <span>
+                        Session: <strong className="text-slate-600">{chart.sessionDate || 'Intraday'}</strong> (09:15–15:30 IST • {chart.series?.length || 0} bars)
+                      </span>
                     </div>
                   </div>
                 </div>
 
-                <div className="text-right font-mono">
-                  <div className="text-base font-black text-slate-900">
-                    ₹{(chart.spot || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                <div className="flex items-center gap-3">
+                  {/* 1m / 5m Resolution Switcher */}
+                  <div className="bg-slate-100 p-0.5 rounded-lg border border-slate-200 flex items-center text-[10px] font-mono font-bold">
+                    {['5m', '1m'].map(tf => (
+                      <button
+                        key={tf}
+                        type="button"
+                        onClick={() => setChartResolution(tf)}
+                        className={`px-2 py-0.5 rounded-md transition-all cursor-pointer ${
+                          chartResolution === tf
+                            ? 'bg-slate-900 text-white shadow-2xs'
+                            : 'text-slate-500 hover:text-slate-800'
+                        }`}
+                      >
+                        {tf}
+                      </button>
+                    ))}
                   </div>
-                  <div className={`text-[11px] font-bold ${isUp ? 'text-emerald-600' : 'text-rose-600'}`}>
-                    {isUp ? '+' : ''}{(chart.changePts || 0).toFixed(1)} pts ({isUp ? '+' : ''}{(chart.changePct || 0).toFixed(2)}%)
+
+                  <div className="text-right font-mono">
+                    <div className="text-base font-black text-slate-900">
+                      ₹{(chart.spot || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </div>
+                    <div className={`text-[11px] font-bold ${isUp ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {isUp ? '+' : ''}{(chart.changePts || 0).toFixed(1)} pts ({isUp ? '+' : ''}{(chart.changePct || 0).toFixed(2)}%)
+                    </div>
                   </div>
                 </div>
               </div>
 
-              {/* Intraday Graph Canvas */}
-              <div className="h-52 w-full">
+              {/* Actionable Trigger Distance Strip */}
+              <div className="bg-slate-950 text-slate-200 rounded-xl px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono border border-slate-800">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-emerald-400 font-bold">▲ CE Breakout (Zone 3):</span>
+                  <span className="text-white font-bold">&gt; ₹{(chart.bullBreakoutTrigger || 0).toFixed(0)}</span>
+                  <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                    chart.bullBreakoutPtsAway <= 0
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                      : 'bg-slate-800 text-slate-300'
+                  }`}>
+                    {chart.bullBreakoutPtsAway <= 0 ? 'TRIGGERED' : `${chart.bullBreakoutPtsAway.toFixed(1)} pts away`}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <span className="text-indigo-300 font-bold">◆ ORB Retest (Zone 2A):</span>
+                  <span className="text-slate-200">
+                    {(chart.orbHigh || 0).toFixed(0)}–{(chart.retestHighTop || 0).toFixed(0)}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <span className="text-rose-400 font-bold">▼ PE Breakdown (Zone 3):</span>
+                  <span className="text-white font-bold">&lt; ₹{(chart.bearBreakdownTrigger || 0).toFixed(0)}</span>
+                  <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                    chart.bearBreakdownPtsAway <= 0
+                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                      : 'bg-slate-800 text-slate-300'
+                  }`}>
+                    {chart.bearBreakdownPtsAway <= 0 ? 'TRIGGERED' : `${chart.bearBreakdownPtsAway.toFixed(1)} pts away`}
+                  </span>
+                </div>
+              </div>
+
+              {/* Intraday Structural Graph Canvas */}
+              <div className="h-60 w-full">
                 {chart.series && chart.series.length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={chart.series} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                    <ComposedChart data={chart.series} margin={{ top: 10, right: 14, left: 0, bottom: 2 }}>
                       <defs>
                         <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor={accentHex} stopOpacity={0.22} />
+                          <stop offset="5%" stopColor={accentHex} stopOpacity={0.20} />
                           <stop offset="95%" stopColor={accentHex} stopOpacity={0.01} />
                         </linearGradient>
                       </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                       <XAxis
                         dataKey="time"
-                        tick={{ fontSize: 10, fill: '#64748b' }}
+                        tick={{ fontSize: 10, fill: '#475569', fontWeight: 600 }}
                         tickLine={false}
-                        axisLine={{ stroke: '#e2e8f0' }}
-                        minTickGap={24}
+                        axisLine={{ stroke: '#cbd5e1' }}
+                        minTickGap={26}
                       />
                       <YAxis
-                        domain={['auto', 'auto']}
-                        tick={{ fontSize: 10, fill: '#64748b' }}
+                        domain={[yMin, yMax]}
+                        tick={{ fontSize: 10, fill: '#475569', fontWeight: 600 }}
                         tickLine={false}
                         axisLine={false}
                         width={58}
                         tickFormatter={val => Number(val).toFixed(0)}
                       />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: '#0f172a',
-                          borderColor: '#334155',
-                          borderRadius: '12px',
-                          fontSize: '11px',
-                          color: '#f8fafc',
-                          fontFamily: 'monospace'
-                        }}
-                        formatter={(val, name) => [
-                          `₹${Number(val).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`,
-                          name === 'spot' ? 'Spot Price' : 'Session VWAP'
-                        ]}
-                      />
+                      <Tooltip content={<QuantChartTooltip chart={chart} />} />
+
+                      {/* SHADED ZONE 1: INSIDE OPENING RANGE CHOP BOX (BLOCKED) */}
+                      {chart.orbHigh > 0 && chart.orbLow > 0 && (
+                        <ReferenceArea
+                          y1={chart.orbLow}
+                          y2={chart.orbHigh}
+                          fill="#f43f5e"
+                          fillOpacity={0.08}
+                          ifOverflow="extendDomain"
+                        />
+                      )}
+
+                      {/* SHADED ZONE 2A: ORB RETEST POCKET (ALLOWED) */}
+                      {chart.retestHighTop > chart.orbHigh && (
+                        <ReferenceArea
+                          y1={chart.orbHigh}
+                          y2={chart.retestHighTop}
+                          fill="#10b981"
+                          fillOpacity={0.10}
+                          ifOverflow="extendDomain"
+                        />
+                      )}
+                      {chart.orbLow > chart.retestLowBot && (
+                        <ReferenceArea
+                          y1={chart.retestLowBot}
+                          y2={chart.orbLow}
+                          fill="#10b981"
+                          fillOpacity={0.10}
+                          ifOverflow="extendDomain"
+                        />
+                      )}
+
+                      {/* SHADED ZONE 2B: MID-AIR PULLBACK TRAP (BLOCKED) */}
+                      {chart.breakoutHighFloor > chart.retestHighTop && (
+                        <ReferenceArea
+                          y1={chart.retestHighTop}
+                          y2={chart.breakoutHighFloor}
+                          fill="#f59e0b"
+                          fillOpacity={0.05}
+                          ifOverflow="extendDomain"
+                        />
+                      )}
+
+                      {/* SHADED ZONE 3: DAY HIGH / LOW BREAKOUT ZONE (ALLOWED) */}
+                      {typeof yMax === 'number' && chart.breakoutHighFloor > 0 && yMax > chart.breakoutHighFloor && (
+                        <ReferenceArea
+                          y1={chart.breakoutHighFloor}
+                          y2={yMax}
+                          fill="#10b981"
+                          fillOpacity={0.11}
+                          ifOverflow="extendDomain"
+                        />
+                      )}
+                      {typeof yMin === 'number' && chart.breakoutLowCeil > yMin && (
+                        <ReferenceArea
+                          y1={yMin}
+                          y2={chart.breakoutLowCeil}
+                          fill="#10b981"
+                          fillOpacity={0.11}
+                          ifOverflow="extendDomain"
+                        />
+                      )}
+
+                      {/* STRUCTURAL REFERENCE LINES: DAY HIGH, ORB HIGH, ORB LOW, DAY LOW */}
+                      {chart.dayHigh > 0 && (
+                        <ReferenceLine
+                          y={chart.dayHigh}
+                          stroke="#059669"
+                          strokeWidth={1.3}
+                          strokeDasharray="2 2"
+                          label={{
+                            value: `Z3 Day High (${chart.dayHigh.toFixed(0)})`,
+                            position: 'insideTopLeft',
+                            fill: '#047857',
+                            fontSize: 9,
+                            fontWeight: 700,
+                          }}
+                        />
+                      )}
                       {chart.orbHigh > 0 && (
                         <ReferenceLine
                           y={chart.orbHigh}
                           stroke="#10b981"
+                          strokeWidth={1.4}
                           strokeDasharray="4 4"
-                          label={{ value: `ORB High (${chart.orbHigh.toFixed(0)})`, position: 'insideTopRight', fill: '#059669', fontSize: 9 }}
+                          label={{
+                            value: `ORB High (${chart.orbHigh.toFixed(0)})`,
+                            position: 'insideTopRight',
+                            fill: '#059669',
+                            fontSize: 9,
+                            fontWeight: 700,
+                          }}
                         />
                       )}
                       {chart.orbLow > 0 && (
                         <ReferenceLine
                           y={chart.orbLow}
                           stroke="#f43f5e"
+                          strokeWidth={1.4}
                           strokeDasharray="4 4"
-                          label={{ value: `ORB Low (${chart.orbLow.toFixed(0)})`, position: 'insideBottomRight', fill: '#e11d48', fontSize: 9 }}
+                          label={{
+                            value: `Z1 ORB Low (${chart.orbLow.toFixed(0)})`,
+                            position: 'insideBottomRight',
+                            fill: '#e11d48',
+                            fontSize: 9,
+                            fontWeight: 700,
+                          }}
                         />
                       )}
+                      {chart.dayLow > 0 && Math.abs(chart.dayLow - chart.orbLow) >= 8 && (
+                        <ReferenceLine
+                          y={chart.dayLow}
+                          stroke="#dc2626"
+                          strokeWidth={1.3}
+                          strokeDasharray="2 2"
+                          label={{
+                            value: `Z3 Day Low (${chart.dayLow.toFixed(0)})`,
+                            position: 'insideBottomLeft',
+                            fill: '#b91c1c',
+                            fontSize: 9,
+                            fontWeight: 700,
+                          }}
+                        />
+                      )}
+
                       <Area
                         type="monotone"
                         dataKey="spot"
                         stroke={accentHex}
-                        strokeWidth={2.2}
+                        strokeWidth={2.3}
                         fillOpacity={1}
                         fill={`url(#${gradId})`}
                         isAnimationActive={false}
@@ -1609,12 +2006,26 @@ export default function OptionSniffer() {
                       <Line
                         type="monotone"
                         dataKey="vwap"
-                        stroke="#f59e0b"
-                        strokeWidth={1.6}
+                        stroke="#d97706"
+                        strokeWidth={1.8}
                         strokeDasharray="5 3"
                         dot={false}
                         isAnimationActive={false}
                       />
+
+                      {/* TRADE ENTRY PINS ON THE CURVE */}
+                      {Array.isArray(chart.tradeDots) &&
+                        chart.tradeDots.map((td, idx) => (
+                          <ReferenceDot
+                            key={`${td.time}-${idx}`}
+                            x={td.time}
+                            y={td.spot}
+                            r={5}
+                            fill={td.tradeSide === 'PE' ? '#e11d48' : '#10b981'}
+                            stroke="#ffffff"
+                            strokeWidth={1.5}
+                          />
+                        ))}
                     </ComposedChart>
                   </ResponsiveContainer>
                 ) : (
@@ -1624,8 +2035,29 @@ export default function OptionSniffer() {
                 )}
               </div>
 
+              {/* Zone Legend Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[9px] font-mono text-slate-500">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-xs bg-emerald-500/25 border border-emerald-600 inline-block" />
+                    <strong>Zone 3 / 2A:</strong> Breakout &amp; ORB Retest (Trade Allowed)
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-xs bg-amber-500/20 border border-amber-500 inline-block" />
+                    <strong>Zone 2B:</strong> Mid-Air Pullback (Blocked)
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2.5 h-2.5 rounded-xs bg-rose-500/20 border border-rose-500 inline-block" />
+                    <strong>Zone 1:</strong> Inside ORB Box (Blocked)
+                  </span>
+                </div>
+                <span className="flex items-center gap-1 text-amber-700 font-bold">
+                  --- Session VWAP (₹{(chart.vwap || 0).toFixed(1)})
+                </span>
+              </div>
+
               {/* Structural Levels & Chain Telemetry Strip */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1 text-[10px] font-mono">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-0.5 text-[10px] font-mono">
                 <div className="bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200/70">
                   <span className="text-slate-400 block uppercase">Session VWAP</span>
                   <strong className="text-amber-700">₹{(chart.vwap || 0).toFixed(1)}</strong>
