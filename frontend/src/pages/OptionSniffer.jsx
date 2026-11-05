@@ -44,21 +44,36 @@ import {
 } from 'recharts';
 import { API_BASE } from '../services/api';
 
-function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallbackOrb = null) {
-  const validBars = Array.isArray(rawBars)
-    ? rawBars.filter(b => b && Number(b.close) > 0)
+function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallbackOrb = null, intel = null) {
+  const normalizedBars = Array.isArray(rawBars)
+    ? rawBars
+        .map(b => {
+          if (!b) return null;
+          const c = Number(b.close ?? b.spot ?? b.ltp ?? 0);
+          if (!(c > 0)) return null;
+          return {
+            time: String(b.time || b.date || b.timestamp || ''),
+            open: Number(b.open || c),
+            high: Number(b.high || c),
+            low: Number(b.low || c),
+            close: c,
+            volume: Math.max(1, Number(b.volume || 1)),
+            vwap: Number(b.vwap || 0),
+          };
+        })
+        .filter(Boolean)
     : [];
 
-  let sessionBars = validBars;
+  let sessionBars = normalizedBars;
   let sessionDate = '';
-  if (validBars.length > 0) {
-    const lastTime = String(validBars[validBars.length - 1].time || '');
+  if (normalizedBars.length > 0) {
+    const lastTime = String(normalizedBars[normalizedBars.length - 1].time || '');
     sessionDate = lastTime.slice(0, 10);
-    const sameDay = validBars.filter(b => String(b.time || '').startsWith(sessionDate));
+    const sameDay = normalizedBars.filter(b => String(b.time || '').startsWith(sessionDate));
     if (sameDay.length >= 3) {
       sessionBars = sameDay;
     } else {
-      sessionBars = validBars.slice(-45);
+      sessionBars = normalizedBars.slice(-45);
     }
   }
 
@@ -78,7 +93,8 @@ function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallb
     const tp = (h + l + c) / 3.0;
     cumPV += tp * v;
     cumV += v;
-    const vwapVal = cumV > 0 ? Number((cumPV / cumV).toFixed(2)) : Number(tp.toFixed(2));
+    const computedVwap = cumV > 0 ? Number((cumPV / cumV).toFixed(2)) : Number(tp.toFixed(2));
+    const vwapVal = b.vwap > 0 ? Number(b.vwap.toFixed(2)) : computedVwap;
 
     if (h > runningHigh) runningHigh = h;
     if (l < runningLow) runningLow = l;
@@ -108,16 +124,53 @@ function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallb
     ? Number(liveVwap)
     : (series.length > 0 ? series[series.length - 1].vwap : effectiveSpot);
 
+  const fbOrbHigh = Number(fallbackOrb?.or_high ?? fallbackOrb?.orb_high ?? intel?.orb_high ?? 0);
+  const fbOrbLow = Number(fallbackOrb?.or_low ?? fallbackOrb?.orb_low ?? intel?.orb_low ?? 0);
+
   if (effectiveSpot > 0) {
-    if (series.length === 0) {
-      series.push({
-        time: '09:15',
-        spot: effectiveSpot,
-        high: effectiveSpot,
-        low: effectiveSpot,
-        open: effectiveSpot,
-        vwap: effectiveVwap || effectiveSpot,
-      });
+    if (series.length < 2) {
+      // Guarantee at least 4 structural session points so Recharts SVG always renders a visible curve & bands
+      const baseVwap = effectiveVwap > 0 ? effectiveVwap : effectiveSpot;
+      const anchorHigh = fbOrbHigh > 0 ? fbOrbHigh : Math.max(effectiveSpot, baseVwap) * 1.0008;
+      const anchorLow = fbOrbLow > 0 ? fbOrbLow : Math.min(effectiveSpot, baseVwap) * 0.9992;
+      const anchorOpen = Number(((anchorHigh + anchorLow) / 2.0).toFixed(2));
+      series.length = 0;
+      series.push(
+        {
+          time: '09:15',
+          spot: anchorOpen,
+          high: Number(anchorHigh.toFixed(2)),
+          low: Number(anchorLow.toFixed(2)),
+          open: anchorOpen,
+          vwap: Number(baseVwap.toFixed(2)),
+        },
+        {
+          time: '09:20',
+          spot: Number(anchorLow.toFixed(2)),
+          high: Number(anchorOpen.toFixed(2)),
+          low: Number(anchorLow.toFixed(2)),
+          open: anchorOpen,
+          vwap: Number(baseVwap.toFixed(2)),
+        },
+        {
+          time: '09:30',
+          spot: Number(anchorHigh.toFixed(2)),
+          high: Number(anchorHigh.toFixed(2)),
+          low: Number(anchorLow.toFixed(2)),
+          open: Number(anchorLow.toFixed(2)),
+          vwap: Number(baseVwap.toFixed(2)),
+        },
+        {
+          time: 'LIVE',
+          spot: Number(effectiveSpot.toFixed(2)),
+          high: Number(Math.max(anchorHigh, effectiveSpot).toFixed(2)),
+          low: Number(Math.min(anchorLow, effectiveSpot).toFixed(2)),
+          open: Number(anchorHigh.toFixed(2)),
+          vwap: Number(baseVwap.toFixed(2)),
+        }
+      );
+      runningHigh = Math.max(anchorHigh, effectiveSpot);
+      runningLow = Math.min(anchorLow, effectiveSpot);
     } else {
       const lastPt = series[series.length - 1];
       if (Math.abs(lastPt.spot - effectiveSpot) >= 0.05) {
@@ -135,12 +188,13 @@ function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallb
     if (effectiveSpot < runningLow) runningLow = effectiveSpot;
   }
 
-  if (fallbackOrb && Number(fallbackOrb.orb_high) > 0 && Number(fallbackOrb.orb_low) > 0) {
-    orbHigh = Number(fallbackOrb.orb_high);
-    orbLow = Number(fallbackOrb.orb_low);
-  } else if (orbHigh <= 0 || orbLow === Infinity) {
-    orbHigh = runningHigh > 0 ? runningHigh : effectiveSpot;
-    orbLow = runningLow < Infinity ? runningLow : effectiveSpot;
+  if (fbOrbHigh > 0 && fbOrbLow > 0) {
+    orbHigh = fbOrbHigh;
+    orbLow = fbOrbLow;
+  } else if (orbHigh <= 0 || orbLow === Infinity || orbHigh === orbLow) {
+    const refMid = effectiveVwap > 0 ? effectiveVwap : effectiveSpot;
+    orbHigh = runningHigh > refMid ? runningHigh : Number((refMid * 1.0008).toFixed(2));
+    orbLow = runningLow < refMid ? runningLow : Number((refMid * 0.9992).toFixed(2));
   }
 
   const dayOpen = series.length > 0 ? series[0].open : effectiveSpot;
@@ -314,18 +368,65 @@ export default function OptionSniffer() {
 
   const fetchIndexCharts = useCallback(async () => {
     try {
-      const [niftyRes, bnfRes] = await Promise.all([
-        fetch(`${API_BASE}/market/latest/%5ENSEI?period=5d&interval=5m`),
-        fetch(`${API_BASE}/market/latest/%5ENSEBANK?period=5d&interval=5m`),
+      const endDt = new Date();
+      const startDt = new Date(endDt.getTime() - 5 * 24 * 60 * 60 * 1000);
+      const endDate = endDt.toISOString().slice(0, 10);
+      const startDate = startDt.toISOString().slice(0, 10);
+      const noopCond = [{ indicator: 'RSI_14', operator: '<', value: -999 }];
+
+      const [niftyBtRes, bnfBtRes] = await Promise.all([
+        fetch(`${API_BASE}/backtest/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticker: 'NIFTY',
+            start_date: startDate,
+            end_date: endDate,
+            interval: '15m',
+            initial_capital: 100000,
+            entry_conditions: noopCond,
+            exit_conditions: noopCond,
+          }),
+        }),
+        fetch(`${API_BASE}/backtest/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticker: 'BANKNIFTY',
+            start_date: startDate,
+            end_date: endDate,
+            interval: '15m',
+            initial_capital: 100000,
+            entry_conditions: noopCond,
+            exit_conditions: noopCond,
+          }),
+        }),
       ]);
+
       const nextBars = {};
-      if (niftyRes.ok) {
-        const nd = await niftyRes.json();
-        nextBars.NIFTY = Array.isArray(nd?.data) ? nd.data : [];
+      if (niftyBtRes.ok) {
+        const nd = await niftyBtRes.json();
+        const curve = Array.isArray(nd?.equity_curve) ? nd.equity_curve : (Array.isArray(nd?.data) ? nd.data : []);
+        nextBars.NIFTY = curve.map(pt => ({
+          time: String(pt.date || pt.time || ''),
+          open: Number(pt.open || pt.close || 0),
+          high: Number(pt.high || pt.close || 0),
+          low: Number(pt.low || pt.close || 0),
+          close: Number(pt.close || 0),
+          volume: Number(pt.volume || 1),
+        })).filter(b => b.close > 0);
       }
-      if (bnfRes.ok) {
-        const bd = await bnfRes.json();
-        nextBars.BANKNIFTY = Array.isArray(bd?.data) ? bd.data : [];
+      if (bnfBtRes.ok) {
+        const bd = await bnfBtRes.json();
+        const curve = Array.isArray(bd?.equity_curve) ? bd.equity_curve : (Array.isArray(bd?.data) ? bd.data : []);
+        nextBars.BANKNIFTY = curve.map(pt => ({
+          time: String(pt.date || pt.time || ''),
+          open: Number(pt.open || pt.close || 0),
+          high: Number(pt.high || pt.close || 0),
+          low: Number(pt.low || pt.close || 0),
+          close: Number(pt.close || 0),
+          volume: Number(pt.volume || 1),
+        })).filter(b => b.close > 0);
       }
       setIndexBars(prev => ({
         NIFTY: nextBars.NIFTY?.length ? nextBars.NIFTY : prev.NIFTY,
@@ -346,11 +447,64 @@ export default function OptionSniffer() {
         fetch(`${API_BASE}/option-sniffer-advance/chain-intelligence`),
       ]);
 
-      if (statusRes.ok) setStatusData(await statusRes.json());
+      let nextStatus = null;
+      let nextIntel = null;
+      if (statusRes.ok) {
+        nextStatus = await statusRes.json();
+        setStatusData(nextStatus);
+      }
       if (candRes.ok) setCandidates(await candRes.json());
       if (sigRes.ok) setSignals(await sigRes.json());
       if (tradesRes.ok) setPaperTrades(await tradesRes.json());
-      if (intelRes.ok) setChainIntel(await intelRes.json());
+      if (intelRes.ok) {
+        nextIntel = await intelRes.json();
+        setChainIntel(nextIntel);
+      }
+
+      // Append live 4-second spot & VWAP ticks so NIFTY and BANKNIFTY intraday curves grow continuously
+      const uMap = nextIntel?.underlyings || nextIntel || {};
+      const nSpot = Number(uMap?.NIFTY?.spot_price || uMap?.NIFTY?.spot_ltp || nextStatus?.market_regime?.spot || 0);
+      const nVwap = Number(uMap?.NIFTY?.session_tpb || nextStatus?.market_regime?.day_vwap || nSpot);
+      const bSpot = Number(uMap?.BANKNIFTY?.spot_price || uMap?.BANKNIFTY?.spot_ltp || 0);
+      const bVwap = Number(uMap?.BANKNIFTY?.session_tpb || bSpot);
+      const nowIso = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Kolkata' }).replace(' ', 'T');
+
+      if (nSpot > 0 || bSpot > 0) {
+        setIndexBars(prev => {
+          const appendTick = (arr = [], spot, vwap) => {
+            if (!(spot > 0)) return arr;
+            const last = arr[arr.length - 1];
+            const minBucket = nowIso.slice(0, 16);
+            if (last && String(last.time || '').slice(0, 16) === minBucket) {
+              const updated = [...arr];
+              updated[updated.length - 1] = {
+                ...last,
+                high: Math.max(Number(last.high || spot), spot),
+                low: Math.min(Number(last.low || spot), spot),
+                close: spot,
+                vwap: vwap > 0 ? vwap : spot,
+              };
+              return updated;
+            }
+            return [
+              ...arr.slice(-119),
+              {
+                time: nowIso,
+                open: last ? Number(last.close || spot) : spot,
+                high: spot,
+                low: spot,
+                close: spot,
+                volume: 1,
+                vwap: vwap > 0 ? vwap : spot,
+              },
+            ];
+          };
+          return {
+            NIFTY: appendTick(prev.NIFTY, nSpot, nVwap),
+            BANKNIFTY: appendTick(prev.BANKNIFTY, bSpot, bVwap),
+          };
+        });
+      }
 
       setLastUpdated(new Date().toLocaleTimeString());
     } catch (err) {
@@ -370,7 +524,7 @@ export default function OptionSniffer() {
     }, 4000); // Polling every 4 seconds for reactive UI synchronization
     const chartInterval = setInterval(() => {
       fetchIndexCharts();
-    }, 20000); // Refresh 5m OHLCV bars every 20s while 4s poll updates live spot/VWAP
+    }, 30000); // Refresh multi-bar index candles every 30s while 4s poll updates live spot/VWAP
     return () => {
       clearInterval(interval);
       clearInterval(chartInterval);
@@ -401,20 +555,34 @@ export default function OptionSniffer() {
   const pauseRemainingSec = circuitBreaker?.pause_remaining_sec || 0;
   const pauseUnfreezeTime = circuitBreaker?.pause_unfreeze_time || '';
 
-  const niftyIntel = chainIntel?.NIFTY || {};
-  const bnfIntel = chainIntel?.BANKNIFTY || {};
+  const underlyingsMap = chainIntel?.underlyings || chainIntel || {};
+  const niftyIntel = underlyingsMap?.NIFTY || {};
+  const bnfIntel = underlyingsMap?.BANKNIFTY || {};
+
+  // Fallback ATM strike anchor if spot_price is momentarily 0 during cold boot
+  const fallbackNiftySpot = useMemo(() => {
+    const cands = candidates.filter(c => c.underlying === 'NIFTY' && Number(c.strike) > 0);
+    if (cands.length === 0) return 0;
+    return cands.reduce((acc, c) => acc + Number(c.strike), 0) / cands.length;
+  }, [candidates]);
+
+  const fallbackBnfSpot = useMemo(() => {
+    const cands = candidates.filter(c => c.underlying === 'BANKNIFTY' && Number(c.strike) > 0);
+    if (cands.length === 0) return 0;
+    return cands.reduce((acc, c) => acc + Number(c.strike), 0) / cands.length;
+  }, [candidates]);
 
   const niftyChart = useMemo(() => {
-    const liveSpot = Number(niftyIntel.spot_price || niftyIntel.spot_ltp || marketRegime.spot || 0);
-    const liveVwap = Number(niftyIntel.session_tpb || marketRegime.day_vwap || 0);
-    return buildIntradayChartModel(indexBars.NIFTY, liveSpot, liveVwap, ms.orb_status);
-  }, [indexBars.NIFTY, niftyIntel.spot_price, niftyIntel.spot_ltp, niftyIntel.session_tpb, marketRegime.spot, marketRegime.day_vwap, ms.orb_status]);
+    const liveSpot = Number(niftyIntel.spot_price || niftyIntel.spot_ltp || marketRegime.spot || fallbackNiftySpot || 0);
+    const liveVwap = Number(niftyIntel.session_tpb || marketRegime.day_vwap || liveSpot || 0);
+    return buildIntradayChartModel(indexBars.NIFTY, liveSpot, liveVwap, ms.orb_status, niftyIntel);
+  }, [indexBars.NIFTY, niftyIntel, marketRegime.spot, marketRegime.day_vwap, fallbackNiftySpot, ms.orb_status]);
 
   const bankniftyChart = useMemo(() => {
-    const liveSpot = Number(bnfIntel.spot_price || bnfIntel.spot_ltp || 0);
-    const liveVwap = Number(bnfIntel.session_tpb || 0);
-    return buildIntradayChartModel(indexBars.BANKNIFTY, liveSpot, liveVwap, null);
-  }, [indexBars.BANKNIFTY, bnfIntel.spot_price, bnfIntel.spot_ltp, bnfIntel.session_tpb]);
+    const liveSpot = Number(bnfIntel.spot_price || bnfIntel.spot_ltp || fallbackBnfSpot || 0);
+    const liveVwap = Number(bnfIntel.session_tpb || liveSpot || 0);
+    return buildIntradayChartModel(indexBars.BANKNIFTY, liveSpot, liveVwap, null, bnfIntel);
+  }, [indexBars.BANKNIFTY, bnfIntel, fallbackBnfSpot]);
 
   // ── REAL-TIME TRAFFIC-LIGHT QUALITY GATES EVALUATION (ALL GREEN = TRADE, 1 RED = NO TRADE) ──
   const gatesSummary = useMemo(() => {
@@ -426,23 +594,35 @@ export default function OptionSniffer() {
     // 2. Gate 2: Upstox V3 Stream & Quote Freshness
     const validQuotes = candidates.filter(c => c?.quote && Number(c.quote.ltp) > 0);
     const freshestAgeMs = validQuotes.length > 0
-      ? Math.min(...validQuotes.map(c => Number(c.quote.quote_age_ms ?? 0)))
+      ? Math.min(...validQuotes.map(c => Number(c.quote.quote_age_ms ?? 99999)))
       : (feedHealth.last_message_latency_ms ?? 99999);
     const ageLimitMs = isArmed ? 1000 : 15000;
-    const gate2Pass = Boolean(isConnected) && validQuotes.length > 0 && freshestAgeMs <= ageLimitMs;
+    const gate2Pass = Boolean(isConnected) && validQuotes.length > 0 && freshestAgeMs >= 0 && freshestAgeMs <= ageLimitMs;
 
-    // 3. Gate 3: Order Book & ATM Bid-Ask Spread Ceiling
-    const atmSpreadPct = ms.spread_atm_pct != null
-      ? Number(ms.spread_atm_pct)
-      : (validQuotes.length > 0 ? Number(validQuotes[0]?.quote?.spread_pct ?? 9.99) : 9.99);
+    // 3. Gate 3: Order Book & ATM Bid-Ask Spread Ceiling (Strictly requires live validQuotes so cold placeholders never pass)
+    const validSpreadQuotes = validQuotes.filter(
+      c => Number(c.quote?.bid || 0) > 0 && Number(c.quote?.ask || 0) >= Number(c.quote?.bid || 0)
+    );
+    const liveComputedSpreadPct = validSpreadQuotes.length > 0
+      ? Math.min(...validSpreadQuotes.map(c => {
+          const bid = Number(c.quote.bid);
+          const ask = Number(c.quote.ask);
+          const mid = (bid + ask) / 2.0;
+          return mid > 0 ? ((ask - bid) / mid) * 100.0 : 9.99;
+        }))
+      : null;
+    const atmSpreadPct = validSpreadQuotes.length > 0
+      ? Number(ms.spread_atm_pct ?? liveComputedSpreadPct ?? 9.99)
+      : null;
     const spreadCeiling = isArmed ? 1.20 : 3.50;
-    const askFloorCount = validQuotes.filter(c => Number(c.quote?.ask || 0) >= 35.0 && Number(c.quote?.ask || 0) >= Number(c.quote?.bid || 0) && Number(c.quote?.bid || 0) > 0).length;
-    const gate3Pass = atmSpreadPct <= spreadCeiling && askFloorCount > 0;
+    const askFloorCount = validSpreadQuotes.filter(c => Number(c.quote?.ask || 0) >= 35.0).length;
+    const gate3Pass = atmSpreadPct !== null && atmSpreadPct <= spreadCeiling && askFloorCount > 0;
 
-    // 4. Gate 4: Contract Liquidity & Delta Floor (OI >= 5,000, Vol >= 200, |Delta| >= 0.32)
+    // 4. Gate 4: Contract Liquidity & Delta Floor (OI >= 5,000, Vol >= 200, |Delta| in [0.32, 0.68])
     const liquidContracts = validQuotes.filter(c => {
       const q = c.quote || {};
-      return Number(q.oi || 0) >= 5000 && Number(q.volume || 0) >= 200 && Math.abs(Number(q.delta || 0)) >= 0.32;
+      const absDelta = Math.abs(Number(q.delta || 0));
+      return Number(q.oi || 0) >= 5000 && Number(q.volume || 0) >= 200 && absDelta >= 0.32 && absDelta <= 0.68;
     });
     const bestOi = validQuotes.length > 0 ? Math.max(...validQuotes.map(c => Number(c.quote?.oi || 0))) : 0;
     const bestVol = validQuotes.length > 0 ? Math.max(...validQuotes.map(c => Number(c.quote?.volume || 0))) : 0;
@@ -451,25 +631,46 @@ export default function OptionSniffer() {
     // 5. Gate 5: Opening Range (09:15-09:30 ORB) & Structural Zone (Zone 1 Breakout / Zone 2A ORB Retest)
     const orbAccepted = Boolean(ms.orb_status?.is_accepted);
     const zonePass = Boolean(niftyChart.zonePass || bankniftyChart.zonePass);
-    const gate5Pass = orbAccepted && zonePass;
+    const gate5Pass = isTradingWin && orbAccepted && zonePass;
     const activeZoneText = niftyChart.zonePass
       ? `NIFTY ${niftyChart.zoneLabel}`
       : (bankniftyChart.zonePass ? `BNF ${bankniftyChart.zoneLabel}` : niftyChart.zoneLabel);
 
-    // 6. Gate 6: Trend Efficiency & Chop / Climax Shield
-    const erVal = Number(ms.kaufman_er ?? niftyIntel.kaufman_er ?? 0);
-    const adxVal = Number(niftyIntel.adx_14 ?? 0);
+    // 6. Gate 6: Trend Efficiency & Chop / Climax Shield (Reads both NIFTY & BANKNIFTY underlyings + guards cold 0.45 placeholder)
+    const maxCompletedBars = Math.max(
+      Number(niftyIntel.completed_bars_count || 0),
+      Number(bnfIntel.completed_bars_count || 0)
+    );
+    const rawMsEr = (isTradingWin || maxCompletedBars > 0) ? Number(ms.kaufman_er || 0) : 0;
+    const erVal = Math.max(
+      rawMsEr,
+      Number(niftyIntel.kaufman_er || 0),
+      Number(bnfIntel.kaufman_er || 0)
+    );
+    const adxVal = Math.max(
+      Number(niftyIntel.adx_14 || 0),
+      Number(bnfIntel.adx_14 || 0)
+    );
     const erHurdle = isArmed ? 0.35 : 0.28;
     const isChopBlocked = marketRegime?.regime === 'RANGEBOUND_CHOP' || marketRegime?.shield === 'SHIELD_PAUSED';
-    const gate6Pass = !isChopBlocked && erVal >= erHurdle && adxVal >= 18.0;
+    // During early 09:30-09:43 IST window (< 28 1m bars), Wilder ADX(14) is warming up; allow pass if ORB accepted & ER >= 0.35
+    const adxOrWarmupOk = adxVal >= 18.0 || (isTradingWin && maxCompletedBars < 28 && orbAccepted && erVal >= 0.35);
+    const gate6Pass = isTradingWin && !isChopBlocked && erVal >= erHurdle && adxOrWarmupOk;
 
-    // 7. Gate 7: AI Ensemble Conviction & Net Return Hurdle
-    const activeSignalsList = signals.filter(s => s.status === 'ACTIVE' || s.status === 'TRADE_READY' || s.status === 'WATCH');
-    const topSignal = activeSignalsList[0] || signals[0] || null;
+    // 7. Gate 7: AI Ensemble Conviction & Net Return Hurdle (Filtered to today's IST session signals)
+    const todayIsoPrefix = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const todaySignals = signals.filter(s => {
+      const ts = String(s.timestamp || s.created_at || '');
+      return !ts || ts.startsWith(todayIsoPrefix);
+    });
+    const activeSignalsList = todaySignals.filter(
+      s => s.status === 'ACTIVE' || s.status === 'TRADE_READY' || s.status === 'WATCH'
+    );
+    const topSignal = activeSignalsList[0] || todaySignals[0] || null;
     const topProbPct = topSignal ? Number((topSignal.calibrated_prob || 0) * 100) : 0;
     const topNetRet = topSignal ? Number(topSignal.expected_net_return || 0) : 0;
     const probHurdle = topSignal?.is_crbi_active ? 38.0 : 44.0;
-    const gate7Pass = activeSignalsList.length > 0 && topProbPct >= probHurdle && topNetRet >= 2.0;
+    const gate7Pass = isTradingWin && activeSignalsList.length > 0 && topProbPct >= probHurdle && topNetRet >= 2.0;
 
     // 8. Gate 8: Circuit Breaker, Canary Scout & Slot Guard
     const openPaperCount = paperTrades?.open_trades?.length || 0;
@@ -499,7 +700,7 @@ export default function OptionSniffer() {
         shortName: 'Feed Freshness',
         title: 'Gate 2: Upstox V3 Stream & Quote Age',
         pass: gate2Pass,
-        liveValue: `${isConnected ? 'WS CONNECTED' : 'WS OFFLINE'} • Age: ${freshestAgeMs < 99000 ? `${freshestAgeMs}ms` : 'STALE'}`,
+        liveValue: `${isConnected ? 'WS CONNECTED' : 'WS OFFLINE'} • Age: ${validQuotes.length > 0 && freshestAgeMs < 99000 ? `${freshestAgeMs}ms` : 'AWAITING QUOTES'}`,
         threshold: `WS Connected & Quote Age ≤ ${ageLimitMs}ms`,
         detail: gate2Pass
           ? `${validQuotes.length} ATM contracts streaming live via Upstox V3 protobuf feed.`
@@ -510,11 +711,15 @@ export default function OptionSniffer() {
         shortName: 'ATM Spread',
         title: 'Gate 3: Order Book & Bid-Ask Spread',
         pass: gate3Pass,
-        liveValue: `ATM Spread: ${atmSpreadPct.toFixed(2)}% • Valid Ask (≥₹35): ${askFloorCount}`,
+        liveValue: atmSpreadPct !== null
+          ? `ATM Spread: ${atmSpreadPct.toFixed(2)}% • Valid Ask (≥₹35): ${askFloorCount}`
+          : `ATM Spread: AWAITING QUOTES • Valid Ask (≥₹35): 0`,
         threshold: `Spread ≤ ${spreadCeiling.toFixed(2)}% & Ask ≥ ₹35`,
         detail: gate3Pass
           ? 'Order book spread is tight; slippage friction is within institutional tolerance.'
-          : `Blocked: ATM bid-ask spread (${atmSpreadPct.toFixed(2)}%) exceeds ${spreadCeiling.toFixed(2)}% ceiling or premium < ₹35.`,
+          : (atmSpreadPct !== null
+              ? `Blocked: ATM bid-ask spread (${atmSpreadPct.toFixed(2)}%) exceeds ${spreadCeiling.toFixed(2)}% ceiling or premium < ₹35.`
+              : 'Blocked: Awaiting live option order-book bid/ask quotes (Ask ≥ ₹35).'),
       },
       {
         id: 'G4',
@@ -525,7 +730,7 @@ export default function OptionSniffer() {
         threshold: 'OI ≥ 5,000 • Vol ≥ 200 • |Δ| ∈ [0.32, 0.68]',
         detail: gate4Pass
           ? `${liquidContracts.length} ATM strikes satisfy institutional OI, volume, and gamma/delta responsiveness.`
-          : 'Blocked: Monitored strikes lack minimum Open Interest (5,000), Volume (200), or Delta (|Δ| ≥ 0.32).',
+          : 'Blocked: Monitored strikes lack minimum Open Interest (5,000), Volume (200), or Delta (|Δ| ∈ [0.32, 0.68]).',
       },
       {
         id: 'G5',
@@ -594,6 +799,7 @@ export default function OptionSniffer() {
     niftyChart,
     bankniftyChart,
     niftyIntel,
+    bnfIntel,
     marketRegime,
     signals,
     paperTrades,
@@ -603,6 +809,7 @@ export default function OptionSniffer() {
     consecutiveLosses,
     maxConsecutiveLosses,
     todayNetPnl,
+    circuitBreaker?.halt_reason,
   ]);
 
   const filteredCandidates = candidates.filter(c => {
@@ -1001,7 +1208,7 @@ export default function OptionSniffer() {
               <span className="font-bold">1. ATM Spread Compression</span>
             </div>
             <div className="font-mono text-[11px] font-bold">
-              <span>{ms.spread_atm_pct != null ? `${ms.spread_atm_pct}%` : '0.23%'}</span>
+              <span>{ms.spread_atm_pct != null ? `${ms.spread_atm_pct}%` : '—'}</span>
               <span className="text-slate-400 font-normal"> (≤ 1.20%)</span>
               <span className="ml-1">{ms.spread_ok ? '✅' : '⏳'}</span>
             </div>
@@ -1018,7 +1225,7 @@ export default function OptionSniffer() {
               <span className="font-bold">2. Kaufman Trend Efficiency</span>
             </div>
             <div className="font-mono text-[11px] font-bold">
-              <span>{ms.kaufman_er != null ? ms.kaufman_er : '0.48'}</span>
+              <span>{ms.kaufman_er != null ? ms.kaufman_er : '—'}</span>
               <span className="text-slate-400 font-normal"> (≥ 0.35)</span>
               <span className="ml-1">{ms.kaufman_ok ? '✅' : '⏳'}</span>
             </div>
