@@ -216,7 +216,8 @@ class OptionFeatureExtractor:
             # Blend micro candle RSI (50%) with structural session RSI (50%) to prevent 3-minute micro-pauses from whipsawing RSI
             spot_rsi = round(0.50 * candle_rsi + 0.50 * structural_rsi, 2)
             atr_val = cls.calculate_atr(underlying_df, period=period_rsi)
-            spot_atr_5m = atr_val * math.sqrt(5.0)
+            default_atr = max(85.0, spot * 0.0018) if spot > 38000.0 else max(35.0, spot * 0.0016)
+            spot_atr_5m = max(default_atr * 0.70, atr_val * math.sqrt(5.0))
             spot_atr_pct = (spot_atr_5m / curr_c * 100.0) if curr_c > 0 else 0.80
 
             vwap_val = float(underlying_quote.get("vwap") or 0.0)

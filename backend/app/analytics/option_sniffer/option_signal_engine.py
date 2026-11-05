@@ -446,7 +446,7 @@ class OptionSignalEngine:
                     tr = np.maximum(h.values - l.values, np.maximum(np.abs(h.values - c_prev.values), np.abs(l.values - c_prev.values)))
                     calc_atr = float(np.mean(tr))
                     if calc_atr > 5.0:
-                        spot_atr_5m = max(default_atr * 0.70, calc_atr)
+                        spot_atr_5m = max(default_atr * 0.70, calc_atr * math.sqrt(5.0))
             except Exception:
                 pass
 

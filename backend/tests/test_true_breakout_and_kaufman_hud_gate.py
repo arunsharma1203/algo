@@ -468,6 +468,91 @@ class TestTrueBreakoutAndKaufmanHudGate(unittest.TestCase):
         self.assertAlmostEqual(watch_res["calibrated_prob"], 0.495, places=3)
         self.assertAlmostEqual(watch_res["expected_net_return"], 5.8, places=2)
 
+    def test_07_midday_grind_up_toward_day_high_no_pwin_cliff(self):
+        """
+        Replays the Nov 5 12:14-12:22 IST midday grind toward Day High:
+        - Session range [24296.30, 24442.20], VWAP = 24384.80, quiet 1-minute candles (~5.9 pts TR).
+        - As Spot grinds up from 24,412.0 -> 24,421.0 -> 24,428.35 (pressing within Zone 1 of Day High),
+          OptionFeatureExtractor floors spot_atr_5m at >= 27.3 pts (default_atr * 0.70) instead of shrinking
+          to 13.25 pts, and OptionAlphaModel keeps calibrated_prob >= 0.48 (> 0.44) without crashing to 31.0%.
+        """
+        from app.analytics.option_sniffer.option_feature_extractor import OptionFeatureExtractor
+        from app.analytics.option_sniffer.option_alpha_model import OptionAlphaModel
+
+        base_dt = datetime(2026, 11, 5, 11, 50, 0)
+        rows = []
+        for i in range(30):
+            ts = (base_dt + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:00")
+            c = 24395.0 + i * 1.1
+            # Quiet 1m bars (~5.8 pts high-low range)
+            rows.append({"timestamp": ts, "open": c - 1.0, "high": c + 2.9, "low": c - 2.9, "close": c, "volume": 3000})
+        df = pd.DataFrame(rows)
+
+        contract = {
+            "instrument_key": "NSE_FO|39962",
+            "trading_symbol": "NIFTY 24400 CE 09 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 24400.0,
+            "option_type": "CE",
+            "expiry": "2026-11-09",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 157.8,
+            "ask": 158.2,
+            "ltp": 158.0,
+            "spread_pct": 0.25,
+            "quote_age_ms": 100,
+            "oi": 1400000,
+            "volume": 780000,
+            "delta": 0.52,
+            "iv": 13.6,
+        }
+        model = OptionAlphaModel.load()
+
+        probs = []
+        for spot_val in (24412.0, 24421.0, 24428.35):
+            step_rows = []
+            for i in range(20):
+                ts = (base_dt + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:00")
+                c = (spot_val - 19.0) + i * 1.0
+                step_rows.append({"timestamp": ts, "open": c - 0.8, "high": c + 2.9, "low": c - 2.9, "close": c, "volume": 3000})
+            df_step = pd.DataFrame(step_rows)
+            u_quote = {
+                "spot_ltp": spot_val,
+                "open": 24340.0,
+                "high": 24442.20,
+                "low": 24296.30,
+                "close": 24350.0,
+                "vwap": 24384.80,
+                "quote_age_ms": 100,
+            }
+            feats = OptionFeatureExtractor.extract_features(
+                contract=contract,
+                quote=quote,
+                underlying_quote=u_quote,
+                underlying_df=df_step,
+                macro_context={"intraday_regime_verdict": "INTRADAY_BULL_MOMENTUM"},
+                upstream_signals={
+                    "qlib_score": 68.0,
+                    "legacy_score": 65.0,
+                    "consensus_confidence": 66.0,
+                    "consensus_direction": "BUY",
+                },
+                as_of_time=datetime(2026, 11, 5, 12, 22, 0),
+            )
+            self.assertGreaterEqual(feats["spot_atr"], 27.0)
+            pred = model.predict_contract(feats, is_breakout=False)
+            probs.append(pred["calibrated_prob"])
+            self.assertGreaterEqual(
+                pred["calibrated_prob"],
+                0.47,
+                f"Expected P(Win) >= 47% (> 44% hurdle) at spot={spot_val}, got {pred['calibrated_prob']*100:.1f}%",
+            )
+
+        # Verify zero cliff across the upward grind
+        self.assertLess(max(probs) - min(probs), 0.03)
+
 
 if __name__ == "__main__":
     unittest.main()

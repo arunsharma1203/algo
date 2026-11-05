@@ -183,38 +183,41 @@ class OptionAlphaModel:
 
         base_edge = 0.38
         if is_call:
+            is_near_day_high = (pullback >= -0.12 and vwap_dist > 0 and ret3 >= -0.02)
             if up_align > 0.7 and (rsi >= 50 or vwap_dist >= 0) and vwap_dist > -0.15:
                 # Sweet spot vs Overextension:
-                # Breakout candles crossing Day High are exempt from Z_ext penalty (initiating fresh expansion)
-                if is_breakout or z_ext <= 1.4:
+                # Breakout candles or Zone-1 Day High pressure are exempt from Z_ext penalty
+                if is_breakout or is_near_day_high or z_ext <= 1.6:
                     base_edge += 0.14
-                elif z_ext <= 2.0:
-                    base_edge += 0.06  # Mild extension
+                elif z_ext <= 2.5:
+                    # Smooth linear taper from +0.14 at z_ext=1.6 to +0.05 at z_ext=2.5 (no step-function cliff)
+                    base_edge += 0.14 - ((z_ext - 1.6) / 0.9) * 0.09
                 else:
-                    # Parabolic climax penalty (Z > 2.0)
-                    climax_pen = min(0.20, 0.10 * (z_ext - 1.8))
+                    # Parabolic climax penalty (Z > 2.5)
+                    climax_pen = min(0.20, 0.10 * (z_ext - 2.5))
                     base_edge -= climax_pen
             elif up_align < 0.3 or rsi < 46 or vwap_dist < -0.3:
                 base_edge -= 0.12
 
-            # RSI overbought governor (if not breakout)
-            if not is_breakout and rsi > 72:
-                base_edge -= 0.10
+            # Smooth extreme-RSI governor (if not breakout or pressing Day High): no cliff at RSI 72
+            if not (is_breakout or is_near_day_high) and rsi > 78.0:
+                base_edge -= min(0.08, (rsi - 78.0) * 0.008)
         else:
+            is_near_day_low = (rally <= 0.12 and vwap_dist < 0 and ret3 <= 0.02)
             if up_align > 0.7 and (rsi <= 50 or vwap_dist <= 0) and vwap_dist < 0.15:
-                if is_breakout or z_ext <= 1.4:
+                if is_breakout or is_near_day_low or z_ext <= 1.6:
                     base_edge += 0.14
-                elif z_ext <= 2.0:
-                    base_edge += 0.06
+                elif z_ext <= 2.5:
+                    base_edge += 0.14 - ((z_ext - 1.6) / 0.9) * 0.09
                 else:
-                    climax_pen = min(0.20, 0.10 * (z_ext - 1.8))
+                    climax_pen = min(0.20, 0.10 * (z_ext - 2.5))
                     base_edge -= climax_pen
             elif up_align < 0.3 or rsi > 54 or vwap_dist > 0.3:
                 base_edge -= 0.12
 
-            # RSI oversold governor (if not breakout)
-            if not is_breakout and rsi < 28:
-                base_edge -= 0.10
+            # Smooth extreme-RSI oversold governor (if not breakout or pressing Day Low): no cliff at RSI 28
+            if not (is_breakout or is_near_day_low) and rsi < 22.0:
+                base_edge -= min(0.08, (22.0 - rsi) * 0.008)
 
         # Spread friction penalty
         spread_penalty = max(0.0, (spread_pct - 1.0) * 0.03)
