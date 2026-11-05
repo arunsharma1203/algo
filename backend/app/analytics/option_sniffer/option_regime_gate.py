@@ -636,7 +636,8 @@ class OptionRegimeGate:
         if rv_15m_ann is not None:
             telemetry["rv_15m_ann"] = rv_15m_ann
             if option_iv is not None and float(option_iv) > 0:
-                vrp_val = round(float(option_iv) - rv_15m_ann, 2)
+                norm_iv = float(option_iv) * 100.0 if 0.0 < float(option_iv) < 1.5 else float(option_iv)
+                vrp_val = round(norm_iv - rv_15m_ann, 2)
                 telemetry["vrp"] = vrp_val
                 if (
                     vrp_val > VRP_PINNING_MAX_SPREAD_PCT
@@ -659,8 +660,8 @@ class OptionRegimeGate:
         if not ok_hw:
             rejection_reasons.append(f"Heavyweight Concurrence: {hw_msg}")
 
-        # 6. Opening Range (09:15-09:30) Trap Guard & Reversal Risk / Extrema Displacement
-        if spot_ltp is not None and not is_breakout:
+        # 6. Opening Range (09:15-09:30) Trap Guard (Unconditional) & Zone 2B Mid-Air Guard (Non-Breakouts)
+        if spot_ltp is not None:
             try:
                 if "timestamp" in bars_df.columns and now_dt.strftime("%H:%M") >= "09:30":
                     ts_list = bars_df["timestamp"].astype(str).tolist()
@@ -682,7 +683,7 @@ class OptionRegimeGate:
                                 rejection_reasons.append(
                                     f"Opening Range Trap Guard: Spot ({spot_ltp:.1f}) is trapped inside the 09:15-09:30 Opening Range [{orb_lo:.1f}, {orb_hi:.1f}]. CE entry blocked until Opening Range High breakout."
                                 )
-                            elif day_high is not None and (float(day_high) - float(spot_ltp)) > ext_breakout_tol and (float(spot_ltp) - orb_hi) > orb_retest_tol:
+                            elif not is_breakout and day_high is not None and (float(day_high) - float(spot_ltp)) > ext_breakout_tol and (float(spot_ltp) - orb_hi) > orb_retest_tol:
                                 rejection_reasons.append(
                                     f"Mid-Air No-Man's-Land Guard (Zone 2B): Spot ({spot_ltp:.1f}) is {float(day_high) - float(spot_ltp):.1f} pts below Day High ({float(day_high):.1f}) and {float(spot_ltp) - orb_hi:.1f} pts above ORB High ({orb_hi:.1f}). CE entry requires Day High breakout or ORB High support retest."
                                 )
@@ -691,7 +692,7 @@ class OptionRegimeGate:
                                 rejection_reasons.append(
                                     f"Opening Range Trap Guard: Spot ({spot_ltp:.1f}) is trapped inside the 09:15-09:30 Opening Range [{orb_lo:.1f}, {orb_hi:.1f}]. PE entry blocked until Opening Range Low breakdown."
                                 )
-                            elif day_low is not None and (float(spot_ltp) - float(day_low)) > ext_breakout_tol and (orb_lo - float(spot_ltp)) > orb_retest_tol:
+                            elif not is_breakout and day_low is not None and (float(spot_ltp) - float(day_low)) > ext_breakout_tol and (orb_lo - float(spot_ltp)) > orb_retest_tol:
                                 rejection_reasons.append(
                                     f"Mid-Air No-Man's-Land Guard (Zone 2B): Spot ({spot_ltp:.1f}) is {float(spot_ltp) - float(day_low):.1f} pts above Day Low ({float(day_low):.1f}) and {orb_lo - float(spot_ltp):.1f} pts below ORB Low ({orb_lo:.1f}). PE entry requires Day Low breakdown or ORB Low resistance retest."
                                 )

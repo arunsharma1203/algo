@@ -296,12 +296,14 @@ class OptionSignalEngine:
         u_high = float(underlying_quote.get("high") or spot_ltp)
         u_low = float(underlying_quote.get("low") or spot_ltp)
         u_close = float(underlying_quote.get("close") or u_open)
+        has_full_session_open = False
         if underlying_df is not None and hasattr(underlying_df, "__len__") and len(underlying_df) >= 2:
             try:
                 df_sess = underlying_df
                 if "timestamp" in df_sess.columns:
                     ts_str = df_sess["timestamp"].astype(str)
                     t_part = ts_str.str.extract(r"(\d{2}:\d{2}:\d{2})", expand=False)
+                    has_full_session_open = bool(((t_part >= "09:15:00") & (t_part <= "09:20:00")).any())
                     valid_mask = t_part.isna() | (t_part >= "09:15:00")
                     if valid_mask.any():
                         df_sess = df_sess[valid_mask]
@@ -313,7 +315,7 @@ class OptionSignalEngine:
                     sess_low_raw = float(df_sess[lc].astype(float).min())
                     sess_low = min(sess_low_raw, spot_ltp) if spot_ltp > 0 else sess_low_raw
                     sess_open = float(df_sess[oc].astype(float).iloc[0])
-                    max_dev = 120.0 if "BANK" in str(underlying).upper() else 45.0
+                    max_dev = 0.0 if has_full_session_open else (120.0 if "BANK" in str(underlying).upper() else 45.0)
                     if u_high <= 0 or (u_high - sess_high) > max_dev or u_high < spot_ltp:
                         u_high = sess_high
                     if u_low <= 0 or (sess_low - u_low) > max_dev or (spot_ltp > 0 and u_low > spot_ltp):
@@ -573,11 +575,12 @@ class OptionSignalEngine:
 
         # Breakout status (Pillar 3: Eliminates random wick sweeps while permitting natural <=4.5pt / <=10pt upper/lower wicks on fresh Day High/Low expansion candles)
         breakout_wick_tol = 10.0 if is_banknifty else 4.5
-        raw_u_high = float(underlying_quote.get("high") or u_high)
-        raw_u_low = float(underlying_quote.get("low") or u_low)
+        raw_u_high = u_high if has_full_session_open else float(underlying_quote.get("high") or u_high)
+        raw_u_low = u_low if has_full_session_open else float(underlying_quote.get("low") or u_low)
         is_day_high_breakout = (
             (spot_ltp >= u_high - breakout_wick_tol)
             and (spot_ltp >= raw_u_high - breakout_wick_tol)
+            and not is_trapped_inside_orb
             and (recent_ret_pct >= 0.05)
             and (drift_from_vwap >= 0.02)
             and is_candle_confirmed_high
@@ -586,6 +589,7 @@ class OptionSignalEngine:
         is_day_low_breakdown = (
             (spot_ltp <= u_low + breakout_wick_tol)
             and (spot_ltp <= raw_u_low + breakout_wick_tol)
+            and not is_trapped_inside_orb
             and (recent_ret_pct <= -0.05)
             and (drift_from_vwap <= -0.02)
             and is_candle_confirmed_low

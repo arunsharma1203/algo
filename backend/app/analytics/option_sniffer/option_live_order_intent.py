@@ -1408,10 +1408,12 @@ class OrderIntentEngine:
                         except Exception as sl_mod_err:
                             logger.debug(f"[OrderIntentEngine] Broker SL ratchet modify note: {sl_mod_err}")
 
-            # 4. Theta Stagnation Stop (Apex Quant Velocity Protection + H3_22M Near-Miss Round-Trip Shield)
+            # 4. Theta Stagnation Stop (Apex Quant Velocity Protection + H3_22M Near-Miss Round-Trip Shield + Half-Risk Cap)
             if not exit_reason and duration_min >= THETA_STAGNATION_TIMEOUT_MINUTES and mfe_pct < THETA_STAGNATION_MIN_MFE_PCT and current_pnl_pct < 0:
                 exit_reason = "STAGNATION_TIME_STOP"
-            elif not exit_reason and duration_min >= 22.0 and (4.0 <= mfe_pct < 8.0) and current_pnl_pct <= -3.5:
+            elif not exit_reason and duration_min >= 6.0 and (10.0 <= mfe_pct < 15.0) and current_pnl_pct <= -9.0:
+                exit_reason = "STAGNATION_TIME_STOP"
+            elif not exit_reason and duration_min >= 22.0 and (4.0 <= mfe_pct < 15.0) and current_pnl_pct <= -3.5:
                 exit_reason = "STAGNATION_TIME_STOP"
 
             # 5. Time Decay (45 min) & Session Cutoff (15:15 IST)

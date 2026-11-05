@@ -127,6 +127,8 @@ class OptionFeatureExtractor:
         theta = float(quote.get("theta") or -10.0)
         vega = float(quote.get("vega") or 5.0)
         iv = float(quote.get("iv") or 15.0)
+        if 0.0 < iv < 1.5:
+            iv = round(iv * 100.0, 4)
 
         bid = float(quote.get("bid") or 0.0)
         ask = float(quote.get("ask") or 0.0)

@@ -316,6 +316,8 @@ class OptionStreamManager:
                 vtt = int(market_ff.get("vtt") or 0)
                 oi = float(market_ff.get("oi") or 0.0)
                 iv = float(market_ff.get("iv") or 0.0)
+                if 0.0 < iv < 1.5:
+                    iv = round(iv * 100.0, 4)
 
                 # Order book depth (top of book)
                 market_level = market_ff.get("marketLevel") or {}
@@ -584,12 +586,11 @@ class OptionStreamManager:
                 eff_low = min(s_low, spot_val) if (s_low > 0 and spot_val > 0) else (s_low or spot_val)
                 q_high = float(quote.get("high") or 0.0)
                 q_low = float(quote.get("low") or 0.0)
-                spike_tol = 120.0 if "BANK" in u_upper else 45.0
-                if eff_high > 0 and (q_high <= 0 or (q_high - eff_high) > spike_tol):
+                if eff_high > 0 and (q_high <= 0 or q_high > eff_high):
                     quote["high"] = eff_high
                     if s_open > 0:
                         quote["open"] = s_open
-                if eff_low > 0 and (q_low <= 0 or (eff_low - q_low) > spike_tol):
+                if eff_low > 0 and (q_low <= 0 or q_low < eff_low):
                     quote["low"] = eff_low
                     if s_open > 0:
                         quote["open"] = s_open
@@ -740,7 +741,7 @@ class OptionStreamManager:
                         "spread_pct": spread_pct,
                         "volume": vol,
                         "oi": oi,
-                        "iv": float(greeks.get("iv") or 0.0),
+                        "iv": round(float(greeks.get("iv") or 0.0) * 100.0, 4) if 0.0 < float(greeks.get("iv") or 0.0) < 1.5 else float(greeks.get("iv") or 0.0),
                         "delta": float(greeks.get("delta") or (0.5 if opt_type == "CE" else -0.5)),
                         "gamma": float(greeks.get("gamma") or 0.0),
                         "theta": float(greeks.get("theta") or 0.0),
@@ -886,6 +887,8 @@ class OptionStreamManager:
                         opt_t = str(meta.get("option_type") or "CE").upper()
                         raw_existing_delta = existing_quote.get("delta")
                         iv = float(existing_quote.get("iv") or 15.0)
+                        if 0.0 < iv < 1.5:
+                            iv = round(iv * 100.0, 4)
                         delta = float(raw_existing_delta) if raw_existing_delta is not None else (0.50 if opt_t == "CE" else -0.50)
 
                         # Analytical Black-Scholes Delta fallback when REST quote lacks live WebSocket Greeks
