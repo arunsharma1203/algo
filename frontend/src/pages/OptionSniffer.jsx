@@ -31,14 +31,192 @@ import {
   Server,
   Wifi
 } from 'lucide-react';
+import {
+  ResponsiveContainer,
+  ComposedChart,
+  Area,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ReferenceLine,
+  CartesianGrid
+} from 'recharts';
 import { API_BASE } from '../services/api';
 
+function buildIntradayChartModel(rawBars = [], liveSpot = 0, liveVwap = 0, fallbackOrb = null) {
+  const validBars = Array.isArray(rawBars)
+    ? rawBars.filter(b => b && Number(b.close) > 0)
+    : [];
+
+  let sessionBars = validBars;
+  let sessionDate = '';
+  if (validBars.length > 0) {
+    const lastTime = String(validBars[validBars.length - 1].time || '');
+    sessionDate = lastTime.slice(0, 10);
+    const sameDay = validBars.filter(b => String(b.time || '').startsWith(sessionDate));
+    if (sameDay.length >= 3) {
+      sessionBars = sameDay;
+    } else {
+      sessionBars = validBars.slice(-45);
+    }
+  }
+
+  let cumPV = 0;
+  let cumV = 0;
+  let runningHigh = 0;
+  let runningLow = Infinity;
+  let orbHigh = 0;
+  let orbLow = Infinity;
+
+  const series = sessionBars.map((b, idx) => {
+    const o = Number(b.open) || Number(b.close);
+    const h = Number(b.high) || Number(b.close);
+    const l = Number(b.low) || Number(b.close);
+    const c = Number(b.close);
+    const v = Math.max(1, Number(b.volume) || 1);
+    const tp = (h + l + c) / 3.0;
+    cumPV += tp * v;
+    cumV += v;
+    const vwapVal = cumV > 0 ? Number((cumPV / cumV).toFixed(2)) : Number(tp.toFixed(2));
+
+    if (h > runningHigh) runningHigh = h;
+    if (l < runningLow) runningLow = l;
+
+    const rawT = String(b.time || '');
+    const tLabel = rawT.length >= 16 ? rawT.slice(11, 16) : (rawT.slice(5) || `#${idx + 1}`);
+    const isOrbBar = idx < 3 || (tLabel >= '09:15' && tLabel <= '09:30');
+    if (isOrbBar) {
+      if (h > orbHigh) orbHigh = h;
+      if (l < orbLow) orbLow = l;
+    }
+
+    return {
+      time: tLabel,
+      spot: Number(c.toFixed(2)),
+      high: Number(h.toFixed(2)),
+      low: Number(l.toFixed(2)),
+      open: Number(o.toFixed(2)),
+      vwap: vwapVal,
+    };
+  });
+
+  const effectiveSpot = Number(liveSpot) > 0
+    ? Number(liveSpot)
+    : (series.length > 0 ? series[series.length - 1].spot : 0);
+  const effectiveVwap = Number(liveVwap) > 0
+    ? Number(liveVwap)
+    : (series.length > 0 ? series[series.length - 1].vwap : effectiveSpot);
+
+  if (effectiveSpot > 0) {
+    if (series.length === 0) {
+      series.push({
+        time: '09:15',
+        spot: effectiveSpot,
+        high: effectiveSpot,
+        low: effectiveSpot,
+        open: effectiveSpot,
+        vwap: effectiveVwap || effectiveSpot,
+      });
+    } else {
+      const lastPt = series[series.length - 1];
+      if (Math.abs(lastPt.spot - effectiveSpot) >= 0.05) {
+        series.push({
+          time: 'LIVE',
+          spot: Number(effectiveSpot.toFixed(2)),
+          high: Number(Math.max(lastPt.high, effectiveSpot).toFixed(2)),
+          low: Number(Math.min(lastPt.low, effectiveSpot).toFixed(2)),
+          open: lastPt.spot,
+          vwap: Number((effectiveVwap || lastPt.vwap).toFixed(2)),
+        });
+      }
+    }
+    if (effectiveSpot > runningHigh) runningHigh = effectiveSpot;
+    if (effectiveSpot < runningLow) runningLow = effectiveSpot;
+  }
+
+  if (fallbackOrb && Number(fallbackOrb.orb_high) > 0 && Number(fallbackOrb.orb_low) > 0) {
+    orbHigh = Number(fallbackOrb.orb_high);
+    orbLow = Number(fallbackOrb.orb_low);
+  } else if (orbHigh <= 0 || orbLow === Infinity) {
+    orbHigh = runningHigh > 0 ? runningHigh : effectiveSpot;
+    orbLow = runningLow < Infinity ? runningLow : effectiveSpot;
+  }
+
+  const dayOpen = series.length > 0 ? series[0].open : effectiveSpot;
+  const dayHigh = runningHigh > 0 ? runningHigh : effectiveSpot;
+  const dayLow = runningLow < Infinity ? runningLow : effectiveSpot;
+  const changePts = effectiveSpot > 0 && dayOpen > 0 ? effectiveSpot - dayOpen : 0;
+  const changePct = dayOpen > 0 ? (changePts / dayOpen) * 100.0 : 0;
+
+  // Determine exact Structural Zone (Zone 1 Breakout | Zone 2A ORB Retest | Zone 2B Mid-Air | Zone 3 Inside ORB)
+  let zoneCode = 'ZONE_3_INSIDE_ORB';
+  let zoneLabel = 'ZONE 3: INSIDE ORB (NO TRADE)';
+  let zonePass = false;
+
+  if (effectiveSpot > 0 && orbHigh > 0 && orbLow > 0) {
+    const distFromHighPct = dayHigh > 0 ? ((dayHigh - effectiveSpot) / dayHigh) * 100.0 : 0;
+    const distFromLowPct = dayLow > 0 ? ((effectiveSpot - dayLow) / dayLow) * 100.0 : 0;
+    const distAboveOrbHighPct = orbHigh > 0 ? ((effectiveSpot - orbHigh) / orbHigh) * 100.0 : 0;
+    const distBelowOrbLowPct = orbLow > 0 ? ((orbLow - effectiveSpot) / orbLow) * 100.0 : 0;
+
+    if (effectiveSpot > orbHigh) {
+      if (distFromHighPct <= 0.15) {
+        zoneCode = 'ZONE_1_BREAKOUT';
+        zoneLabel = 'ZONE 1: DAY HIGH BREAKOUT';
+        zonePass = true;
+      } else if (distAboveOrbHighPct <= 0.12 && effectiveSpot >= effectiveVwap) {
+        zoneCode = 'ZONE_2A_ORB_RETEST';
+        zoneLabel = 'ZONE 2A: ORB HIGH RETEST';
+        zonePass = true;
+      } else {
+        zoneCode = 'ZONE_2B_MID_AIR';
+        zoneLabel = 'ZONE 2B: MID-AIR PULLBACK (BLOCKED)';
+        zonePass = false;
+      }
+    } else if (effectiveSpot < orbLow) {
+      if (distFromLowPct <= 0.15) {
+        zoneCode = 'ZONE_1_BREAKOUT';
+        zoneLabel = 'ZONE 1: DAY LOW BREAKDOWN';
+        zonePass = true;
+      } else if (distBelowOrbLowPct <= 0.12 && effectiveSpot <= effectiveVwap) {
+        zoneCode = 'ZONE_2A_ORB_RETEST';
+        zoneLabel = 'ZONE 2A: ORB LOW RETEST';
+        zonePass = true;
+      } else {
+        zoneCode = 'ZONE_2B_MID_AIR';
+        zoneLabel = 'ZONE 2B: MID-AIR PULLBACK (BLOCKED)';
+        zonePass = false;
+      }
+    }
+  }
+
+  return {
+    sessionDate,
+    series,
+    spot: effectiveSpot,
+    vwap: effectiveVwap,
+    dayOpen,
+    dayHigh,
+    dayLow,
+    orbHigh,
+    orbLow,
+    changePts,
+    changePct,
+    zoneCode,
+    zoneLabel,
+    zonePass,
+  };
+}
+
 export default function OptionSniffer() {
-  const [activeTab, setActiveTab] = useState('signals'); // 'signals' | 'candidates' | 'trades' | 'live_terminal'
+  const [activeTab, setActiveTab] = useState('signals'); // 'signals' (Traffic-Light Gates) | 'candidates' | 'trades' | 'live_terminal'
   const [statusData, setStatusData] = useState(null);
   const [candidates, setCandidates] = useState([]);
   const [signals, setSignals] = useState([]);
   const [paperTrades, setPaperTrades] = useState({ open_trades: [], closed_trades: [], pnl_summary: {} });
+  const [chainIntel, setChainIntel] = useState({ NIFTY: null, BANKNIFTY: null });
+  const [indexBars, setIndexBars] = useState({ NIFTY: [], BANKNIFTY: [] });
   const [liveReadiness, setLiveReadiness] = useState(null);
   const [liveStatusData, setLiveStatusData] = useState(null);
   const [allocationSim, setAllocationSim] = useState(null);
@@ -50,7 +228,6 @@ export default function OptionSniffer() {
   const [armingFeedback, setArmingFeedback] = useState(null);
   const [showRealPnl, setShowRealPnl] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [scanning, setScanning] = useState(false);
   const [underlyingFilter, setUnderlyingFilter] = useState('ALL'); // 'ALL' | 'NIFTY' | 'BANKNIFTY'
   const [lastUpdated, setLastUpdated] = useState(null);
 
@@ -135,19 +312,45 @@ export default function OptionSniffer() {
     }
   };
 
+  const fetchIndexCharts = useCallback(async () => {
+    try {
+      const [niftyRes, bnfRes] = await Promise.all([
+        fetch(`${API_BASE}/market/latest/%5ENSEI?period=5d&interval=5m`),
+        fetch(`${API_BASE}/market/latest/%5ENSEBANK?period=5d&interval=5m`),
+      ]);
+      const nextBars = {};
+      if (niftyRes.ok) {
+        const nd = await niftyRes.json();
+        nextBars.NIFTY = Array.isArray(nd?.data) ? nd.data : [];
+      }
+      if (bnfRes.ok) {
+        const bd = await bnfRes.json();
+        nextBars.BANKNIFTY = Array.isArray(bd?.data) ? bd.data : [];
+      }
+      setIndexBars(prev => ({
+        NIFTY: nextBars.NIFTY?.length ? nextBars.NIFTY : prev.NIFTY,
+        BANKNIFTY: nextBars.BANKNIFTY?.length ? nextBars.BANKNIFTY : prev.BANKNIFTY,
+      }));
+    } catch (err) {
+      console.error('Failed to fetch NIFTY/BANKNIFTY chart history:', err);
+    }
+  }, []);
+
   const fetchData = useCallback(async () => {
     try {
-      const [statusRes, candRes, sigRes, tradesRes] = await Promise.all([
+      const [statusRes, candRes, sigRes, tradesRes, intelRes] = await Promise.all([
         fetch(`${API_BASE}/option-sniffer/status`),
         fetch(`${API_BASE}/option-sniffer/candidates`),
         fetch(`${API_BASE}/option-sniffer/signals?limit=50`),
         fetch(`${API_BASE}/option-sniffer/paper-trades`),
+        fetch(`${API_BASE}/option-sniffer-advance/chain-intelligence`),
       ]);
 
       if (statusRes.ok) setStatusData(await statusRes.json());
       if (candRes.ok) setCandidates(await candRes.json());
       if (sigRes.ok) setSignals(await sigRes.json());
       if (tradesRes.ok) setPaperTrades(await tradesRes.json());
+      if (intelRes.ok) setChainIntel(await intelRes.json());
 
       setLastUpdated(new Date().toLocaleTimeString());
     } catch (err) {
@@ -160,25 +363,19 @@ export default function OptionSniffer() {
   useEffect(() => {
     fetchData();
     fetchLiveTerminalData();
+    fetchIndexCharts();
     const interval = setInterval(() => {
       fetchData();
       fetchLiveTerminalData();
     }, 4000); // Polling every 4 seconds for reactive UI synchronization
-    return () => clearInterval(interval);
-  }, [fetchData, fetchLiveTerminalData]);
-
-
-  const handleManualScan = async () => {
-    setScanning(true);
-    try {
-      await fetch(`${API_BASE}/option-sniffer/scan`, { method: 'POST' });
-      await fetchData();
-    } catch (err) {
-      console.error('Manual scan failed:', err);
-    } finally {
-      setScanning(false);
-    }
-  };
+    const chartInterval = setInterval(() => {
+      fetchIndexCharts();
+    }, 20000); // Refresh 5m OHLCV bars every 20s while 4s poll updates live spot/VWAP
+    return () => {
+      clearInterval(interval);
+      clearInterval(chartInterval);
+    };
+  }, [fetchData, fetchLiveTerminalData, fetchIndexCharts]);
 
   const pnl = paperTrades.pnl_summary || {};
   const livePnl = liveStatusData?.pnl_summary || {};
@@ -203,6 +400,210 @@ export default function OptionSniffer() {
   const todayNetPnl = circuitBreaker?.today_net_pnl || 0;
   const pauseRemainingSec = circuitBreaker?.pause_remaining_sec || 0;
   const pauseUnfreezeTime = circuitBreaker?.pause_unfreeze_time || '';
+
+  const niftyIntel = chainIntel?.NIFTY || {};
+  const bnfIntel = chainIntel?.BANKNIFTY || {};
+
+  const niftyChart = useMemo(() => {
+    const liveSpot = Number(niftyIntel.spot_price || niftyIntel.spot_ltp || marketRegime.spot || 0);
+    const liveVwap = Number(niftyIntel.session_tpb || marketRegime.day_vwap || 0);
+    return buildIntradayChartModel(indexBars.NIFTY, liveSpot, liveVwap, ms.orb_status);
+  }, [indexBars.NIFTY, niftyIntel.spot_price, niftyIntel.spot_ltp, niftyIntel.session_tpb, marketRegime.spot, marketRegime.day_vwap, ms.orb_status]);
+
+  const bankniftyChart = useMemo(() => {
+    const liveSpot = Number(bnfIntel.spot_price || bnfIntel.spot_ltp || 0);
+    const liveVwap = Number(bnfIntel.session_tpb || 0);
+    return buildIntradayChartModel(indexBars.BANKNIFTY, liveSpot, liveVwap, null);
+  }, [indexBars.BANKNIFTY, bnfIntel.spot_price, bnfIntel.spot_ltp, bnfIntel.session_tpb]);
+
+  // ── REAL-TIME TRAFFIC-LIGHT QUALITY GATES EVALUATION (ALL GREEN = TRADE, 1 RED = NO TRADE) ──
+  const gatesSummary = useMemo(() => {
+    // 1. Gate 1: Session & Golden Entry Window (09:30 - 13:15 IST)
+    const isTradingWin = Boolean(statusData?.is_trading_window);
+    const unlockOk = isArmed ? Boolean(ms.is_unlocked) : isTradingWin;
+    const gate1Pass = isTradingWin && unlockOk;
+
+    // 2. Gate 2: Upstox V3 Stream & Quote Freshness
+    const validQuotes = candidates.filter(c => c?.quote && Number(c.quote.ltp) > 0);
+    const freshestAgeMs = validQuotes.length > 0
+      ? Math.min(...validQuotes.map(c => Number(c.quote.quote_age_ms ?? 0)))
+      : (feedHealth.last_message_latency_ms ?? 99999);
+    const ageLimitMs = isArmed ? 1000 : 15000;
+    const gate2Pass = Boolean(isConnected) && validQuotes.length > 0 && freshestAgeMs <= ageLimitMs;
+
+    // 3. Gate 3: Order Book & ATM Bid-Ask Spread Ceiling
+    const atmSpreadPct = ms.spread_atm_pct != null
+      ? Number(ms.spread_atm_pct)
+      : (validQuotes.length > 0 ? Number(validQuotes[0]?.quote?.spread_pct ?? 9.99) : 9.99);
+    const spreadCeiling = isArmed ? 1.20 : 3.50;
+    const askFloorCount = validQuotes.filter(c => Number(c.quote?.ask || 0) >= 35.0 && Number(c.quote?.ask || 0) >= Number(c.quote?.bid || 0) && Number(c.quote?.bid || 0) > 0).length;
+    const gate3Pass = atmSpreadPct <= spreadCeiling && askFloorCount > 0;
+
+    // 4. Gate 4: Contract Liquidity & Delta Floor (OI >= 5,000, Vol >= 200, |Delta| >= 0.32)
+    const liquidContracts = validQuotes.filter(c => {
+      const q = c.quote || {};
+      return Number(q.oi || 0) >= 5000 && Number(q.volume || 0) >= 200 && Math.abs(Number(q.delta || 0)) >= 0.32;
+    });
+    const bestOi = validQuotes.length > 0 ? Math.max(...validQuotes.map(c => Number(c.quote?.oi || 0))) : 0;
+    const bestVol = validQuotes.length > 0 ? Math.max(...validQuotes.map(c => Number(c.quote?.volume || 0))) : 0;
+    const gate4Pass = liquidContracts.length > 0;
+
+    // 5. Gate 5: Opening Range (09:15-09:30 ORB) & Structural Zone (Zone 1 Breakout / Zone 2A ORB Retest)
+    const orbAccepted = Boolean(ms.orb_status?.is_accepted);
+    const zonePass = Boolean(niftyChart.zonePass || bankniftyChart.zonePass);
+    const gate5Pass = orbAccepted && zonePass;
+    const activeZoneText = niftyChart.zonePass
+      ? `NIFTY ${niftyChart.zoneLabel}`
+      : (bankniftyChart.zonePass ? `BNF ${bankniftyChart.zoneLabel}` : niftyChart.zoneLabel);
+
+    // 6. Gate 6: Trend Efficiency & Chop / Climax Shield
+    const erVal = Number(ms.kaufman_er ?? niftyIntel.kaufman_er ?? 0);
+    const adxVal = Number(niftyIntel.adx_14 ?? 0);
+    const erHurdle = isArmed ? 0.35 : 0.28;
+    const isChopBlocked = marketRegime?.regime === 'RANGEBOUND_CHOP' || marketRegime?.shield === 'SHIELD_PAUSED';
+    const gate6Pass = !isChopBlocked && erVal >= erHurdle && adxVal >= 18.0;
+
+    // 7. Gate 7: AI Ensemble Conviction & Net Return Hurdle
+    const activeSignalsList = signals.filter(s => s.status === 'ACTIVE' || s.status === 'TRADE_READY' || s.status === 'WATCH');
+    const topSignal = activeSignalsList[0] || signals[0] || null;
+    const topProbPct = topSignal ? Number((topSignal.calibrated_prob || 0) * 100) : 0;
+    const topNetRet = topSignal ? Number(topSignal.expected_net_return || 0) : 0;
+    const probHurdle = topSignal?.is_crbi_active ? 38.0 : 44.0;
+    const gate7Pass = activeSignalsList.length > 0 && topProbPct >= probHurdle && topNetRet >= 2.0;
+
+    // 8. Gate 8: Circuit Breaker, Canary Scout & Slot Guard
+    const openPaperCount = paperTrades?.open_trades?.length || 0;
+    const openLiveCount = liveStatusData?.active_positions?.length || 0;
+    const activeSlotCount = isArmed ? openLiveCount : openPaperCount;
+    const canaryOk = ms.canary_status !== 'LOCKED';
+    const cbOk = !isSessionHalted && !isPauseActive && consecutiveLosses < maxConsecutiveLosses && todayNetPnl > -3500;
+    const slotsOk = activeSlotCount < 2;
+    const gate8Pass = canaryOk && cbOk && slotsOk;
+
+    const gates = [
+      {
+        id: 'G1',
+        shortName: 'Entry Window',
+        title: 'Gate 1: Golden Entry Window & Clock',
+        pass: gate1Pass,
+        liveValue: isTradingWin
+          ? (unlockOk ? `OPEN (${ms.dynamic_unlock_time || '09:30-13:15 IST'})` : 'WAITING CANARY UNLOCK')
+          : 'CLOSED (OUTSIDE WINDOW)',
+        threshold: '09:30 – 13:15 IST (Mon–Fri)',
+        detail: gate1Pass
+          ? 'Session clock is inside the high-alpha Golden Entry Window.'
+          : (ms.unlock_reason || 'Entries strictly blocked outside 09:30–13:15 IST to evade opening noise & afternoon theta decay.'),
+      },
+      {
+        id: 'G2',
+        shortName: 'Feed Freshness',
+        title: 'Gate 2: Upstox V3 Stream & Quote Age',
+        pass: gate2Pass,
+        liveValue: `${isConnected ? 'WS CONNECTED' : 'WS OFFLINE'} • Age: ${freshestAgeMs < 99000 ? `${freshestAgeMs}ms` : 'STALE'}`,
+        threshold: `WS Connected & Quote Age ≤ ${ageLimitMs}ms`,
+        detail: gate2Pass
+          ? `${validQuotes.length} ATM contracts streaming live via Upstox V3 protobuf feed.`
+          : 'Blocked: WebSocket stream offline or option quote age exceeds real-time freshness ceiling.',
+      },
+      {
+        id: 'G3',
+        shortName: 'ATM Spread',
+        title: 'Gate 3: Order Book & Bid-Ask Spread',
+        pass: gate3Pass,
+        liveValue: `ATM Spread: ${atmSpreadPct.toFixed(2)}% • Valid Ask (≥₹35): ${askFloorCount}`,
+        threshold: `Spread ≤ ${spreadCeiling.toFixed(2)}% & Ask ≥ ₹35`,
+        detail: gate3Pass
+          ? 'Order book spread is tight; slippage friction is within institutional tolerance.'
+          : `Blocked: ATM bid-ask spread (${atmSpreadPct.toFixed(2)}%) exceeds ${spreadCeiling.toFixed(2)}% ceiling or premium < ₹35.`,
+      },
+      {
+        id: 'G4',
+        shortName: 'Liquidity & Delta',
+        title: 'Gate 4: Contract Depth, OI & Delta Floor',
+        pass: gate4Pass,
+        liveValue: `${liquidContracts.length}/${candidates.length} Pass • Max OI: ${Math.round(bestOi).toLocaleString()} • Vol: ${bestVol.toLocaleString()}`,
+        threshold: 'OI ≥ 5,000 • Vol ≥ 200 • |Δ| ∈ [0.32, 0.68]',
+        detail: gate4Pass
+          ? `${liquidContracts.length} ATM strikes satisfy institutional OI, volume, and gamma/delta responsiveness.`
+          : 'Blocked: Monitored strikes lack minimum Open Interest (5,000), Volume (200), or Delta (|Δ| ≥ 0.32).',
+      },
+      {
+        id: 'G5',
+        shortName: 'ORB & Zone 1/2A',
+        title: 'Gate 5: ORB Breakout & Structural Zone',
+        pass: gate5Pass,
+        liveValue: `${ms.orb_status?.breakout_direction || 'NO ORB BREAK'} • ${activeZoneText}`,
+        threshold: '5m ORB Accepted + Zone 1 (Breakout) or Zone 2A (ORB Retest)',
+        detail: gate5Pass
+          ? `Price accepted outside 09:15–09:30 ORB (${ms.orb_status?.volume_ratio || 1.2}x vol) in actionable ${activeZoneText}.`
+          : `Blocked: Price is in ${activeZoneText}. Mid-air pullbacks (Zone 2B) and inside-ORB chop (Zone 3) are strictly rejected.`,
+      },
+      {
+        id: 'G6',
+        shortName: 'Trend & Chop Shield',
+        title: 'Gate 6: Kaufman Efficiency & Chop Shield',
+        pass: gate6Pass,
+        liveValue: `ER(14): ${erVal.toFixed(2)} • ADX(14): ${adxVal.toFixed(1)} • Regime: ${marketRegime?.regime || 'EVALUATING'}`,
+        threshold: `Kaufman ER ≥ ${erHurdle.toFixed(2)} • ADX ≥ 18.0 • Non-Chop`,
+        detail: gate6Pass
+          ? 'Directional efficiency and Wilder ADX confirm genuine trend expansion over intraday noise.'
+          : `Blocked: ${marketRegime?.reason || `Trend efficiency ER (${erVal.toFixed(2)}) or ADX (${adxVal.toFixed(1)}) below expansion hurdle.`}`,
+      },
+      {
+        id: 'G7',
+        shortName: 'AI Conviction',
+        title: 'Gate 7: Calibrated Win Prob & Net Return',
+        pass: gate7Pass,
+        liveValue: activeSignalsList.length > 0
+          ? `P(Win): ${topProbPct.toFixed(1)}% • Exp Net: +${topNetRet.toFixed(1)}% (${topSignal?.trading_symbol})`
+          : '0 Qualified Contracts (Awaiting Setup)',
+        threshold: 'P(Net Win) ≥ 44.0% (38% CRB-I) & Net Return ≥ +2.0%',
+        detail: gate7Pass
+          ? `${topSignal?.trading_symbol} clears isotonic probability & post-tax net return hurdle.`
+          : 'Blocked: No contract currently clears both the 44% calibrated win probability and +2.0% net edge hurdle.',
+      },
+      {
+        id: 'G8',
+        shortName: 'Risk & Canary Guard',
+        title: 'Gate 8: Circuit Breaker, Canary & Slots',
+        pass: gate8Pass,
+        liveValue: `Canary: ${ms.canary_status || 'PROBING'} • Losses: ${consecutiveLosses}/${maxConsecutiveLosses} • Slots: ${activeSlotCount}/2`,
+        threshold: 'Canary HEALTHY (0 SL) • Losses < 2 • Net > -₹3,500 • Slots < 2',
+        detail: gate8Pass
+          ? 'All risk circuit breakers, Canary scout checks, and capital slot limits are green.'
+          : (circuitBreaker?.halt_reason || 'Blocked: Circuit breaker, Canary stop-loss lock, or max open slot ceiling reached.'),
+      },
+    ];
+
+    const greenCount = gates.filter(g => g.pass).length;
+    const redGates = gates.filter(g => !g.pass);
+    return {
+      allGreen: redGates.length === 0,
+      greenCount,
+      redCount: redGates.length,
+      redGates,
+      gates,
+    };
+  }, [
+    statusData,
+    isArmed,
+    ms,
+    candidates,
+    feedHealth,
+    isConnected,
+    niftyChart,
+    bankniftyChart,
+    niftyIntel,
+    marketRegime,
+    signals,
+    paperTrades,
+    liveStatusData,
+    isSessionHalted,
+    isPauseActive,
+    consecutiveLosses,
+    maxConsecutiveLosses,
+    todayNetPnl,
+  ]);
 
   const filteredCandidates = candidates.filter(c => {
     if (underlyingFilter === 'ALL') return true;
@@ -442,16 +843,10 @@ export default function OptionSniffer() {
             </button>
           )}
 
-          <button
-            onClick={handleManualScan}
-            disabled={scanning}
-            className={`flex items-center space-x-1.5 px-3 py-2 rounded-xl text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 transition-all shadow-2xs ${
-              scanning ? 'opacity-60 cursor-not-allowed' : ''
-            }`}
-          >
-            <RefreshCw size={13} className={scanning ? 'animate-spin text-indigo-600' : 'text-slate-500'} />
-            <span>{scanning ? 'Sweeping...' : 'Sweep Chain'}</span>
-          </button>
+          <div className="flex items-center space-x-1.5 px-3 py-2 rounded-xl text-[11px] font-mono font-bold text-slate-600 bg-white border border-slate-200 shadow-2xs">
+            <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-ping' : 'bg-indigo-500 animate-pulse'}`} />
+            <span>AUTO-SYNC 4s {lastUpdated ? `• ${lastUpdated}` : ''}</span>
+          </div>
         </div>
       </div>
 
@@ -709,21 +1104,43 @@ export default function OptionSniffer() {
           </div>
         </div>
 
-        {/* Card 2: Model & Quality Hurdle */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs">
+        {/* Card 2: Traffic-Light Quality Gates Summary */}
+        <div className={`bg-white border rounded-2xl p-4 shadow-xs transition-all ${
+          gatesSummary.allGreen ? 'border-emerald-300 ring-2 ring-emerald-500/10' : 'border-rose-200'
+        }`}>
           <div className="flex items-center justify-between mb-2">
-            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Option Alpha Model</span>
-            <span className="text-[10px] font-mono font-bold bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded border border-indigo-200">
-              STAGE 4
+            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Traffic-Light Gates</span>
+            <span className={`text-[10px] font-mono font-black px-1.5 py-0.5 rounded border ${
+              gatesSummary.allGreen
+                ? 'bg-emerald-600 text-white border-emerald-700 animate-pulse'
+                : 'bg-rose-600 text-white border-rose-700'
+            }`}>
+              {gatesSummary.allGreen ? '🟢 ALL GREEN' : '🔴 NO TRADE'}
             </span>
           </div>
-          <div className="flex items-baseline space-x-2">
-            <span className="text-xl font-black text-slate-900">44.0%</span>
-            <span className="text-xs text-slate-500">Conviction Hurdle</span>
+          <div className="flex items-baseline justify-between">
+            <div className="flex items-baseline space-x-2">
+              <span className={`text-xl font-black ${gatesSummary.allGreen ? 'text-emerald-700' : 'text-rose-600'}`}>
+                {gatesSummary.greenCount} / {gatesSummary.gates.length}
+              </span>
+              <span className="text-xs text-slate-500 font-semibold">Gates Green</span>
+            </div>
+            <div className="flex items-center space-x-1">
+              {gatesSummary.gates.map(g => (
+                <span
+                  key={g.id}
+                  title={`${g.title}: ${g.pass ? 'GREEN (PASS)' : 'RED (BLOCKED)'}`}
+                  className={`w-2.5 h-2.5 rounded-full ${g.pass ? 'bg-emerald-500' : 'bg-rose-500'}`}
+                />
+              ))}
+            </div>
           </div>
-          <div className="text-[11px] text-slate-500 mt-2 font-mono flex items-center justify-between">
-            <span>Net Hurdle: +2.0%</span>
-            <span>Brier: 0.198</span>
+          <div className="text-[11px] text-slate-500 mt-2 font-mono flex items-center justify-between truncate">
+            <span className="truncate">
+              {gatesSummary.allGreen
+                ? 'All 8 gates passed — Trade Ready'
+                : `Blocked: ${gatesSummary.redGates.slice(0, 2).map(g => g.shortName).join(', ')}${gatesSummary.redCount > 2 ? ` +${gatesSummary.redCount - 2}` : ''}`}
+            </span>
           </div>
         </div>
 
@@ -854,11 +1271,188 @@ export default function OptionSniffer() {
         </div>
       )}
 
+      {/* ── SECTION 1C: DUAL LIVE NIFTY 50 & BANKNIFTY INTRADAY STRUCTURAL GRAPHS ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {[
+          {
+            symbol: 'NIFTY 50',
+            keyName: 'NIFTY',
+            chart: niftyChart,
+            intel: niftyIntel,
+            accentHex: '#4f46e5',
+            gradId: 'niftySpotGrad',
+          },
+          {
+            symbol: 'BANKNIFTY',
+            keyName: 'BANKNIFTY',
+            chart: bankniftyChart,
+            intel: bnfIntel,
+            accentHex: '#059669',
+            gradId: 'bnfSpotGrad',
+          },
+        ].map(({ symbol, keyName, chart, intel, accentHex, gradId }) => {
+          const isUp = (chart.changePts || 0) >= 0;
+          return (
+            <div key={keyName} className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
+              {/* Chart Card Header */}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                <div className="flex items-center space-x-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-slate-900 text-white flex items-center justify-center font-black text-xs">
+                    {keyName === 'NIFTY' ? 'N50' : 'BNF'}
+                  </div>
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xs font-black text-slate-900 tracking-wide">{symbol}</span>
+                      <span className={`text-[10px] font-mono font-black px-2 py-0.5 rounded border ${
+                        chart.zonePass
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                          : 'bg-rose-50 text-rose-700 border-rose-200'
+                      }`}>
+                        {chart.zonePass ? `🟢 ${chart.zoneLabel}` : `🔴 ${chart.zoneLabel}`}
+                      </span>
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-400">
+                      Session: {chart.sessionDate || 'Intraday'} • 5m Candles + 4s Live Spot/VWAP
+                    </div>
+                  </div>
+                </div>
+
+                <div className="text-right font-mono">
+                  <div className="text-base font-black text-slate-900">
+                    ₹{(chart.spot || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </div>
+                  <div className={`text-[11px] font-bold ${isUp ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {isUp ? '+' : ''}{(chart.changePts || 0).toFixed(1)} pts ({isUp ? '+' : ''}{(chart.changePct || 0).toFixed(2)}%)
+                  </div>
+                </div>
+              </div>
+
+              {/* Intraday Graph Canvas */}
+              <div className="h-52 w-full">
+                {chart.series && chart.series.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={chart.series} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor={accentHex} stopOpacity={0.22} />
+                          <stop offset="95%" stopColor={accentHex} stopOpacity={0.01} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                      <XAxis
+                        dataKey="time"
+                        tick={{ fontSize: 10, fill: '#64748b' }}
+                        tickLine={false}
+                        axisLine={{ stroke: '#e2e8f0' }}
+                        minTickGap={24}
+                      />
+                      <YAxis
+                        domain={['auto', 'auto']}
+                        tick={{ fontSize: 10, fill: '#64748b' }}
+                        tickLine={false}
+                        axisLine={false}
+                        width={58}
+                        tickFormatter={val => Number(val).toFixed(0)}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: '#0f172a',
+                          borderColor: '#334155',
+                          borderRadius: '12px',
+                          fontSize: '11px',
+                          color: '#f8fafc',
+                          fontFamily: 'monospace'
+                        }}
+                        formatter={(val, name) => [
+                          `₹${Number(val).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`,
+                          name === 'spot' ? 'Spot Price' : 'Session VWAP'
+                        ]}
+                      />
+                      {chart.orbHigh > 0 && (
+                        <ReferenceLine
+                          y={chart.orbHigh}
+                          stroke="#10b981"
+                          strokeDasharray="4 4"
+                          label={{ value: `ORB High (${chart.orbHigh.toFixed(0)})`, position: 'insideTopRight', fill: '#059669', fontSize: 9 }}
+                        />
+                      )}
+                      {chart.orbLow > 0 && (
+                        <ReferenceLine
+                          y={chart.orbLow}
+                          stroke="#f43f5e"
+                          strokeDasharray="4 4"
+                          label={{ value: `ORB Low (${chart.orbLow.toFixed(0)})`, position: 'insideBottomRight', fill: '#e11d48', fontSize: 9 }}
+                        />
+                      )}
+                      <Area
+                        type="monotone"
+                        dataKey="spot"
+                        stroke={accentHex}
+                        strokeWidth={2.2}
+                        fillOpacity={1}
+                        fill={`url(#${gradId})`}
+                        isAnimationActive={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="vwap"
+                        stroke="#f59e0b"
+                        strokeWidth={1.6}
+                        strokeDasharray="5 3"
+                        dot={false}
+                        isAnimationActive={false}
+                      />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-xs text-slate-400 font-mono bg-slate-50 rounded-xl border border-slate-100">
+                    Syncing {symbol} intraday series...
+                  </div>
+                )}
+              </div>
+
+              {/* Structural Levels & Chain Telemetry Strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1 text-[10px] font-mono">
+                <div className="bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200/70">
+                  <span className="text-slate-400 block uppercase">Session VWAP</span>
+                  <strong className="text-amber-700">₹{(chart.vwap || 0).toFixed(1)}</strong>
+                </div>
+                <div className="bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200/70">
+                  <span className="text-slate-400 block uppercase">ORB (09:15-09:30)</span>
+                  <strong className="text-slate-800">{(chart.orbLow || 0).toFixed(0)} – {(chart.orbHigh || 0).toFixed(0)}</strong>
+                </div>
+                <div className="bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200/70">
+                  <span className="text-slate-400 block uppercase">Day Low / High</span>
+                  <strong className="text-slate-800">{(chart.dayLow || 0).toFixed(0)} – {(chart.dayHigh || 0).toFixed(0)}</strong>
+                </div>
+                <div className="bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200/70">
+                  <span className="text-slate-400 block uppercase">ADX(14) • ER(14)</span>
+                  <strong className="text-indigo-700">
+                    {Number(intel.adx_14 || 0).toFixed(1)} • {Number(intel.kaufman_er || 0).toFixed(2)}
+                  </strong>
+                </div>
+                <div className="bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200/70">
+                  <span className="text-slate-400 block uppercase">PCR • Put/Call Wall</span>
+                  <strong className="text-slate-800">
+                    {Number(intel.pcr_oi || 1.0).toFixed(2)} • {intel.put_wall_strike || '—'}/{intel.call_wall_strike || '—'}
+                  </strong>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
       {/* ── SECTION 2: SIMPLIFIED TAB NAVIGATION (4 FOCUSED TABS) ─────────── */}
       <div className="border-b border-slate-200 flex items-center justify-between overflow-x-auto pb-px">
         <div className="flex space-x-2">
           {[
-            { id: 'signals', label: 'Active Signals & Alerts', icon: Zap, count: signals.filter(s => s.status === 'ACTIVE').length },
+            {
+              id: 'signals',
+              label: '🚦 Quality Gates (Traffic Light)',
+              icon: Shield,
+              badge: gatesSummary.allGreen ? 'ALL 8 GREEN' : `${gatesSummary.redCount} RED • NO TRADE`
+            },
             { id: 'candidates', label: 'Watch Candidates (ATM)', icon: Eye, count: candidates.length },
             { id: 'trades', label: 'Paper Positions & Journal', icon: DollarSign, count: paperTrades.open_trades?.length },
             {
@@ -891,8 +1485,10 @@ export default function OptionSniffer() {
                 )}
                 {tab.badge && (
                   <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold ${
-                    tab.badge === 'LIVE ARMED'
+                    tab.badge === 'LIVE ARMED' || tab.badge === 'ALL 8 GREEN'
                       ? 'bg-emerald-600 text-white animate-pulse'
+                      : tab.badge.includes('RED')
+                      ? 'bg-rose-600 text-white'
                       : (tab.badge === 'READY' ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' : 'bg-amber-100 text-amber-800 border border-amber-300')
                   }`}>
                     {tab.badge}
@@ -925,95 +1521,203 @@ export default function OptionSniffer() {
 
       {/* ── SECTION 3: TAB PANELS ──────────────────────────────────────── */}
 
-      {/* TAB 1: ACTIVE SIGNALS & ALERTS */}
+      {/* TAB 1: TRAFFIC-LIGHT QUALITY GATES MATRIX (+ ACTIVE SIGNALS BELOW WHEN TRIGGERED) */}
       {activeTab === 'signals' && (
         <div className="space-y-4">
-          {signals.length === 0 ? (
-            <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center text-xs text-slate-500 space-y-2 shadow-xs">
-              <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mx-auto text-slate-400">
-                <ShieldAlert size={24} />
+          {/* Master Traffic-Light Verdict Banner */}
+          <div className={`border-2 rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-xs transition-all ${
+            gatesSummary.allGreen
+              ? 'bg-gradient-to-r from-emerald-950 via-slate-900 to-emerald-950 border-emerald-500 text-white'
+              : 'bg-gradient-to-r from-rose-950 via-slate-900 to-slate-900 border-rose-500/80 text-white'
+          }`}>
+            <div className="flex items-start sm:items-center space-x-3.5">
+              {/* Vertical 3-Lamp Traffic Light Housing */}
+              <div className="bg-slate-950 border border-slate-700 rounded-xl p-2 flex flex-col items-center space-y-1.5 shrink-0 shadow-inner">
+                <span className={`w-3.5 h-3.5 rounded-full transition-all ${
+                  !gatesSummary.allGreen ? 'bg-rose-500 shadow-[0_0_10px_#f43f5e] animate-pulse' : 'bg-rose-950/50'
+                }`} />
+                <span className="w-3.5 h-3.5 rounded-full bg-amber-950/40" />
+                <span className={`w-3.5 h-3.5 rounded-full transition-all ${
+                  gatesSummary.allGreen ? 'bg-emerald-400 shadow-[0_0_10px_#10b981] animate-pulse' : 'bg-emerald-950/50'
+                }`} />
               </div>
-              <h3 className="text-sm font-bold text-slate-800">Zero Active Option Signals</h3>
-              <p className="max-w-md mx-auto text-slate-500">
-                The 10 quality gates are currently filtering out non-actionable setups. Signals trigger strictly when calibrated net probability &ge; 58% and expected net return &ge; +3.0% after statutory costs.
-              </p>
+
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`text-xs font-black uppercase px-2.5 py-0.5 rounded tracking-widest ${
+                    gatesSummary.allGreen ? 'bg-emerald-500 text-slate-950' : 'bg-rose-600 text-white'
+                  }`}>
+                    {gatesSummary.allGreen
+                      ? '🟢 ALL 8 GATES GREEN — TRADE EXECUTION PERMITTED'
+                      : `🔴 NO TRADE — ${gatesSummary.redCount} OF 8 GATE(S) RED`}
+                  </span>
+                  <span className="text-xs font-mono text-slate-300">
+                    ({gatesSummary.greenCount} Green / {gatesSummary.redCount} Red)
+                  </span>
+                </div>
+                <p className="text-xs text-slate-300 mt-1">
+                  {gatesSummary.allGreen
+                    ? 'Every institutional gate is passing right now. System is actively executing qualified setups.'
+                    : `Strict Traffic-Light Rule: Even 1 Red gate blocks entry. Currently blocking: ${gatesSummary.redGates.map(g => `${g.id} (${g.shortName})`).join(' • ')}.`}
+                </p>
+              </div>
             </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {signals.map((sig, idx) => {
-                const isBuyCall = sig.direction === 'BUY_CE';
-                const isActive = sig.status === 'ACTIVE';
-                return (
-                  <div
-                    key={idx}
-                    className={`bg-white border rounded-2xl p-4.5 shadow-xs transition-all ${
-                      isActive ? 'border-indigo-300 ring-2 ring-indigo-500/10' : 'border-slate-200 opacity-80'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center space-x-2">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-black tracking-wide ${
-                          isBuyCall ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
-                        }`}>
-                          {isBuyCall ? 'CALL BUY' : 'PUT BUY'}
-                        </span>
-                        {sig.is_crbi_active && (
-                          <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 border border-purple-200">
-                            CRB-I
-                          </span>
-                        )}
-                        <span className="font-black text-slate-900 text-sm">{sig.trading_symbol}</span>
-                      </div>
-                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
-                        isActive
-                          ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
-                          : 'bg-slate-100 text-slate-600'
-                      }`}>
-                        {sig.status}
+
+            {/* 8-Lamp Horizontal Traffic Light Pill Bar */}
+            <div className="flex flex-wrap items-center gap-1.5 bg-slate-950/80 border border-slate-800 px-3 py-2 rounded-xl shrink-0">
+              {gatesSummary.gates.map(g => (
+                <div
+                  key={g.id}
+                  className={`flex items-center space-x-1 px-2 py-1 rounded-lg border text-[10px] font-mono font-bold ${
+                    g.pass
+                      ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-300'
+                      : 'bg-rose-950/90 border-rose-500/60 text-rose-300'
+                  }`}
+                >
+                  <span className={`w-2 h-2 rounded-full ${g.pass ? 'bg-emerald-400' : 'bg-rose-500 animate-pulse'}`} />
+                  <span>{g.id}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 8 Individual Traffic-Light Gate Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3.5">
+            {gatesSummary.gates.map(gate => (
+              <div
+                key={gate.id}
+                className={`bg-white border-2 rounded-2xl p-4 shadow-xs flex flex-col justify-between transition-all ${
+                  gate.pass
+                    ? 'border-emerald-200 hover:border-emerald-300'
+                    : 'border-rose-200 bg-rose-50/15 hover:border-rose-300'
+                }`}
+              >
+                <div>
+                  <div className="flex items-center justify-between gap-2 mb-2.5">
+                    <div className="flex items-center space-x-2">
+                      <span className={`w-3.5 h-3.5 rounded-full shrink-0 ${
+                        gate.pass
+                          ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.65)]'
+                          : 'bg-rose-600 shadow-[0_0_8px_rgba(225,29,72,0.65)] animate-pulse'
+                      }`} />
+                      <span className="text-xs font-black text-slate-900">{gate.title}</span>
+                    </div>
+                    <span className={`text-[9px] font-mono font-black px-1.5 py-0.5 rounded border shrink-0 ${
+                      gate.pass
+                        ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                        : 'bg-rose-100 text-rose-800 border-rose-300'
+                    }`}>
+                      {gate.pass ? '🟢 PASS' : '🔴 NO TRADE'}
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-2.5 font-mono text-[11px] space-y-1 mb-2.5">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[9px] uppercase text-slate-400 font-bold">Live Reading</span>
+                      <span className={`font-bold text-right ${gate.pass ? 'text-emerald-700' : 'text-rose-700'}`}>
+                        {gate.liveValue}
                       </span>
                     </div>
-
-                    <div className="grid grid-cols-3 gap-2 bg-slate-50 p-2.5 rounded-xl border border-slate-200/60 font-mono text-xs mb-3">
-                      <div>
-                        <span className="text-[10px] text-slate-400 block uppercase">Paper Entry</span>
-                        <strong className="text-slate-800">₹{sig.option_ask?.toFixed(2)}</strong> (ASK)
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-400 block uppercase">Spot Reference</span>
-                        <strong className="text-slate-800">₹{sig.spot_price?.toFixed(2)}</strong>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-400 block uppercase">Spread %</span>
-                        <strong className="text-slate-800">{sig.spread_pct?.toFixed(2)}%</strong>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-4 gap-2 text-[11px] font-mono text-slate-600 mb-3">
-                      <div>Delta: <strong>{sig.delta?.toFixed(2)}</strong></div>
-                      <div>IV: <strong>{sig.iv?.toFixed(1)}%</strong></div>
-                      <div>Vol: <strong>{sig.volume?.toLocaleString()}</strong></div>
-                      <div>OI: <strong>{sig.oi ? Math.round(sig.oi).toLocaleString() : '—'}</strong></div>
-                    </div>
-
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-[11px]">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-indigo-600 font-bold font-mono">
-                          P(Net Win): {(sig.calibrated_prob * 100).toFixed(1)}%
-                        </span>
-                        <span className="text-slate-300">•</span>
-                        <span className="text-emerald-700 font-bold font-mono">
-                          Exp Net: +{sig.expected_net_return?.toFixed(1)}%
-                        </span>
-                      </div>
-                      {sig.telegram_sent === 1 && (
-                        <span className="flex items-center text-[10px] text-emerald-600 font-mono font-bold">
-                          <Send size={11} className="mr-1" /> Telegram Alerted
-                        </span>
-                      )}
+                    <div className="flex items-center justify-between gap-1 pt-1 border-t border-slate-200/60">
+                      <span className="text-[9px] uppercase text-slate-400 font-bold">Required</span>
+                      <span className="text-slate-600 text-[10px] text-right">{gate.threshold}</span>
                     </div>
                   </div>
-                );
-              })}
+                </div>
+
+                <p className="text-[11px] text-slate-600 leading-snug">
+                  {gate.detail}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          {/* Live Triggered Option Signals (Rendered Automatically When Any Contract Qualifies) */}
+          {signals.length > 0 && (
+            <div className="space-y-3 pt-2">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-black text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                  <Zap size={14} className="text-indigo-600" />
+                  <span>Recent Qualified Option Signals ({signals.length})</span>
+                </h3>
+                <span className="text-[11px] font-mono text-slate-400">Net of Indian Statutory Charges</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {signals.map((sig, idx) => {
+                  const isBuyCall = sig.direction === 'BUY_CE';
+                  const isActive = sig.status === 'ACTIVE';
+                  return (
+                    <div
+                      key={idx}
+                      className={`bg-white border rounded-2xl p-4.5 shadow-xs transition-all ${
+                        isActive ? 'border-indigo-300 ring-2 ring-indigo-500/10' : 'border-slate-200 opacity-80'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center space-x-2">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-black tracking-wide ${
+                            isBuyCall ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                          }`}>
+                            {isBuyCall ? 'CALL BUY' : 'PUT BUY'}
+                          </span>
+                          {sig.is_crbi_active && (
+                            <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 border border-purple-200">
+                              CRB-I
+                            </span>
+                          )}
+                          <span className="font-black text-slate-900 text-sm">{sig.trading_symbol}</span>
+                        </div>
+                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
+                          isActive
+                            ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
+                            : 'bg-slate-100 text-slate-600'
+                        }`}>
+                          {sig.status}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 bg-slate-50 p-2.5 rounded-xl border border-slate-200/60 font-mono text-xs mb-3">
+                        <div>
+                          <span className="text-[10px] text-slate-400 block uppercase">Paper Entry</span>
+                          <strong className="text-slate-800">₹{sig.option_ask?.toFixed(2)}</strong> (ASK)
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-400 block uppercase">Spot Reference</span>
+                          <strong className="text-slate-800">₹{sig.spot_price?.toFixed(2)}</strong>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-400 block uppercase">Spread %</span>
+                          <strong className="text-slate-800">{sig.spread_pct?.toFixed(2)}%</strong>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-4 gap-2 text-[11px] font-mono text-slate-600 mb-3">
+                        <div>Delta: <strong>{sig.delta?.toFixed(2)}</strong></div>
+                        <div>IV: <strong>{sig.iv?.toFixed(1)}%</strong></div>
+                        <div>Vol: <strong>{sig.volume?.toLocaleString()}</strong></div>
+                        <div>OI: <strong>{sig.oi ? Math.round(sig.oi).toLocaleString() : '—'}</strong></div>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-[11px]">
+                        <div className="flex items-center space-x-2">
+                          <span className="text-indigo-600 font-bold font-mono">
+                            P(Net Win): {(sig.calibrated_prob * 100).toFixed(1)}%
+                          </span>
+                          <span className="text-slate-300">•</span>
+                          <span className="text-emerald-700 font-bold font-mono">
+                            Exp Net: +{sig.expected_net_return?.toFixed(1)}%
+                          </span>
+                        </div>
+                        {sig.telegram_sent === 1 && (
+                          <span className="flex items-center text-[10px] text-emerald-600 font-mono font-bold">
+                            <Send size={11} className="mr-1" /> Telegram Alerted
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>

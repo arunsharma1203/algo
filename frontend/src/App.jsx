@@ -20,7 +20,6 @@ import QlibControlRoom from './pages/QlibControlRoom';
 import ConsensusScanner from './pages/ConsensusScanner';
 import OptionSniffer from './pages/OptionSniffer';
 import OptionSnifferAdvance from './pages/OptionSnifferAdvance';
-import OptionF from './pages/OptionF';
 import TradeAgent from './pages/TradeAgent';
 import { LiveIndicatorProvider } from './context/LiveIndicatorContext';
 import { API_BASE } from './services/api';
@@ -56,18 +55,6 @@ function App() {
   const [winRateData, setWinRateData] = useState({ win_rate: null, total_closed_trades: 0, wins: 0, display_rate: 'N/A' });
   const [tokenExpired, setTokenExpired] = useState(false);
   const [tokenErrorMessage, setTokenErrorMessage] = useState('');
-  const [sidebarProfit, setSidebarProfit] = useState(21450);
-
-  useEffect(() => {
-    let tick = 0;
-    const interval = setInterval(() => {
-      tick = (tick + 1) % 360;
-      const wave = Math.sin((tick * Math.PI) / 12) * 1250 + Math.cos((tick * Math.PI) / 5) * 450;
-      const profit = Math.min(23950, Math.max(18200, Math.round(20587 + 1650 + wave)));
-      setSidebarProfit(profit);
-    }, 4500);
-    return () => clearInterval(interval);
-  }, []);
 
   useEffect(() => {
     const fetchStatus = async () => {
@@ -271,11 +258,11 @@ function App() {
 
               <div className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider my-3 px-2 flex items-center justify-between">
                 <span>Option Buying Alpha</span>
-                <span className="text-[8px] px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 rounded border border-emerald-500/40 font-mono font-bold animate-pulse">
-                  +₹{sidebarProfit.toLocaleString('en-IN')}
+                <span className="text-[8px] px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 rounded border border-emerald-500/40 font-mono font-bold">
+                  NIFTY • BNF
                 </span>
               </div>
-              <LinkItem to="/option-f" aliases={['/option-f']} icon={Radio} label="Option Sniffer" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem to="/option-sniffer" aliases={['/option-buying', '/options-sniffer', '/options', '/option-f']} icon={Radio} label="Option Sniffer" onClick={() => setMobileNavOpen(false)} />
               <LinkItem to="/option-sniffer-advance" aliases={['/option-advance', '/options-advance']} icon={Zap} label="Option Sniffer Advance" onClick={() => setMobileNavOpen(false)} />
 
 
@@ -366,7 +353,7 @@ function App() {
                   <Route path="/option-buying" element={<OptionSniffer />} />
                   <Route path="/options-sniffer" element={<OptionSniffer />} />
                   <Route path="/options" element={<OptionSniffer />} />
-                  <Route path="/option-f" element={<OptionF />} />
+                  <Route path="/option-f" element={<OptionSniffer />} />
                   <Route path="/option-sniffer-advance" element={<OptionSnifferAdvance />} />
                   <Route path="/option-advance" element={<OptionSnifferAdvance />} />
                   <Route path="/options-advance" element={<OptionSnifferAdvance />} />
