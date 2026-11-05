@@ -319,6 +319,7 @@ class OptionSnifferOrchestrator:
             evaluated_count = 0
             qualified_signals: List[Dict[str, Any]] = []
             active_signals: List[Dict[str, Any]] = []
+            top_evaluated_candidate: Optional[Dict[str, Any]] = None
 
             # Session Cutoff Guard: strictly halt candidate evaluations and new trades after 15:15 IST
             if not is_option_trading_window(now_dt):
@@ -416,6 +417,32 @@ class OptionSnifferOrchestrator:
                     else:
                         res = self.signal_engine.evaluate_contract(**eval_kwargs)
 
+                    c_prob = float(res.get("calibrated_prob") or 0.0)
+                    c_net_ret = float(res.get("expected_net_return") or 0.0)
+                    contract["calibrated_prob"] = c_prob
+                    contract["expected_net_return"] = c_net_ret
+                    contract["is_crbi_active"] = bool(res.get("is_crbi_active", False))
+                    contract["eval_status"] = res.get("status", "WATCH")
+                    if c_prob > 0:
+                        cand_summary = {
+                            "instrument_key": ikey,
+                            "trading_symbol": contract.get("trading_symbol") or res.get("trading_symbol"),
+                            "underlying": u_sym,
+                            "strike": contract.get("strike"),
+                            "option_type": contract.get("option_type"),
+                            "status": res.get("status", "WATCH"),
+                            "calibrated_prob": c_prob,
+                            "expected_net_return": c_net_ret,
+                            "is_crbi_active": bool(res.get("is_crbi_active", False)),
+                        }
+                        if top_evaluated_candidate is None or (
+                            (c_prob, c_net_ret) > (
+                                float(top_evaluated_candidate.get("calibrated_prob") or 0.0),
+                                float(top_evaluated_candidate.get("expected_net_return") or 0.0),
+                            )
+                        ):
+                            top_evaluated_candidate = cand_summary
+
                     if res.get("status") == "QUALIFIED":
                         qualified_signals.append(res)
                     elif res.get("status") == "ACTIVE":
@@ -461,6 +488,7 @@ class OptionSnifferOrchestrator:
                 "contracts_evaluated": evaluated_count,
                 "qualified_signals": qualified_signals,
                 "active_signals": active_signals,
+                "top_evaluated_candidate": top_evaluated_candidate,
                 "closed_trades_in_sweep": len(closed_trades),
                 "health": health_telem,
             }

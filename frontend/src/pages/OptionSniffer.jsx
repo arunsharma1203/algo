@@ -657,20 +657,25 @@ export default function OptionSniffer() {
     const adxOrWarmupOk = adxVal >= 18.0 || (isTradingWin && maxCompletedBars < 28 && orbAccepted && erVal >= 0.35);
     const gate6Pass = isTradingWin && !isChopBlocked && erVal >= erHurdle && adxOrWarmupOk;
 
-    // 7. Gate 7: AI Ensemble Conviction & Net Return Hurdle (Filtered to today's IST session signals)
+    // 7. Gate 7: AI Ensemble Conviction & Net Return Hurdle (Filtered to today's IST session signals + live sweep evaluation)
     const todayIsoPrefix = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const todaySignals = signals.filter(s => {
       const ts = String(s.timestamp || s.created_at || '');
       return !ts || ts.startsWith(todayIsoPrefix);
     });
     const activeSignalsList = todaySignals.filter(
-      s => s.status === 'ACTIVE' || s.status === 'TRADE_READY' || s.status === 'WATCH'
+      s => s.status === 'ACTIVE' || s.status === 'QUALIFIED' || s.status === 'TRADE_READY' || s.status === 'WATCH'
     );
-    const topSignal = activeSignalsList[0] || todaySignals[0] || null;
+    const liveEvalCandidates = candidates
+      .filter(c => Number(c.calibrated_prob || 0) > 0)
+      .sort((a, b) => (Number(b.calibrated_prob || 0) - Number(a.calibrated_prob || 0)) || (Number(b.expected_net_return || 0) - Number(a.expected_net_return || 0)));
+    const sweepTopCand = statusData?.last_sweep_results?.top_evaluated_candidate || liveEvalCandidates[0] || null;
+    const topSignal = activeSignalsList[0] || todaySignals[0] || sweepTopCand || null;
     const topProbPct = topSignal ? Number((topSignal.calibrated_prob || 0) * 100) : 0;
     const topNetRet = topSignal ? Number(topSignal.expected_net_return || 0) : 0;
     const probHurdle = topSignal?.is_crbi_active ? 38.0 : 44.0;
-    const gate7Pass = isTradingWin && activeSignalsList.length > 0 && topProbPct >= probHurdle && topNetRet >= 2.0;
+    const hasConvictionSource = activeSignalsList.length > 0 || Boolean(sweepTopCand);
+    const gate7Pass = isTradingWin && hasConvictionSource && topProbPct >= probHurdle && topNetRet >= 2.0;
 
     // 8. Gate 8: Circuit Breaker, Canary Scout & Slot Guard
     const openPaperCount = paperTrades?.open_trades?.length || 0;
@@ -759,8 +764,8 @@ export default function OptionSniffer() {
         shortName: 'AI Conviction',
         title: 'Gate 7: Calibrated Win Prob & Net Return',
         pass: gate7Pass,
-        liveValue: activeSignalsList.length > 0
-          ? `P(Win): ${topProbPct.toFixed(1)}% • Exp Net: +${topNetRet.toFixed(1)}% (${topSignal?.trading_symbol})`
+        liveValue: hasConvictionSource && topSignal
+          ? `P(Win): ${topProbPct.toFixed(1)}% • Exp Net: ${topNetRet >= 0 ? '+' : ''}${topNetRet.toFixed(1)}% (${topSignal?.trading_symbol})`
           : '0 Qualified Contracts (Awaiting Setup)',
         threshold: 'P(Net Win) ≥ 44.0% (38% CRB-I) & Net Return ≥ +2.0%',
         detail: gate7Pass

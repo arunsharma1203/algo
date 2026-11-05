@@ -357,6 +357,117 @@ class TestTrueBreakoutAndKaufmanHudGate(unittest.TestCase):
         self.assertEqual(res_itm["calibrated_prob"], res_atm["calibrated_prob"])
         self.assertLess(res_far_otm["calibrated_prob"], res_atm["calibrated_prob"] - 0.06)
 
+    def test_06_premarket_0900_auction_ohlc_sanitization_and_gate7_live_conviction(self):
+        """
+        Verifies the Nov 5 09:49 IST root-cause fix:
+        1. When Upstox raw underlying quote has 09:00 pre-open auction spike (high=24580.75, low=23608.50)
+           while true >= 09:15 IST session range is [24296.30, 24442.00] and spot=24440.00 (at true Day High),
+           OptionSignalEngine and OptionFeatureExtractor sanitize u_high/u_low against >= 09:15 session bars
+           so genuine breakouts are NOT falsely flagged as -140pt pullbacks from High.
+        2. Even when a contract stays in STATE_WATCH due to a gate rejection, calibrated_prob and
+           expected_net_return are computed for Gate 7 HUD transparency.
+        """
+        from app.analytics.option_sniffer.option_feature_extractor import OptionFeatureExtractor
+
+        base_dt = datetime(2026, 11, 5, 9, 15, 0)
+        rows = [
+            # Pre-open 09:00 auction spike bar
+            {"timestamp": "2026-11-05 09:00:00", "open": 24363.25, "high": 24580.75, "low": 23608.50, "close": 24384.30, "volume": 0},
+        ]
+        for i in range(35):  # 09:15 to 09:49
+            ts = (base_dt + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:00")
+            if i < 15:
+                o, h, l, c = 24340.0, 24391.95, 24296.30, 24360.0
+            else:
+                step = i - 15
+                c = 24392.0 + step * 2.5
+                o, h, l = c - 2.0, min(24442.0, c + 2.0), c - 2.0
+            rows.append({"timestamp": ts, "open": o, "high": h, "low": l, "close": c, "volume": 5000})
+        df = pd.DataFrame(rows)
+
+        contract = {
+            "instrument_key": "NSE_FO|39962",
+            "trading_symbol": "NIFTY 24400 CE 09 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 24400.0,
+            "option_type": "CE",
+            "expiry": "2026-11-09",
+            "lot_size": 65,
+        }
+        quote = {
+            "bid": 154.0,
+            "ask": 154.5,
+            "ltp": 154.25,
+            "spread_pct": 0.32,
+            "quote_age_ms": 100,
+            "oi": 1200000,
+            "volume": 650000,
+            "delta": 0.54,
+            "iv": 13.8,
+        }
+        # Contaminated raw Upstox OHLC with 09:00 pre-open auction spike
+        contaminated_u_quote = {
+            "spot_ltp": 24440.0,
+            "open": 24363.25,
+            "high": 24580.75,
+            "low": 23608.50,
+            "close": 24350.0,
+            "vwap": 24385.0,
+            "quote_age_ms": 100,
+        }
+
+        feats = OptionFeatureExtractor.extract_features(
+            contract=contract,
+            quote=quote,
+            underlying_quote=contaminated_u_quote,
+            underlying_df=df,
+            macro_context={"intraday_regime_verdict": "INTRADAY_BULL_MOMENTUM"},
+            as_of_time=datetime(2026, 11, 5, 9, 49, 30),
+        )
+        # Blended RSI (0.5 * 100 candle RSI + 0.5 * 70 structural RSI cap) == 85.0
+        self.assertEqual(feats["spot_rsi"], 85.0)
+
+        mock_model = MagicMock()
+        mock_model.version = "v1.0-champion-gbm"
+        mock_model.predict_contract.return_value = {
+            "direction": DIRECTION_BUY_CE,
+            "calibrated_prob": 0.495,
+            "expected_net_return_pct": 5.8,
+        }
+        engine = OptionSignalEngine(model=mock_model)
+
+        # Verify genuine breakout with contaminated pre-open u_quote is NOT blocked by Bull Reversal Guard
+        clean_res = engine.evaluate_contract(
+            contract=contract,
+            quote=quote,
+            underlying_quote=contaminated_u_quote,
+            underlying_df=df,
+            macro_context={"intraday_regime_verdict": "INTRADAY_BULL_MOMENTUM"},
+            as_of_time=datetime(2026, 11, 5, 9, 49, 30),
+            enforce_cutoff=True,
+            enforce_regime_gate=False,
+            defer_execution=True,
+        )
+        reasons_str = " | ".join(clean_res.get("rejection_reasons", []))
+        self.assertNotIn("Reversal Guard", reasons_str)
+
+        # Even if a contract is rejected by a gate (e.g. enforce_regime_gate=False with low volume),
+        # calibrated_prob and expected_net_return are still populated when quote is valid
+        low_vol_quote = dict(quote, volume=50)
+        watch_res = engine.evaluate_contract(
+            contract=contract,
+            quote=low_vol_quote,
+            underlying_quote=contaminated_u_quote,
+            underlying_df=df,
+            macro_context={"intraday_regime_verdict": "INTRADAY_BULL_MOMENTUM"},
+            as_of_time=datetime(2026, 11, 5, 9, 49, 30),
+            enforce_cutoff=True,
+            enforce_regime_gate=False,
+        )
+        self.assertEqual(watch_res["status"], STATE_WATCH)
+        self.assertAlmostEqual(watch_res["calibrated_prob"], 0.495, places=3)
+        self.assertAlmostEqual(watch_res["expected_net_return"], 5.8, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

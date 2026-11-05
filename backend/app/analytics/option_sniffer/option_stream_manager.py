@@ -507,12 +507,14 @@ class OptionStreamManager:
             from app.analytics.option_sniffer.option_db import OptionDB as _ActiveOptionDB
             conn = _ActiveOptionDB.get_connection()
             query = """
-                SELECT high, low, close
+                SELECT open, high, low, close
                 FROM continuous_index_ohlcv
                 WHERE ticker = ?
                   AND timestamp >= ?
                   AND timestamp <= ?
                   AND is_complete = 1
+                  AND COALESCE(is_synthetic, 0) = 0
+                  AND COALESCE(is_gap, 0) = 0
                 ORDER BY timestamp ASC
             """
             cur = conn.cursor()
@@ -532,13 +534,19 @@ class OptionStreamManager:
                 return None
 
             # Arithmetic mean of typical price: (H + L + C) / 3.0
-            typical_sum = sum((float(r[0]) + float(r[1]) + float(r[2])) / 3.0 for r in rows)
+            typical_sum = sum((float(r[1]) + float(r[2]) + float(r[3])) / 3.0 for r in rows)
             benchmark_val = round(typical_sum / len(rows), 2)
+            s_open = float(rows[0][0])
+            s_high = max(float(r[1]) for r in rows)
+            s_low = min(float(r[2]) for r in rows)
 
             with self._lock:
                 if not hasattr(self, "_benchmark_cache"):
                     self._benchmark_cache = {}
+                if not hasattr(self, "_session_ohlc_cache"):
+                    self._session_ohlc_cache = {}
                 self._benchmark_cache[u_upper] = (now_mono, benchmark_val)
+                self._session_ohlc_cache[u_upper] = (now_mono, (s_open, s_high, s_low))
 
             return benchmark_val
         except Exception as e:
@@ -546,7 +554,7 @@ class OptionStreamManager:
             return None
 
     def get_underlying_quote(self, underlying: str = "NIFTY") -> Optional[Dict[str, Any]]:
-        """Retrieves latest live quote for the underlying index with session benchmark."""
+        """Retrieves latest live quote for the underlying index with session benchmark and sanitized >=09:15 OHLC."""
         u_upper = underlying.upper().strip()
         with self._lock:
             raw_quote = self._underlying_quotes.get(u_upper)
@@ -562,10 +570,29 @@ class OptionStreamManager:
             quote["session_benchmark"] = benchmark
             curr_vwap = float(quote.get("vwap") or 0.0)
             quote["raw_broker_vwap"] = curr_vwap
+            spot_val = float(quote.get("spot_ltp") or 0.0)
             if benchmark and float(benchmark) > 0:
-                spot_val = float(quote.get("spot_ltp") or 0.0)
                 if curr_vwap <= 0 or abs(curr_vwap - spot_val) < 1e-4:
                     quote["vwap"] = float(benchmark)
+
+            # Sanitize open/high/low against >= 09:15 IST session bars when Upstox 1d OHLC is contaminated by 09:00 pre-open spikes
+            with self._lock:
+                s_ohlc_entry = getattr(self, "_session_ohlc_cache", {}).get(u_upper)
+            if s_ohlc_entry:
+                _, (s_open, s_high, s_low) = s_ohlc_entry
+                eff_high = max(s_high, spot_val) if spot_val > 0 else s_high
+                eff_low = min(s_low, spot_val) if (s_low > 0 and spot_val > 0) else (s_low or spot_val)
+                q_high = float(quote.get("high") or 0.0)
+                q_low = float(quote.get("low") or 0.0)
+                spike_tol = 120.0 if "BANK" in u_upper else 45.0
+                if eff_high > 0 and (q_high <= 0 or (q_high - eff_high) > spike_tol):
+                    quote["high"] = eff_high
+                    if s_open > 0:
+                        quote["open"] = s_open
+                if eff_low > 0 and (q_low <= 0 or (eff_low - q_low) > spike_tol):
+                    quote["low"] = eff_low
+                    if s_open > 0:
+                        quote["open"] = s_open
         return quote
 
     def get_underlying_history_df(self, underlying: str = "NIFTY", limit: int = 375) -> Optional[Any]:

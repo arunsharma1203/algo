@@ -150,10 +150,34 @@ class OptionFeatureExtractor:
         spot_atr_pct = 0.80
         spot_vwap_dist = 0.0
 
-        # High/Low Intraday Excursion Tracking
+        # High/Low Intraday Excursion Tracking (Sanitized against >= 09:15 IST session bars to strip 09:00 pre-open spikes)
         u_open = float(underlying_quote.get("open") or spot)
         u_high = float(underlying_quote.get("high") or spot)
         u_low = float(underlying_quote.get("low") or spot)
+        if underlying_df is not None and hasattr(underlying_df, "__len__") and len(underlying_df) >= 3:
+            try:
+                hc = "high" if "high" in underlying_df.columns else "High"
+                lc = "low" if "low" in underlying_df.columns else "Low"
+                oc = "open" if "open" in underlying_df.columns else "Open"
+                s_df = underlying_df
+                if "timestamp" in underlying_df.columns:
+                    ts_norm = underlying_df["timestamp"].astype(str).str.replace("T", " ", regex=False)
+                    s_mask = ts_norm.str.slice(11, 16) >= "09:15"
+                    if s_mask.any():
+                        s_df = underlying_df[s_mask]
+                if len(s_df) >= 3 and hc in s_df.columns and lc in s_df.columns:
+                    df_hi = max(float(s_df[hc].astype(float).max()), spot)
+                    df_lo = min(float(s_df[lc].astype(float).min()), spot) if spot > 0 else float(s_df[lc].astype(float).min())
+                    df_op = float(s_df[oc].astype(float).iloc[0]) if oc in s_df.columns else u_open
+                    spike_lim = 120.0 if spot > 38000.0 else 45.0
+                    if df_hi > 0 and (u_high <= 0 or (u_high - df_hi) > spike_lim):
+                        u_high = df_hi
+                        u_open = df_op
+                    if df_lo > 0 and (u_low <= 0 or (df_lo - u_low) > spike_lim):
+                        u_low = df_lo
+                        u_open = df_op
+            except Exception:
+                pass
         pullback_from_high_pct = ((spot - u_high) / u_high * 100.0) if u_high > 0 else 0.0
         rally_from_low_pct = ((spot - u_low) / u_low * 100.0) if u_low > 0 else 0.0
 

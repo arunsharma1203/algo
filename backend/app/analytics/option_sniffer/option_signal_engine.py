@@ -281,6 +281,32 @@ class OptionSignalEngine:
         u_high = float(underlying_quote.get("high") or spot_ltp)
         u_low = float(underlying_quote.get("low") or spot_ltp)
         u_close = float(underlying_quote.get("close") or u_open)
+        if underlying_df is not None and hasattr(underlying_df, "__len__") and len(underlying_df) >= 2:
+            try:
+                df_sess = underlying_df
+                if "timestamp" in df_sess.columns:
+                    ts_str = df_sess["timestamp"].astype(str)
+                    t_part = ts_str.str.extract(r"(\d{2}:\d{2}:\d{2})", expand=False)
+                    valid_mask = t_part.isna() | (t_part >= "09:15:00")
+                    if valid_mask.any():
+                        df_sess = df_sess[valid_mask]
+                if len(df_sess) >= 1:
+                    hc = "high" if "high" in df_sess.columns else "High"
+                    lc = "low" if "low" in df_sess.columns else "Low"
+                    oc = "open" if "open" in df_sess.columns else "Open"
+                    sess_high = max(float(df_sess[hc].astype(float).max()), spot_ltp)
+                    sess_low_raw = float(df_sess[lc].astype(float).min())
+                    sess_low = min(sess_low_raw, spot_ltp) if spot_ltp > 0 else sess_low_raw
+                    sess_open = float(df_sess[oc].astype(float).iloc[0])
+                    max_dev = 120.0 if "BANK" in str(underlying).upper() else 45.0
+                    if u_high <= 0 or (u_high - sess_high) > max_dev or u_high < spot_ltp:
+                        u_high = sess_high
+                    if u_low <= 0 or (sess_low - u_low) > max_dev or (spot_ltp > 0 and u_low > spot_ltp):
+                        u_low = sess_low
+                    if u_open <= 0 or abs(u_open - sess_open) > max_dev:
+                        u_open = sess_open
+            except Exception:
+                pass
         u_vwap = float(underlying_quote.get("vwap") or 0.0)
         if u_vwap <= 0 or abs(u_vwap - spot_ltp) < 1e-4:
             bench_vwap = float(underlying_quote.get("session_benchmark") or 0.0)
@@ -781,15 +807,54 @@ class OptionSignalEngine:
             if not regime_eval.get("hurdles_passed", False):
                 rejection_reasons.extend(regime_eval.get("rejection_reasons", []))
 
-        # Fail closed early if data is distorted or regime/concurrence blocks
+        # Fail closed early if data is distorted or regime/concurrence blocks,
+        # while still computing live AI model conviction for HUD telemetry if quote is valid.
         if rejection_reasons:
+            live_prob = 0.0
+            live_net_ret = 0.0
+            if spot_ltp > 0 and bid > 0 and ask >= bid:
+                try:
+                    _feats = OptionFeatureExtractor.extract_features(
+                        contract=contract,
+                        quote=quote,
+                        underlying_quote=underlying_quote,
+                        underlying_df=underlying_df,
+                        macro_context=macro_context,
+                        upstream_signals=upstream_signals,
+                        as_of_time=now_dt,
+                    )
+                    from app.analytics.option_sniffer.option_constants import OPTION_EXECUTION_ENGINE_MODE, STOP_LOSS_PCT, TARGET_GAIN_PCT
+                    if OPTION_EXECUTION_ENGINE_MODE == "V1_CLASSIC":
+                        _dsl, _dtgt = STOP_LOSS_PCT, TARGET_GAIN_PCT
+                    else:
+                        _dsl, _dtgt, _, _ = OptionPaperExecution.calculate_dynamic_sl_and_target(
+                            underlying=underlying,
+                            spot_price=spot_ltp,
+                            option_ask=ask,
+                            delta=float(quote.get("delta") or 0.50),
+                            iv=float(quote.get("iv") or 15.0),
+                            spot_atr_pct=quote.get("spot_atr_pct"),
+                            day_range_pts=day_range_pts,
+                            is_breakout=bool(is_crbi_active or is_day_high_breakout or is_day_low_breakdown),
+                        )
+                    _pred = self.model.predict_contract(
+                        _feats,
+                        dynamic_sl_pct=_dsl,
+                        dynamic_tgt_pct=_dtgt,
+                        min_prob_hurdle=CRBI_RELAXED_MODEL_PROB if (is_crbi_active or is_day_high_breakout or is_day_low_breakdown) else 0.44,
+                        is_breakout=bool(is_crbi_active or is_day_high_breakout or is_day_low_breakdown),
+                    )
+                    live_prob = float(_pred.get("calibrated_prob") or 0.0)
+                    live_net_ret = float(_pred.get("expected_net_return_pct") or 0.0)
+                except Exception:
+                    pass
             return {
                 "instrument_key": ikey,
                 "trading_symbol": tsym,
                 "status": STATE_WATCH,
                 "direction": DIRECTION_NO_TRADE,
-                "calibrated_prob": 0.0,
-                "expected_net_return": 0.0,
+                "calibrated_prob": live_prob,
+                "expected_net_return": live_net_ret,
                 "rejection_reasons": rejection_reasons,
                 "hurdles_passed": False,
                 "regime_gate_passed": False,
