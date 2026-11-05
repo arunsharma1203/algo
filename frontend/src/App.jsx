@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Target, Activity, Search, BookmarkPlus, FolderOpen, BrainCircuit, Database, Network, Settings, TrendingUp, Zap, Menu, X, ShieldCheck, HelpCircle, Cpu, Crosshair, Radio, Bot } from 'lucide-react';
+import { LayoutDashboard, Target, Activity, Search, BookmarkPlus, FolderOpen, BrainCircuit, Database, Network, Settings, TrendingUp, Zap, Menu, X, ShieldCheck, HelpCircle, Cpu, Crosshair, Radio, Bot, ChevronLeft, ChevronRight } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import CustomStrategy from './pages/CustomStrategy';
 import StrategyLibrary from './pages/StrategyLibrary';
@@ -27,21 +27,22 @@ import ErrorBoundary from './components/common/ErrorBoundary';
 
 
 
-function LinkItem({ to, aliases = [], icon: Icon, label, onClick }) {
+function LinkItem({ to, aliases = [], icon: Icon, label, onClick, collapsed = false }) {
   const location = useLocation();
   const isActive = location.pathname === to || aliases.includes(location.pathname);
   return (
     <Link
       to={to}
       onClick={onClick}
-      className={`flex items-center px-4 py-3 mb-2 rounded-xl transition-all duration-200 ${
+      title={collapsed ? label : undefined}
+      className={`flex items-center ${collapsed ? 'lg:justify-center lg:px-2' : 'px-4'} py-3 mb-2 rounded-xl transition-all duration-200 ${
         isActive
           ? 'bg-gradient-to-r from-indigo-500 to-indigo-600 text-white shadow-md'
           : 'text-gray-400 hover:bg-gray-800 hover:text-white'
       }`}
     >
-      <Icon size={20} className={`mr-3 shrink-0 ${isActive ? 'text-white' : 'opacity-70'}`} />
-      <span className="font-medium text-sm tracking-wide truncate">{label}</span>
+      <Icon size={20} className={`${collapsed ? 'lg:mr-0 mr-3' : 'mr-3'} shrink-0 ${isActive ? 'text-white' : 'opacity-70'}`} />
+      <span className={`font-medium text-sm tracking-wide truncate ${collapsed ? 'lg:hidden' : ''}`}>{label}</span>
     </Link>
   );
 }
@@ -52,9 +53,26 @@ function App() {
   const [dataSource, setDataSource] = useState('upstox');
   const [simulationMode, setSimulationMode] = useState(true);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('swingai_sidebar_collapsed') === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [winRateData, setWinRateData] = useState({ win_rate: null, total_closed_trades: 0, wins: 0, display_rate: 'N/A' });
   const [tokenExpired, setTokenExpired] = useState(false);
   const [tokenErrorMessage, setTokenErrorMessage] = useState('');
+
+  const toggleSidebarCollapsed = () => {
+    setSidebarCollapsed(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('swingai_sidebar_collapsed', String(next));
+      } catch {}
+      return next;
+    });
+  };
 
   useEffect(() => {
     const fetchStatus = async () => {
@@ -126,16 +144,24 @@ function App() {
             />
           )}
 
-          {/* Navigation Sidebar (Desktop static / Mobile sliding drawer) */}
-          <nav className={`fixed inset-y-0 left-0 z-50 w-64 bg-gray-900 text-white flex flex-col shadow-2xl transition-transform duration-300 ease-in-out lg:static lg:translate-x-0 ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'} overflow-hidden shrink-0`}>
-            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-              <div className="flex items-center justify-between mb-6 mt-4">
+          {/* Navigation Sidebar (Desktop collapsible / Mobile sliding drawer) */}
+          <nav className={`fixed inset-y-0 left-0 z-50 w-64 ${sidebarCollapsed ? 'lg:w-20' : 'lg:w-64'} bg-gray-900 text-white flex flex-col shadow-2xl transition-all duration-300 ease-in-out lg:static lg:translate-x-0 ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'} overflow-hidden shrink-0`}>
+            <div className={`flex-1 overflow-y-auto ${sidebarCollapsed ? 'lg:px-2.5 p-4' : 'p-4'} custom-scrollbar`}>
+              <div className={`flex items-center ${sidebarCollapsed ? 'lg:flex-col lg:gap-3 justify-between' : 'justify-between'} mb-6 mt-4`}>
                 <div className="flex items-center">
-                  <div className="w-10 h-10 bg-indigo-500 rounded-lg flex items-center justify-center shadow-lg transform -rotate-6 mr-3 shrink-0">
+                  <div className={`w-10 h-10 bg-indigo-500 rounded-lg flex items-center justify-center shadow-lg transform -rotate-6 ${sidebarCollapsed ? 'lg:mr-0 mr-3' : 'mr-3'} shrink-0`}>
                     <Target size={24} className="text-white transform rotate-6" />
                   </div>
-                  <h1 className="text-xl font-black tracking-tight text-white">SWING<span className="text-indigo-400">AI</span></h1>
+                  <h1 className={`text-xl font-black tracking-tight text-white ${sidebarCollapsed ? 'lg:hidden' : ''}`}>SWING<span className="text-indigo-400">AI</span></h1>
                 </div>
+                <button
+                  onClick={toggleSidebarCollapsed}
+                  title={sidebarCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+                  className="hidden lg:flex items-center justify-center p-1.5 text-gray-400 hover:text-white rounded-lg bg-gray-800/80 hover:bg-gray-700 border border-gray-700 transition cursor-pointer"
+                  aria-label="Toggle desktop sidebar"
+                >
+                  {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+                </button>
                 <button 
                   onClick={() => setMobileNavOpen(false)}
                   className="lg:hidden p-1.5 text-gray-400 hover:text-white rounded-lg hover:bg-gray-800 transition"
@@ -146,7 +172,7 @@ function App() {
               </div>
 
               {/* Live Data Source Indicator */}
-              <div className="mx-2 mb-3 flex items-center justify-center">
+              <div className={`mx-2 mb-3 flex items-center justify-center ${sidebarCollapsed ? 'lg:hidden' : ''}`}>
                 <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center space-x-1.5 ${tokenExpired ? 'bg-rose-950/90 text-rose-300 border border-rose-700' : 'bg-emerald-950/80 text-emerald-300 border border-emerald-700/50'}`}>
                   <span className={`w-1.5 h-1.5 rounded-full ${tokenExpired ? 'bg-rose-500 animate-ping' : 'bg-emerald-400 animate-pulse'}`}></span>
                   <span>{tokenExpired ? 'UPSTOX TOKEN EXPIRED' : 'UPSTOX REALTIME (0ms)'}</span>
@@ -154,7 +180,7 @@ function App() {
               </div>
 
               {/* Production Model Win Rate Badge */}
-              <div className="mx-2 mb-3 bg-slate-800/90 border border-slate-700/80 rounded-xl p-2.5 flex items-center justify-between shadow-xs">
+              <div className={`mx-2 mb-3 bg-slate-800/90 border border-slate-700/80 rounded-xl p-2.5 flex items-center justify-between shadow-xs ${sidebarCollapsed ? 'lg:hidden' : ''}`}>
                 <div className="flex items-center space-x-2">
                   <div className="w-6 h-6 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center shrink-0">
                     <TrendingUp size={13} />
@@ -183,7 +209,7 @@ function App() {
               <Link
                 to="/data-dump"
                 onClick={() => setMobileNavOpen(false)}
-                className="mx-2 mb-3 bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-xl p-2.5 flex items-center justify-between shadow-xs transition group cursor-pointer"
+                className={`mx-2 mb-3 bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 rounded-xl p-2.5 flex items-center justify-between shadow-xs transition group cursor-pointer ${sidebarCollapsed ? 'lg:hidden' : ''}`}
                 title="View Local Database Dump & Cache Telemetry"
               >
                 <div className="flex items-center space-x-2">
@@ -204,7 +230,7 @@ function App() {
               
               {/* Global Active Monitor Badge */}
               {activeMonitors.length > 0 && (
-                <div className="mx-2 mb-4 bg-gray-800 border border-gray-700 rounded-xl p-3 shadow-inner">
+                <div className={`mx-2 mb-4 bg-gray-800 border border-gray-700 rounded-xl p-3 shadow-inner ${sidebarCollapsed ? 'lg:hidden' : ''}`}>
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="flex items-center text-xs font-bold text-gray-200">
                       <span className="w-2 h-2 rounded-full bg-emerald-400 mr-2 animate-ping"></span>
@@ -233,43 +259,43 @@ function App() {
                 </div>
               )}
               {activeMonitors.length === 0 && (
-                <div className="mb-4"></div>
+                <div className={`mb-4 ${sidebarCollapsed ? 'lg:hidden' : ''}`}></div>
               )}
               
-              <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-3 px-2">Primary Operations</div>
-              <LinkItem to="/consensus" aliases={['/consensus-scanner', '/confluence', '/consensus/arena', '/consensus-arena', '/consensus-game']} icon={Crosshair} label="Consensus Scanner" onClick={() => setMobileNavOpen(false)} />
-              <LinkItem to="/scanner" aliases={['/smart-scanner', '/ai-scan', '/swing-scan', '/watchlist-scanner']} icon={Zap} label="Smart AI Scanner" onClick={() => setMobileNavOpen(false)} />
-              <LinkItem to="/research" aliases={['/research-autopilot', '/data-lab']} icon={Cpu} label="Autonomous Research" onClick={() => setMobileNavOpen(false)} />
-              <LinkItem to="/models" aliases={['/ml-lab']} icon={Network} label="Model Lab & Governance" onClick={() => setMobileNavOpen(false)} />
-              <LinkItem to="/system" aliases={['/audit']} icon={ShieldCheck} label="System Operations" onClick={() => setMobileNavOpen(false)} />
-              <LinkItem to="/data-dump" icon={Database} label="Cached Memory & Data" onClick={() => setMobileNavOpen(false)} />
+              <div className={`text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-3 px-2 ${sidebarCollapsed ? 'lg:hidden' : ''}`}>Primary Operations</div>
+              <LinkItem collapsed={sidebarCollapsed} to="/consensus" aliases={['/consensus-scanner', '/confluence', '/consensus/arena', '/consensus-arena', '/consensus-game']} icon={Crosshair} label="Consensus Scanner" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem collapsed={sidebarCollapsed} to="/scanner" aliases={['/smart-scanner', '/ai-scan', '/swing-scan', '/watchlist-scanner']} icon={Zap} label="Smart AI Scanner" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem collapsed={sidebarCollapsed} to="/research" aliases={['/research-autopilot', '/data-lab']} icon={Cpu} label="Autonomous Research" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem collapsed={sidebarCollapsed} to="/models" aliases={['/ml-lab']} icon={Network} label="Model Lab & Governance" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem collapsed={sidebarCollapsed} to="/system" aliases={['/audit']} icon={ShieldCheck} label="System Operations" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem collapsed={sidebarCollapsed} to="/data-dump" icon={Database} label="Cached Memory & Data" onClick={() => setMobileNavOpen(false)} />
 
-              <div className="text-[10px] font-bold text-purple-400 uppercase tracking-wider my-3 px-2 flex items-center justify-between">
+              <div className={`text-[10px] font-bold text-purple-400 uppercase tracking-wider my-3 px-2 flex items-center justify-between ${sidebarCollapsed ? 'lg:hidden' : ''}`}>
                 <span>Microsoft Qlib</span>
                 <span className="text-[8px] px-1.5 py-0.5 bg-purple-900/60 text-purple-300 rounded border border-purple-500/40">NEW</span>
               </div>
-              <LinkItem to="/qlib" aliases={['/qlib/scanner', '/qlib/training', '/qlib/fno', '/qlib/comparison']} icon={Cpu} label="Qlib Control Room" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem collapsed={sidebarCollapsed} to="/qlib" aliases={['/qlib/scanner', '/qlib/training', '/qlib/fno', '/qlib/comparison']} icon={Cpu} label="Qlib Control Room" onClick={() => setMobileNavOpen(false)} />
 
-              <div className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider my-3 px-2 flex items-center justify-between">
+              <div className={`text-[10px] font-bold text-emerald-400 uppercase tracking-wider my-3 px-2 flex items-center justify-between ${sidebarCollapsed ? 'lg:hidden' : ''}`}>
                 <span>Multi-Model Confluence</span>
                 <span className="text-[8px] px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 rounded border border-emerald-500/40">AI CONSENSUS</span>
               </div>
-              <LinkItem to="/consensus" aliases={['/consensus-scanner', '/confluence']} icon={Crosshair} label="Consensus Scanner" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem collapsed={sidebarCollapsed} to="/consensus" aliases={['/consensus-scanner', '/confluence']} icon={Crosshair} label="Consensus Scanner" onClick={() => setMobileNavOpen(false)} />
 
-              <div className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider my-3 px-2 flex items-center justify-between">
+              <div className={`text-[10px] font-bold text-emerald-400 uppercase tracking-wider my-3 px-2 flex items-center justify-between ${sidebarCollapsed ? 'lg:hidden' : ''}`}>
                 <span>Option Buying Alpha</span>
                 <span className="text-[8px] px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 rounded border border-emerald-500/40 font-mono font-bold">
                   NIFTY • BNF
                 </span>
               </div>
-              <LinkItem to="/option-sniffer" aliases={['/option-buying', '/options-sniffer', '/options', '/option-f']} icon={Radio} label="Option Sniffer" onClick={() => setMobileNavOpen(false)} />
-              <LinkItem to="/option-sniffer-advance" aliases={['/option-advance', '/options-advance']} icon={Zap} label="Option Sniffer Advance" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem collapsed={sidebarCollapsed} to="/option-sniffer" aliases={['/option-buying', '/options-sniffer', '/options', '/option-f']} icon={Radio} label="Option Sniffer" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem collapsed={sidebarCollapsed} to="/option-sniffer-advance" aliases={['/option-advance', '/options-advance']} icon={Zap} label="Option Sniffer Advance" onClick={() => setMobileNavOpen(false)} />
 
 
               <div className="mt-auto pt-6">
                 <div className="border-t border-gray-800 pt-4">
-                  <LinkItem to="/profile" icon={Settings} label="Config & Profile" onClick={() => setMobileNavOpen(false)} />
-                  <LinkItem to="/help" icon={HelpCircle} label="Help & User Guide" onClick={() => setMobileNavOpen(false)} />
+                  <LinkItem collapsed={sidebarCollapsed} to="/profile" icon={Settings} label="Config & Profile" onClick={() => setMobileNavOpen(false)} />
+                  <LinkItem collapsed={sidebarCollapsed} to="/help" icon={HelpCircle} label="Help & User Guide" onClick={() => setMobileNavOpen(false)} />
                 </div>
               </div>
             </div>
