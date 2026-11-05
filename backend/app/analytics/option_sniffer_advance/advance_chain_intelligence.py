@@ -115,10 +115,33 @@ class AdvanceChainIntelligence:
                 pass
 
         n_bars = len(bars)
+        orb_high = 0.0
+        orb_low = 0.0
+        day_high = 0.0
+        day_low = 0.0
+        high_bar_idx = 0
+        low_bar_idx = 0
+        range_10m_pts = 0.0
+        range_10m_pct = 0.0
+
+        if n_bars >= 1:
+            orb_bars = [
+                b for b in bars
+                if "09:15" <= str(b.get("timestamp") or "")[11:16] <= "09:29"
+            ]
+            if orb_bars:
+                orb_high = round(max(float(b["high"]) for b in orb_bars), 2)
+                orb_low = round(min(float(b["low"]) for b in orb_bars), 2)
+
         if n_bars >= 28:
             highs = np.array([float(b["high"]) for b in bars], dtype=float)
             lows = np.array([float(b["low"]) for b in bars], dtype=float)
             closes = np.array([float(b["close"]) for b in bars], dtype=float)
+
+            day_high = round(float(np.max(highs)), 2)
+            day_low = round(float(np.min(lows)), 2)
+            high_bar_idx = int(np.argmax(highs))
+            low_bar_idx = int(np.argmin(lows))
 
             adx_res = compute_wilder_adx_canonical(highs, lows, closes, 14)
             adx_14 = round(float(adx_res[0]), 2) if adx_res else 0.0
@@ -129,6 +152,9 @@ class AdvanceChainIntelligence:
             atr_rat = round(float(compute_atr_ratio(highs, lows, closes, 5, 20) or 1.0), 3)
             tpb = round(float(np.mean((highs + lows + closes) / 3.0)), 2)
             spot = float(closes[-1]) if fallback_spot <= 0 else fallback_spot
+
+            range_10m_pts = round(float(np.max(highs[-10:]) - np.min(lows[-10:])), 2)
+            range_10m_pct = round((range_10m_pts / spot) * 100.0, 4) if spot > 0 else 0.0
 
             # Annualized 15-minute Realized Volatility (RV_15m_ann) from 1-minute log returns
             recent_c = closes[-16:]
@@ -158,6 +184,14 @@ class AdvanceChainIntelligence:
             "display_bars_count": n_bars,
             "spot_price": round(spot, 2),
             "session_tpb": tpb,
+            "orb_high": orb_high,
+            "orb_low": orb_low,
+            "day_high": day_high,
+            "day_low": day_low,
+            "high_bar_idx": high_bar_idx,
+            "low_bar_idx": low_bar_idx,
+            "range_10m_pts": range_10m_pts,
+            "range_10m_pct": range_10m_pct,
             "adx_14": adx_14,
             "plus_di": plus_di,
             "minus_di": minus_di,
@@ -350,6 +384,14 @@ class AdvanceChainIntelligence:
             "underlying": u_sym,
             "spot_price": round(spot, 2),
             "session_tpb": idx_tech["session_tpb"],
+            "orb_high": idx_tech.get("orb_high", 0.0),
+            "orb_low": idx_tech.get("orb_low", 0.0),
+            "day_high": idx_tech.get("day_high", 0.0),
+            "day_low": idx_tech.get("day_low", 0.0),
+            "high_bar_idx": idx_tech.get("high_bar_idx", 0),
+            "low_bar_idx": idx_tech.get("low_bar_idx", 0),
+            "range_10m_pts": idx_tech.get("range_10m_pts", 0.0),
+            "range_10m_pct": idx_tech.get("range_10m_pct", 0.0),
             "completed_bars_count": idx_tech["completed_bars_count"],
             "display_bars_count": idx_tech["display_bars_count"],
             "synthetic_future": synthetic_future,

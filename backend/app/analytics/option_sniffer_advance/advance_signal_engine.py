@@ -151,6 +151,36 @@ class AdvanceSignalEngine:
         syn_basis = float(chain_intel.get("synthetic_basis_bps") or 0.0)
         pcr_oi = float(chain_intel.get("pcr_oi") or 1.0)
         completed_bars = int(chain_intel.get("completed_bars_count") or 0)
+        session_tpb = float(chain_intel.get("session_tpb") or spot_ltp)
+        orb_high = float(chain_intel.get("orb_high") or 0.0)
+        orb_low = float(chain_intel.get("orb_low") or 0.0)
+        day_high = float(chain_intel.get("day_high") or spot_ltp)
+        day_low = float(chain_intel.get("day_low") or spot_ltp)
+        high_bar_idx = int(chain_intel.get("high_bar_idx") or 0)
+        low_bar_idx = int(chain_intel.get("low_bar_idx") or 0)
+        range_10m_pts = float(chain_intel.get("range_10m_pts") or 0.0)
+        range_10m_pct = float(chain_intel.get("range_10m_pct") or 0.0)
+
+        has_orb = (orb_high > 0.0) and (orb_low > 0.0)
+        is_day_high_breakout = (day_high > 0.0) and (spot_ltp >= day_high - 2.0)
+        is_day_low_breakdown = (day_low > 0.0) and (spot_ltp <= day_low + 2.0)
+        rally_from_low = ((spot_ltp - day_low) / day_low * 100.0) if day_low > 0 else 0.0
+        pullback_from_high = ((day_high - spot_ltp) / day_high * 100.0) if day_high > 0 else 0.0
+
+        is_v_bottom_recovery = (
+            (rally_from_low >= 0.35)
+            and (low_bar_idx > high_bar_idx)
+            and (pullback_from_high <= 0.15)
+            and (spot_ltp >= session_tpb)
+        )
+        is_v_top_rejection = (
+            (pullback_from_high >= 0.35)
+            and (high_bar_idx > low_bar_idx)
+            and (rally_from_low <= 0.15)
+            and (spot_ltp <= session_tpb)
+        )
+        is_orb_broken_ce = (not has_orb) or (spot_ltp >= orb_high) or is_v_bottom_recovery
+        is_orb_broken_pe = (not has_orb) or (spot_ltp <= orb_low) or is_v_top_rejection
 
         strike_int = float(STRIKE_INTERVALS.get(u_sym, 50.0))
         if spot_ltp > 0 and strike > 0:
@@ -173,6 +203,7 @@ class AdvanceSignalEngine:
         is_short_open = len(u_open_short) > 0
         parent_long_entry_time = str(u_open_long[0].get("entry_time") or "") if is_long_open else ""
         parent_long_opt_type = str(u_open_long[0].get("option_type") or "").upper().strip() if is_long_open else ""
+        parent_long_mfe = float(u_open_long[0].get("mfe_pct") or 0.0) if is_long_open else 0.0
 
         long_open_elapsed_sec = 99999.0
         if is_long_open:
@@ -197,7 +228,7 @@ class AdvanceSignalEngine:
             and ((otm_strikes >= -SHORT_MAX_ITM_STRIKES) or (kaufman_er <= 0.15))
         )
 
-        is_contraction_short = (not is_long_open) and (atr_ratio <= CONTRACTION_ATR_RATIO_MAX) and (kaufman_er < CONTRACTION_ER_MAX)
+        is_contraction_short = (not is_long_open) and (atr_ratio <= CONTRACTION_ATR_RATIO_MAX) and (kaufman_er <= 0.20)
         is_wave2_exhaustion_short = is_post_harvest_after_close and (
             atr_ratio <= POST_HARVEST_EXHAUSTION_ATR_RATIO_MAX or kaufman_er <= POST_HARVEST_EXHAUSTION_ER_MAX
         )
@@ -213,6 +244,8 @@ class AdvanceSignalEngine:
             and (not parent_long_opt_type or opt_type == parent_long_opt_type)
             and (long_open_elapsed_sec >= DIAGONAL_MIN_LONG_ELAPSED_SECONDS)
             and (otm_strikes >= DIAGONAL_MIN_OTM_STRIKES)
+            and (parent_long_mfe >= 10.0)
+            and (kaufman_er <= 0.28)
         )
 
         is_short_regime = can_short_extrinsic and (
@@ -307,18 +340,32 @@ class AdvanceSignalEngine:
                         f"Wave-2 Exhaustion Anti-Churn: 1 Exhaustion Short already executed for harvested {u_sym} {opt_type} wave"
                     )
             if strategy_mode == STRATEGY_CONTRACTION_THETA_SELLER:
+                if otm_strikes < 0.20:
+                    rejection_reasons.append(
+                        f"Contraction Short Strike Discipline: Strike {strike:.0f} is too close/ITM ({otm_strikes:+.2f} strikes OTM < +0.20 min)"
+                    )
                 if vrp < 0.0:
                     rejection_reasons.append(
                         f"Contraction Short VRP Guard: VRP ({vrp:+.2f}% < 0.0%) indicates underpriced IV relative to 15m RV ({rv_15m_ann:.1f}%)"
                     )
-                if opt_type == "CE" and (plus_di - minus_di) > 8.0 and kaufman_er >= 0.30:
-                    rejection_reasons.append(
-                        f"Contraction Short Trend Conflict: +DI ({plus_di:.1f}) > -DI ({minus_di:.1f}) + 8.0 with ER {kaufman_er:.2f}; naked SELL_CE blocked"
-                    )
-                elif opt_type == "PE" and (minus_di - plus_di) > 8.0 and kaufman_er >= 0.30:
-                    rejection_reasons.append(
-                        f"Contraction Short Trend Conflict: -DI ({minus_di:.1f}) > +DI ({plus_di:.1f}) + 8.0 with ER {kaufman_er:.2f}; naked SELL_PE blocked"
-                    )
+                if opt_type == "CE":
+                    if has_orb and spot_ltp > orb_high:
+                        rejection_reasons.append(
+                            f"Contraction Short ORB Breakout Guard: Spot ({spot_ltp:.1f}) > ORB High ({orb_high:.1f}); naked SELL_CE blocked"
+                        )
+                    elif (plus_di - minus_di) > 4.0 or kaufman_er > 0.20:
+                        rejection_reasons.append(
+                            f"Contraction Short Trend Conflict: +DI ({plus_di:.1f}) vs -DI ({minus_di:.1f}) with ER {kaufman_er:.2f}; naked SELL_CE blocked"
+                        )
+                elif opt_type == "PE":
+                    if has_orb and spot_ltp < orb_low:
+                        rejection_reasons.append(
+                            f"Contraction Short ORB Breakdown Guard: Spot ({spot_ltp:.1f}) < ORB Low ({orb_low:.1f}); naked SELL_PE blocked"
+                        )
+                    elif (minus_di - plus_di) > 4.0 or kaufman_er > 0.20:
+                        rejection_reasons.append(
+                            f"Contraction Short Trend Conflict: -DI ({minus_di:.1f}) vs +DI ({plus_di:.1f}) with ER {kaufman_er:.2f}; naked SELL_PE blocked"
+                        )
             recent_short_loss = AdvanceDB.get_recent_book_loss_cooldown(
                 book_type=BOOK_SHORT_SELL,
                 underlying=u_sym,
@@ -344,13 +391,25 @@ class AdvanceSignalEngine:
                 rejection_reasons.append(
                     f"Minimum Premium Discipline: Option ask ₹{ask:.2f} < ₹35.00 institutional floor"
                 )
-            if 0.0 < raw_delta_abs < 0.32:
+            if 0.0 < raw_delta_abs < 0.35 or raw_delta_abs > 0.72:
                 rejection_reasons.append(
-                    f"Minimum Delta Discipline: |Delta| {raw_delta_abs:.2f} < 0.32 institutional floor"
+                    f"Institutional Delta Discipline: |Delta| {raw_delta_abs:.2f} outside [0.35, 0.72] convexity band"
                 )
-            if otm_strikes > 2.5:
+            if abs(otm_strikes) > 2.5:
                 rejection_reasons.append(
-                    f"Far-OTM Strike Discipline: Strike {strike:.0f} is {otm_strikes:.2f} strikes OTM (> 2.50 max)"
+                    f"ATM Proximity Discipline: Strike {strike:.0f} is {otm_strikes:+.2f} strikes from spot (exceeds ±2.50 max)"
+                )
+            if opt_type == "CE" and not is_orb_broken_ce:
+                rejection_reasons.append(
+                    f"Inside Opening Range Box: Spot ({spot_ltp:.1f}) < ORB High ({orb_high:.1f}) without chronological V-bottom; Long Call blocked"
+                )
+            elif opt_type == "PE" and not is_orb_broken_pe:
+                rejection_reasons.append(
+                    f"Inside Opening Range Box: Spot ({spot_ltp:.1f}) > ORB Low ({orb_low:.1f}) without chronological V-top; Long Put blocked"
+                )
+            if completed_bars >= 10 and 0.0 < range_10m_pct < 0.08:
+                rejection_reasons.append(
+                    f"10m Compression Shield: Underlying 10m range {range_10m_pts:.1f} pts ({range_10m_pct:.3f}% < 0.080%) indicates dead chop"
                 )
             if is_post_harvest_after_close:
                 rem_m = max(1, int(recent_harvest.get("remaining_seconds", 1800)) // 60)
@@ -368,6 +427,21 @@ class AdvanceSignalEngine:
                     f"Long Book Post-Loss Cooldown: Recent {u_sym} {opt_type} {recent_long_loss['exit_reason']} "
                     f"({recent_long_loss['remaining_seconds']}s cooldown remaining)"
                 )
+            opp_opt_type = "PE" if opt_type == "CE" else "CE"
+            recent_opp_loss = AdvanceDB.get_recent_book_loss_cooldown(
+                book_type=BOOK_LONG_BUY,
+                underlying=u_sym,
+                option_type=opp_opt_type,
+                as_of_time=now_dt,
+                sl_cooldown_seconds=1800,
+                stagnation_cooldown_seconds=1800,
+            )
+            is_extrema_break = is_day_high_breakout if opt_type == "CE" else is_day_low_breakdown
+            if recent_opp_loss and not (is_extrema_break and kaufman_er >= 0.38):
+                rem_flip_m = max(1, int(recent_opp_loss["remaining_seconds"]) // 60)
+                rejection_reasons.append(
+                    f"Anti-Ping-Pong Lockout: Active {rem_flip_m}m flip cooldown after recent {u_sym} {opp_opt_type} loss"
+                )
             if plus_di > 0 or minus_di > 0:
                 if opt_type == "CE" and minus_di > plus_di:
                     rejection_reasons.append(
@@ -377,14 +451,20 @@ class AdvanceSignalEngine:
                     rejection_reasons.append(
                         f"Counter-trend Long Put blocked: +DI ({plus_di:.1f}) > -DI ({minus_di:.1f})"
                     )
-            if adx_14 > 0 and adx_14 < 16.0 and rv_15m_ann < 8.0 and vrp > 6.0:
+                elif abs(plus_di - minus_di) < 5.0:
+                    rejection_reasons.append(
+                        f"Directional Equilibrium Chop: |+DI ({plus_di:.1f}) - -DI ({minus_di:.1f})| < 5.0 minimum spread"
+                    )
+            if rv_15m_ann < 8.5 and vrp > 6.0 and not is_extrema_break:
                 rejection_reasons.append(
-                    f"Low-RV Gamma Pinning Trap blocked for Long Buying (ADX={adx_14:.1f}, RV_15m={rv_15m_ann:.1f}%, VRP=+{vrp:.1f}%)"
+                    f"Low-RV Gamma Pinning Trap blocked for Long Buying (RV_15m={rv_15m_ann:.1f}% < 8.5%, VRP=+{vrp:.1f}% > +6.0%)"
                 )
             if cal_prob < 0.48 or exp_net_ret < 1.5:
                 rejection_reasons.append(f"Model conviction below Long Sniper hurdle (P={cal_prob:.2f}, E[R]={exp_net_ret:.1f}%)")
-            if kaufman_er < 0.25 and adx_14 < 18.0:
-                rejection_reasons.append(f"Trend expansion insufficient for Long Buying (ADX={adx_14:.1f}, ER={kaufman_er:.2f})")
+            if kaufman_er < 0.28 or adx_14 < 18.0:
+                rejection_reasons.append(
+                    f"Trend expansion insufficient for Long Buying (requires ADX >= 18.0 & ER >= 0.28; got ADX={adx_14:.1f}, ER={kaufman_er:.2f})"
+                )
 
         # 6. Circuit Breaker & Cooldown Check
         cb = AdvanceDB.get_circuit_breaker_telemetry(as_of_time=now_dt)
