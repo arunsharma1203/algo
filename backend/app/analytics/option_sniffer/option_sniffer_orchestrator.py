@@ -296,18 +296,39 @@ class OptionSnifferOrchestrator:
                         buy_votes = sum(1 for t in unanimous if str(t.get("direction", "")).upper() in ("BUY", "BULLISH"))
                         sell_votes = sum(1 for t in unanimous if str(t.get("direction", "")).upper() in ("SELL", "BEARISH"))
 
+                        is_conflicted = (conflicts_count > (unanimous_count * 2)) and (conflicts_count > 5)
+
                         c_dir = "NEUTRAL"
-                        if unanimous_count >= 2:
+                        c_conf = float(unanimous[0].get("composite_score", 50.0)) if unanimous else 50.0
+                        if unanimous_count >= 2 or (unanimous_count == 1 and conflicts_count == 0 and not is_conflicted):
                             if buy_votes > sell_votes and buy_votes > 0:
                                 c_dir = "BULLISH"
                             elif sell_votes > buy_votes and sell_votes > 0:
                                 c_dir = "BEARISH"
-
-                        is_conflicted = (conflicts_count > (unanimous_count * 2)) and (conflicts_count > 5)
+                        elif unanimous_count == 0 and not is_conflicted:
+                            # When 0 stock swing trades cross unanimous threshold, check if Qlib solo, Legacy solo,
+                            # and Intraday Index Regime are all aligned in the same direction (prevents 42.8% dead-zone on index breakouts)
+                            qlib_solo = latest_c.get("qlib_solo") or []
+                            legacy_solo = latest_c.get("legacy_solo") or []
+                            q_buy = sum(1 for t in qlib_solo[:10] if str(t.get("direction", "")).upper() in ("BUY", "BULLISH"))
+                            q_sell = sum(1 for t in qlib_solo[:10] if str(t.get("direction", "")).upper() in ("SELL", "BEARISH"))
+                            l_buy = sum(1 for t in legacy_solo[:10] if str(t.get("direction", "")).upper() in ("BUY", "BULLISH"))
+                            l_sell = sum(1 for t in legacy_solo[:10] if str(t.get("direction", "")).upper() in ("SELL", "BEARISH"))
+                            intra_reg = str(
+                                macro_info.get("intraday_regime_verdict")
+                                or (latest_c.get("macro_regime") or {}).get("intraday_verdict")
+                                or ""
+                            ).upper()
+                            if q_buy > q_sell and l_buy > l_sell and "BULL" in intra_reg:
+                                c_dir = "BULLISH"
+                                c_conf = 58.0
+                            elif q_sell > q_buy and l_sell > l_buy and "BEAR" in intra_reg:
+                                c_dir = "BEARISH"
+                                c_conf = 58.0
 
                         upstream_signals = {
                             "consensus_direction": c_dir,
-                            "consensus_confidence": unanimous[0].get("composite_score", 50.0) if unanimous else 50.0,
+                            "consensus_confidence": c_conf,
                             "unanimous_count": unanimous_count,
                             "conflicts_count": conflicts_count,
                             "is_conflicted": is_conflicted,

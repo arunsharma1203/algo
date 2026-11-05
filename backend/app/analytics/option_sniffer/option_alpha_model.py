@@ -182,42 +182,41 @@ class OptionAlphaModel:
             z_ext = abs(vwap_dist) / max(0.10, spot_atr_pct)
 
         base_edge = 0.38
+        eff_up_conf = max(up_conf, 0.62) if (is_breakout and up_align >= 0.5) else up_conf
         if is_call:
-            is_near_day_high = (pullback >= -0.12 and vwap_dist > 0 and ret3 >= -0.02)
-            if up_align > 0.7 and (rsi >= 50 or vwap_dist >= 0) and vwap_dist > -0.15:
+            if (up_align > 0.7 or (is_breakout and up_align >= 0.5)) and (rsi >= 50 or vwap_dist >= 0) and vwap_dist > -0.15:
                 # Sweet spot vs Overextension:
-                # Breakout candles or Zone-1 Day High pressure are exempt from Z_ext penalty
-                if is_breakout or is_near_day_high or z_ext <= 1.6:
+                # Confirmed CRB-I / Day High breakouts are exempt from Z_ext penalty;
+                # non-breakout entries smoothly taper from +0.14 (Z <= 1.6) to +0.06 (Z = 2.3)
+                if is_breakout or z_ext <= 1.6:
                     base_edge += 0.14
-                elif z_ext <= 2.5:
-                    # Smooth linear taper from +0.14 at z_ext=1.6 to +0.05 at z_ext=2.5 (no step-function cliff)
-                    base_edge += 0.14 - ((z_ext - 1.6) / 0.9) * 0.09
+                elif z_ext <= 2.3:
+                    base_edge += 0.14 - ((z_ext - 1.6) / 0.7) * 0.08
                 else:
-                    # Parabolic climax penalty (Z > 2.5)
-                    climax_pen = min(0.20, 0.10 * (z_ext - 2.5))
+                    # Parabolic climax penalty (Z > 2.3)
+                    climax_pen = min(0.20, 0.10 * (z_ext - 2.0))
                     base_edge -= climax_pen
             elif up_align < 0.3 or rsi < 46 or vwap_dist < -0.3:
                 base_edge -= 0.12
 
-            # Smooth extreme-RSI governor (if not breakout or pressing Day High): no cliff at RSI 72
-            if not (is_breakout or is_near_day_high) and rsi > 78.0:
-                base_edge -= min(0.08, (rsi - 78.0) * 0.008)
+            # Smooth extreme-RSI overbought governor (if not breakout): smooth taper above RSI 72 (no step-function cliff)
+            if not is_breakout and rsi > 72.0:
+                base_edge -= min(0.10, (rsi - 72.0) * 0.012)
         else:
-            is_near_day_low = (rally <= 0.12 and vwap_dist < 0 and ret3 <= 0.02)
-            if up_align > 0.7 and (rsi <= 50 or vwap_dist <= 0) and vwap_dist < 0.15:
-                if is_breakout or is_near_day_low or z_ext <= 1.6:
+            if (up_align > 0.7 or (is_breakout and up_align >= 0.5)) and (rsi <= 50 or vwap_dist <= 0) and vwap_dist < 0.15:
+                if is_breakout or z_ext <= 1.6:
                     base_edge += 0.14
-                elif z_ext <= 2.5:
-                    base_edge += 0.14 - ((z_ext - 1.6) / 0.9) * 0.09
+                elif z_ext <= 2.3:
+                    base_edge += 0.14 - ((z_ext - 1.6) / 0.7) * 0.08
                 else:
-                    climax_pen = min(0.20, 0.10 * (z_ext - 2.5))
+                    climax_pen = min(0.20, 0.10 * (z_ext - 2.0))
                     base_edge -= climax_pen
             elif up_align < 0.3 or rsi > 54 or vwap_dist > 0.3:
                 base_edge -= 0.12
 
-            # Smooth extreme-RSI oversold governor (if not breakout or pressing Day Low): no cliff at RSI 28
-            if not (is_breakout or is_near_day_low) and rsi < 22.0:
-                base_edge -= min(0.08, (22.0 - rsi) * 0.008)
+            # Smooth extreme-RSI oversold governor (if not breakout): smooth taper below RSI 28 (no step-function cliff)
+            if not is_breakout and rsi < 28.0:
+                base_edge -= min(0.10, (28.0 - rsi) * 0.012)
 
         # Spread friction penalty
         spread_penalty = max(0.0, (spread_pct - 1.0) * 0.03)
@@ -232,7 +231,7 @@ class OptionAlphaModel:
 
         structural_prob = max(
             0.10,
-            min(0.85, base_edge + (up_conf * 0.05) - spread_penalty - otm_penalty - low_delta_penalty),
+            min(0.85, base_edge + (eff_up_conf * 0.05) - spread_penalty - otm_penalty - low_delta_penalty),
         )
         raw_score = structural_prob
         calibrated_prob = structural_prob

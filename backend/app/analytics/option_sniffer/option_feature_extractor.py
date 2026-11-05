@@ -247,9 +247,13 @@ class OptionFeatureExtractor:
                     spot_ret_1 = round(rally_from_low_pct * 0.4, 2)
                     spot_ret_3 = round(rally_from_low_pct * 0.7, 2)
 
-        # India VIX & Macro Context
+        # India VIX & Macro Context (prefer live intraday_regime_verdict over 200-DMA swing regime_verdict)
         india_vix = float(macro_context.get("india_vix") or 13.5)
-        regime = str(macro_context.get("regime_verdict", "NEUTRAL_CHOP")).upper()
+        regime = str(
+            macro_context.get("intraday_regime_verdict")
+            or macro_context.get("regime_verdict")
+            or "NEUTRAL_CHOP"
+        ).upper()
         macro_bullish = 1.0 if "BULL" in regime else 0.0
         macro_bearish = 1.0 if "BEAR" in regime else 0.0
 

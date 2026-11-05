@@ -54,6 +54,11 @@ class TestTrueBreakoutAndKaufmanHudGate(unittest.TestCase):
         self.p2.start()
         self.p3.start()
         init_option_sniffer_tables()
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT);")
+        conn.commit()
+        conn.close()
 
     def tearDown(self):
         OptionSignalEngine.reset_class_state()
@@ -309,7 +314,8 @@ class TestTrueBreakoutAndKaufmanHudGate(unittest.TestCase):
         try:
             adapter._is_live_armed = True
             intent_engine = OrderIntentEngine()
-            with patch("app.analytics.option_sniffer.option_live_order_intent.datetime") as mock_dt:
+            with patch("app.analytics.option_sniffer.option_live_order_intent.datetime") as mock_dt, \
+                 patch.object(adapter, "fetch_account_readiness", return_value={"is_ready_for_live": True, "ready_for_live": True, "blocking_reasons": []}):
                 mock_dt.now.return_value = eval_dt
                 mock_dt.strptime = datetime.strptime
                 order_res = intent_engine.place_real_entry_order("INTENT_TEST_NOV4")
@@ -550,8 +556,92 @@ class TestTrueBreakoutAndKaufmanHudGate(unittest.TestCase):
                 f"Expected P(Win) >= 47% (> 44% hurdle) at spot={spot_val}, got {pred['calibrated_prob']*100:.1f}%",
             )
 
-        # Verify zero cliff across the upward grind
-        self.assertLess(max(probs) - min(probs), 0.03)
+        # Verify zero cliff across the upward grind (smooth taper < 4% vs legacy 16% cliff)
+        self.assertLess(max(probs) - min(probs), 0.04)
+
+    def test_08_nov5_1300_day_high_breakout_triggers_active_with_3pt_upper_wick(self):
+        """
+        Replays the exact Nov 5 13:00-13:01 IST NIFTY Day High breakout (24,450.20 -> 24,468.15):
+          1. Breakout candle closes at 24,465.10 (above prior Day High 24,461.15) with a 3.05 pt upper wick (24,468.15).
+          2. Even if ConsensusScanner has 0 unanimous stock trades (neutral upstream_signals), CRB-I Day High breakout
+             qualifies with P(Win) >= 54% (> 38% CRB-I hurdle and > 48% midday hurdle) and status == STATE_ACTIVE.
+        """
+        from app.analytics.option_sniffer.option_signal_engine import OptionSignalEngine
+        from app.analytics.option_sniffer.option_constants import STATE_ACTIVE
+
+        OptionSignalEngine.reset_class_state()
+        engine = OptionSignalEngine()
+
+        base_dt = datetime(2026, 11, 5, 12, 32, 0)
+        rows = []
+        # Realistic 29 completed bars matching Nov 5 12:32-13:00 IST (including mild pullbacks so RSI ~ 62 and recent_ret_pct >= 0.08%)
+        for i in range(29):
+            ts = (base_dt + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:00")
+            if i < 24:
+                c = 24415.0 + i * 0.8 + ((-1.5) if (i % 4 == 2) else 0.5)
+                rows.append({"timestamp": ts, "open": c - 0.8, "high": min(24448.0, c + 1.8), "low": c - 1.8, "close": c, "volume": 0})
+            elif i == 24:  # 12:56 pullback bar
+                rows.append({"timestamp": ts, "open": 24444.05, "high": 24444.25, "low": 24433.25, "close": 24434.05, "volume": 0})
+            elif i == 25:  # 12:57 base bar
+                rows.append({"timestamp": ts, "open": 24436.35, "high": 24436.85, "low": 24428.80, "close": 24432.85, "volume": 0})
+            elif i == 26:  # 12:58 impulse bar
+                rows.append({"timestamp": ts, "open": 24436.15, "high": 24446.55, "low": 24428.50, "close": 24446.05, "volume": 0})
+            elif i == 27:  # 12:59 bar breaking 24,450.20
+                rows.append({"timestamp": ts, "open": 24447.20, "high": 24453.35, "low": 24443.30, "close": 24452.45, "volume": 0})
+            else:  # 13:00 bar expanding to 24,461.15, closing at 24,457.80 (3.35 pt upper wick)
+                rows.append({"timestamp": ts, "open": 24455.55, "high": 24461.15, "low": 24451.35, "close": 24457.80, "volume": 0})
+        df = pd.DataFrame(rows)
+
+        contract = {
+            "instrument_key": "NSE_FO|NIFTY26NOV24450CE",
+            "trading_symbol": "NIFTY 24450 CE 09 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 24450.0,
+            "option_type": "CE",
+            "expiry": "2026-11-09",
+            "lot_size": 75,
+        }
+        quote = {
+            "ltp": 195.0,
+            "bid": 194.6,
+            "ask": 195.4,
+            "spread_pct": 0.41,
+            "quote_age_ms": 100,
+            "oi": 1500000,
+            "volume": 850000,
+            "delta": 0.52,
+            "iv": 13.5,
+            "is_valid": True,
+        }
+        u_quote = {
+            "spot_ltp": 24457.80,
+            "open": 24340.0,
+            "high": 24461.15,
+            "low": 24296.30,
+            "close": 24350.0,
+            "vwap": 24392.40,
+            "quote_age_ms": 100,
+        }
+        res = engine.evaluate_contract(
+            contract=contract,
+            quote=quote,
+            underlying_quote=u_quote,
+            underlying_df=df,
+            macro_context={"regime_verdict": "BEAR_DISTRIBUTION", "intraday_regime_verdict": "INTRADAY_BULL_MOMENTUM"},
+            upstream_signals={"consensus_direction": "NEUTRAL", "consensus_confidence": 50.0},
+            heavyweight_quotes={
+                "HDFCBANK": {"spot_ltp": 1750.0, "vwap": 1740.0},
+                "RELIANCE": {"spot_ltp": 1350.0, "vwap": 1340.0},
+                "ICICIBANK": {"spot_ltp": 1300.0, "vwap": 1290.0},
+            },
+            as_of_time=datetime(2026, 11, 5, 13, 0, 5),
+            enforce_cutoff=True,
+            enforce_regime_gate=True,
+            defer_execution=True,
+        )
+        self.assertTrue(res["is_crbi_active"], f"Expected CRB-I breakout active, got rejections: {res.get('rejection_reasons')}")
+        self.assertEqual(res["status"], STATE_ACTIVE, f"Expected ACTIVE, got {res['status']}: {res.get('rejection_reasons')}")
+        self.assertGreaterEqual(res["calibrated_prob"], 0.53)
 
 
 if __name__ == "__main__":

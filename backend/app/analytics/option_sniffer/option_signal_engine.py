@@ -165,8 +165,8 @@ class OptionSignalEngine:
         """
         Anti-Wick Sweep Guard:
         Verifies that breakout is confirmed by genuine candle structure rather than a 1-second spike.
-        For CE: Last candle close must be >= (u_high - 2.0).
-        For PE: Last candle close must be <= (u_low + 2.0).
+        For CE: Last candle close must be >= (u_high - 2.0), OR closing strictly above all prior bars' highs within 4.5/10.0 pts of the new wick high.
+        For PE: Last candle close must be <= (u_low + 2.0), OR closing strictly below all prior bars' lows within 4.5/10.0 pts of the new wick low.
         """
         if df is None or not hasattr(df, '__len__') or len(df) < 2:
             return True
@@ -174,10 +174,25 @@ class OptionSignalEngine:
         if close_col not in df.columns:
             return True
         last_c = float(df[close_col].iloc[-1])
+        tol = 10.0 if max(u_high, last_c) > 38000.0 else 4.5
         if opt_type == "CE":
-            return last_c >= (u_high - 2.0)
+            if last_c >= (u_high - 2.0):
+                return True
+            high_col = "high" if "high" in df.columns else "High"
+            if high_col in df.columns and len(df) >= 3:
+                prior_high = float(df[high_col].iloc[:-1].astype(float).max())
+                if last_c > prior_high and last_c >= (u_high - tol):
+                    return True
+            return False
         elif opt_type == "PE":
-            return last_c <= (u_low + 2.0)
+            if last_c <= (u_low + 2.0):
+                return True
+            low_col = "low" if "low" in df.columns else "Low"
+            if low_col in df.columns and len(df) >= 3:
+                prior_low = float(df[low_col].iloc[:-1].astype(float).min())
+                if last_c < prior_low and last_c <= (u_low + tol):
+                    return True
+            return False
         return True
 
     def __init__(self, model: Optional[OptionAlphaModel] = None):
@@ -556,16 +571,21 @@ class OptionSignalEngine:
             b_composite = 1.0
         is_intermarket_divergent = abs(b_composite) < INTERMARKET_BREADTH_MIN_RATIO
 
-        # Breakout status (Pillar 3: Eliminates 5-point random wick sweeps)
+        # Breakout status (Pillar 3: Eliminates random wick sweeps while permitting natural <=4.5pt / <=10pt upper/lower wicks on fresh Day High/Low expansion candles)
+        breakout_wick_tol = 10.0 if is_banknifty else 4.5
+        raw_u_high = float(underlying_quote.get("high") or u_high)
+        raw_u_low = float(underlying_quote.get("low") or u_low)
         is_day_high_breakout = (
-            (spot_ltp >= u_high - 2.0)
+            (spot_ltp >= u_high - breakout_wick_tol)
+            and (spot_ltp >= raw_u_high - breakout_wick_tol)
             and (recent_ret_pct >= 0.05)
             and (drift_from_vwap >= 0.02)
             and is_candle_confirmed_high
             and is_volume_confirmed
         )
         is_day_low_breakdown = (
-            (spot_ltp <= u_low + 2.0)
+            (spot_ltp <= u_low + breakout_wick_tol)
+            and (spot_ltp <= raw_u_low + breakout_wick_tol)
             and (recent_ret_pct <= -0.05)
             and (drift_from_vwap <= -0.02)
             and is_candle_confirmed_low
@@ -605,7 +625,11 @@ class OptionSignalEngine:
         is_chaotic_chop = (er_15m < active_er_threshold)
 
         # In-Range determination (Spot between day high and day low boundaries)
-        is_in_day_range = (spot_ltp > (u_low + 4.0)) and (spot_ltp < (u_high - 4.0))
+        is_in_day_range = (
+            ((spot_ltp > (u_low + 4.0)) or (spot_ltp > (raw_u_low + 4.0)))
+            and ((spot_ltp < (u_high - 4.0)) or (spot_ltp < (raw_u_high - 4.0)))
+            and not (is_day_high_breakout or is_day_low_breakdown)
+        )
 
         # Strong independent underlying expansion check (reversal-immune & ORB-breakout verified)
         is_strong_underlying_bear = ((drift_from_open <= -0.30) or (pullback_from_high <= -0.30)) and (recent_ret_pct <= 0.08) and not is_bear_reversal_broken and not is_trapped_inside_orb

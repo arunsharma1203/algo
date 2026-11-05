@@ -629,27 +629,28 @@ export default function OptionSniffer() {
     const gate4Pass = liquidContracts.length > 0;
 
     // 5. Gate 5: Opening Range (09:15-09:30 ORB) & Structural Zone (Zone 1 Breakout / Zone 2A ORB Retest)
+    const hasBnfCandidates = candidates.some(c => String(c.underlying || c.trading_symbol || '').toUpperCase().includes('BANK'));
     const orbAccepted = Boolean(ms.orb_status?.is_accepted);
-    const zonePass = Boolean(niftyChart.zonePass || bankniftyChart.zonePass);
+    const zonePass = Boolean(niftyChart.zonePass || (hasBnfCandidates && bankniftyChart.zonePass));
     const gate5Pass = isTradingWin && orbAccepted && zonePass;
     const activeZoneText = niftyChart.zonePass
       ? `NIFTY ${niftyChart.zoneLabel}`
-      : (bankniftyChart.zonePass ? `BNF ${bankniftyChart.zoneLabel}` : niftyChart.zoneLabel);
+      : ((hasBnfCandidates && bankniftyChart.zonePass) ? `BNF ${bankniftyChart.zoneLabel}` : niftyChart.zoneLabel);
 
-    // 6. Gate 6: Trend Efficiency & Chop / Climax Shield (Reads both NIFTY & BANKNIFTY underlyings + guards cold 0.45 placeholder)
+    // 6. Gate 6: Trend Efficiency & Chop / Climax Shield (Synchronized with active monitored underlyings & Top Banner ms.kaufman_er)
     const maxCompletedBars = Math.max(
       Number(niftyIntel.completed_bars_count || 0),
-      Number(bnfIntel.completed_bars_count || 0)
+      hasBnfCandidates ? Number(bnfIntel.completed_bars_count || 0) : 0
     );
     const rawMsEr = (isTradingWin || maxCompletedBars > 0) ? Number(ms.kaufman_er || 0) : 0;
     const erVal = Math.max(
       rawMsEr,
       Number(niftyIntel.kaufman_er || 0),
-      Number(bnfIntel.kaufman_er || 0)
+      hasBnfCandidates ? Number(bnfIntel.kaufman_er || 0) : 0
     );
     const adxVal = Math.max(
       Number(niftyIntel.adx_14 || 0),
-      Number(bnfIntel.adx_14 || 0)
+      hasBnfCandidates ? Number(bnfIntel.adx_14 || 0) : 0
     );
     const erHurdle = isArmed ? 0.35 : 0.28;
     const isChopBlocked = marketRegime?.regime === 'RANGEBOUND_CHOP' || marketRegime?.shield === 'SHIELD_PAUSED';
