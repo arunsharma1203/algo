@@ -199,6 +199,11 @@ def get_upstox_token_status_endpoint(verify_live: bool = False):
     Returns the real-time health and expiration status of the Upstox market data token.
     Used by frontend banner to prompt token re-entry and lock execution on auth failure.
     """
+    try:
+        from app.data.upstox_token_automator import UpstoxTokenAutomator
+        UpstoxTokenAutomator.ensure_background_daemon_started()
+    except Exception:
+        pass
     from app.data.upstox_provider import get_upstox_token_status
     conn = sqlite3.connect(get_db_path(), timeout=5.0)
     cur = conn.cursor()
@@ -339,11 +344,15 @@ def smart_activate_upstox_token(payload: dict):
     return UpstoxTokenAutomator.smart_exchange_or_activate(raw_input, sync_both_slots=sync_both)
 
 
-@router.post("/upstox/request-mobile-approval")
-def request_upstox_v3_mobile_approval():
-    """Triggers Upstox V3 Token Request API for 1-Tap approval on Upstox Mobile App / WhatsApp."""
+@router.post("/upstox/run-auto-login")
+def run_upstox_headless_auto_login():
+    """
+    Runs 100% autonomous headless Chrome login using saved Mobile Number + 6-Digit PIN + TOTP Secret,
+    exchanges the OAuth code, and activates both Market Data & Algo Trading tokens.
+    """
     from app.data.upstox_token_automator import UpstoxTokenAutomator
-    return UpstoxTokenAutomator.request_v3_mobile_approval()
+    return UpstoxTokenAutomator.run_headless_auto_login(trigger_source="100% Auto-Login Engine")
+
 
 
 @router.post("/upstox/webhook")

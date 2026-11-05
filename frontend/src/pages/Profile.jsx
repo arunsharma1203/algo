@@ -19,6 +19,8 @@ export default function Profile() {
   const [upstoxRateLimits, setUpstoxRateLimits] = useState(null);
   const [upstoxTokenStatus, setUpstoxTokenStatus] = useState(null);
   const [automatorStatus, setAutomatorStatus] = useState(null);
+  const [mobileNumberInput, setMobileNumberInput] = useState('');
+  const [pinInput, setPinInput] = useState('');
   const [totpSecretInput, setTotpSecretInput] = useState('');
   const [showTotpVault, setShowTotpVault] = useState(false);
   const [smartInput, setSmartInput] = useState('');
@@ -468,21 +470,25 @@ export default function Profile() {
     }
   };
 
-  const handleRequestMobileApproval = async () => {
+  const handleRunAutoLoginNow = async () => {
     setAutomatorBusy(true);
-    setAutomatorFeedback(null);
+    setAutomatorFeedback({
+      status: 'info',
+      message: '🤖 Running 100% Autonomous Headless Login in the background (Mobile -> TOTP -> PIN -> Dual-Token Sync)...',
+    });
     try {
       await fetch(`${API_BASE}/settings/upstox`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(upstox)
       });
-      const res = await fetch(`${API_BASE}/settings/upstox/request-mobile-approval`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/settings/upstox/run-auto-login`, { method: 'POST' });
       const data = await res.json();
       setAutomatorFeedback(data);
       refreshUpstoxStatus();
+      refreshUpstoxRateLimits();
     } catch (e) {
-      setAutomatorFeedback({ status: 'error', message: 'Failed to contact backend for mobile approval request.' });
+      setAutomatorFeedback({ status: 'error', message: 'Failed to contact backend for autonomous login.' });
     } finally {
       setAutomatorBusy(false);
     }
@@ -501,27 +507,52 @@ export default function Profile() {
     } catch (e) {}
   };
 
-  const handleSaveTotpSecret = async (clear = false) => {
-    setAutomatorBusy(true);
+  const handleToggleAutoLogin = async (nextVal) => {
     try {
       const res = await fetch(`${API_BASE}/settings/upstox/automator-config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ totp_secret: clear ? '__CLEAR__' : totpSecretInput }),
+        body: JSON.stringify({ auto_login_enabled: nextVal }),
+      });
+      if (res.ok) {
+        setAutomatorStatus(await res.json());
+      }
+    } catch (e) {}
+  };
+
+  const handleSaveAutoLoginVault = async (clear = false) => {
+    setAutomatorBusy(true);
+    try {
+      const payload = clear
+        ? { mobile_number: '__CLEAR__', pin: '__CLEAR__', totp_secret: '__CLEAR__' }
+        : {
+            ...(mobileNumberInput.trim() ? { mobile_number: mobileNumberInput.trim() } : {}),
+            ...(pinInput.trim() ? { pin: pinInput.trim() } : {}),
+            ...(totpSecretInput.trim() ? { totp_secret: totpSecretInput.trim() } : {}),
+            auto_login_enabled: true,
+          };
+      const res = await fetch(`${API_BASE}/settings/upstox/automator-config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       });
       if (res.ok) {
         const next = await res.json();
         setAutomatorStatus(next);
+        setMobileNumberInput('');
+        setPinInput('');
         setTotpSecretInput('');
         setAutomatorFeedback({
           status: 'success',
           message: clear
-            ? 'Local TOTP secret cleared.'
-            : '✅ Built-in 6-Digit TOTP Authenticator activated! Your live code now auto-copies when clicking 1-Click Login.',
+            ? 'Auto-Login Vault credentials cleared.'
+            : next.auto_login_ready
+            ? '✅ 100% Automatic Morning Login ARMED! The system will now refresh both Upstox tokens on its own every morning.'
+            : '✅ Saved! Fill any remaining vault fields (Mobile + 6-Digit PIN + TOTP Secret) to arm 100% Zero-Click Morning Login.',
         });
       }
     } catch (e) {
-      setAutomatorFeedback({ status: 'error', message: 'Could not save TOTP configuration.' });
+      setAutomatorFeedback({ status: 'error', message: 'Could not save Auto-Login Vault configuration.' });
     } finally {
       setAutomatorBusy(false);
     }
@@ -884,72 +915,98 @@ export default function Profile() {
                   />
                 </div>
 
-                {/* ISOLATED ZERO COPY-PASTE DAILY TOKEN AUTOMATOR HUB */}
+                {/* ISOLATED ZERO COPY-PASTE & ZERO-CLICK DAILY TOKEN AUTOMATOR HUB */}
                 <div className="md:col-span-2 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-indigo-500/40 rounded-xl p-4 text-white shadow-md space-y-3">
                   <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-800 pb-3">
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-xs font-black tracking-wide text-emerald-400 uppercase flex items-center gap-1">
-                          <Zap size={14} className="text-yellow-400" /> Zero Copy-Paste Daily Token Automator
+                          <Zap size={14} className="text-yellow-400" /> Autonomous Daily Token Automator
                         </span>
                         <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
                           automatorStatus?.tokens_in_sync
                             ? 'bg-emerald-950/90 text-emerald-300 border-emerald-600/60'
                             : 'bg-amber-950/90 text-amber-300 border-amber-600/60'
                         }`}>
-                          {automatorStatus?.tokens_in_sync ? '✓ MARKET & ALGO SLOTS IN SYNC' : 'SLOTS SEPARATE'}
+                          {automatorStatus?.tokens_in_sync ? '✓ BOTH TOKENS ACTIVE & SYNCED' : 'SLOTS SEPARATE'}
+                        </span>
+                        <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
+                          automatorStatus?.auto_login_ready && automatorStatus?.auto_login_enabled
+                            ? 'bg-indigo-950/90 text-indigo-300 border-indigo-500/60'
+                            : 'bg-slate-800 text-slate-300 border-slate-600'
+                        }`}>
+                          {automatorStatus?.auto_login_ready
+                            ? (automatorStatus?.auto_login_enabled ? '🤖 100% AUTO-LOGIN ARMED' : '⏸️ AUTO-LOGIN PAUSED')
+                            : '⚙️ SETUP VAULT FOR ZERO-CLICK'}
                         </span>
                         {automatorStatus?.last_refresh_ist && (
                           <span className="text-[10px] font-mono text-slate-400">
-                            Last Synced: {automatorStatus.last_refresh_ist} ({automatorStatus.last_refresh_method || 'OAuth'})
+                            Synced: {automatorStatus.last_refresh_ist} ({automatorStatus.last_refresh_user || 'Upstox'})
                           </span>
                         )}
                       </div>
                       <p className="text-[11px] text-slate-300 mt-1">
-                        Click <strong>⚡ 1-Click Morning Login</strong> to open the Upstox popup. Once you enter your PIN, the popup automatically exchanges the code, populates <strong>both Market &amp; Algo tokens</strong> in SQLite, reconnects WebSocket V3, and closes itself!
+                        <strong>Zero-Click Mode:</strong> Save your Mobile, 6-Digit PIN &amp; TOTP Secret once in the vault and the backend refreshes both tokens <strong>on its own every morning</strong>. Or use <strong>⚡ 1-Click Popup Login</strong> (single step — no Step 2 needed).
                       </p>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      {automatorStatus?.auto_login_ready ? (
+                        <button
+                          type="button"
+                          onClick={handleRunAutoLoginNow}
+                          disabled={automatorBusy || automatorStatus?.auto_login_in_progress}
+                          className="bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs px-3.5 py-2 rounded-lg shadow-sm transition cursor-pointer flex items-center gap-1.5"
+                        >
+                          <Zap size={14} /> {automatorBusy ? 'Auto-Logging In...' : '🤖 Run Auto-Login Now'}
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         onClick={handleGenerateAuthUrl}
-                        className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs px-3.5 py-2 rounded-lg shadow-sm transition cursor-pointer flex items-center gap-1.5"
+                        className="bg-indigo-600 hover:bg-indigo-500 text-white font-black text-xs px-3.5 py-2 rounded-lg shadow-sm transition cursor-pointer flex items-center gap-1.5"
                       >
-                        <Zap size={14} /> 1-Click Morning Login
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleRequestMobileApproval}
-                        disabled={automatorBusy}
-                        className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs px-3 py-2 rounded-lg shadow-sm transition cursor-pointer flex items-center gap-1.5"
-                        title="Send 1-Tap approval push notification to your Upstox Mobile App / WhatsApp (Upstox V3 API)"
-                      >
-                        📲 1-Tap Phone Approval
+                        <Zap size={14} /> ⚡ 1-Click Popup Login
                       </button>
                       <button
                         type="button"
                         onClick={() => setShowTotpVault(v => !v)}
-                        className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 font-bold text-xs px-2.5 py-2 rounded-lg transition cursor-pointer"
+                        className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 font-bold text-xs px-3 py-2 rounded-lg transition cursor-pointer"
                       >
-                        {automatorStatus?.has_totp_secret ? `🔐 TOTP: ${automatorStatus.live_totp || '••••••'} (${automatorStatus.totp_remaining_sec || 0}s)` : '🔐 Setup Built-in TOTP'}
+                        {automatorStatus?.auto_login_ready
+                          ? `🔐 Vault Armed (TOTP: ${automatorStatus.live_totp || '••••••'})`
+                          : '🤖 Setup 100% Auto-Login Vault'}
                       </button>
                     </div>
                   </div>
 
                   {/* Dual-Slot Auto-Sync Toggle & Live TOTP Copy Bar */}
                   <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-                    <label className="flex items-center space-x-2 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={automatorStatus?.sync_both_slots !== false}
-                        onChange={(e) => handleToggleSyncBoth(e.target.checked)}
-                        className="rounded text-emerald-500 focus:ring-emerald-400"
-                      />
-                      <span className="text-[11px] text-slate-200 font-semibold">
-                        Automatically sync fresh token into <strong>both</strong> Market Data (#1) &amp; Algo Trading (#2) slots
-                      </span>
-                    </label>
+                    <div className="flex flex-wrap items-center gap-4">
+                      <label className="flex items-center space-x-2 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={automatorStatus?.sync_both_slots !== false}
+                          onChange={(e) => handleToggleSyncBoth(e.target.checked)}
+                          className="rounded text-emerald-500 focus:ring-emerald-400"
+                        />
+                        <span className="text-[11px] text-slate-200 font-semibold">
+                          Sync <strong>both</strong> Market Data (#1) &amp; Algo Trading (#2) slots
+                        </span>
+                      </label>
+
+                      <label className="flex items-center space-x-2 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={automatorStatus?.auto_login_enabled !== false}
+                          onChange={(e) => handleToggleAutoLogin(e.target.checked)}
+                          className="rounded text-indigo-500 focus:ring-indigo-400"
+                        />
+                        <span className="text-[11px] text-indigo-200 font-semibold">
+                          Run 100% Automatic Morning Login on its own when token expires
+                        </span>
+                      </label>
+                    </div>
 
                     {automatorStatus?.has_totp_secret && automatorStatus?.live_totp && (
                       <div className="flex items-center space-x-2 bg-slate-950/90 border border-emerald-500/40 px-2.5 py-1 rounded-lg font-mono">
@@ -967,69 +1024,102 @@ export default function Profile() {
                     )}
                   </div>
 
-                  {/* Collapsible Local TOTP Authenticator & Smart URL/Code Box */}
+                  {/* Collapsible 100% Zero-Click Auto-Login Vault & Smart Exchange Box */}
                   {showTotpVault && (
-                    <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-3 space-y-2.5 text-xs">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="bg-slate-950/90 border border-slate-800 rounded-lg p-3.5 space-y-3 text-xs">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-2">
                         <div>
-                          <label className="block text-[11px] font-bold text-indigo-300 mb-1">
-                            Built-in Authenticator TOTP Secret (Base32 — Stored Locally Only)
-                          </label>
-                          <div className="flex gap-1.5">
-                            <input
-                              type="password"
-                              value={totpSecretInput}
-                              onChange={(e) => setTotpSecretInput(e.target.value)}
-                              placeholder={automatorStatus?.has_totp_secret ? `Saved (${automatorStatus.totp_secret_masked})` : 'Paste Base32 TOTP secret key once...'}
-                              className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono text-xs text-white focus:outline-none focus:border-emerald-500"
-                            />
+                          <div className="text-xs font-bold text-emerald-400">
+                            🤖 One-Time Setup for 100% Automatic Morning Login (Stored Locally in SQLite Only)
+                          </div>
+                          <p className="text-[10px] text-slate-400">
+                            Once saved, the backend automatically enters your Mobile + generated 6-digit TOTP + 6-digit PIN every morning at 08:45 AM IST (or whenever expired) with zero clicks.
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleSaveAutoLoginVault(false)}
+                            disabled={automatorBusy || (!mobileNumberInput.trim() && !pinInput.trim() && !totpSecretInput.trim())}
+                            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold px-3 py-1.5 rounded-lg cursor-pointer whitespace-nowrap"
+                          >
+                            Save Vault
+                          </button>
+                          {(automatorStatus?.has_mobile_number || automatorStatus?.has_pin || automatorStatus?.has_totp_secret) && (
                             <button
                               type="button"
-                              onClick={() => handleSaveTotpSecret(false)}
-                              disabled={automatorBusy || !totpSecretInput.trim()}
-                              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-bold px-3 py-1.5 rounded-lg cursor-pointer"
+                              onClick={() => handleSaveAutoLoginVault(true)}
+                              className="bg-rose-900/60 hover:bg-rose-800 text-rose-200 font-bold px-2.5 py-1.5 rounded-lg cursor-pointer whitespace-nowrap"
                             >
-                              Save TOTP
+                              Clear Vault
                             </button>
-                            {automatorStatus?.has_totp_secret && (
-                              <button
-                                type="button"
-                                onClick={() => handleSaveTotpSecret(true)}
-                                className="bg-rose-900/60 hover:bg-rose-800 text-rose-200 font-bold px-2.5 py-1.5 rounded-lg cursor-pointer"
-                              >
-                                Clear
-                              </button>
-                            )}
-                          </div>
-                          <p className="text-[10px] text-slate-400 mt-1">
-                            Saves you from opening Google Authenticator on your phone—auto-copies your 6-digit TOTP when you click 1-Click Login.
-                          </p>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-bold text-indigo-300 mb-1">
+                            1. Upstox 10-Digit Mobile Number
+                          </label>
+                          <input
+                            type="text"
+                            maxLength={10}
+                            value={mobileNumberInput}
+                            onChange={(e) => setMobileNumberInput(e.target.value)}
+                            placeholder={automatorStatus?.has_mobile_number ? `Saved (${automatorStatus.mobile_number_masked})` : 'e.g. 9876543210'}
+                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono text-xs text-white focus:outline-none focus:border-emerald-500"
+                          />
                         </div>
 
                         <div>
                           <label className="block text-[11px] font-bold text-indigo-300 mb-1">
-                            Smart Exchange Box (Redirect URL `?code=...`, Auth Code, or JWT)
+                            2. Upstox 6-Digit Login PIN
                           </label>
-                          <div className="flex gap-1.5">
-                            <input
-                              type="text"
-                              value={smartInput}
-                              onChange={(e) => setSmartInput(e.target.value)}
-                              placeholder="Paste callback URL, code, or token to sync both slots..."
-                              className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono text-xs text-white focus:outline-none focus:border-indigo-500"
-                            />
-                            <button
-                              type="button"
-                              onClick={handleSmartPasteActivate}
-                              disabled={automatorBusy || !smartInput.trim()}
-                              className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-bold px-3 py-1.5 rounded-lg cursor-pointer whitespace-nowrap"
-                            >
-                              Sync All
-                            </button>
-                          </div>
-                          <p className="text-[10px] text-slate-400 mt-1">
-                            Redirect URI registered: <code className="text-slate-300">{automatorStatus?.redirect_uri || 'http://localhost:8000/api/settings/upstox/callback'}</code>
-                          </p>
+                          <input
+                            type="password"
+                            maxLength={6}
+                            value={pinInput}
+                            onChange={(e) => setPinInput(e.target.value)}
+                            placeholder={automatorStatus?.has_pin ? 'Saved (••••••)' : 'Enter 6-digit PIN'}
+                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono text-xs text-white focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-bold text-indigo-300 mb-1">
+                            3. Upstox TOTP Secret Key (Base32)
+                          </label>
+                          <input
+                            type="password"
+                            value={totpSecretInput}
+                            onChange={(e) => setTotpSecretInput(e.target.value)}
+                            placeholder={automatorStatus?.has_totp_secret ? `Saved (${automatorStatus.totp_secret_masked})` : 'Paste Base32 TOTP key from Upstox'}
+                            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono text-xs text-white focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-800/80 grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
+                        <div className="text-[10px] text-slate-400">
+                          <strong>Where to get TOTP Secret once:</strong> In Upstox web/app → <em>My Account → Profile → Security → Time-based OTP (TOTP)</em> → Copy the secret key &amp; paste above.
+                        </div>
+                        <div className="flex gap-1.5">
+                          <input
+                            type="text"
+                            value={smartInput}
+                            onChange={(e) => setSmartInput(e.target.value)}
+                            placeholder="Or paste callback URL / code / JWT here..."
+                            className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 font-mono text-xs text-white focus:outline-none focus:border-indigo-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleSmartPasteActivate}
+                            disabled={automatorBusy || !smartInput.trim()}
+                            className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-bold px-3 py-1.5 rounded-lg cursor-pointer whitespace-nowrap"
+                          >
+                            Sync All
+                          </button>
                         </div>
                       </div>
                     </div>

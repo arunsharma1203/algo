@@ -1,17 +1,18 @@
 """
-Isolated Upstox Daily Token Automator (Zero Copy-Paste Architecture).
+Isolated Upstox Daily Token Automator (Zero Copy-Paste & Zero-Click Architecture).
 
 Strictly decoupled from all core trading, alpha, scanner, and execution modules:
 communicates exclusively through the canonical SQLite `app_settings` table
 (`upstox_access_token`, `upstox_market_token`, `upstox_algo_token`, `upstox_auth_status`).
 
 Capabilities:
-  1. 1-Click OAuth Popup Code Exchange with Dual-Slot Sync (Market + Algo Tokens)
+  1. 100% Autonomous Headless Morning Login (Zero-Click):
+     Uses local Headless Chrome (CDP) + saved Mobile Number, 6-Digit PIN, and
+     RFC-6238 TOTP Secret to log in automatically every morning (or whenever
+     the token expires) without any human intervention.
+  2. 1-Click OAuth Popup Code Exchange with Dual-Slot Sync (Market + Algo Tokens)
      and automatic popup postMessage + self-close.
-  2. Built-in RFC-6238 TOTP 6-Digit Authenticator Generator (pure Python stdlib)
-     so the user never needs to pick up their phone to read Google Authenticator.
-  3. Upstox V3 Token Request API (`POST /v3/login/auth/token/request/{client_id}`)
-     & Webhook Notifier receiver for 1-Tap Mobile Approval.
+  3. Built-in RFC-6238 TOTP 6-Digit Authenticator Generator (pure Python stdlib).
   4. Paste-Anything Smart Extractor (accepts a raw redirect URL `?code=...`,
      an auth `code`, or a raw JWT and handles exchange + dual-slot activation).
 """
@@ -22,8 +23,13 @@ import hmac
 import json
 import logging
 import os
+import shutil
+import socket
 import sqlite3
 import struct
+import subprocess
+import tempfile
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
@@ -31,6 +37,11 @@ from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
 IST = timezone(timedelta(hours=5, minutes=30))
+
+_DAEMON_LOCK = threading.Lock()
+_DAEMON_STARTED = False
+_AUTO_LOGIN_IN_PROGRESS = False
+_LAST_AUTO_ATTEMPT_TS = 0.0
 
 
 def _resolve_db_path() -> str:
@@ -41,12 +52,37 @@ def _resolve_db_path() -> str:
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "market_data.db"))
 
 
+def _find_chrome_binary() -> Optional[str]:
+    candidates = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        shutil.which("google-chrome"),
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _get_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
 class UpstoxTokenAutomator:
     """Standalone, zero-dependency Upstox daily token renewal and dual-slot synchronizer."""
 
     @staticmethod
-    def now_ist_str() -> str:
-        return datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    def now_ist() -> datetime:
+        return datetime.now(IST)
+
+    @classmethod
+    def now_ist_str(cls) -> str:
+        return cls.now_ist().strftime("%Y-%m-%d %H:%M:%S IST")
 
     @staticmethod
     def generate_totp(secret_b32: str, interval: int = 30) -> Dict[str, Any]:
@@ -57,8 +93,14 @@ class UpstoxTokenAutomator:
         cleaned = "".join(c for c in (secret_b32 or "").strip().upper() if c.isalnum())
         if not cleaned:
             return {"has_totp": False, "code": None, "remaining_sec": 0}
+        if cleaned.isdigit() and len(cleaned) <= 8:
+            return {
+                "has_totp": False,
+                "code": None,
+                "remaining_sec": 0,
+                "error": "A 6-digit PIN/OTP was entered instead of the 16-32 char Base32 TOTP Secret Key.",
+            }
         try:
-            # Pad base32 string to a multiple of 8
             pad_len = (8 - (len(cleaned) % 8)) % 8
             key = base64.b32decode(cleaned + ("=" * pad_len), casefold=True)
             now_int = int(time.time())
@@ -75,8 +117,7 @@ class UpstoxTokenAutomator:
                 "code": otp,
                 "remaining_sec": rem_sec,
             }
-        except Exception as e:
-            logger.warning(f"[UpstoxTokenAutomator] Invalid TOTP secret format: {e}")
+        except Exception:
             return {"has_totp": False, "code": None, "remaining_sec": 0, "error": "Invalid Base32 TOTP secret"}
 
     @staticmethod
@@ -92,12 +133,16 @@ class UpstoxTokenAutomator:
             claims = json.loads(raw.decode("utf-8"))
             exp_ts = claims.get("exp")
             exp_ist = None
+            is_expired = False
             if exp_ts:
-                exp_ist = datetime.fromtimestamp(float(exp_ts), IST).strftime("%Y-%m-%d %H:%M:%S")
+                exp_f = float(exp_ts)
+                exp_ist = datetime.fromtimestamp(exp_f, IST).strftime("%Y-%m-%d %H:%M:%S IST")
+                is_expired = time.time() >= (exp_f - 60)
             return {
                 "sub": claims.get("sub"),
                 "exp_ts": exp_ts,
                 "expires_at_ist": exp_ist,
+                "is_expired": is_expired,
             }
         except Exception:
             return {}
@@ -113,31 +158,61 @@ class UpstoxTokenAutomator:
         return {str(k): (str(v) if v is not None else "") for k, v in rows}
 
     @classmethod
+    def _set_setting(cls, key: str, value: str) -> None:
+        conn = sqlite3.connect(_resolve_db_path(), timeout=5.0)
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", (key, value))
+        conn.close()
+
+    @classmethod
     def get_automator_status(cls) -> Dict[str, Any]:
+        cls.ensure_background_daemon_started()
         smap = cls.get_settings_map()
         sync_both = smap.get("upstox_sync_both_slots", "true").lower() != "false"
-        totp_secret = smap.get("upstox_totp_secret", "")
+        auto_login_enabled = smap.get("upstox_auto_login_enabled", "true").lower() != "false"
+        totp_secret = smap.get("upstox_totp_secret", "").strip()
+        mobile_number = smap.get("upstox_mobile_number", "").strip()
+        pin = smap.get("upstox_pin", "").strip()
+
         totp_info = cls.generate_totp(totp_secret) if totp_secret else {"has_totp": False, "code": None, "remaining_sec": 0}
         access_tok = smap.get("upstox_access_token", "")
         algo_tok = smap.get("upstox_algo_token", "")
         jwt_meta = cls.decode_jwt_metadata(access_tok) if access_tok else {}
 
-        masked_totp = ""
-        if totp_secret:
-            masked_totp = f"{totp_secret[:3]}****{totp_secret[-3:]}" if len(totp_secret) > 6 else "****"
+        masked_totp = f"{totp_secret[:3]}****{totp_secret[-3:]}" if len(totp_secret) > 6 else ("****" if totp_secret else "")
+        masked_mobile = f"******{mobile_number[-4:]}" if len(mobile_number) >= 4 else ""
+        has_pin = len(pin) >= 4
+
+        auto_login_ready = bool(
+            smap.get("upstox_api_key", "").strip()
+            and smap.get("upstox_api_secret", "").strip()
+            and len(mobile_number) == 10
+            and has_pin
+            and totp_info.get("has_totp")
+        )
 
         return {
             "sync_both_slots": sync_both,
-            "has_totp_secret": bool(totp_secret),
-            "totp_secret_masked": masked_totp,
+            "auto_login_enabled": auto_login_enabled,
+            "auto_login_ready": auto_login_ready,
+            "auto_login_in_progress": _AUTO_LOGIN_IN_PROGRESS,
+            "has_mobile_number": len(mobile_number) == 10,
+            "mobile_number_masked": masked_mobile,
+            "has_pin": has_pin,
+            "has_totp_secret": bool(totp_info.get("has_totp")),
+            "totp_secret_masked": masked_totp if totp_info.get("has_totp") else "",
+            "totp_error": totp_info.get("error"),
             "live_totp": totp_info.get("code"),
             "totp_remaining_sec": totp_info.get("remaining_sec", 0),
             "last_refresh_ist": smap.get("upstox_last_token_refresh_ist", ""),
             "last_refresh_method": smap.get("upstox_last_refresh_method", ""),
             "last_refresh_user": smap.get("upstox_last_refresh_user", ""),
+            "last_auto_login_status": smap.get("upstox_last_auto_login_status", ""),
             "tokens_in_sync": bool(access_tok and algo_tok and access_tok == algo_tok),
             "jwt_expires_at_ist": jwt_meta.get("expires_at_ist"),
+            "jwt_is_expired": bool(jwt_meta.get("is_expired", False)),
             "redirect_uri": smap.get("upstox_redirect_uri") or "http://localhost:8000/api/settings/upstox/callback",
+            "chrome_available": bool(_find_chrome_binary()),
         }
 
     @classmethod
@@ -150,6 +225,30 @@ class UpstoxTokenAutomator:
                     "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_sync_both_slots', ?)",
                     (val,),
                 )
+            if "auto_login_enabled" in payload and payload["auto_login_enabled"] is not None:
+                val = "true" if bool(payload["auto_login_enabled"]) else "false"
+                conn.execute(
+                    "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_auto_login_enabled', ?)",
+                    (val,),
+                )
+            if "mobile_number" in payload and payload["mobile_number"] is not None:
+                raw_mob = "".join(c for c in str(payload["mobile_number"]).strip() if c.isdigit())
+                if str(payload["mobile_number"]).strip() == "__CLEAR__":
+                    conn.execute("DELETE FROM app_settings WHERE key = 'upstox_mobile_number'")
+                elif len(raw_mob) == 10:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_mobile_number', ?)",
+                        (raw_mob,),
+                    )
+            if "pin" in payload and payload["pin"] is not None:
+                raw_pin = "".join(c for c in str(payload["pin"]).strip() if c.isdigit())
+                if str(payload["pin"]).strip() == "__CLEAR__":
+                    conn.execute("DELETE FROM app_settings WHERE key = 'upstox_pin'")
+                elif len(raw_pin) >= 4:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_pin', ?)",
+                        (raw_pin,),
+                    )
             if "totp_secret" in payload and payload["totp_secret"] is not None:
                 raw_secret = str(payload["totp_secret"]).strip().replace(" ", "")
                 if raw_secret == "__CLEAR__":
@@ -211,6 +310,10 @@ class UpstoxTokenAutomator:
                 "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_last_refresh_method', ?)",
                 (method_label,),
             )
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_last_auto_login_status', ?)",
+                (f"SUCCESS at {now_str} via {method_label}",),
+            )
             if user_name:
                 conn.execute(
                     "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_last_refresh_user', ?)",
@@ -236,7 +339,6 @@ class UpstoxTokenAutomator:
                 svc.start()
                 stream_reconnected = True
             elif svc._streamer:
-                # Disconnect existing streamer so _run_streamer immediately reconnects with the fresh token
                 try:
                     svc._streamer.disconnect()
                     stream_reconnected = True
@@ -337,7 +439,6 @@ class UpstoxTokenAutomator:
         if not text:
             return {"status": "error", "message": "Empty input provided."}
 
-        # Case 1: Full redirect URL containing ?code=...
         if "code=" in text:
             try:
                 parsed = urlparse(text)
@@ -350,7 +451,6 @@ class UpstoxTokenAutomator:
             except Exception:
                 pass
 
-        # Case 2: Raw JWT token (starts with eyJ and has 2 dots)
         if text.startswith("eyJ") and text.count(".") == 2 and len(text) > 80:
             return cls.activate_and_persist_token(
                 access_token=text,
@@ -358,43 +458,367 @@ class UpstoxTokenAutomator:
                 method_label="Direct JWT Sync (Market + Algo)",
             )
 
-        # Case 3: Short OAuth authorization code
         return cls.exchange_oauth_code(
             text, sync_both_slots=sync_both_slots, method_label="Direct Auth Code Exchange"
         )
 
     @classmethod
-    def request_v3_mobile_approval(cls) -> Dict[str, Any]:
+    def run_headless_auto_login(cls, trigger_source: str = "Autonomous Headless Auto-Login") -> Dict[str, Any]:
         """
-        Triggers Upstox V3 Token Request API (`POST /v3/login/auth/token/request/{client_id}`).
-        Upstox sends a 1-tap approval notification to the user's Upstox mobile app / WhatsApp;
-        once approved, Upstox posts the token to the configured Notifier Webhook URL.
+        100% Zero-Click Headless Upstox Login via Chrome DevTools Protocol (CDP).
+        Uses stored Mobile Number + generated RFC-6238 6-digit TOTP + 6-digit PIN to
+        complete the OAuth2 flow in the background, capture the authorization `code`,
+        and activate both Market Data & Algo Trading tokens automatically.
         """
+        global _AUTO_LOGIN_IN_PROGRESS, _LAST_AUTO_ATTEMPT_TS
+        if _AUTO_LOGIN_IN_PROGRESS:
+            return {"status": "busy", "message": "Autonomous login is already running in the background."}
+
         smap = cls.get_settings_map()
         api_key = smap.get("upstox_api_key", "").strip()
         api_secret = smap.get("upstox_api_secret", "").strip()
-        if not api_key or not api_secret:
-            return {
-                "status": "error",
-                "message": "Upstox API Key and API Secret are required to request mobile approval.",
-            }
+        redirect_uri = smap.get("upstox_redirect_uri", "").strip() or "http://localhost:8000/api/settings/upstox/callback"
+        mobile = smap.get("upstox_mobile_number", "").strip()
+        pin = smap.get("upstox_pin", "").strip()
+        totp_secret = smap.get("upstox_totp_secret", "").strip()
 
-        url = f"https://api.upstox.com/v3/login/auth/token/request/{api_key}"
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
-        payload = {"client_secret": api_secret}
+        missing = []
+        if not api_key or not api_secret:
+            missing.append("API Key & Secret")
+        if len(mobile) != 10:
+            missing.append("10-Digit Mobile Number")
+        if len(pin) < 4:
+            missing.append("6-Digit PIN")
+        if not totp_secret or not cls.generate_totp(totp_secret).get("has_totp"):
+            missing.append("Base32 TOTP Secret Key")
+
+        if missing:
+            msg = f"Cannot run automatic login yet — missing one-time setup for: {', '.join(missing)}."
+            cls._set_setting("upstox_last_auto_login_status", f"SKIPPED: {msg}")
+            return {"status": "error", "message": msg}
+
+        chrome_bin = _find_chrome_binary()
+        if not chrome_bin:
+            msg = "Google Chrome binary not found on this machine for headless automation."
+            cls._set_setting("upstox_last_auto_login_status", f"ERROR: {msg}")
+            return {"status": "error", "message": msg}
+
+        _AUTO_LOGIN_IN_PROGRESS = True
+        _LAST_AUTO_ATTEMPT_TS = time.time()
+        pre_refresh_ts = smap.get("upstox_last_token_refresh_ist", "")
+        port = _get_free_port()
+        profile_dir = tempfile.mkdtemp(prefix="upstox_autologin_")
+        auth_url = (
+            f"https://api.upstox.com/v2/login/authorization/dialog"
+            f"?response_type=code&client_id={api_key}&redirect_uri={redirect_uri}"
+        )
+
+        proc = None
+        ws = None
         try:
             import requests
-            resp = requests.post(url, headers=headers, json=payload, timeout=10)
-            if resp.status_code in (200, 201, 202):
-                data = resp.json() if resp.content else {}
+            import websocket
+
+            cls._set_setting("upstox_last_auto_login_status", f"RUNNING ({cls.now_ist_str()})...")
+            cmd = [
+                chrome_bin,
+                "--headless=new",
+                "--disable-gpu",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-extensions",
+                "--disable-popup-blocking",
+                "--window-size=1280,900",
+                f"--remote-debugging-port={port}",
+                "--remote-allow-origins=*",
+                f"--user-data-dir={profile_dir}",
+                auth_url,
+            ]
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            # Wait for DevTools endpoint to become ready
+            ws_url = None
+            for _ in range(30):
+                time.sleep(0.35)
+                try:
+                    r = requests.get(f"http://127.0.0.1:{port}/json", timeout=1.5)
+                    if r.status_code == 200:
+                        targets = r.json()
+                        for t in targets:
+                            if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                                ws_url = t["webSocketDebuggerUrl"]
+                                break
+                        if ws_url:
+                            break
+                except Exception:
+                    pass
+
+            if not ws_url:
+                msg = "Headless Chrome started, but DevTools WebSocket did not respond in time."
+                cls._set_setting("upstox_last_auto_login_status", f"ERROR: {msg}")
+                return {"status": "error", "message": msg}
+
+            ws = websocket.create_connection(ws_url, timeout=10)
+            msg_id = 0
+
+            def cdp_eval(js_expr: str) -> Any:
+                nonlocal msg_id
+                msg_id += 1
+                cur_id = msg_id
+                payload = {
+                    "id": cur_id,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": js_expr, "returnByValue": True},
+                }
+                ws.send(json.dumps(payload))
+                deadline = time.time() + 6.0
+                while time.time() < deadline:
+                    raw = ws.recv()
+                    data = json.loads(raw)
+                    if data.get("id") == cur_id:
+                        return data.get("result", {}).get("result", {}).get("value")
+                return None
+
+            step_mobile_done = False
+            step_totp_done = False
+            step_pin_done = False
+            last_error_text = ""
+
+            # Up to 32 seconds to progress through Mobile -> TOTP -> PIN -> Redirect
+            start_loop = time.time()
+            while time.time() - start_loop < 32.0:
+                # 1. Check if localhost callback ALREADY received the code and updated SQLite!
+                cur_smap = cls.get_settings_map()
+                cur_refresh = cur_smap.get("upstox_last_token_refresh_ist", "")
+                if cur_refresh and cur_refresh != pre_refresh_ts and cur_smap.get("upstox_auth_status") == "ACTIVE":
+                    cls._set_setting(
+                        "upstox_last_refresh_method",
+                        trigger_source,
+                    )
+                    cls._set_setting(
+                        "upstox_last_auto_login_status",
+                        f"SUCCESS at {cur_refresh} ({trigger_source})",
+                    )
+                    return {
+                        "status": "success",
+                        "message": f"✅ Autonomous login succeeded! Both Market & Algo tokens refreshed ({cur_refresh}).",
+                        "refreshed_at_ist": cur_refresh,
+                        "user_name": cur_smap.get("upstox_last_refresh_user", "Upstox Trader"),
+                    }
+
+                # 2. Inspect current URL & DOM state via CDP
+                totp_bundle = cls.generate_totp(totp_secret)
+                if totp_bundle.get("remaining_sec", 30) <= 2 and not step_totp_done:
+                    # Wait for next 30-second window so we never submit an expiring TOTP
+                    time.sleep(2.2)
+                    totp_bundle = cls.generate_totp(totp_secret)
+                live_otp = totp_bundle.get("code") or ""
+
+                js_step = f"""
+                (function() {{
+                    var href = window.location.href || '';
+                    if (href.indexOf('code=') !== -1) {{
+                        return {{ state: 'REDIRECTED', href: href }};
+                    }}
+                    function setVal(el, val) {{
+                        el.focus();
+                        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        setter.call(el, val);
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+                    var errEl = document.querySelector('.error-message, [class*="error"], [id*="error"]');
+                    var errTxt = errEl && errEl.innerText ? errEl.innerText.trim() : '';
+
+                    var mobInput = document.querySelector('#mobileNum, input[name="mobileNum"], input[type="tel"][maxlength="10"]');
+                    var otpInput = document.querySelector('#otpNum, input[name="otpNum"], input[id*="otp"]');
+                    var pinInput = document.querySelector('#pinCode, input[name="pinCode"], input[type="password"]');
+
+                    if (pinInput && pinInput.offsetParent !== null) {{
+                        return {{ state: 'PIN_SCREEN', err: errTxt }};
+                    }}
+                    if (otpInput && otpInput.offsetParent !== null) {{
+                        return {{ state: 'OTP_SCREEN', err: errTxt }};
+                    }}
+                    if (mobInput && mobInput.offsetParent !== null) {{
+                        return {{ state: 'MOBILE_SCREEN', err: errTxt }};
+                    }}
+                    return {{ state: 'LOADING', href: href, err: errTxt, bodyPreview: (document.body && document.body.innerText || '').slice(0, 200) }};
+                }})();
+                """
+                state_obj = cdp_eval(js_step) or {}
+                st = state_obj.get("state", "LOADING")
+                if state_obj.get("err"):
+                    last_error_text = state_obj["err"]
+
+                if st == "REDIRECTED":
+                    href = state_obj.get("href", "")
+                    res = cls.smart_exchange_or_activate(href)
+                    if res.get("status") == "success":
+                        return res
+
+                elif st == "MOBILE_SCREEN" and not step_mobile_done:
+                    fill_mob_js = f"""
+                    (function() {{
+                        var el = document.querySelector('#mobileNum, input[name="mobileNum"], input[type="tel"][maxlength="10"]');
+                        if (!el) return false;
+                        el.focus();
+                        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        setter.call(el, {json.dumps(mobile)});
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        var btn = document.querySelector('#getOtp, button[type="submit"], button');
+                        if (btn) btn.click();
+                        return true;
+                    }})();
+                    """
+                    if cdp_eval(fill_mob_js):
+                        step_mobile_done = True
+                        time.sleep(1.2)
+                        continue
+
+                elif st == "OTP_SCREEN" and not step_totp_done and live_otp:
+                    fill_otp_js = f"""
+                    (function() {{
+                        var el = document.querySelector('#otpNum, input[name="otpNum"], input[id*="otp"]');
+                        if (!el) return false;
+                        el.focus();
+                        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        setter.call(el, {json.dumps(live_otp)});
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        var btn = document.querySelector('#continueBtn, button[type="submit"], button');
+                        if (btn) btn.click();
+                        return true;
+                    }})();
+                    """
+                    if cdp_eval(fill_otp_js):
+                        step_totp_done = True
+                        time.sleep(1.2)
+                        continue
+
+                elif st == "PIN_SCREEN" and not step_pin_done:
+                    fill_pin_js = f"""
+                    (function() {{
+                        var el = document.querySelector('#pinCode, input[name="pinCode"], input[type="password"]');
+                        if (!el) return false;
+                        el.focus();
+                        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        setter.call(el, {json.dumps(pin)});
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        var btn = document.querySelector('#pinContinueBtn, button[type="submit"], button');
+                        if (btn) btn.click();
+                        return true;
+                    }})();
+                    """
+                    if cdp_eval(fill_pin_js):
+                        step_pin_done = True
+                        time.sleep(1.5)
+                        continue
+
+                time.sleep(0.6)
+
+            # Final check in case callback completed right at loop end
+            final_smap = cls.get_settings_map()
+            final_refresh = final_smap.get("upstox_last_token_refresh_ist", "")
+            if final_refresh and final_refresh != pre_refresh_ts and final_smap.get("upstox_auth_status") == "ACTIVE":
                 return {
                     "status": "success",
-                    "message": "📲 Approval request sent to your Upstox App / WhatsApp! Tap 'Approve' on your phone, or use the 1-Click Popup Login.",
-                    "details": data,
+                    "message": f"✅ Autonomous login succeeded! Both Market & Algo tokens refreshed ({final_refresh}).",
+                    "refreshed_at_ist": final_refresh,
                 }
-            return {
-                "status": "error",
-                "message": f"Upstox V3 Token Request returned HTTP {resp.status_code}: {resp.text[:250]}",
-            }
+
+            err_detail = f" (Upstox page said: {last_error_text})" if last_error_text else ""
+            fail_msg = (
+                f"Headless auto-login timed out at step "
+                f"[Mobile={step_mobile_done}, TOTP={step_totp_done}, PIN={step_pin_done}]{err_detail}. "
+                f"Verify that TOTP is enabled on your Upstox account and your Mobile/PIN/TOTP Secret are accurate."
+            )
+            cls._set_setting("upstox_last_auto_login_status", f"FAILED: {fail_msg}")
+            return {"status": "error", "message": fail_msg}
+
         except Exception as e:
-            return {"status": "error", "message": f"Upstox V3 request error: {e}"}
+            err_msg = f"Autonomous login exception: {e}"
+            logger.warning(f"[UpstoxTokenAutomator] {err_msg}")
+            cls._set_setting("upstox_last_auto_login_status", f"ERROR: {err_msg}")
+            return {"status": "error", "message": err_msg}
+        finally:
+            _AUTO_LOGIN_IN_PROGRESS = False
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            try:
+                shutil.rmtree(profile_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    @classmethod
+    def _needs_daily_refresh(cls, smap: Dict[str, str]) -> bool:
+        """
+        Determines whether today's Upstox token is missing or expired.
+        Upstox expires all tokens at 03:30 AM IST daily.
+        """
+        tok = smap.get("upstox_access_token", "").strip()
+        if not tok:
+            return True
+        if smap.get("upstox_auth_status", "") == "TOKEN_EXPIRED":
+            return True
+        jwt_meta = cls.decode_jwt_metadata(tok)
+        if jwt_meta.get("is_expired"):
+            return True
+        return False
+
+    @classmethod
+    def ensure_background_daemon_started(cls) -> None:
+        """
+        Starts an isolated background daemon thread inside `UpstoxTokenAutomator`
+        that checks every 60 seconds if today's token is expired (e.g. every morning
+        after 08:45 AM IST or on server startup) and runs `run_headless_auto_login()`
+        automatically on its own when credentials are saved.
+        """
+        global _DAEMON_STARTED
+        with _DAEMON_LOCK:
+            if _DAEMON_STARTED:
+                return
+            _DAEMON_STARTED = True
+
+        def _daemon_loop():
+            logger.info("[UpstoxTokenAutomator] 🤖 Autonomous Daily Token Daemon started (isolated).")
+            while True:
+                try:
+                    time.sleep(45)
+                    smap = cls.get_settings_map()
+                    if smap.get("upstox_auto_login_enabled", "true").lower() == "false":
+                        continue
+                    # Cooldown of 15 minutes between automatic attempts
+                    if time.time() - _LAST_AUTO_ATTEMPT_TS < 900:
+                        continue
+                    now_ist = cls.now_ist()
+                    # Run automatically if token is expired/missing and we are past 08:30 AM IST
+                    if now_ist.hour >= 8 and cls._needs_daily_refresh(smap):
+                        mobile = smap.get("upstox_mobile_number", "").strip()
+                        pin = smap.get("upstox_pin", "").strip()
+                        totp_secret = smap.get("upstox_totp_secret", "").strip()
+                        if len(mobile) == 10 and len(pin) >= 4 and totp_secret:
+                            logger.info(
+                                "[UpstoxTokenAutomator] 🤖 Detected expired/missing Upstox token — "
+                                "triggering Autonomous Headless Morning Login..."
+                            )
+                            cls.run_headless_auto_login(trigger_source="Autonomous Morning Daemon")
+                except Exception as e:
+                    logger.debug(f"[UpstoxTokenAutomator] Daemon tick note: {e}")
+
+        t = threading.Thread(target=_daemon_loop, name="upstox-auto-login-daemon", daemon=True)
+        t.start()
