@@ -310,84 +310,137 @@ def get_upstox_auth_url():
         return {"status": "error", "message": "Upstox API Key (Client ID) is required to generate Login URL."}
         
     auth_url = f"https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id={api_key}&redirect_uri={redirect_uri}"
-    return {"status": "success", "auth_url": auth_url}
+    return {"status": "success", "auth_url": auth_url, "redirect_uri": redirect_uri}
+
+
+@router.get("/upstox/automator-status")
+def get_upstox_automator_status():
+    """Returns isolated Upstox Token Automator telemetry, live 6-digit TOTP (if configured), and sync status."""
+    from app.data.upstox_token_automator import UpstoxTokenAutomator
+    return UpstoxTokenAutomator.get_automator_status()
+
+
+@router.post("/upstox/automator-config")
+def save_upstox_automator_config(payload: dict):
+    """Saves isolated Upstox Token Automator configuration (sync_both_slots, optional local TOTP secret)."""
+    from app.data.upstox_token_automator import UpstoxTokenAutomator
+    return UpstoxTokenAutomator.save_automator_config(payload or {})
+
+
+@router.post("/upstox/smart-activate")
+def smart_activate_upstox_token(payload: dict):
+    """
+    Accepts a callback URL (?code=...), an OAuth code, or a raw JWT access_token,
+    exchanges if needed, and activates across both Market Data & Algo Trading slots.
+    """
+    from app.data.upstox_token_automator import UpstoxTokenAutomator
+    raw_input = str((payload or {}).get("raw_input", ""))
+    sync_both = (payload or {}).get("sync_both_slots", None)
+    return UpstoxTokenAutomator.smart_exchange_or_activate(raw_input, sync_both_slots=sync_both)
+
+
+@router.post("/upstox/request-mobile-approval")
+def request_upstox_v3_mobile_approval():
+    """Triggers Upstox V3 Token Request API for 1-Tap approval on Upstox Mobile App / WhatsApp."""
+    from app.data.upstox_token_automator import UpstoxTokenAutomator
+    return UpstoxTokenAutomator.request_v3_mobile_approval()
+
+
+@router.post("/upstox/webhook")
+def receive_upstox_v3_token_webhook(payload: dict):
+    """
+    Webhook Notifier endpoint for Upstox V3 Automated Token delivery.
+    When the user approves the token request on their phone, Upstox POSTs `access_token` here.
+    """
+    from app.data.upstox_token_automator import UpstoxTokenAutomator
+    tok = str((payload or {}).get("access_token") or (payload or {}).get("data", {}).get("access_token") or "")
+    user_name = str((payload or {}).get("user_name") or (payload or {}).get("user_id") or "Upstox Webhook")
+    if tok:
+        return UpstoxTokenAutomator.activate_and_persist_token(
+            access_token=tok,
+            sync_both_slots=True,
+            user_name=user_name,
+            method_label="Upstox V3 Mobile Approval Webhook",
+        )
+    return {"status": "ignored", "message": "No access_token in webhook payload."}
+
 
 @router.get("/upstox/callback")
 def upstox_oauth_callback(code: str = ""):
     """
-    OAuth Callback Handler: Exchanges authorization code with Upstox API v2 for daily Access Token.
+    1-Click OAuth Callback Handler:
+    Exchanges authorization `code` with Upstox API v2, atomically syncs BOTH
+    `upstox_access_token` (`upstox_market_token`) and `upstox_algo_token`,
+    clears any `TOKEN_EXPIRED` or rate-limit lockouts, hot-reloads the WebSocket V3 stream,
+    notifies the parent React window via `window.opener.postMessage`, and auto-closes the popup!
     """
     from fastapi.responses import HTMLResponse
-    import requests
-    from app.data.upstox_provider import get_upstox_config
-    
+    import json
+    from app.data.upstox_token_automator import UpstoxTokenAutomator
+
     if not code:
         return HTMLResponse("<h3>❌ Authorization failed: No auth code received from Upstox.</h3>", status_code=400)
-        
-    cfg = get_upstox_config()
-    api_key = cfg.get("api_key")
-    api_secret = cfg.get("api_secret")
-    redirect_uri = cfg.get("redirect_uri", "http://localhost:8000/api/settings/upstox/callback")
-    
-    if not api_key or not api_secret:
-        return HTMLResponse(
-            "<h3>⚠️ API Key or Secret missing. Please make sure both are saved in Profile settings.</h3>",
-            status_code=400
-        )
-        
-    try:
-        token_url = "https://api.upstox.com/v2/login/authorization/token"
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
-        data = {
-            "code": code,
-            "client_id": api_key,
-            "client_secret": api_secret,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code"
-        }
-        
-        resp = requests.post(token_url, headers=headers, data=data, timeout=10)
-        if resp.status_code == 200:
-            token_data = resp.json()
-            access_token = token_data.get("access_token")
-            user_name = token_data.get("user_name", "Upstox User")
-            
-            if access_token:
-                conn = sqlite3.connect(get_db_path(), timeout=5.0)
-                conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_access_token', ?)", (access_token,))
-                conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('market_data_source', 'upstox')")
-                conn.commit()
-                conn.close()
-                
-                html_content = f"""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Upstox Connected</title>
-                    <meta http-equiv="refresh" content="3;url=http://localhost:5173/profile" />
-                    <style>
-                        body {{ font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
-                        .card {{ background: #1e293b; padding: 2.5rem; border-radius: 1rem; border: 1px solid #334155; text-align: center; max-width: 450px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5); }}
-                        .btn {{ display: inline-block; margin-top: 1.5rem; padding: 0.75rem 1.5rem; background: #10b981; color: #ffffff; text-decoration: none; border-radius: 0.5rem; font-weight: bold; }}
-                    </style>
-                </head>
-                <body>
-                    <div class="card">
-                        <h2 style="color: #10b981; margin-top: 0;">✅ Upstox Connected!</h2>
-                        <p>Authenticated as <strong>{user_name}</strong>.</p>
-                        <p style="color: #94a3b8; font-size: 0.875rem;">Access Token saved &amp; Market Data switched to Real-Time Upstox Feed.</p>
-                        <a href="http://localhost:5173/profile" class="btn">Return to App</a>
-                    </div>
-                </body>
-                </html>
-                """
-                return HTMLResponse(content=html_content)
-        
-        return HTMLResponse(f"<h3>❌ Token Exchange Failed:</h3><pre>{resp.text}</pre>", status_code=400)
-    except Exception as e:
-        return HTMLResponse(f"<h3>❌ Error during authentication:</h3><p>{str(e)}</p>", status_code=500)
+
+    result = UpstoxTokenAutomator.exchange_oauth_code(code, method_label="1-Click OAuth Popup")
+    if result.get("status") == "success":
+        user_name = result.get("user_name", "Upstox Trader")
+        slots_str = " &amp; ".join(result.get("slots_updated", ["Market Data", "Algo Trading"]))
+        payload_json = json.dumps({
+            "type": "UPSTOX_OAUTH_SUCCESS",
+            "user_name": user_name,
+            "refreshed_at_ist": result.get("refreshed_at_ist"),
+            "expires_at_ist": result.get("expires_at_ist"),
+        })
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Upstox 1-Click Connected</title>
+            <style>
+                body {{ font-family: system-ui, -apple-system, sans-serif; background: #020617; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+                .card {{ background: #0f172a; padding: 2.25rem; border-radius: 1.25rem; border: 1px solid #10b981; text-align: center; max-width: 440px; box-shadow: 0 20px 30px -5px rgba(0,0,0,0.7); }}
+                .badge {{ display: inline-block; background: rgba(16,185,129,0.15); color: #34d399; border: 1px solid rgba(16,185,129,0.4); font-size: 0.75rem; font-weight: 800; padding: 0.25rem 0.75rem; border-radius: 999px; margin-bottom: 0.75rem; }}
+                .btn {{ display: inline-block; margin-top: 1.25rem; padding: 0.65rem 1.4rem; background: #10b981; color: #ffffff; text-decoration: none; border-radius: 0.6rem; font-weight: 700; font-size: 0.85rem; cursor: pointer; border: none; }}
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <div class="badge">⚡ ZERO COPY-PASTE SYNC COMPLETE</div>
+                <h2 style="color: #10b981; margin: 0 0 0.5rem 0;">✅ Upstox Connected!</h2>
+                <p style="margin: 0.25rem 0; font-size: 0.92rem;">Authenticated as <strong>{user_name}</strong></p>
+                <p style="color: #94a3b8; font-size: 0.8rem; margin-top: 0.5rem;">
+                    Automatically synced: <strong style="color: #e2e8f0;">{slots_str}</strong><br/>
+                    WebSocket V3 Stream &amp; Rate Limiter Active.
+                </p>
+                <p style="color: #6ee7b7; font-size: 0.75rem; margin-top: 0.9rem;">Closing window automatically...</p>
+                <button class="btn" onclick="window.close(); window.location.href='http://localhost:5173/profile';">Return to Trading Desk</button>
+            </div>
+            <script>
+                (function() {{
+                    var msg = {payload_json};
+                    try {{
+                        if (window.opener && !window.opener.closed) {{
+                            window.opener.postMessage(msg, '*');
+                            setTimeout(function() {{ window.close(); }}, 1100);
+                        }} else {{
+                            setTimeout(function() {{ window.location.href = 'http://localhost:5173/profile'; }}, 1500);
+                        }}
+                    }} catch (e) {{}}
+                }})();
+            </script>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content)
+
+    err_msg = result.get("message", "Unknown token exchange failure")
+    return HTMLResponse(
+        f"<div style='font-family:sans-serif;padding:2rem;background:#0f172a;color:#f8fafc;height:100vh;'>"
+        f"<h3 style='color:#f43f5e;'>❌ Upstox 1-Click Token Exchange Failed</h3>"
+        f"<pre style='background:#1e293b;padding:1rem;border-radius:0.5rem;color:#fda4af;white-space:pre-wrap;'>{err_msg}</pre>"
+        f"</div>",
+        status_code=400,
+    )
+
 
 
