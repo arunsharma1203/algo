@@ -183,18 +183,27 @@ class UpstoxTokenAutomator:
         masked_mobile = f"******{mobile_number[-4:]}" if len(mobile_number) >= 4 else ""
         has_pin = len(pin) >= 4
 
-        auto_login_ready = bool(
+        has_full_totp_vault = bool(
             smap.get("upstox_api_key", "").strip()
             and smap.get("upstox_api_secret", "").strip()
             and len(mobile_number) == 10
             and has_pin
             and totp_info.get("has_totp")
         )
+        persistent_profile_dir = os.path.expanduser("~/.gemini/antigravity/upstox_chrome_profile")
+        has_saved_session = os.path.exists(os.path.join(persistent_profile_dir, "Default", "Cookies"))
+        auto_login_ready = bool(
+            smap.get("upstox_api_key", "").strip()
+            and smap.get("upstox_api_secret", "").strip()
+            and has_pin
+        )
 
         return {
             "sync_both_slots": sync_both,
             "auto_login_enabled": auto_login_enabled,
             "auto_login_ready": auto_login_ready,
+            "has_full_totp_vault": has_full_totp_vault,
+            "has_saved_session": has_saved_session,
             "auto_login_in_progress": _AUTO_LOGIN_IN_PROGRESS,
             "has_mobile_number": len(mobile_number) == 10,
             "mobile_number_masked": masked_mobile,
@@ -463,12 +472,21 @@ class UpstoxTokenAutomator:
         )
 
     @classmethod
-    def run_headless_auto_login(cls, trigger_source: str = "Autonomous Headless Auto-Login") -> Dict[str, Any]:
+    def run_headless_auto_login(
+        cls,
+        trigger_source: str = "Autonomous Headless Auto-Login",
+        allow_interactive_fallback: bool = True,
+    ) -> Dict[str, Any]:
         """
-        100% Zero-Click Headless Upstox Login via Chrome DevTools Protocol (CDP).
-        Uses stored Mobile Number + generated RFC-6238 6-digit TOTP + 6-digit PIN to
-        complete the OAuth2 flow in the background, capture the authorization `code`,
-        and activate both Market Data & Algo Trading tokens automatically.
+        Autonomous Upstox Login via Chrome DevTools Protocol (CDP) with Persistent Device Session:
+          1. Uses a persistent isolated Chrome profile (`~/.gemini/antigravity/upstox_chrome_profile`)
+             so Upstox device/session recognition persists across days.
+          2. If Mobile + TOTP + PIN are all configured (or if the persistent session goes straight to
+             the 6-Digit PIN screen), runs 100% headlessly in the background.
+          3. If Upstox requests Mobile/OTP and TOTP Secret is not yet configured, launches a compact
+             CDP-driven Chrome window, auto-captures the 10-digit Mobile Number for future runs,
+             automatically fills the saved 6-digit PIN (`#pinCode`) the instant the PIN screen appears,
+             exchanges the OAuth code, activates both Market & Algo tokens, and auto-closes the window.
         """
         global _AUTO_LOGIN_IN_PROGRESS, _LAST_AUTO_ATTEMPT_TS
         if _AUTO_LOGIN_IN_PROGRESS:
@@ -481,263 +499,314 @@ class UpstoxTokenAutomator:
         mobile = smap.get("upstox_mobile_number", "").strip()
         pin = smap.get("upstox_pin", "").strip()
         totp_secret = smap.get("upstox_totp_secret", "").strip()
+        has_totp = bool(totp_secret and cls.generate_totp(totp_secret).get("has_totp"))
 
-        missing = []
         if not api_key or not api_secret:
-            missing.append("API Key & Secret")
-        if len(mobile) != 10:
-            missing.append("10-Digit Mobile Number")
+            msg = "Cannot run automatic login — Upstox API Key & Secret are missing."
+            cls._set_setting("upstox_last_auto_login_status", f"SKIPPED: {msg}")
+            return {"status": "error", "message": msg}
         if len(pin) < 4:
-            missing.append("6-Digit PIN")
-        if not totp_secret or not cls.generate_totp(totp_secret).get("has_totp"):
-            missing.append("Base32 TOTP Secret Key")
-
-        if missing:
-            msg = f"Cannot run automatic login yet — missing one-time setup for: {', '.join(missing)}."
+            msg = "Cannot run automatic login — 6-Digit Upstox PIN is missing in the Vault."
             cls._set_setting("upstox_last_auto_login_status", f"SKIPPED: {msg}")
             return {"status": "error", "message": msg}
 
         chrome_bin = _find_chrome_binary()
         if not chrome_bin:
-            msg = "Google Chrome binary not found on this machine for headless automation."
+            msg = "Google Chrome binary not found on this machine for automation."
             cls._set_setting("upstox_last_auto_login_status", f"ERROR: {msg}")
             return {"status": "error", "message": msg}
 
         _AUTO_LOGIN_IN_PROGRESS = True
         _LAST_AUTO_ATTEMPT_TS = time.time()
         pre_refresh_ts = smap.get("upstox_last_token_refresh_ist", "")
-        port = _get_free_port()
-        profile_dir = tempfile.mkdtemp(prefix="upstox_autologin_")
+        profile_dir = os.path.expanduser("~/.gemini/antigravity/upstox_chrome_profile")
+        os.makedirs(profile_dir, exist_ok=True)
+        # Clean stale SingletonLock if any terminated Chrome left it behind
+        for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            try:
+                lock_p = os.path.join(profile_dir, lock_name)
+                if os.path.lexists(lock_p):
+                    os.unlink(lock_p)
+            except Exception:
+                pass
+
         auth_url = (
             f"https://api.upstox.com/v2/login/authorization/dialog"
             f"?response_type=code&client_id={api_key}&redirect_uri={redirect_uri}"
         )
 
-        proc = None
-        ws = None
-        try:
-            import requests
-            import websocket
+        # Decide whether to start in headless mode or Assisted Auto-PIN App Window mode:
+        has_saved_cookies = os.path.exists(os.path.join(profile_dir, "Default", "Cookies"))
+        start_headless = (len(mobile) == 10 and has_totp) or has_saved_cookies
 
-            cls._set_setting("upstox_last_auto_login_status", f"RUNNING ({cls.now_ist_str()})...")
-            cmd = [
-                chrome_bin,
-                "--headless=new",
-                "--disable-gpu",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-extensions",
-                "--disable-popup-blocking",
-                "--window-size=1280,900",
-                f"--remote-debugging-port={port}",
-                "--remote-allow-origins=*",
-                f"--user-data-dir={profile_dir}",
-                auth_url,
-            ]
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def _drive_chrome_session(headless_mode: bool, max_wait_sec: float) -> Dict[str, Any]:
+            nonlocal mobile
+            port = _get_free_port()
+            proc = None
+            ws = None
+            try:
+                import requests
+                import websocket
 
-            # Wait for DevTools endpoint to become ready
-            ws_url = None
-            for _ in range(30):
-                time.sleep(0.35)
-                try:
-                    r = requests.get(f"http://127.0.0.1:{port}/json", timeout=1.5)
-                    if r.status_code == 200:
-                        targets = r.json()
-                        for t in targets:
-                            if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
-                                ws_url = t["webSocketDebuggerUrl"]
+                cmd = [
+                    chrome_bin,
+                    "--disable-gpu",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-extensions",
+                    "--disable-popup-blocking",
+                    f"--remote-debugging-port={port}",
+                    "--remote-allow-origins=*",
+                    f"--user-data-dir={profile_dir}",
+                ]
+                if headless_mode:
+                    cmd.extend(["--headless=new", "--window-size=1280,900", auth_url])
+                else:
+                    cmd.extend(["--window-size=520,700", f"--app={auth_url}"])
+
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                ws_url = None
+                for _ in range(30):
+                    time.sleep(0.35)
+                    try:
+                        r = requests.get(f"http://127.0.0.1:{port}/json", timeout=1.5)
+                        if r.status_code == 200:
+                            targets = r.json()
+                            for t in targets:
+                                if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                                    ws_url = t["webSocketDebuggerUrl"]
+                                    break
+                            if ws_url:
                                 break
-                        if ws_url:
-                            break
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
-            if not ws_url:
-                msg = "Headless Chrome started, but DevTools WebSocket did not respond in time."
-                cls._set_setting("upstox_last_auto_login_status", f"ERROR: {msg}")
-                return {"status": "error", "message": msg}
+                if not ws_url:
+                    return {"status": "error", "message": "Chrome DevTools WebSocket did not respond in time."}
 
-            ws = websocket.create_connection(ws_url, timeout=10)
-            msg_id = 0
+                ws = websocket.create_connection(ws_url, timeout=10)
+                msg_id = 0
 
-            def cdp_eval(js_expr: str) -> Any:
-                nonlocal msg_id
-                msg_id += 1
-                cur_id = msg_id
-                payload = {
-                    "id": cur_id,
-                    "method": "Runtime.evaluate",
-                    "params": {"expression": js_expr, "returnByValue": True},
-                }
-                ws.send(json.dumps(payload))
-                deadline = time.time() + 6.0
-                while time.time() < deadline:
-                    raw = ws.recv()
-                    data = json.loads(raw)
-                    if data.get("id") == cur_id:
-                        return data.get("result", {}).get("result", {}).get("value")
-                return None
+                def cdp_eval(js_expr: str) -> Any:
+                    nonlocal msg_id
+                    msg_id += 1
+                    cur_id = msg_id
+                    payload = {
+                        "id": cur_id,
+                        "method": "Runtime.evaluate",
+                        "params": {"expression": js_expr, "returnByValue": True},
+                    }
+                    ws.send(json.dumps(payload))
+                    deadline = time.time() + 5.0
+                    while time.time() < deadline:
+                        raw = ws.recv()
+                        data = json.loads(raw)
+                        if data.get("id") == cur_id:
+                            return data.get("result", {}).get("result", {}).get("value")
+                    return None
 
-            step_mobile_done = False
-            step_totp_done = False
-            step_pin_done = False
-            last_error_text = ""
+                step_mobile_done = False
+                step_totp_done = False
+                step_pin_done = False
+                last_error_text = ""
 
-            # Up to 32 seconds to progress through Mobile -> TOTP -> PIN -> Redirect
-            start_loop = time.time()
-            while time.time() - start_loop < 32.0:
-                # 1. Check if localhost callback ALREADY received the code and updated SQLite!
-                cur_smap = cls.get_settings_map()
-                cur_refresh = cur_smap.get("upstox_last_token_refresh_ist", "")
-                if cur_refresh and cur_refresh != pre_refresh_ts and cur_smap.get("upstox_auth_status") == "ACTIVE":
-                    cls._set_setting(
-                        "upstox_last_refresh_method",
-                        trigger_source,
-                    )
-                    cls._set_setting(
-                        "upstox_last_auto_login_status",
-                        f"SUCCESS at {cur_refresh} ({trigger_source})",
-                    )
+                start_loop = time.time()
+                while time.time() - start_loop < max_wait_sec:
+                    # 1. Check if localhost callback ALREADY received the code and updated SQLite!
+                    cur_smap = cls.get_settings_map()
+                    cur_refresh = cur_smap.get("upstox_last_token_refresh_ist", "")
+                    if cur_refresh and cur_refresh != pre_refresh_ts and cur_smap.get("upstox_auth_status") == "ACTIVE":
+                        cls._set_setting("upstox_last_refresh_method", trigger_source)
+                        cls._set_setting(
+                            "upstox_last_auto_login_status",
+                            f"SUCCESS at {cur_refresh} ({trigger_source})",
+                        )
+                        return {
+                            "status": "success",
+                            "message": f"✅ Autonomous login succeeded! Both Market & Algo tokens refreshed ({cur_refresh}).",
+                            "refreshed_at_ist": cur_refresh,
+                            "user_name": cur_smap.get("upstox_last_refresh_user", "Upstox Trader"),
+                        }
+
+                    if proc.poll() is not None:
+                        break
+
+                    totp_bundle = cls.generate_totp(totp_secret) if has_totp else {}
+                    if totp_bundle.get("remaining_sec", 30) <= 2 and not step_totp_done and has_totp:
+                        time.sleep(2.2)
+                        totp_bundle = cls.generate_totp(totp_secret)
+                    live_otp = totp_bundle.get("code") or ""
+
+                    js_step = """
+                    (function() {
+                        var href = window.location.href || '';
+                        if (href.indexOf('code=') !== -1) {
+                            return { state: 'REDIRECTED', href: href };
+                        }
+                        var errEl = document.querySelector('.error-message, [class*="error"], [id*="error"]');
+                        var errTxt = errEl && errEl.innerText ? errEl.innerText.trim() : '';
+
+                        var mobInput = document.querySelector('#mobileNum, input[name="mobileNum"], input[type="tel"][maxlength="10"]');
+                        var otpInput = document.querySelector('#otpNum, input[name="otpNum"], input[id*="otp"]');
+                        var pinInput = document.querySelector('#pinCode, input[name="pinCode"], input[type="password"]');
+
+                        var typedMob = mobInput && mobInput.value ? String(mobInput.value).replace(/\\D/g, '') : '';
+
+                        if (pinInput && pinInput.offsetParent !== null) {
+                            return { state: 'PIN_SCREEN', err: errTxt, typedMob: typedMob };
+                        }
+                        if (otpInput && otpInput.offsetParent !== null) {
+                            return { state: 'OTP_SCREEN', err: errTxt, typedMob: typedMob };
+                        }
+                        if (mobInput && mobInput.offsetParent !== null) {
+                            return { state: 'MOBILE_SCREEN', err: errTxt, typedMob: typedMob };
+                        }
+                        return { state: 'LOADING', href: href, err: errTxt };
+                    })();
+                    """
+                    state_obj = cdp_eval(js_step) or {}
+                    st = state_obj.get("state", "LOADING")
+                    if state_obj.get("err"):
+                        last_error_text = state_obj["err"]
+
+                    # Auto-capture 10-digit mobile number if user typed it once so future runs have it!
+                    typed_mob = str(state_obj.get("typedMob") or "")
+                    if len(typed_mob) == 10 and len(mobile) != 10:
+                        mobile = typed_mob
+                        cls._set_setting("upstox_mobile_number", mobile)
+
+                    if st == "REDIRECTED":
+                        href = state_obj.get("href", "")
+                        res = cls.smart_exchange_or_activate(href)
+                        if res.get("status") == "success":
+                            return res
+
+                    elif st == "MOBILE_SCREEN":
+                        if len(mobile) == 10 and not step_mobile_done:
+                            fill_mob_js = f"""
+                            (function() {{
+                                var el = document.querySelector('#mobileNum, input[name="mobileNum"], input[type="tel"][maxlength="10"]');
+                                if (!el) return false;
+                                el.focus();
+                                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                setter.call(el, {json.dumps(mobile)});
+                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                var btn = document.querySelector('#getOtp, button[type="submit"], button');
+                                if (btn) btn.click();
+                                return true;
+                            }})();
+                            """
+                            if cdp_eval(fill_mob_js):
+                                step_mobile_done = True
+                                time.sleep(1.0)
+                                continue
+                        elif headless_mode:
+                            # Headless hit MOBILE_SCREEN without saved mobile number -> switch to interactive fallback
+                            return {"status": "needs_interactive", "reason": "MOBILE_SCREEN"}
+
+                    elif st == "OTP_SCREEN":
+                        if live_otp and not step_totp_done:
+                            fill_otp_js = f"""
+                            (function() {{
+                                var el = document.querySelector('#otpNum, input[name="otpNum"], input[id*="otp"]');
+                                if (!el) return false;
+                                el.focus();
+                                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                setter.call(el, {json.dumps(live_otp)});
+                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                var btn = document.querySelector('#continueBtn, button[type="submit"], button');
+                                if (btn) btn.click();
+                                return true;
+                            }})();
+                            """
+                            if cdp_eval(fill_otp_js):
+                                step_totp_done = True
+                                time.sleep(1.0)
+                                continue
+                        elif headless_mode and not live_otp:
+                            # Headless hit OTP_SCREEN without saved TOTP secret -> switch to interactive fallback
+                            return {"status": "needs_interactive", "reason": "OTP_SCREEN"}
+
+                    elif st == "PIN_SCREEN" and not step_pin_done:
+                        fill_pin_js = f"""
+                        (function() {{
+                            var el = document.querySelector('#pinCode, input[name="pinCode"], input[type="password"]');
+                            if (!el) return false;
+                            el.focus();
+                            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                            setter.call(el, {json.dumps(pin)});
+                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                            var btn = document.querySelector('#pinContinueBtn, button[type="submit"], button');
+                            if (btn) btn.click();
+                            return true;
+                        }})();
+                        """
+                        if cdp_eval(fill_pin_js):
+                            step_pin_done = True
+                            time.sleep(1.3)
+                            continue
+
+                    time.sleep(0.45)
+
+                final_smap = cls.get_settings_map()
+                final_refresh = final_smap.get("upstox_last_token_refresh_ist", "")
+                if final_refresh and final_refresh != pre_refresh_ts and final_smap.get("upstox_auth_status") == "ACTIVE":
                     return {
                         "status": "success",
-                        "message": f"✅ Autonomous login succeeded! Both Market & Algo tokens refreshed ({cur_refresh}).",
-                        "refreshed_at_ist": cur_refresh,
-                        "user_name": cur_smap.get("upstox_last_refresh_user", "Upstox Trader"),
+                        "message": f"✅ Autonomous login succeeded! Both Market & Algo tokens refreshed ({final_refresh}).",
+                        "refreshed_at_ist": final_refresh,
+                        "user_name": final_smap.get("upstox_last_refresh_user", "Upstox Trader"),
                     }
 
-                # 2. Inspect current URL & DOM state via CDP
-                totp_bundle = cls.generate_totp(totp_secret)
-                if totp_bundle.get("remaining_sec", 30) <= 2 and not step_totp_done:
-                    # Wait for next 30-second window so we never submit an expiring TOTP
-                    time.sleep(2.2)
-                    totp_bundle = cls.generate_totp(totp_secret)
-                live_otp = totp_bundle.get("code") or ""
-
-                js_step = f"""
-                (function() {{
-                    var href = window.location.href || '';
-                    if (href.indexOf('code=') !== -1) {{
-                        return {{ state: 'REDIRECTED', href: href }};
-                    }}
-                    function setVal(el, val) {{
-                        el.focus();
-                        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                        setter.call(el, val);
-                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    }}
-                    var errEl = document.querySelector('.error-message, [class*="error"], [id*="error"]');
-                    var errTxt = errEl && errEl.innerText ? errEl.innerText.trim() : '';
-
-                    var mobInput = document.querySelector('#mobileNum, input[name="mobileNum"], input[type="tel"][maxlength="10"]');
-                    var otpInput = document.querySelector('#otpNum, input[name="otpNum"], input[id*="otp"]');
-                    var pinInput = document.querySelector('#pinCode, input[name="pinCode"], input[type="password"]');
-
-                    if (pinInput && pinInput.offsetParent !== null) {{
-                        return {{ state: 'PIN_SCREEN', err: errTxt }};
-                    }}
-                    if (otpInput && otpInput.offsetParent !== null) {{
-                        return {{ state: 'OTP_SCREEN', err: errTxt }};
-                    }}
-                    if (mobInput && mobInput.offsetParent !== null) {{
-                        return {{ state: 'MOBILE_SCREEN', err: errTxt }};
-                    }}
-                    return {{ state: 'LOADING', href: href, err: errTxt, bodyPreview: (document.body && document.body.innerText || '').slice(0, 200) }};
-                }})();
-                """
-                state_obj = cdp_eval(js_step) or {}
-                st = state_obj.get("state", "LOADING")
-                if state_obj.get("err"):
-                    last_error_text = state_obj["err"]
-
-                if st == "REDIRECTED":
-                    href = state_obj.get("href", "")
-                    res = cls.smart_exchange_or_activate(href)
-                    if res.get("status") == "success":
-                        return res
-
-                elif st == "MOBILE_SCREEN" and not step_mobile_done:
-                    fill_mob_js = f"""
-                    (function() {{
-                        var el = document.querySelector('#mobileNum, input[name="mobileNum"], input[type="tel"][maxlength="10"]');
-                        if (!el) return false;
-                        el.focus();
-                        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                        setter.call(el, {json.dumps(mobile)});
-                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        var btn = document.querySelector('#getOtp, button[type="submit"], button');
-                        if (btn) btn.click();
-                        return true;
-                    }})();
-                    """
-                    if cdp_eval(fill_mob_js):
-                        step_mobile_done = True
-                        time.sleep(1.2)
-                        continue
-
-                elif st == "OTP_SCREEN" and not step_totp_done and live_otp:
-                    fill_otp_js = f"""
-                    (function() {{
-                        var el = document.querySelector('#otpNum, input[name="otpNum"], input[id*="otp"]');
-                        if (!el) return false;
-                        el.focus();
-                        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                        setter.call(el, {json.dumps(live_otp)});
-                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        var btn = document.querySelector('#continueBtn, button[type="submit"], button');
-                        if (btn) btn.click();
-                        return true;
-                    }})();
-                    """
-                    if cdp_eval(fill_otp_js):
-                        step_totp_done = True
-                        time.sleep(1.2)
-                        continue
-
-                elif st == "PIN_SCREEN" and not step_pin_done:
-                    fill_pin_js = f"""
-                    (function() {{
-                        var el = document.querySelector('#pinCode, input[name="pinCode"], input[type="password"]');
-                        if (!el) return false;
-                        el.focus();
-                        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                        setter.call(el, {json.dumps(pin)});
-                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        var btn = document.querySelector('#pinContinueBtn, button[type="submit"], button');
-                        if (btn) btn.click();
-                        return true;
-                    }})();
-                    """
-                    if cdp_eval(fill_pin_js):
-                        step_pin_done = True
-                        time.sleep(1.5)
-                        continue
-
-                time.sleep(0.6)
-
-            # Final check in case callback completed right at loop end
-            final_smap = cls.get_settings_map()
-            final_refresh = final_smap.get("upstox_last_token_refresh_ist", "")
-            if final_refresh and final_refresh != pre_refresh_ts and final_smap.get("upstox_auth_status") == "ACTIVE":
+                err_detail = f" (Upstox page: {last_error_text})" if last_error_text else ""
                 return {
-                    "status": "success",
-                    "message": f"✅ Autonomous login succeeded! Both Market & Algo tokens refreshed ({final_refresh}).",
-                    "refreshed_at_ist": final_refresh,
+                    "status": "error",
+                    "message": (
+                        f"Auto-login timed out at step [Mobile={step_mobile_done}, OTP={step_totp_done}, PIN={step_pin_done}]{err_detail}."
+                    ),
                 }
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
 
-            err_detail = f" (Upstox page said: {last_error_text})" if last_error_text else ""
-            fail_msg = (
-                f"Headless auto-login timed out at step "
-                f"[Mobile={step_mobile_done}, TOTP={step_totp_done}, PIN={step_pin_done}]{err_detail}. "
-                f"Verify that TOTP is enabled on your Upstox account and your Mobile/PIN/TOTP Secret are accurate."
-            )
-            cls._set_setting("upstox_last_auto_login_status", f"FAILED: {fail_msg}")
-            return {"status": "error", "message": fail_msg}
-
+        try:
+            cls._set_setting("upstox_last_auto_login_status", f"RUNNING ({cls.now_ist_str()})...")
+            if start_headless:
+                res = _drive_chrome_session(headless_mode=True, max_wait_sec=28.0)
+                if res.get("status") == "success":
+                    return res
+                if res.get("status") == "needs_interactive" and allow_interactive_fallback:
+                    logger.info(
+                        f"[UpstoxTokenAutomator] Persistent profile needs one-time {res.get('reason')} verification; "
+                        f"launching Auto-PIN Assisted window..."
+                    )
+                    res = _drive_chrome_session(headless_mode=False, max_wait_sec=120.0)
+                    return res
+                return res
+            elif allow_interactive_fallback:
+                res = _drive_chrome_session(headless_mode=False, max_wait_sec=120.0)
+                return res
+            else:
+                return {
+                    "status": "error",
+                    "message": "Headless auto-login requires Mobile + TOTP Secret or an established persistent session.",
+                }
         except Exception as e:
             err_msg = f"Autonomous login exception: {e}"
             logger.warning(f"[UpstoxTokenAutomator] {err_msg}")
@@ -745,24 +814,6 @@ class UpstoxTokenAutomator:
             return {"status": "error", "message": err_msg}
         finally:
             _AUTO_LOGIN_IN_PROGRESS = False
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception:
-                    pass
-            if proc is not None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=3)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-            try:
-                shutil.rmtree(profile_dir, ignore_errors=True)
-            except Exception:
-                pass
 
     @classmethod
     def _needs_daily_refresh(cls, smap: Dict[str, str]) -> bool:
@@ -806,17 +857,22 @@ class UpstoxTokenAutomator:
                     if time.time() - _LAST_AUTO_ATTEMPT_TS < 900:
                         continue
                     now_ist = cls.now_ist()
-                    # Run automatically if token is expired/missing and we are past 08:30 AM IST
-                    if now_ist.hour >= 8 and cls._needs_daily_refresh(smap):
+                    # Run automatically if token is expired/missing and we are past 04:00 AM IST (after 03:30 AM cutoff)
+                    if now_ist.hour >= 4 and cls._needs_daily_refresh(smap):
                         mobile = smap.get("upstox_mobile_number", "").strip()
                         pin = smap.get("upstox_pin", "").strip()
                         totp_secret = smap.get("upstox_totp_secret", "").strip()
-                        if len(mobile) == 10 and len(pin) >= 4 and totp_secret:
+                        persistent_dir = os.path.expanduser("~/.gemini/antigravity/upstox_chrome_profile")
+                        has_session = os.path.exists(os.path.join(persistent_dir, "Default", "Cookies"))
+                        if len(pin) >= 4 and (has_session or (len(mobile) == 10 and totp_secret)):
                             logger.info(
                                 "[UpstoxTokenAutomator] 🤖 Detected expired/missing Upstox token — "
                                 "triggering Autonomous Headless Morning Login..."
                             )
-                            cls.run_headless_auto_login(trigger_source="Autonomous Morning Daemon")
+                            cls.run_headless_auto_login(
+                                trigger_source="Autonomous Morning Daemon",
+                                allow_interactive_fallback=False,
+                            )
                 except Exception as e:
                     logger.debug(f"[UpstoxTokenAutomator] Daemon tick note: {e}")
 
