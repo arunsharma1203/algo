@@ -509,7 +509,7 @@ class OptionStreamManager:
             from app.analytics.option_sniffer.option_db import OptionDB as _ActiveOptionDB
             conn = _ActiveOptionDB.get_connection()
             query = """
-                SELECT open, high, low, close
+                SELECT open, high, low, close, timestamp
                 FROM continuous_index_ohlcv
                 WHERE ticker = ?
                   AND timestamp >= ?
@@ -541,6 +541,8 @@ class OptionStreamManager:
             s_open = float(rows[0][0])
             s_high = max(float(r[1]) for r in rows)
             s_low = min(float(r[2]) for r in rows)
+            first_ts = str(rows[0][4] or "") if len(rows[0]) > 4 else ""
+            has_full_open = ("09:15" <= first_ts[11:16] <= "09:20") or ("T09:15" <= first_ts[10:16] <= "T09:20")
 
             with self._lock:
                 if not hasattr(self, "_benchmark_cache"):
@@ -548,7 +550,7 @@ class OptionStreamManager:
                 if not hasattr(self, "_session_ohlc_cache"):
                     self._session_ohlc_cache = {}
                 self._benchmark_cache[u_upper] = (now_mono, benchmark_val)
-                self._session_ohlc_cache[u_upper] = (now_mono, (s_open, s_high, s_low))
+                self._session_ohlc_cache[u_upper] = (now_mono, (s_open, s_high, s_low, has_full_open))
 
             return benchmark_val
         except Exception as e:
@@ -581,16 +583,19 @@ class OptionStreamManager:
             with self._lock:
                 s_ohlc_entry = getattr(self, "_session_ohlc_cache", {}).get(u_upper)
             if s_ohlc_entry:
-                _, (s_open, s_high, s_low) = s_ohlc_entry
+                _, ohlc_tuple = s_ohlc_entry
+                s_open, s_high, s_low = ohlc_tuple[0], ohlc_tuple[1], ohlc_tuple[2]
+                has_full_open = bool(ohlc_tuple[3]) if len(ohlc_tuple) > 3 else False
                 eff_high = max(s_high, spot_val) if spot_val > 0 else s_high
                 eff_low = min(s_low, spot_val) if (s_low > 0 and spot_val > 0) else (s_low or spot_val)
                 q_high = float(quote.get("high") or 0.0)
                 q_low = float(quote.get("low") or 0.0)
-                if eff_high > 0 and (q_high <= 0 or q_high > eff_high):
+                spike_tol = 0.0 if has_full_open else (120.0 if "BANK" in u_upper else 45.0)
+                if eff_high > 0 and (q_high <= 0 or (q_high - eff_high) > spike_tol):
                     quote["high"] = eff_high
                     if s_open > 0:
                         quote["open"] = s_open
-                if eff_low > 0 and (q_low <= 0 or q_low < eff_low):
+                if eff_low > 0 and (q_low <= 0 or (eff_low - q_low) > spike_tol):
                     quote["low"] = eff_low
                     if s_open > 0:
                         quote["open"] = s_open

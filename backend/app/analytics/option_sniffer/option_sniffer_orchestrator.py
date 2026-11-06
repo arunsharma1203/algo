@@ -300,7 +300,7 @@ class OptionSnifferOrchestrator:
 
                         c_dir = "NEUTRAL"
                         c_conf = float(unanimous[0].get("composite_score", 50.0)) if unanimous else 50.0
-                        if unanimous_count >= 2 or (unanimous_count == 1 and conflicts_count == 0 and not is_conflicted):
+                        if unanimous_count >= 2 and not is_conflicted:
                             if buy_votes > sell_votes and buy_votes > 0:
                                 c_dir = "BULLISH"
                             elif sell_votes > buy_votes and sell_votes > 0:

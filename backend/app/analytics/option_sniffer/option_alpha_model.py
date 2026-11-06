@@ -182,9 +182,10 @@ class OptionAlphaModel:
             z_ext = abs(vwap_dist) / max(0.10, spot_atr_pct)
 
         base_edge = 0.38
-        eff_up_conf = max(up_conf, 0.62) if (is_breakout and up_align >= 0.5) else up_conf
+        eff_up_align = max(up_align, 0.50) if is_breakout else up_align
+        eff_up_conf = max(up_conf, 0.62) if (is_breakout and eff_up_align >= 0.5) else up_conf
         if is_call:
-            if (up_align > 0.7 or (is_breakout and up_align >= 0.5)) and (rsi >= 50 or vwap_dist >= 0) and vwap_dist > -0.15:
+            if (eff_up_align > 0.7 or (is_breakout and eff_up_align >= 0.5)) and (rsi >= 50 or vwap_dist >= 0) and vwap_dist > -0.15:
                 # Sweet spot vs Overextension:
                 # Confirmed CRB-I / Day High breakouts are exempt from Z_ext penalty;
                 # non-breakout entries smoothly taper from +0.14 (Z <= 1.6) to +0.06 (Z = 2.3)
@@ -196,14 +197,14 @@ class OptionAlphaModel:
                     # Parabolic climax penalty (Z > 2.3)
                     climax_pen = min(0.20, 0.10 * (z_ext - 2.0))
                     base_edge -= climax_pen
-            elif up_align < 0.3 or rsi < 46 or vwap_dist < -0.3:
+            elif eff_up_align < 0.3 or rsi < 46 or vwap_dist < -0.3:
                 base_edge -= 0.12
 
             # Smooth extreme-RSI overbought governor (if not breakout): smooth taper above RSI 72 (no step-function cliff)
             if not is_breakout and rsi > 72.0:
                 base_edge -= min(0.10, (rsi - 72.0) * 0.012)
         else:
-            if (up_align > 0.7 or (is_breakout and up_align >= 0.5)) and (rsi <= 50 or vwap_dist <= 0) and vwap_dist < 0.15:
+            if (eff_up_align > 0.7 or (is_breakout and eff_up_align >= 0.5)) and (rsi <= 50 or vwap_dist <= 0) and vwap_dist < 0.15:
                 if is_breakout or z_ext <= 1.6:
                     base_edge += 0.14
                 elif z_ext <= 2.3:
@@ -211,7 +212,7 @@ class OptionAlphaModel:
                 else:
                     climax_pen = min(0.20, 0.10 * (z_ext - 2.0))
                     base_edge -= climax_pen
-            elif up_align < 0.3 or rsi > 54 or vwap_dist > 0.3:
+            elif eff_up_align < 0.3 or rsi > 54 or vwap_dist > 0.3:
                 base_edge -= 0.12
 
             # Smooth extreme-RSI oversold governor (if not breakout): smooth taper below RSI 28 (no step-function cliff)
