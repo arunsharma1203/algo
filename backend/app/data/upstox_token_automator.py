@@ -566,6 +566,15 @@ class UpstoxTokenAutomator:
                     cmd.extend(["--window-size=520,700", f"--app={auth_url}"])
 
                 proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if not headless_mode:
+                    try:
+                        subprocess.Popen(
+                            ["osascript", "-e", 'tell application "Google Chrome" to activate'],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        pass
 
                 def _connect_ws(max_tries: int = 30) -> Any:
                     for _ in range(max_tries):
@@ -589,7 +598,7 @@ class UpstoxTokenAutomator:
 
                 msg_id = 0
 
-                def cdp_eval(js_expr: str) -> Any:
+                def cdp_call(method: str, params: Dict[str, Any]) -> Any:
                     nonlocal msg_id, ws
                     for _ in range(2):
                         if ws is None:
@@ -599,18 +608,14 @@ class UpstoxTokenAutomator:
                         try:
                             msg_id += 1
                             cur_id = msg_id
-                            payload = {
-                                "id": cur_id,
-                                "method": "Runtime.evaluate",
-                                "params": {"expression": js_expr, "returnByValue": True},
-                            }
+                            payload = {"id": cur_id, "method": method, "params": params}
                             ws.send(json.dumps(payload))
                             deadline = time.time() + 5.0
                             while time.time() < deadline:
                                 raw = ws.recv()
                                 data = json.loads(raw)
                                 if data.get("id") == cur_id:
-                                    return data.get("result", {}).get("result", {}).get("value")
+                                    return data.get("result", {})
                             return None
                         except Exception:
                             try:
@@ -622,10 +627,31 @@ class UpstoxTokenAutomator:
                             time.sleep(0.25)
                     return None
 
+                def cdp_eval(js_expr: str) -> Any:
+                    res = cdp_call("Runtime.evaluate", {"expression": js_expr, "returnByValue": True})
+                    if isinstance(res, dict):
+                        return res.get("result", {}).get("value")
+                    return None
+
+                def cdp_type_and_submit(focus_js: str, text_val: str, submit_js: str) -> bool:
+                    focused = cdp_eval(focus_js)
+                    if not focused:
+                        return False
+                    time.sleep(0.15)
+                    for ch in str(text_val):
+                        cdp_call("Input.insertText", {"text": ch})
+                        time.sleep(0.035)
+                    time.sleep(0.25)
+                    cdp_eval(submit_js)
+                    return True
+
                 step_mobile_done = False
+                step_mobile_ts = 0.0
                 step_totp_done = False
                 step_pin_done = False
+                step_pin_ts = 0.0
                 last_error_text = ""
+                last_seen_state = "INIT"
 
                 start_loop = time.time()
                 while time.time() - start_loop < max_wait_sec:
@@ -666,12 +692,26 @@ class UpstoxTokenAutomator:
                         if (href.indexOf('code=') !== -1) {
                             return { state: 'REDIRECTED', href: href };
                         }
+                        var bodyTxt = (document.body && document.body.innerText) ? document.body.innerText : '';
                         var errEl = document.querySelector('.error-message, [class*="error"], [id*="error"]');
                         var errTxt = errEl && errEl.innerText ? errEl.innerText.trim() : '';
 
-                        var mobInput = document.querySelector('#mobileNum, input[name="mobileNum"], input[type="tel"][maxlength="10"]');
-                        var otpInput = document.querySelector('#otpNum, input[name="otpNum"], input[id*="otp"]');
-                        var pinInput = document.querySelector('#pinCode, input[name="pinCode"], input[type="password"]');
+                        var pinInput = document.querySelector('#pinCode, input[name="pinCode"], input[type="password"], input[id*="pin" i]');
+                        var otpInput = document.querySelector('#otpNum, input[name="otpNum"], input[id*="otp" i]');
+                        var mobInput = document.querySelector('#mobileNum, input[name="mobileNum"], input[id*="mobile" i]');
+
+                        var visibleInputs = Array.from(document.querySelectorAll('input')).filter(function(i) {
+                            return i.offsetParent !== null && i.type !== 'hidden' && i.type !== 'checkbox';
+                        });
+                        if (!pinInput && visibleInputs.length > 0 && /6-digit PIN|enter.*pin|passcode/i.test(bodyTxt)) {
+                            pinInput = visibleInputs[0];
+                        }
+                        if (!otpInput && visibleInputs.length > 0 && /enter.*otp|one time password|sent to/i.test(bodyTxt)) {
+                            otpInput = visibleInputs[0];
+                        }
+                        if (!mobInput && visibleInputs.length > 0 && /mobile number|phone number|10-digit/i.test(bodyTxt)) {
+                            mobInput = visibleInputs[0];
+                        }
 
                         var typedMob = mobInput && mobInput.value ? String(mobInput.value).replace(/\\D/g, '') : '';
 
@@ -689,6 +729,8 @@ class UpstoxTokenAutomator:
                     """
                     state_obj = cdp_eval(js_step) or {}
                     st = state_obj.get("state", "LOADING")
+                    if st != "LOADING":
+                        last_seen_state = st
                     if state_obj.get("err"):
                         last_error_text = state_obj["err"]
 
@@ -711,27 +753,29 @@ class UpstoxTokenAutomator:
 
                     elif st == "MOBILE_SCREEN":
                         if headless_mode and not has_totp:
-                            # Do NOT click Get OTP in headless mode if we don't have TOTP Secret (prevents double-sending OTP)
                             return {"status": "needs_interactive", "reason": "MOBILE_SCREEN"}
-                        if len(mobile) == 10 and not step_mobile_done:
-                            fill_mob_js = f"""
-                            (function() {{
-                                var el = document.querySelector('#mobileNum, input[name="mobileNum"], input[type="tel"][maxlength="10"]');
+                        if len(mobile) == 10 and (not step_mobile_done or (time.time() - step_mobile_ts > 6.0 and not typed_mob)):
+                            focus_mob_js = """
+                            (function() {
+                                var el = document.querySelector('#mobileNum, input[name="mobileNum"], input[id*="mobile" i]')
+                                      || Array.from(document.querySelectorAll('input')).find(function(i){ return i.offsetParent !== null && i.type !== 'hidden'; });
                                 if (!el) return false;
                                 el.focus();
-                                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                                setter.call(el, {json.dumps(mobile)});
-                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                setTimeout(function() {{
-                                    var btn = document.querySelector('#getOtp, button[type="submit"], button');
-                                    if (btn) btn.click();
-                                }}, 150);
+                                el.value = '';
+                                el.dispatchEvent(new Event('input', { bubbles: true }));
                                 return true;
-                            }})();
+                            })();
                             """
-                            if cdp_eval(fill_mob_js):
+                            submit_mob_js = """
+                            (function() {
+                                var btn = document.querySelector('#getOtp, button[type="submit"], button');
+                                if (btn) { btn.click(); return true; }
+                                return false;
+                            })();
+                            """
+                            if cdp_type_and_submit(focus_mob_js, mobile, submit_mob_js):
                                 step_mobile_done = True
+                                step_mobile_ts = time.time()
                                 time.sleep(1.2)
                                 continue
                         elif headless_mode:
@@ -739,49 +783,49 @@ class UpstoxTokenAutomator:
 
                     elif st == "OTP_SCREEN":
                         if live_otp and not step_totp_done:
-                            fill_otp_js = f"""
-                            (function() {{
-                                var el = document.querySelector('#otpNum, input[name="otpNum"], input[id*="otp"]');
+                            focus_otp_js = """
+                            (function() {
+                                var el = document.querySelector('#otpNum, input[name="otpNum"], input[id*="otp" i]')
+                                      || Array.from(document.querySelectorAll('input')).find(function(i){ return i.offsetParent !== null && i.type !== 'hidden'; });
                                 if (!el) return false;
                                 el.focus();
-                                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                                setter.call(el, {json.dumps(live_otp)});
-                                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                setTimeout(function() {{
-                                    var btn = document.querySelector('#continueBtn, button[type="submit"], button');
-                                    if (btn) btn.click();
-                                }}, 150);
                                 return true;
-                            }})();
+                            })();
                             """
-                            if cdp_eval(fill_otp_js):
+                            submit_otp_js = """
+                            (function() {
+                                var btn = document.querySelector('#continueBtn, button[type="submit"], button');
+                                if (btn) { btn.click(); return true; }
+                                return false;
+                            })();
+                            """
+                            if cdp_type_and_submit(focus_otp_js, live_otp, submit_otp_js):
                                 step_totp_done = True
                                 time.sleep(1.2)
                                 continue
                         elif headless_mode and not live_otp:
-                            # Headless hit OTP_SCREEN without saved TOTP secret -> switch to interactive fallback
                             return {"status": "needs_interactive", "reason": "OTP_SCREEN"}
 
-                    elif st == "PIN_SCREEN" and not step_pin_done:
-                        fill_pin_js = f"""
-                        (function() {{
-                            var el = document.querySelector('#pinCode, input[name="pinCode"], input[type="password"]');
+                    elif st == "PIN_SCREEN" and (not step_pin_done or (time.time() - step_pin_ts > 5.0)):
+                        focus_pin_js = """
+                        (function() {
+                            var el = document.querySelector('#pinCode, input[name="pinCode"], input[type="password"], input[id*="pin" i]')
+                                  || Array.from(document.querySelectorAll('input')).find(function(i){ return i.offsetParent !== null && i.type !== 'hidden'; });
                             if (!el) return false;
                             el.focus();
-                            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                            setter.call(el, {json.dumps(pin)});
-                            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            setTimeout(function() {{
-                                var btn = document.querySelector('#pinContinueBtn, button[type="submit"], button');
-                                if (btn) btn.click();
-                            }}, 150);
                             return true;
-                        }})();
+                        })();
                         """
-                        if cdp_eval(fill_pin_js):
+                        submit_pin_js = """
+                        (function() {
+                            var btn = document.querySelector('#pinContinueBtn, button[type="submit"], button');
+                            if (btn) { btn.click(); return true; }
+                            return false;
+                        })();
+                        """
+                        if cdp_type_and_submit(focus_pin_js, pin, submit_pin_js):
                             step_pin_done = True
+                            step_pin_ts = time.time()
                             time.sleep(1.5)
                             continue
 
@@ -806,7 +850,7 @@ class UpstoxTokenAutomator:
                 return {
                     "status": "error",
                     "message": (
-                        f"Auto-login timed out at step [Mobile={step_mobile_done}, OTP={step_totp_done}, PIN={step_pin_done}]{err_detail}."
+                        f"Auto-login timed out at step [State={last_seen_state}, Mobile={step_mobile_done}, OTP={step_totp_done}, PIN={step_pin_done}]{err_detail}."
                     ),
                 }
             finally:
@@ -836,11 +880,11 @@ class UpstoxTokenAutomator:
                         f"[UpstoxTokenAutomator] Persistent profile needs one-time {res.get('reason')} verification; "
                         f"launching Auto-PIN Assisted window..."
                     )
-                    res = _drive_chrome_session(headless_mode=False, max_wait_sec=120.0)
+                    res = _drive_chrome_session(headless_mode=False, max_wait_sec=180.0)
                     return res
                 return res
             elif allow_interactive_fallback:
-                res = _drive_chrome_session(headless_mode=False, max_wait_sec=120.0)
+                res = _drive_chrome_session(headless_mode=False, max_wait_sec=180.0)
                 return res
             else:
                 return {
