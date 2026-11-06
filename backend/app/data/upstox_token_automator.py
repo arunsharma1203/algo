@@ -536,8 +536,9 @@ class UpstoxTokenAutomator:
         )
 
         # Decide whether to start in headless mode or Assisted Auto-PIN App Window mode:
-        has_saved_cookies = os.path.exists(os.path.join(profile_dir, "Default", "Cookies"))
-        start_headless = (len(mobile) == 10 and has_totp) or has_saved_cookies
+        session_verified_marker = os.path.join(profile_dir, ".upstox_session_verified")
+        has_verified_cookies = os.path.exists(session_verified_marker)
+        start_headless = (len(mobile) == 10 and has_totp) or has_verified_cookies or (not allow_interactive_fallback)
 
         def _drive_chrome_session(headless_mode: bool, max_wait_sec: float) -> Dict[str, Any]:
             nonlocal mobile
@@ -566,44 +567,59 @@ class UpstoxTokenAutomator:
 
                 proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-                ws_url = None
-                for _ in range(30):
-                    time.sleep(0.35)
-                    try:
-                        r = requests.get(f"http://127.0.0.1:{port}/json", timeout=1.5)
-                        if r.status_code == 200:
-                            targets = r.json()
-                            for t in targets:
-                                if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
-                                    ws_url = t["webSocketDebuggerUrl"]
-                                    break
-                            if ws_url:
-                                break
-                    except Exception:
-                        pass
+                def _connect_ws(max_tries: int = 30) -> Any:
+                    for _ in range(max_tries):
+                        if proc.poll() is not None:
+                            return None
+                        time.sleep(0.3)
+                        try:
+                            r = requests.get(f"http://127.0.0.1:{port}/json", timeout=1.5)
+                            if r.status_code == 200:
+                                targets = r.json()
+                                for t in targets:
+                                    if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                                        return websocket.create_connection(t["webSocketDebuggerUrl"], timeout=8)
+                        except Exception:
+                            pass
+                    return None
 
-                if not ws_url:
+                ws = _connect_ws(max_tries=30)
+                if not ws:
                     return {"status": "error", "message": "Chrome DevTools WebSocket did not respond in time."}
 
-                ws = websocket.create_connection(ws_url, timeout=10)
                 msg_id = 0
 
                 def cdp_eval(js_expr: str) -> Any:
-                    nonlocal msg_id
-                    msg_id += 1
-                    cur_id = msg_id
-                    payload = {
-                        "id": cur_id,
-                        "method": "Runtime.evaluate",
-                        "params": {"expression": js_expr, "returnByValue": True},
-                    }
-                    ws.send(json.dumps(payload))
-                    deadline = time.time() + 5.0
-                    while time.time() < deadline:
-                        raw = ws.recv()
-                        data = json.loads(raw)
-                        if data.get("id") == cur_id:
-                            return data.get("result", {}).get("result", {}).get("value")
+                    nonlocal msg_id, ws
+                    for _ in range(2):
+                        if ws is None:
+                            ws = _connect_ws(max_tries=12)
+                            if ws is None:
+                                return None
+                        try:
+                            msg_id += 1
+                            cur_id = msg_id
+                            payload = {
+                                "id": cur_id,
+                                "method": "Runtime.evaluate",
+                                "params": {"expression": js_expr, "returnByValue": True},
+                            }
+                            ws.send(json.dumps(payload))
+                            deadline = time.time() + 5.0
+                            while time.time() < deadline:
+                                raw = ws.recv()
+                                data = json.loads(raw)
+                                if data.get("id") == cur_id:
+                                    return data.get("result", {}).get("result", {}).get("value")
+                            return None
+                        except Exception:
+                            try:
+                                if ws is not None:
+                                    ws.close()
+                            except Exception:
+                                pass
+                            ws = None
+                            time.sleep(0.25)
                     return None
 
                 step_mobile_done = False
@@ -617,6 +633,11 @@ class UpstoxTokenAutomator:
                     cur_smap = cls.get_settings_map()
                     cur_refresh = cur_smap.get("upstox_last_token_refresh_ist", "")
                     if cur_refresh and cur_refresh != pre_refresh_ts and cur_smap.get("upstox_auth_status") == "ACTIVE":
+                        try:
+                            with open(session_verified_marker, "w") as mf:
+                                mf.write(cur_refresh)
+                        except Exception:
+                            pass
                         cls._set_setting("upstox_last_refresh_method", trigger_source)
                         cls._set_setting(
                             "upstox_last_auto_login_status",
@@ -630,6 +651,7 @@ class UpstoxTokenAutomator:
                         }
 
                     if proc.poll() is not None:
+                        time.sleep(0.5)
                         break
 
                     totp_bundle = cls.generate_totp(totp_secret) if has_totp else {}
@@ -680,9 +702,17 @@ class UpstoxTokenAutomator:
                         href = state_obj.get("href", "")
                         res = cls.smart_exchange_or_activate(href)
                         if res.get("status") == "success":
+                            try:
+                                with open(session_verified_marker, "w") as mf:
+                                    mf.write(cls.now_ist_str())
+                            except Exception:
+                                pass
                             return res
 
                     elif st == "MOBILE_SCREEN":
+                        if headless_mode and not has_totp:
+                            # Do NOT click Get OTP in headless mode if we don't have TOTP Secret (prevents double-sending OTP)
+                            return {"status": "needs_interactive", "reason": "MOBILE_SCREEN"}
                         if len(mobile) == 10 and not step_mobile_done:
                             fill_mob_js = f"""
                             (function() {{
@@ -693,17 +723,18 @@ class UpstoxTokenAutomator:
                                 setter.call(el, {json.dumps(mobile)});
                                 el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                var btn = document.querySelector('#getOtp, button[type="submit"], button');
-                                if (btn) btn.click();
+                                setTimeout(function() {{
+                                    var btn = document.querySelector('#getOtp, button[type="submit"], button');
+                                    if (btn) btn.click();
+                                }}, 150);
                                 return true;
                             }})();
                             """
                             if cdp_eval(fill_mob_js):
                                 step_mobile_done = True
-                                time.sleep(1.0)
+                                time.sleep(1.2)
                                 continue
                         elif headless_mode:
-                            # Headless hit MOBILE_SCREEN without saved mobile number -> switch to interactive fallback
                             return {"status": "needs_interactive", "reason": "MOBILE_SCREEN"}
 
                     elif st == "OTP_SCREEN":
@@ -717,14 +748,16 @@ class UpstoxTokenAutomator:
                                 setter.call(el, {json.dumps(live_otp)});
                                 el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                                 el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                                var btn = document.querySelector('#continueBtn, button[type="submit"], button');
-                                if (btn) btn.click();
+                                setTimeout(function() {{
+                                    var btn = document.querySelector('#continueBtn, button[type="submit"], button');
+                                    if (btn) btn.click();
+                                }}, 150);
                                 return true;
                             }})();
                             """
                             if cdp_eval(fill_otp_js):
                                 step_totp_done = True
-                                time.sleep(1.0)
+                                time.sleep(1.2)
                                 continue
                         elif headless_mode and not live_otp:
                             # Headless hit OTP_SCREEN without saved TOTP secret -> switch to interactive fallback
@@ -740,14 +773,16 @@ class UpstoxTokenAutomator:
                             setter.call(el, {json.dumps(pin)});
                             el.dispatchEvent(new Event('input', {{ bubbles: true }}));
                             el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                            var btn = document.querySelector('#pinContinueBtn, button[type="submit"], button');
-                            if (btn) btn.click();
+                            setTimeout(function() {{
+                                var btn = document.querySelector('#pinContinueBtn, button[type="submit"], button');
+                                if (btn) btn.click();
+                            }}, 150);
                             return true;
                         }})();
                         """
                         if cdp_eval(fill_pin_js):
                             step_pin_done = True
-                            time.sleep(1.3)
+                            time.sleep(1.5)
                             continue
 
                     time.sleep(0.45)
@@ -755,6 +790,11 @@ class UpstoxTokenAutomator:
                 final_smap = cls.get_settings_map()
                 final_refresh = final_smap.get("upstox_last_token_refresh_ist", "")
                 if final_refresh and final_refresh != pre_refresh_ts and final_smap.get("upstox_auth_status") == "ACTIVE":
+                    try:
+                        with open(session_verified_marker, "w") as mf:
+                            mf.write(final_refresh)
+                    except Exception:
+                        pass
                     return {
                         "status": "success",
                         "message": f"✅ Autonomous login succeeded! Both Market & Algo tokens refreshed ({final_refresh}).",
