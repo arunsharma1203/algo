@@ -50,7 +50,9 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     LONG_TARGET_GAIN_PCT,
     LONG_MAX_SINGLE_TRADE_LOSS_INR,
     SHORT_HARD_STOP_LOSS_PCT,
+    SHORT_HEDGED_MARGIN_PER_LOT_INR,
     SHORT_MAX_SINGLE_TRADE_LOSS_INR,
+    SHORT_SWEET_SPOT_OTM_STRIKES,
     calculate_short_option_trade_costs,
 )
 from app.analytics.option_sniffer_advance.advance_db import (
@@ -301,6 +303,7 @@ class OptionSnifferAdvanceOrchestrator:
 
                 def _atm_sort_key(c: Dict[str, Any]):
                     u_name = str(c.get("underlying") or "NIFTY").upper()
+                    opt_t = str(c.get("option_type") or "CE").upper()
                     uq_obj = underlying_quotes.get(u_name) or {}
                     spot_val = float(uq_obj.get("spot_ltp") or 0.0)
                     strike_val = float(c.get("strike") or 0.0)
@@ -315,6 +318,15 @@ class OptionSnifferAdvanceOrchestrator:
                         except Exception:
                             pass
                     if spot_val > 0 and strike_val > 0:
+                        u_intel = chain_intel_map.get(u_name) or {}
+                        strike_step = float(STRIKE_INTERVALS.get(u_name, 50.0))
+                        otm_dist = (
+                            ((strike_val - spot_val) / strike_step)
+                            if opt_t == "CE"
+                            else ((spot_val - strike_val) / strike_step)
+                        )
+                        if u_intel.get("recommended_book") == BOOK_SHORT_SELL and otm_dist >= 0.40:
+                            return (exp_penalty, abs(otm_dist - SHORT_SWEET_SPOT_OTM_STRIKES) * strike_step, exp_str, strike_val)
                         return (exp_penalty, abs(strike_val - spot_val), exp_str, strike_val)
                     return (exp_penalty, 0.0, exp_str, strike_val)
 
@@ -463,19 +475,19 @@ class OptionSnifferAdvanceOrchestrator:
                     "book_type": BOOK_LONG_BUY,
                     "lots": 1,
                     "strategy": STRATEGY_WAVE1_GAMMA_SNIPER,
-                    "strike_zone": "ATM / Near-ATM (|OTM| <= 1.2 strikes)",
+                    "strike_zone": "ATM / Near-ATM (|OTM| <= 1.2 strikes) + 13:15-14:15 Super-Trend Breakout Override",
                     "max_loss_cap": f"-{LONG_STOP_LOSS_PCT:.0f}% / ₹{LONG_MAX_SINGLE_TRADE_LOSS_INR:.0f}",
-                    "trailing_engine": "4-Tier Uncapped Chandelier Ratchet (+6% Floor -> +15%/+22%/+30%/+60%)",
+                    "trailing_engine": "6-Tier Uncapped Chandelier Ratchet (+10% Tier-0 Cost-Plus Floor -> +12.5% -> +15%/+22%/+30%/+60%)",
                 },
                 "short_book": {
                     "book_type": BOOK_SHORT_SELL,
                     "lots": 1,
                     "strategies": [
-                        "CONTRACTION_THETA_SELLER (ATR_R <= 0.85, ER < 0.40)",
-                        "WAVE_2_EXHAUSTION_SELLER (Post-Harvest Wave-2 Reversion or ER <= 0.20)",
-                        "DIAGONAL_OTM_WING_SELLER (Active Long >= 8m + Sell OTM Wing >= 1.85 strikes)",
+                        "CONTRACTION_THETA_SELLER (ATR_R <= 0.85, ER < 0.40, OTM Sweet-Spot 1.2 Strikes)",
+                        "WAVE_2_EXHAUSTION_SELLER (Post-Harvest Reversion + Trend-Aligned Put/Call Selling)",
+                        "DIAGONAL_OTM_WING_SELLER (Active Profitable Long >= 8m + Sell OTM Wing >= 1.85 strikes)",
                     ],
-                    "max_loss_cap": f"+{SHORT_HARD_STOP_LOSS_PCT:.0f}% Spike / ₹{SHORT_MAX_SINGLE_TRADE_LOSS_INR:.0f}",
+                    "max_loss_cap": f"+{SHORT_HARD_STOP_LOSS_PCT:.0f}% Spike / ₹{SHORT_MAX_SINGLE_TRADE_LOSS_INR:.0f} (Auto-Hedged Spread Margin ₹{SHORT_HEDGED_MARGIN_PER_LOT_INR:,.0f})",
                     "trailing_engine": "4-Tier Reverse-Chandelier Decay Ratchet (+10% Cost Lock -> +14%/+22%/+35%/+50% Decay)",
                 },
             },

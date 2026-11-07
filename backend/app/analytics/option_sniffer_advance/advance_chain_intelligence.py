@@ -267,14 +267,15 @@ class AdvanceChainIntelligence:
             else round(spot / strike_int) * strike_int - (2 * strike_int)
         )
 
-        # 2. Net Dealer Gamma Exposure (GEX in ₹ Crores per 1% spot move)
-        # Dealer assumption: Market makers are net long calls (sold by covered/overwrite or pinned) and net short puts
+        # 2. Net Dealer Gamma Exposure (GEX in ₹ Crores per 0.1% spot move)
+        # Upstox V3 reports OI in total shares/units (lots * lot_size); normalize so we never double-multiply by lot_size
         net_gex_raw = 0.0
         for q in u_quotes:
             gamma = float(q.get("gamma") or 0.0012)
             oi = float(q.get("oi") or 0.0)
+            oi_units = oi if oi >= 5000.0 else (oi * lot_size)
             sign = 1.0 if str(q.get("option_type") or "").upper() == "CE" else -1.0
-            net_gex_raw += sign * gamma * oi * lot_size * (spot ** 2) * 0.01 / 1e7
+            net_gex_raw += sign * gamma * oi_units * (spot ** 2) * 0.001 / 1e7
         net_gex = round(net_gex_raw, 2)
         if net_gex > 5.0:
             gex_regime = "LONG_GAMMA_PINNING"

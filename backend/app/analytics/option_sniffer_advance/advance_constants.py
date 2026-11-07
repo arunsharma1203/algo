@@ -25,7 +25,7 @@ from app.analytics.option_sniffer.option_constants import (
 # ── SANDBOX SAFETY INVARIANTS ────────────────────────────────────────────────
 SIMULATION_ONLY: bool = True
 LIVE_ORDER_PLACEMENT_ENABLED: bool = False
-ADVANCE_ENGINE_VERSION: str = "ADVANCE_DUAL_BOOK_V1.0"
+ADVANCE_ENGINE_VERSION: str = "ADVANCE_DUAL_BOOK_V2.0"
 
 # ── DUAL-BOOK STRATEGY MODES & DIRECTIONS ────────────────────────────────────
 BOOK_LONG_BUY: str = "LONG_BOOK_BUY"
@@ -47,8 +47,23 @@ LONG_BASE_LOTS: int = 1
 LONG_STOP_LOSS_PCT: float = 20.0
 LONG_TARGET_GAIN_PCT: float = 35.0
 LONG_MAX_SINGLE_TRADE_LOSS_INR: float = 2200.0
+LONG_TIER0_BREAKEVEN_TRIGGER_PCT: float = 10.0  # At +10.0% MFE, lock +2.0% cost-plus breakeven floor
+LONG_TIER0_BREAKEVEN_FLOOR_PCT: float = 2.0
+LONG_TIER0_5_PROFIT_TRIGGER_PCT: float = 12.5   # At +12.5% MFE, lock +4.5% net profit floor
+LONG_TIER0_5_PROFIT_FLOOR_PCT: float = 4.5
 LONG_EARLY_BREAKEVEN_TRIGGER_PCT: float = 15.0
 LONG_EARLY_BREAKEVEN_FLOOR_PCT: float = 6.0
+LONG_MAX_PULLBACK_FROM_HIGH_PTS_NIFTY: float = 16.0
+LONG_MAX_PULLBACK_FROM_HIGH_PTS_BANKNIFTY: float = 40.0
+
+# 13:15–14:15 IST Super-Trend Institutional Breakout Override Constants
+SUPER_TREND_AFTERNOON_OVERRIDE_ENABLED: bool = True
+SUPER_TREND_AFTERNOON_CUTOFF_HOUR: int = 14
+SUPER_TREND_AFTERNOON_CUTOFF_MINUTE: int = 15
+SUPER_TREND_AFTERNOON_MIN_ER: float = 0.40
+SUPER_TREND_AFTERNOON_MIN_ADX: float = 28.0
+SUPER_TREND_AFTERNOON_MIN_ATR_RATIO: float = 1.05
+SUPER_TREND_AFTERNOON_MIN_DTE_DAYS: int = 2
 
 # 4-Tier Uncapped Chandelier Trailing Stop (Long Book)
 LONG_CHANDELIER_TIER1_TRIGGER_PCT: float = 15.0
@@ -67,7 +82,15 @@ SHORT_BASE_LOTS: int = 1
 SHORT_HARD_STOP_LOSS_PCT: float = 16.0          # Capped max % rise in option premium
 SHORT_MAX_SINGLE_TRADE_LOSS_INR: float = 1800.0 # Capped max ₹ loss per 1-lot short trade
 SHORT_MIN_ENTRY_BID_PRICE: float = 35.0         # Never short tiny penny options with tail gamma risk
-SHORT_MAX_ITM_STRIKES: float = 1.2              # Never short deep ITM (> 1.2 strikes ITM) unless ER <= 0.15
+SHORT_MAX_ITM_STRIKES: float = 0.5              # Never short deep ITM (> 0.5 strikes ITM) unless ER <= 0.15
+SHORT_MIN_OTM_STRIKES: float = 0.60             # Minimum +0.60 strikes OTM for Wave-2 / Contraction short selling
+SHORT_SWEET_SPOT_OTM_STRIKES: float = 1.20      # Ideal OTM distance (1.0-1.8 strikes OTM) for short premium decay
+SHORT_MAX_OTM_STRIKES: float = 2.50             # Maximum OTM distance to preserve meaningful ₹ premium
+SHORT_AUTO_HEDGE_SPREAD_ENABLED: bool = True    # Models 200-pt OTM protective wing for ₹26.5k defined-risk margin
+SHORT_AUTO_HEDGE_WING_PTS_NIFTY: float = 200.0
+SHORT_AUTO_HEDGE_WING_PTS_BANKNIFTY: float = 500.0
+SHORT_HEDGED_MARGIN_PER_LOT_INR: float = 26500.0
+SHORT_NAKED_SPAN_MARGIN_PER_LOT_INR: float = 135000.0
 
 # 4-Tier Reverse-Chandelier Premium Decay Ratchet (Short Book)
 # Tracks Short MFE % = ((Entry_Bid - Trough_Ask) / Entry_Bid) * 100
@@ -105,6 +128,29 @@ INTROSPECTION_PAUSE_MINUTES: int = 30
 MAX_HOLDING_MINUTES: int = 45
 
 
+def is_advance_entry_window(
+    dt: Optional[datetime] = None,
+    allow_super_trend_afternoon: bool = False,
+) -> bool:
+    """
+    Returns True if within the Option Sniffer Advance entry window:
+      - Standard Window: 09:30 to 13:15 IST (via `is_option_entry_window`)
+      - Super-Trend Institutional Breakout Override Window: 13:15 to 14:15 IST when
+        `allow_super_trend_afternoon=True` and `SUPER_TREND_AFTERNOON_OVERRIDE_ENABLED=True`.
+    """
+    if is_option_entry_window(dt):
+        return True
+    if not (allow_super_trend_afternoon and SUPER_TREND_AFTERNOON_OVERRIDE_ENABLED):
+        return False
+    now_dt = to_ist_naive(dt)
+    if not is_option_trading_window(now_dt):
+        return False
+    mins = now_dt.hour * 60 + now_dt.minute
+    std_cutoff_mins = 13 * 60 + 15
+    aft_cutoff_mins = SUPER_TREND_AFTERNOON_CUTOFF_HOUR * 60 + SUPER_TREND_AFTERNOON_CUTOFF_MINUTE
+    return std_cutoff_mins <= mins <= aft_cutoff_mins
+
+
 def calculate_short_option_trade_costs(
     sell_entry_bid: float,
     buy_exit_ask: float,
@@ -137,12 +183,19 @@ def calculate_short_option_trade_costs(
     )
     gross_pnl = round((sell_entry_bid - buy_exit_ask) * quantity, 2)
     net_pnl = round(gross_pnl - base["total_friction"], 2)
-    estimated_span_margin = round(max(sell_entry_bid * quantity * 2.5, 45000.0), 2)
+    naked_span_margin = round(max(sell_entry_bid * quantity * 3.0, SHORT_NAKED_SPAN_MARGIN_PER_LOT_INR), 2)
+    estimated_span_margin = (
+        SHORT_HEDGED_MARGIN_PER_LOT_INR
+        if SHORT_AUTO_HEDGE_SPREAD_ENABLED
+        else round(max(sell_entry_bid * quantity * 2.5, 45000.0), 2)
+    )
     return {
         **base,
         "gross_pnl": gross_pnl,
         "net_pnl": net_pnl,
         "estimated_span_margin": estimated_span_margin,
+        "naked_span_margin_inr": naked_span_margin,
+        "hedged_spread_margin_inr": SHORT_HEDGED_MARGIN_PER_LOT_INR,
         "return_on_premium_pct": round((net_pnl / (sell_entry_bid * quantity) * 100.0), 2)
         if (sell_entry_bid * quantity) > 0
         else 0.0,

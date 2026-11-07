@@ -43,11 +43,20 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     LONG_STOP_LOSS_PCT,
     LONG_TARGET_GAIN_PCT,
     LONG_TARGET_LOCK_FLOOR_OFFSET_PCT,
+    LONG_TIER0_5_PROFIT_FLOOR_PCT,
+    LONG_TIER0_5_PROFIT_TRIGGER_PCT,
+    LONG_TIER0_BREAKEVEN_FLOOR_PCT,
+    LONG_TIER0_BREAKEVEN_TRIGGER_PCT,
     MAX_HOLDING_MINUTES,
+    SHORT_AUTO_HEDGE_SPREAD_ENABLED,
+    SHORT_AUTO_HEDGE_WING_PTS_BANKNIFTY,
+    SHORT_AUTO_HEDGE_WING_PTS_NIFTY,
     SHORT_EARLY_COST_LOCK_FLOOR_PCT,
     SHORT_EARLY_COST_LOCK_TRIGGER_PCT,
     SHORT_HARD_STOP_LOSS_PCT,
+    SHORT_HEDGED_MARGIN_PER_LOT_INR,
     SHORT_MAX_SINGLE_TRADE_LOSS_INR,
+    SHORT_NAKED_SPAN_MARGIN_PER_LOT_INR,
     SHORT_REV_CHANDELIER_TIER1_DIST_PCT,
     SHORT_REV_CHANDELIER_TIER1_TRIGGER_PCT,
     SHORT_REV_CHANDELIER_TIER2_DIST_PCT,
@@ -58,6 +67,7 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     SHORT_REV_CHANDELIER_TIER4_TRIGGER_PCT,
     STRATEGY_DIAGONAL_OTM_WING_SELLER,
     calculate_short_option_trade_costs,
+    is_advance_entry_window,
 )
 from app.analytics.option_sniffer_advance.advance_db import AdvanceDB
 
@@ -104,9 +114,23 @@ class AdvancePaperExecution:
         mfe_pct: float,
         target_hurdle: float = LONG_TARGET_GAIN_PCT,
     ) -> Optional[float]:
-        """4-Tier Uncapped Chandelier Trailing Stop (ratchets upward below peak_bid)."""
-        if mfe_pct < LONG_EARLY_BREAKEVEN_TRIGGER_PCT:
+        """
+        6-Tier Uncapped Chandelier & Early Cost-Plus Breakeven Ratchet (ratchets upward below peak_bid):
+          - Tier 0   (>= +10.0% MFE): Locks +2.0% cost-plus breakeven floor (covers all statutory charges + slippage).
+          - Tier 0.5 (>= +12.5% MFE): Locks +4.5% guaranteed net profit floor.
+          - Tier 1   (>= +15.0% MFE): Locks +6.0% floor and trails 8.0% below peak.
+          - Tier 2   (>= +22.0% MFE): Trails 6.0% below peak.
+          - Tier 3   (>= +30.0% MFE): Trails 4.5% below peak (locks target_hurdle - 1% at >= +35%).
+          - Tier 4   (>= +60.0% MFE): Trails 4.0% below peak.
+        """
+        if mfe_pct < LONG_TIER0_BREAKEVEN_TRIGGER_PCT:
             return None
+
+        if mfe_pct < LONG_TIER0_5_PROFIT_TRIGGER_PCT:
+            return round(entry_ask * (1.0 + LONG_TIER0_BREAKEVEN_FLOOR_PCT / 100.0), 2)
+
+        if mfe_pct < LONG_EARLY_BREAKEVEN_TRIGGER_PCT:
+            return round(entry_ask * (1.0 + LONG_TIER0_5_PROFIT_FLOOR_PCT / 100.0), 2)
 
         floor_stop = entry_ask * (1.0 + LONG_EARLY_BREAKEVEN_FLOOR_PCT / 100.0)
         if target_hurdle > 0 and mfe_pct >= target_hurdle:
@@ -175,8 +199,11 @@ class AdvancePaperExecution:
         or Book 2 (`SHORT_BOOK_SELL` at BID).
         """
         now_dt = to_ist_naive(as_of_time)
+        allow_super_trend_aft = bool(signal.get("is_super_trend_afternoon_breakout"))
         if enforce_cutoff or as_of_time is not None:
-            if not is_option_trading_window(now_dt) or not is_option_entry_window(now_dt):
+            if not is_option_trading_window(now_dt) or not is_advance_entry_window(
+                now_dt, allow_super_trend_afternoon=allow_super_trend_aft
+            ):
                 return None
 
         cb = AdvanceDB.get_circuit_breaker_telemetry(as_of_time=now_dt)
@@ -195,18 +222,43 @@ class AdvancePaperExecution:
             return None
 
         trade_id = f"adv_trd_{uuid.uuid4().hex[:10]}"
+        regime_ctx = dict(signal.get("regime_telemetry") or {})
         if book_type == BOOK_SHORT_SELL:
             entry_price_used = entry_bid  # SELL to open at BID
             sl_pct = cls.calculate_short_capped_sl_pct(entry_bid, lot_size)
             tgt_pct = 35.0
             init_stop = round(entry_bid * (1.0 + sl_pct / 100.0), 2)
-            est_margin = round(max(entry_bid * lot_size * 2.5, 45000.0), 2)
+            wing_pts = (
+                SHORT_AUTO_HEDGE_WING_PTS_BANKNIFTY
+                if "BANK" in u_sym
+                else SHORT_AUTO_HEDGE_WING_PTS_NIFTY
+            )
+            strike_val = float(signal["strike"])
+            opt_t = str(signal["option_type"]).upper()
+            hedge_wing_strike = strike_val + wing_pts if opt_t == "CE" else strike_val - wing_pts
+            naked_span = round(max(entry_bid * lot_size * 3.0, SHORT_NAKED_SPAN_MARGIN_PER_LOT_INR), 2)
+            est_margin = (
+                SHORT_HEDGED_MARGIN_PER_LOT_INR
+                if SHORT_AUTO_HEDGE_SPREAD_ENABLED
+                else round(max(entry_bid * lot_size * 2.5, 45000.0), 2)
+            )
+            regime_ctx.update(
+                {
+                    "auto_hedge_spread_enabled": SHORT_AUTO_HEDGE_SPREAD_ENABLED,
+                    "hedge_wing_strike": hedge_wing_strike,
+                    "hedge_wing_option_type": opt_t,
+                    "naked_span_margin_inr": naked_span,
+                    "hedged_spread_margin_inr": SHORT_HEDGED_MARGIN_PER_LOT_INR,
+                }
+            )
         else:
             entry_price_used = entry_ask  # BUY to open at ASK
             sl_pct = cls.calculate_long_capped_sl_pct(entry_ask, lot_size)
             tgt_pct = LONG_TARGET_GAIN_PCT
             init_stop = round(entry_ask * (1.0 - sl_pct / 100.0), 2)
             est_margin = round(entry_ask * lot_size, 2)
+            if allow_super_trend_aft:
+                regime_ctx["super_trend_afternoon_breakout"] = True
 
         trade_obj = {
             "trade_id": trade_id,
@@ -233,7 +285,7 @@ class AdvancePaperExecution:
             "stop_loss_pct": sl_pct,
             "target_pct": tgt_pct,
             "estimated_margin": est_margin,
-            "regime_context": signal.get("regime_telemetry") or {},
+            "regime_context": regime_ctx,
         }
 
         if AdvanceDB.create_trade(trade_obj):
@@ -413,9 +465,9 @@ class AdvancePaperExecution:
                     exit_reason = "TRAILING_STOP_HIT"
                 elif duration_min >= 12.0 and mfe_pct < 5.0 and curr_pnl_pct < 0.0:
                     exit_reason = "STAGNATION_TIME_STOP"
-                elif duration_min >= 20.0 and mfe_pct < 8.0 and curr_pnl_pct <= -2.0:
+                elif duration_min >= 18.0 and mfe_pct < 6.5 and curr_pnl_pct <= -1.5:
                     exit_reason = "STAGNATION_TIME_STOP"
-                elif duration_min >= 22.0 and 4.0 <= mfe_pct < 8.0 and curr_pnl_pct <= -3.5:
+                elif duration_min >= 22.0 and 6.5 <= mfe_pct < 10.0 and curr_pnl_pct <= -2.0:
                     exit_reason = "STAGNATION_TIME_STOP"
                 elif duration_min >= MAX_HOLDING_MINUTES:
                     exit_reason = "TIME_DECAY_EXPIRY"
@@ -611,6 +663,9 @@ class AdvancePaperExecution:
                     sl_pct = cls.calculate_short_capped_sl_pct(
                         entry_bid, qty, float(trade.get("stop_loss_pct") or SHORT_HARD_STOP_LOSS_PCT)
                     )
+                    rev_ceiling = cls.calculate_short_reverse_chandelier_ceiling(
+                        entry_bid, curr_trough_ask, short_mfe_pct
+                    )
                     if curr_decay_pct <= -sl_pct:
                         cls.close_trade(
                             trade=trade,
@@ -624,11 +679,21 @@ class AdvancePaperExecution:
                             duration_sec=duration_sec,
                             as_of_time=now_dt,
                         )
+                    elif rev_ceiling is not None and curr_ask >= rev_ceiling:
+                        cls.close_trade(
+                            trade=trade,
+                            exit_bid=curr_bid,
+                            exit_ask=curr_ask,
+                            exit_reason="SHORT_REVERSE_CHANDELIER_HIT",
+                            peak_price=curr_peak_ask,
+                            trough_price=curr_trough_ask,
+                            mfe_pct=short_mfe_pct,
+                            mae_pct=short_mae_pct,
+                            duration_sec=duration_sec,
+                            as_of_time=now_dt,
+                        )
                     elif curr_trough_ask < prev_trough_ask or curr_peak_ask > prev_peak_ask:
                         hard_sl_ceiling = round(entry_bid * (1.0 + sl_pct / 100.0), 2)
-                        rev_ceiling = cls.calculate_short_reverse_chandelier_ceiling(
-                            entry_bid, curr_trough_ask, short_mfe_pct
-                        )
                         eff_ceiling = min(hard_sl_ceiling, rev_ceiling) if rev_ceiling is not None else hard_sl_ceiling
                         cost_est = calculate_short_option_trade_costs(
                             sell_entry_bid=entry_bid,
@@ -663,6 +728,12 @@ class AdvancePaperExecution:
                     sl_pct = cls.calculate_long_capped_sl_pct(
                         entry_ask, qty, float(trade.get("stop_loss_pct") or LONG_STOP_LOSS_PCT)
                     )
+                    chandelier_floor = cls.calculate_long_chandelier_stop(
+                        entry_ask,
+                        curr_peak_bid,
+                        mfe_pct,
+                        float(trade.get("target_pct") or LONG_TARGET_GAIN_PCT),
+                    )
                     if curr_pnl_pct <= -sl_pct:
                         cls.close_trade(
                             trade=trade,
@@ -676,14 +747,21 @@ class AdvancePaperExecution:
                             duration_sec=duration_sec,
                             as_of_time=now_dt,
                         )
+                    elif chandelier_floor is not None and curr_bid <= chandelier_floor:
+                        cls.close_trade(
+                            trade=trade,
+                            exit_bid=curr_bid,
+                            exit_ask=curr_ask,
+                            exit_reason="TRAILING_STOP_HIT",
+                            peak_price=curr_peak_bid,
+                            trough_price=curr_trough_bid,
+                            mfe_pct=mfe_pct,
+                            mae_pct=mae_pct,
+                            duration_sec=duration_sec,
+                            as_of_time=now_dt,
+                        )
                     elif curr_peak_bid > prev_peak_bid or curr_trough_bid < prev_trough_bid:
                         hard_sl_floor = round(entry_ask * (1.0 - sl_pct / 100.0), 2)
-                        chandelier_floor = cls.calculate_long_chandelier_stop(
-                            entry_ask,
-                            curr_peak_bid,
-                            mfe_pct,
-                            float(trade.get("target_pct") or LONG_TARGET_GAIN_PCT),
-                        )
                         eff_floor = max(hard_sl_floor, chandelier_floor) if chandelier_floor is not None else hard_sl_floor
                         costs = calculate_option_trade_costs(
                             buy_price=entry_ask,

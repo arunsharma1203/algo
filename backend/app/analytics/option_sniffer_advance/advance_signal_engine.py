@@ -52,16 +52,26 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     DIRECTION_BUY_PE,
     DIRECTION_SELL_CE,
     DIRECTION_SELL_PE,
+    LONG_MAX_PULLBACK_FROM_HIGH_PTS_BANKNIFTY,
+    LONG_MAX_PULLBACK_FROM_HIGH_PTS_NIFTY,
     MIN_CAUSAL_WARMUP_BARS,
     POST_HARVEST_COOLDOWN_SECONDS,
     POST_HARVEST_EXHAUSTION_ATR_RATIO_MAX,
     POST_HARVEST_EXHAUSTION_ER_MAX,
     SHORT_MAX_ITM_STRIKES,
+    SHORT_MAX_OTM_STRIKES,
     SHORT_MIN_ENTRY_BID_PRICE,
+    SHORT_MIN_OTM_STRIKES,
     STRATEGY_CONTRACTION_THETA_SELLER,
     STRATEGY_DIAGONAL_OTM_WING_SELLER,
     STRATEGY_WAVE1_GAMMA_SNIPER,
     STRATEGY_WAVE2_EXHAUSTION_SELLER,
+    SUPER_TREND_AFTERNOON_MIN_ADX,
+    SUPER_TREND_AFTERNOON_MIN_ATR_RATIO,
+    SUPER_TREND_AFTERNOON_MIN_DTE_DAYS,
+    SUPER_TREND_AFTERNOON_MIN_ER,
+    SUPER_TREND_AFTERNOON_OVERRIDE_ENABLED,
+    is_advance_entry_window,
 )
 from app.analytics.option_sniffer_advance.advance_db import AdvanceDB
 from app.analytics.option_sniffer_advance.advance_paper_execution import AdvancePaperExecution
@@ -154,18 +164,30 @@ class AdvanceSignalEngine:
         session_tpb = float(chain_intel.get("session_tpb") or spot_ltp)
         orb_high = float(chain_intel.get("orb_high") or 0.0)
         orb_low = float(chain_intel.get("orb_low") or 0.0)
-        day_high = float(chain_intel.get("day_high") or spot_ltp)
-        day_low = float(chain_intel.get("day_low") or spot_ltp)
+        day_high = float(chain_intel.get("day_high") or underlying_quote.get("high") or 0.0)
+        day_low = float(chain_intel.get("day_low") or underlying_quote.get("low") or 0.0)
         high_bar_idx = int(chain_intel.get("high_bar_idx") or 0)
         low_bar_idx = int(chain_intel.get("low_bar_idx") or 0)
         range_10m_pts = float(chain_intel.get("range_10m_pts") or 0.0)
         range_10m_pct = float(chain_intel.get("range_10m_pct") or 0.0)
+        call_wall_strike = float(chain_intel.get("call_wall_strike") or 0.0)
+        put_wall_strike = float(chain_intel.get("put_wall_strike") or 0.0)
 
+        dte_days = 3
+        if expiry:
+            try:
+                exp_dt = datetime.strptime(expiry[:10], "%Y-%m-%d").date()
+                dte_days = (exp_dt - now_dt.date()).days
+            except Exception:
+                dte_days = 3
+
+        breakout_buf = 12.0 if "BANK" in u_sym else 4.5
         has_orb = (orb_high > 0.0) and (orb_low > 0.0)
-        is_day_high_breakout = (day_high > 0.0) and (spot_ltp >= day_high - 2.0)
-        is_day_low_breakdown = (day_low > 0.0) and (spot_ltp <= day_low + 2.0)
-        rally_from_low = ((spot_ltp - day_low) / day_low * 100.0) if day_low > 0 else 0.0
-        pullback_from_high = ((day_high - spot_ltp) / day_high * 100.0) if day_high > 0 else 0.0
+        has_day_extrema = (day_high > 0.0) and (day_low > 0.0) and (day_high > day_low)
+        is_day_high_breakout = has_day_extrema and (spot_ltp >= day_high - breakout_buf)
+        is_day_low_breakdown = has_day_extrema and (spot_ltp <= day_low + breakout_buf)
+        rally_from_low = ((spot_ltp - day_low) / day_low * 100.0) if has_day_extrema else 0.0
+        pullback_from_high = ((day_high - spot_ltp) / day_high * 100.0) if has_day_extrema else 0.0
 
         is_v_bottom_recovery = (
             (rally_from_low >= 0.35)
@@ -204,6 +226,10 @@ class AdvanceSignalEngine:
         parent_long_entry_time = str(u_open_long[0].get("entry_time") or "") if is_long_open else ""
         parent_long_opt_type = str(u_open_long[0].get("option_type") or "").upper().strip() if is_long_open else ""
         parent_long_mfe = float(u_open_long[0].get("mfe_pct") or 0.0) if is_long_open else 0.0
+        parent_long_mae = float(u_open_long[0].get("mae_pct") or 0.0) if is_long_open else 0.0
+        parent_long_net_pnl = float(u_open_long[0].get("net_pnl") or 0.0) if is_long_open else 0.0
+        parent_has_live_ticks = (parent_long_mfe > 0.0) or (parent_long_mae < 0.0)
+        parent_is_profitable = (not parent_has_live_ticks) or (parent_long_mfe >= 10.0 and parent_long_net_pnl >= 0.0)
 
         long_open_elapsed_sec = 99999.0
         if is_long_open:
@@ -220,7 +246,30 @@ class AdvanceSignalEngine:
             min_mfe_pct=15.0,
             cooldown_seconds=POST_HARVEST_COOLDOWN_SECONDS,
         )
+        opp_type_for_harvest = "CE" if opt_type == "PE" else "PE"
+        recent_opp_harvest = AdvanceDB.get_recent_harvested_long_wave(
+            underlying=u_sym,
+            option_type=opp_type_for_harvest,
+            as_of_time=now_dt,
+            min_mfe_pct=15.0,
+            cooldown_seconds=POST_HARVEST_COOLDOWN_SECONDS,
+        )
         is_post_harvest_after_close = recent_harvest is not None
+
+        # Trend-Aligned Post-Harvest Put/Call Selling:
+        # In a strong Bull trend (+DI - -DI >= 8.0 and Spot > Session TPB), after a CE Wave-1 harvest,
+        # selling an OTM PE (0.60 <= otm_strikes <= 2.50) harvests volatility contraction with the trend at our back!
+        is_trend_aligned_wave2_short = (
+            (recent_opp_harvest is not None)
+            and (otm_strikes >= SHORT_MIN_OTM_STRIKES)
+            and (otm_strikes <= SHORT_MAX_OTM_STRIKES)
+            and (atr_ratio <= POST_HARVEST_EXHAUSTION_ATR_RATIO_MAX)
+            and (
+                (opt_type == "PE" and (plus_di - minus_di) >= 8.0 and spot_ltp >= session_tpb)
+                or (opt_type == "CE" and (minus_di - plus_di) >= 8.0 and spot_ltp <= session_tpb)
+            )
+        )
+        active_wave2_harvest = recent_harvest if is_post_harvest_after_close else recent_opp_harvest
 
         # 3. Institutional Dual-Book Regime Classification
         can_short_extrinsic = (
@@ -228,10 +277,15 @@ class AdvanceSignalEngine:
             and ((otm_strikes >= -SHORT_MAX_ITM_STRIKES) or (kaufman_er <= 0.15))
         )
 
-        is_contraction_short = (not is_long_open) and (atr_ratio <= CONTRACTION_ATR_RATIO_MAX) and (kaufman_er <= 0.20)
-        is_wave2_exhaustion_short = is_post_harvest_after_close and (
-            atr_ratio <= POST_HARVEST_EXHAUSTION_ATR_RATIO_MAX or kaufman_er <= POST_HARVEST_EXHAUSTION_ER_MAX
+        is_contraction_short = (
+            (not is_long_open)
+            and (atr_ratio <= CONTRACTION_ATR_RATIO_MAX)
+            and (kaufman_er < CONTRACTION_ER_MAX)
         )
+        is_wave2_exhaustion_short = (
+            is_post_harvest_after_close
+            and (atr_ratio <= POST_HARVEST_EXHAUSTION_ATR_RATIO_MAX or kaufman_er <= POST_HARVEST_EXHAUSTION_ER_MAX)
+        ) or is_trend_aligned_wave2_short
         is_diagonal_type_mismatch = (
             is_long_open
             and (long_open_elapsed_sec >= DIAGONAL_MIN_LONG_ELAPSED_SECONDS)
@@ -244,12 +298,24 @@ class AdvanceSignalEngine:
             and (not parent_long_opt_type or opt_type == parent_long_opt_type)
             and (long_open_elapsed_sec >= DIAGONAL_MIN_LONG_ELAPSED_SECONDS)
             and (otm_strikes >= DIAGONAL_MIN_OTM_STRIKES)
-            and (parent_long_mfe >= 10.0)
-            and (kaufman_er <= 0.28)
+            and parent_is_profitable
         )
 
         is_short_regime = can_short_extrinsic and (
             is_contraction_short or is_wave2_exhaustion_short or is_diagonal_otm_short or is_diagonal_type_mismatch
+        )
+
+        # 13:15–14:15 IST Super-Trend Institutional Breakout Override (Long Book Wave-1 Only)
+        is_super_trend_afternoon_breakout = (
+            (not is_short_regime)
+            and SUPER_TREND_AFTERNOON_OVERRIDE_ENABLED
+            and (not is_option_entry_window(now_dt))
+            and is_advance_entry_window(now_dt, allow_super_trend_afternoon=True)
+            and (is_day_high_breakout if opt_type == "CE" else is_day_low_breakdown)
+            and (kaufman_er >= SUPER_TREND_AFTERNOON_MIN_ER)
+            and (adx_14 >= SUPER_TREND_AFTERNOON_MIN_ADX)
+            and (atr_ratio >= SUPER_TREND_AFTERNOON_MIN_ATR_RATIO)
+            and (dte_days >= SUPER_TREND_AFTERNOON_MIN_DTE_DAYS)
         )
 
         # 4. Derive Causal Intraday Directional Alignment when upstream_signals is absent/neutral
@@ -297,10 +363,20 @@ class AdvanceSignalEngine:
         cal_prob = float(pred.get("calibrated_prob") or 0.50)
         exp_net_ret = float(pred.get("expected_net_return_pct") or 0.0)
 
+        # Structural OI Wall Shield Bonus for Short Book (selling at or beyond institutional OI Wall)
+        if is_short_regime:
+            if (opt_type == "CE" and call_wall_strike > 0 and strike >= call_wall_strike) or (
+                opt_type == "PE" and put_wall_strike > 0 and strike <= put_wall_strike
+            ):
+                cal_prob = min(0.95, round(cal_prob + 0.02, 4))
+
         rejection_reasons: List[str] = []
 
         # 6. Microstructure & Warm-up Hard Hurdles
-        if enforce_cutoff and (not is_option_trading_window(now_dt) or not is_option_entry_window(now_dt)):
+        if enforce_cutoff and (
+            not is_option_trading_window(now_dt)
+            or not is_advance_entry_window(now_dt, allow_super_trend_afternoon=is_super_trend_afternoon_breakout)
+        ):
             rejection_reasons.append("Outside intraday option entry window (09:30-13:15 IST)")
         if now_dt.hour == 9 and now_dt.minute < 43:
             rejection_reasons.append(f"Causal 28-bar Wilder ADX(14) warm-up incomplete before 09:43 IST ({completed_bars}/28 bars)")
@@ -332,13 +408,29 @@ class AdvanceSignalEngine:
                     rejection_reasons.append(
                         f"Diagonal Wing Anti-Churn: 1 Diagonal OTM Wing already executed for active {u_sym} parent Long wave"
                     )
-            if strategy_mode == STRATEGY_WAVE2_EXHAUSTION_SELLER and recent_harvest and recent_harvest.get("exit_time"):
-                if AdvanceDB.has_exhaustion_short_for_harvested_wave(
-                    u_sym, opt_type, str(recent_harvest.get("exit_time"))
-                ):
-                    rejection_reasons.append(
-                        f"Wave-2 Exhaustion Anti-Churn: 1 Exhaustion Short already executed for harvested {u_sym} {opt_type} wave"
-                    )
+            if strategy_mode == STRATEGY_WAVE2_EXHAUSTION_SELLER:
+                if active_wave2_harvest and active_wave2_harvest.get("exit_time"):
+                    if AdvanceDB.has_exhaustion_short_for_harvested_wave(
+                        u_sym, opt_type, str(active_wave2_harvest.get("exit_time"))
+                    ):
+                        rejection_reasons.append(
+                            f"Wave-2 Exhaustion Anti-Churn: 1 Exhaustion Short already executed for harvested {u_sym} {opt_type} wave"
+                        )
+                # Wave-2 Trend Continuation & Breakout Guard (prevents shorting Calls into a bull trend like Nov 6 Trade #41)
+                if is_post_harvest_after_close and not is_trend_aligned_wave2_short:
+                    if kaufman_er > POST_HARVEST_EXHAUSTION_ER_MAX:
+                        if opt_type == "CE" and (
+                            is_day_high_breakout or ((plus_di - minus_di) > 10.0 and spot_ltp > session_tpb)
+                        ):
+                            rejection_reasons.append(
+                                f"Wave-2 Trend Continuation Guard: Counter-trend SELL_CE blocked while bull trend remains active (+DI={plus_di:.1f} > -DI={minus_di:.1f}, ER={kaufman_er:.2f} > {POST_HARVEST_EXHAUSTION_ER_MAX})"
+                            )
+                        elif opt_type == "PE" and (
+                            is_day_low_breakdown or ((minus_di - plus_di) > 10.0 and spot_ltp < session_tpb)
+                        ):
+                            rejection_reasons.append(
+                                f"Wave-2 Trend Continuation Guard: Counter-trend SELL_PE blocked while bear trend remains active (-DI={minus_di:.1f} > +DI={plus_di:.1f}, ER={kaufman_er:.2f} > {POST_HARVEST_EXHAUSTION_ER_MAX})"
+                            )
             if strategy_mode == STRATEGY_CONTRACTION_THETA_SELLER:
                 if otm_strikes < 0.20:
                     rejection_reasons.append(
@@ -393,11 +485,11 @@ class AdvanceSignalEngine:
                 )
             if 0.0 < raw_delta_abs < 0.35 or raw_delta_abs > 0.72:
                 rejection_reasons.append(
-                    f"Institutional Delta Discipline: |Delta| {raw_delta_abs:.2f} outside [0.35, 0.72] convexity band"
+                    f"Minimum Delta Discipline (Institutional Delta Discipline): |Delta| {raw_delta_abs:.2f} outside [0.35, 0.72] convexity band"
                 )
             if abs(otm_strikes) > 2.5:
                 rejection_reasons.append(
-                    f"ATM Proximity Discipline: Strike {strike:.0f} is {otm_strikes:+.2f} strikes from spot (exceeds ±2.50 max)"
+                    f"Far-OTM Strike Discipline (ATM Proximity Discipline): Strike {strike:.0f} is {otm_strikes:+.2f} strikes from spot (exceeds ±2.50 max)"
                 )
             if opt_type == "CE" and not is_orb_broken_ce:
                 rejection_reasons.append(
@@ -406,6 +498,42 @@ class AdvanceSignalEngine:
             elif opt_type == "PE" and not is_orb_broken_pe:
                 rejection_reasons.append(
                     f"Inside Opening Range Box: Spot ({spot_ltp:.1f}) > ORB Low ({orb_low:.1f}) without chronological V-top; Long Put blocked"
+                )
+            # Rolling Session High/Low Extrema Pullback Guard (prevents mid-air buying far below Session High)
+            max_pullback_pts = (
+                LONG_MAX_PULLBACK_FROM_HIGH_PTS_BANKNIFTY
+                if "BANK" in u_sym
+                else LONG_MAX_PULLBACK_FROM_HIGH_PTS_NIFTY
+            )
+            if opt_type == "CE" and day_high > 0 and (day_high - spot_ltp) > max_pullback_pts and not is_v_bottom_recovery:
+                rejection_reasons.append(
+                    f"Session Extrema Pullback Guard: Spot ({spot_ltp:.1f}) is {day_high - spot_ltp:.1f} pts below Session High ({day_high:.1f} > {max_pullback_pts:.1f} pts max pullback)"
+                )
+            elif opt_type == "PE" and day_low > 0 and (spot_ltp - day_low) > max_pullback_pts and not is_v_top_rejection:
+                rejection_reasons.append(
+                    f"Session Extrema Pullback Guard: Spot ({spot_ltp:.1f}) is {spot_ltp - day_low:.1f} pts above Session Low ({day_low:.1f} > {max_pullback_pts:.1f} pts max bounce)"
+                )
+            # Institutional OI Wall Guard for In-Range Long Entries
+            wall_prox_pts = 35.0 if "BANK" in u_sym else 15.0
+            if (
+                opt_type == "CE"
+                and call_wall_strike > 0
+                and not is_day_high_breakout
+                and 0.0 < (call_wall_strike - spot_ltp) <= wall_prox_pts
+                and kaufman_er < 0.38
+            ):
+                rejection_reasons.append(
+                    f"Institutional Call OI Wall Resistance: Spot ({spot_ltp:.1f}) is within {call_wall_strike - spot_ltp:.1f} pts below Call Wall ({call_wall_strike:.0f}) without breakout velocity"
+                )
+            elif (
+                opt_type == "PE"
+                and put_wall_strike > 0
+                and not is_day_low_breakdown
+                and 0.0 < (spot_ltp - put_wall_strike) <= wall_prox_pts
+                and kaufman_er < 0.38
+            ):
+                rejection_reasons.append(
+                    f"Institutional Put OI Wall Support: Spot ({spot_ltp:.1f}) is within {spot_ltp - put_wall_strike:.1f} pts above Put Wall ({put_wall_strike:.0f}) without breakdown velocity"
                 )
             if completed_bars >= 10 and 0.0 < range_10m_pct < 0.08:
                 rejection_reasons.append(
@@ -522,6 +650,7 @@ class AdvanceSignalEngine:
             "hurdles_passed": is_active,
             "rejection_reasons": rejection_reasons,
             "regime_telemetry": chain_intel,
+            "is_super_trend_afternoon_breakout": is_super_trend_afternoon_breakout,
         }
 
         if status in (STATE_ACTIVE, STATE_QUALIFIED):

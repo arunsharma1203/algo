@@ -883,6 +883,212 @@ class TestStep3OptionSnifferAdvanceDualBook(unittest.TestCase):
                 f"Expected Wave-2 Exhaustion Anti-Churn, got: {res_exh2['rejection_reasons']}",
             )
 
+    def test_11_seven_weekend_institutional_upgrades_and_zero_main_domino(self):
+        """
+        Verifies the 7 Weekend Institutional Upgrades in Option Sniffer Advance:
+          1. Tier-0 (+10.0% MFE -> +2.0% floor) & Tier-0.5 (+12.5% MFE -> +4.5% floor) Chandelier Ratchet.
+          2. Rolling Session High/Low Pullback Guard (> 16.0 pts below Session High blocked for Long Call).
+          3. 13:15–14:15 IST Super-Trend Afternoon Breakout Override (unlocks Wave-1 Long on Session High breakout).
+          4. Wave-2 Trend Continuation Guard (blocks counter-trend SELL_CE like Nov 6 Trade #41 when +DI > -DI + 10 & ER > 0.20)
+             and Trend-Aligned Put Selling (SELL_PE allowed on bull pause after CE harvest).
+          5. Auto-Hedged Credit Spread Margin (₹26,500 defined-risk margin + hedge_wing_strike telemetry).
+        """
+        # 1. Verify Tier-0 (+10.0% MFE -> +2.0% floor) & Tier-0.5 (+12.5% MFE -> +4.5% floor)
+        self.assertIsNone(AdvancePaperExecution.calculate_long_chandelier_stop(100.0, 109.0, 9.0))
+        self.assertEqual(AdvancePaperExecution.calculate_long_chandelier_stop(100.0, 111.0, 11.0), 102.0)
+        self.assertEqual(AdvancePaperExecution.calculate_long_chandelier_stop(100.0, 113.5, 13.5), 104.5)
+        self.assertEqual(AdvancePaperExecution.calculate_long_chandelier_stop(100.0, 116.0, 16.0), 106.72)
+
+        engine = AdvanceSignalEngine()
+        with patch.object(
+            engine.model,
+            "predict_contract",
+            return_value={"calibrated_prob": 0.57, "expected_net_return_pct": 12.5},
+        ):
+            # 2. Verify Session Extrema Pullback Guard blocks mid-air Call 28 pts below Session High
+            c_call = {
+                "instrument_key": "NSE_FO|NIFTY_24700CE",
+                "trading_symbol": "NIFTY 24700 CE 09 NOV 26",
+                "underlying": "NIFTY",
+                "strike": 24700.0,
+                "option_type": "CE",
+                "lot_size": 65,
+                "expiry": "2026-11-09",
+            }
+            q_call = {
+                **c_call,
+                "ltp": 150.0,
+                "bid": 149.8,
+                "ask": 150.0,
+                "spread_pct": 0.13,
+                "volume": 250000,
+                "oi": 900000,
+                "iv": 16.0,
+                "delta": 0.48,
+                "quote_age_ms": 50,
+            }
+            u_pullback = {"spot_ltp": 24672.0, "open": 24500.0, "vwap": 24610.0}
+            intel_pullback = {
+                "spot_price": 24672.0,
+                "session_tpb": 24610.0,
+                "orb_high": 24540.0,
+                "orb_low": 24388.0,
+                "day_high": 24702.6,
+                "day_low": 24388.0,
+                "high_bar_idx": 75,
+                "low_bar_idx": 1,
+                "completed_bars_count": 180,
+                "adx_14": 32.0,
+                "plus_di": 30.0,
+                "minus_di": 16.0,
+                "kaufman_er": 0.35,
+                "atr_ratio": 0.98,
+                "vrp": 2.0,
+                "rv_15m_ann": 14.0,
+            }
+            res_pb = engine.evaluate_contract(
+                contract=c_call,
+                quote=q_call,
+                underlying_quote=u_pullback,
+                chain_intel=intel_pullback,
+                as_of_time=datetime(2026, 11, 6, 12, 24, 0),
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(res_pb["status"], "ACTIVE")
+            self.assertTrue(
+                any("Session Extrema Pullback Guard" in r for r in res_pb["rejection_reasons"]),
+                f"Expected Session Extrema Pullback Guard, got: {res_pb['rejection_reasons']}",
+            )
+
+            # 3. Open & harvest a midday Wave-1 Long winner (12:16 -> 12:30 IST, +25% MFE), matching Nov 6 Trade #40!
+            AdvanceSignalEngine.reset_state()
+            u_midday_break = {"spot_ltp": 24701.0, "open": 24500.0, "vwap": 24610.0}
+            intel_midday_break = {
+                **intel_pullback,
+                "spot_price": 24701.0,
+                "day_high": 24702.6,
+                "adx_14": 34.0,
+                "plus_di": 34.0,
+                "minus_di": 14.0,
+                "kaufman_er": 0.42,
+                "atr_ratio": 1.15,
+            }
+            res_mid = engine.evaluate_contract(
+                contract=c_call,
+                quote=q_call,
+                underlying_quote=u_midday_break,
+                chain_intel=intel_midday_break,
+                as_of_time=datetime(2026, 11, 6, 12, 16, 0),
+                enforce_cutoff=True,
+            )
+            self.assertEqual(res_mid["status"], "ACTIVE")
+            self.assertIsNotNone(res_mid.get("opened_trade_id"))
+
+            AdvancePaperExecution.update_open_trades(
+                {"NSE_FO|NIFTY_24700CE": {**q_call, "bid": 188.0, "ask": 188.5}},
+                {"NIFTY": u_midday_break},
+                as_of_time=datetime(2026, 11, 6, 12, 25, 0),
+            )
+            closed_mid = AdvancePaperExecution.update_open_trades(
+                {"NSE_FO|NIFTY_24700CE": {**q_call, "bid": 172.0, "ask": 172.5}},
+                {"NIFTY": u_midday_break},
+                as_of_time=datetime(2026, 11, 6, 12, 30, 0),
+            )
+            self.assertEqual(len(closed_mid), 1)
+
+            # 4. Verify Wave-2 Trend Continuation Guard blocks counter-trend SELL_CE at 12:33:31 IST
+            #    (reproducing Nov 6 Trade #41: ER=0.245 > 0.20, ATR_R=0.807 <= 0.93, +DI=30.96 >> -DI=16.63, Spot > TPB)
+            AdvanceSignalEngine.reset_state()
+            intel_trade41 = {
+                **intel_pullback,
+                "spot_price": 24676.05,
+                "session_tpb": 24612.99,
+                "day_high": 24702.6,
+                "adx_14": 39.99,
+                "plus_di": 30.96,
+                "minus_di": 16.63,
+                "kaufman_er": 0.245,
+                "atr_ratio": 0.807,
+            }
+            res_t41 = engine.evaluate_contract(
+                contract=c_call,
+                quote={**q_call, "bid": 146.15, "ask": 146.50},
+                underlying_quote={"spot_ltp": 24676.05, "open": 24500.0, "vwap": 24613.0},
+                chain_intel=intel_trade41,
+                as_of_time=datetime(2026, 11, 6, 12, 33, 31),
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(res_t41["status"], "ACTIVE")
+            self.assertTrue(
+                any("Wave-2 Trend Continuation Guard" in r for r in res_t41["rejection_reasons"]),
+                f"Expected Wave-2 Trend Continuation Guard on Trade #41 reproduction, got: {res_t41['rejection_reasons']}",
+            )
+
+            # 5. Verify Trend-Aligned Wave-2 Put Selling (SELL_PE) IS allowed on that exact same bull pause (+1.5 strikes OTM PE)
+            c_put = {
+                "instrument_key": "NSE_FO|NIFTY_24600PE",
+                "trading_symbol": "NIFTY 24600 PE 09 NOV 26",
+                "underlying": "NIFTY",
+                "strike": 24600.0,
+                "option_type": "PE",
+                "lot_size": 65,
+                "expiry": "2026-11-09",
+            }
+            q_put = {
+                **c_put,
+                "ltp": 95.0,
+                "bid": 94.8,
+                "ask": 95.0,
+                "spread_pct": 0.21,
+                "volume": 220000,
+                "oi": 950000,
+                "iv": 16.5,
+                "delta": -0.34,
+                "quote_age_ms": 50,
+            }
+            res_ta_pe = engine.evaluate_contract(
+                contract=c_put,
+                quote=q_put,
+                underlying_quote={"spot_ltp": 24676.05, "open": 24500.0, "vwap": 24613.0},
+                chain_intel=intel_trade41,
+                as_of_time=datetime(2026, 11, 6, 12, 34, 0),
+                enforce_cutoff=True,
+            )
+            self.assertEqual(res_ta_pe["status"], "ACTIVE")
+            self.assertEqual(res_ta_pe["book_type"], BOOK_SHORT_SELL)
+            self.assertEqual(res_ta_pe["direction"], "SELL_PE")
+            self.assertEqual(res_ta_pe["strategy_mode"], STRATEGY_WAVE2_EXHAUSTION_SELLER)
+
+            open_short = AdvanceDB.get_open_trades(book_type=BOOK_SHORT_SELL)
+            self.assertEqual(len(open_short), 1)
+            self.assertEqual(float(open_short[0]["estimated_margin"]), 26500.0)
+
+            # 6. Verify 13:15–14:15 IST Super-Trend Afternoon Breakout Override unlocks at 13:45 IST
+            #    when Spot breaks Session High (24800.0 >= 24801.9 - 4.5) with ER=0.45 >= 0.40, ADX=36 >= 28, ATR_R=1.30 >= 1.05
+            AdvanceSignalEngine.reset_state()
+            u_aft_break = {"spot_ltp": 24800.0, "open": 24500.0, "vwap": 24650.0}
+            intel_aft_break = {
+                **intel_pullback,
+                "spot_price": 24800.0,
+                "day_high": 24801.9,
+                "adx_14": 36.0,
+                "plus_di": 34.0,
+                "minus_di": 14.0,
+                "kaufman_er": 0.45,
+                "atr_ratio": 1.30,
+            }
+            res_aft = engine.evaluate_contract(
+                contract=c_call,
+                quote=q_call,
+                underlying_quote=u_aft_break,
+                chain_intel=intel_aft_break,
+                as_of_time=datetime(2026, 11, 6, 13, 45, 0),
+                enforce_cutoff=True,
+            )
+            self.assertEqual(res_aft["status"], "ACTIVE")
+            self.assertTrue(res_aft["is_super_trend_afternoon_breakout"])
+            self.assertIsNotNone(res_aft.get("opened_trade_id"))
+
 
 if __name__ == "__main__":
     unittest.main()
