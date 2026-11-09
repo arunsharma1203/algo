@@ -232,6 +232,41 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
             self.assertEqual(intents[0]["exit_reason"], "LONG_CHANDELIER_TRAIL_HIT")
             self.assertGreater(intents[0]["realized_pnl"], 1900.0)
 
+    def test_5_calendar_performance_aggregation(self):
+        """
+        Proves that `get_calendar_performance()` aggregates closed trades by date and month
+        in read-only mode without modifying any core Advance tables.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_CAL_1",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="CLOSED",
+            entry_price=140.0,
+            exit_price=180.0,
+            exit_reason="LONG_CHANDELIER_TRAIL_HIT",
+            net_pnl=2535.0,
+        )
+        self._insert_advance_paper_trade(
+            "ADV_CAL_2",
+            book_type="SHORT_BOOK_SELL",
+            action="SELL",
+            status="CLOSED",
+            entry_price=110.0,
+            exit_price=85.0,
+            exit_reason="SHORT_REVERSE_CHANDELIER_HIT",
+            net_pnl=1560.0,
+        )
+        cal = self.bridge.get_calendar_performance(book_filter="ALL")
+        self.assertIn("2026-11", cal["available_months"])
+        self.assertEqual(len(cal["days"]), 1)
+        day_rec = cal["days"][0]
+        self.assertEqual(day_rec["date"], "2026-11-09")
+        self.assertEqual(day_rec["trade_count"], 2)
+        self.assertEqual(day_rec["long_book_trades"], 1)
+        self.assertEqual(day_rec["short_book_trades"], 1)
+        self.assertEqual(day_rec["net_pnl_rupees"], 4095.0)
+
 
 if __name__ == "__main__":
     unittest.main()

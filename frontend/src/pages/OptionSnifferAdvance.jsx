@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   ShieldCheck,
   ShieldAlert,
@@ -24,6 +24,10 @@ import {
   Coins,
   Wifi,
   Power,
+  Calendar as CalendarIcon,
+  ChevronLeft,
+  ChevronRight,
+  Eye,
 } from 'lucide-react';
 import { API_BASE } from '../services/api';
 
@@ -54,9 +58,11 @@ export default function OptionSnifferAdvance() {
   const [chainData, setChainData] = useState(null);
   const [tradesData, setTradesData] = useState({ open_trades: [], closed_trades: [], pnl_summary: {} });
   const [signalsData, setSignalsData] = useState([]);
-  const [auditData, setAuditData] = useState(null);
-  const [activeTab, setActiveTab] = useState('audit');
+  const [calendarData, setCalendarData] = useState(null);
+  const [activeTab, setActiveTab] = useState('calendar');
   const [bookFilter, setBookFilter] = useState('ALL');
+  const [selectedMonth, setSelectedMonth] = useState('2026-11');
+  const [selectedCalendarDay, setSelectedCalendarDay] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sweeping, setSweeping] = useState(false);
 
@@ -69,12 +75,13 @@ export default function OptionSnifferAdvance() {
 
   const fetchAllTelemetry = useCallback(async () => {
     try {
-      const [stRes, chRes, trRes, sigRes, lvRes] = await Promise.all([
+      const [stRes, chRes, trRes, sigRes, lvRes, calRes] = await Promise.all([
         fetch(`${API_BASE}/option-sniffer-advance/status`),
         fetch(`${API_BASE}/option-sniffer-advance/chain-intelligence`),
         fetch(`${API_BASE}/option-sniffer-advance/trades`),
         fetch(`${API_BASE}/option-sniffer-advance/signals?limit=40`),
         fetch(`${API_BASE}/option-sniffer-advance/live/status`),
+        fetch(`${API_BASE}/option-sniffer-advance/calendar?book_filter=${bookFilter}`),
       ]);
       let stJson = null;
       if (stRes.ok) {
@@ -93,30 +100,24 @@ export default function OptionSnifferAdvance() {
       } else if (stJson?.live_bridge) {
         setLiveStatus(stJson.live_bridge);
       }
+      if (calRes.ok) {
+        const calJson = await calRes.json();
+        setCalendarData(calJson);
+      } else if (stJson?.calendar) {
+        setCalendarData(stJson.calendar);
+      }
     } catch (err) {
       console.error('OptionSnifferAdvance telemetry error:', err);
     } finally {
       setLoading(false);
     }
-  }, []);
-
-  const fetchWalkforwardAudit = useCallback(async (force = false) => {
-    try {
-      const res = await fetch(`${API_BASE}/option-sniffer-advance/walkforward-audit?force_refresh=${force}`);
-      if (res.ok) {
-        setAuditData(await res.json());
-      }
-    } catch (err) {
-      console.error('Walkforward audit fetch error:', err);
-    }
-  }, []);
+  }, [bookFilter]);
 
   useEffect(() => {
     fetchAllTelemetry();
-    fetchWalkforwardAudit(false);
     const interval = setInterval(fetchAllTelemetry, 8000);
     return () => clearInterval(interval);
-  }, [fetchAllTelemetry, fetchWalkforwardAudit]);
+  }, [fetchAllTelemetry]);
 
   const handleManualSweep = async () => {
     setSweeping(true);
@@ -205,13 +206,8 @@ export default function OptionSnifferAdvance() {
   };
 
   const underlyings = chainData?.underlyings || statusData?.chain_intelligence || {};
-  const auditSummary = auditData?.summary || {};
-  const auditTrades = (auditData?.trades || []).filter((t) =>
-    bookFilter === 'ALL' ? true : t.book_type === bookFilter
-  );
-
   const livePnl = tradesData?.pnl_summary || statusData?.pnl_summary || {};
-  const displayPnl = (livePnl.total_trades || 0) > 0 ? livePnl : auditSummary;
+  const displayPnl = livePnl;
 
   const isLiveArmed = Boolean(liveStatus?.is_live_armed);
   const currentExecMode = liveStatus?.execution_mode || selectedExecMode || 'LONG_BOOK_ONLY';
@@ -219,6 +215,217 @@ export default function OptionSnifferAdvance() {
   const reqMargin = Number(liveStatus?.required_margin_for_mode ?? 18000);
   const liveActivePositions = liveStatus?.active_live_positions || [];
   const liveRecentIntents = liveStatus?.recent_order_intents || [];
+
+  // Build interactive Monthly P&L Calendar model from backend calendarData + client-side tradesData fallback
+  const computedCalendar = useMemo(() => {
+    const rawClosed = tradesData?.closed_trades || [];
+    const filteredTrades =
+      bookFilter === 'LIVE_BROKER'
+        ? (liveRecentIntents || [])
+            .filter((i) => i.exit_state === 'CONFIRMED_FLAT')
+            .map((i) => ({
+              trade_id: i.order_intent_id,
+              trading_date: String(i.updated_at || i.created_at || '').slice(0, 10),
+              book_type: i.action === 'BUY' ? 'LONG_BOOK_BUY' : 'SHORT_BOOK_SELL',
+              strategy_mode: i.execution_mode,
+              underlying: i.underlying,
+              trading_symbol: i.trading_symbol,
+              option_type: i.option_type,
+              strike_price: i.strike_price,
+              quantity: i.filled_quantity || i.target_quantity,
+              entry_time: i.created_at,
+              exit_time: i.updated_at,
+              entry_price: i.average_fill_price || i.limit_price,
+              exit_price: i.exit_fill_price,
+              gross_pnl: i.realized_pnl,
+              charges: 0,
+              net_pnl: i.realized_pnl,
+              mfe_pct: 0,
+              mae_pct: 0,
+              exit_reason: i.exit_reason || 'LIVE_BROKER_EXIT',
+            }))
+        : rawClosed.filter((t) => (bookFilter === 'ALL' ? true : t.book_type === bookFilter));
+
+    // Group by date YYYY-MM-DD
+    const dayMap = {};
+    if (calendarData?.days && calendarData?.book_filter === bookFilter) {
+      calendarData.days.forEach((d) => {
+        dayMap[d.date] = d;
+      });
+    } else {
+      filteredTrades.forEach((t) => {
+        const dt = String(t.trading_date || t.exit_time || t.entry_time || '').slice(0, 10);
+        if (!dt || dt.length < 10) return;
+        if (!dayMap[dt]) {
+          dayMap[dt] = {
+            date: dt,
+            month: dt.slice(0, 7),
+            trade_count: 0,
+            wins: 0,
+            losses: 0,
+            win_rate: 0,
+            gross_pnl_rupees: 0,
+            charges_rupees: 0,
+            net_pnl_rupees: 0,
+            long_book_net_pnl: 0,
+            short_book_net_pnl: 0,
+            long_book_trades: 0,
+            short_book_trades: 0,
+            trades: [],
+          };
+        }
+        const rec = dayMap[dt];
+        const net = Number(t.net_pnl || 0);
+        const gross = Number(t.gross_pnl ?? net);
+        const chg = Number(t.charges || 0);
+        rec.trade_count += 1;
+        if (net > 0) rec.wins += 1;
+        else rec.losses += 1;
+        rec.gross_pnl_rupees = Number((rec.gross_pnl_rupees + gross).toFixed(2));
+        rec.charges_rupees = Number((rec.charges_rupees + chg).toFixed(2));
+        rec.net_pnl_rupees = Number((rec.net_pnl_rupees + net).toFixed(2));
+        if (t.book_type === 'LONG_BOOK_BUY') {
+          rec.long_book_net_pnl = Number((rec.long_book_net_pnl + net).toFixed(2));
+          rec.long_book_trades += 1;
+        } else {
+          rec.short_book_net_pnl = Number((rec.short_book_net_pnl + net).toFixed(2));
+          rec.short_book_trades += 1;
+        }
+        rec.win_rate = Number(((rec.wins / rec.trade_count) * 100).toFixed(1));
+        rec.trades.push(t);
+      });
+    }
+
+    const monthSet = new Set(['2026-11', '2026-10']);
+    Object.keys(dayMap).forEach((d) => monthSet.add(d.slice(0, 7)));
+    if (calendarData?.available_months) {
+      calendarData.available_months.forEach((m) => monthSet.add(m));
+    }
+    const availableMonths = Array.from(monthSet).sort().reverse();
+    const activeMonth = availableMonths.includes(selectedMonth)
+      ? selectedMonth
+      : availableMonths[0] || '2026-11';
+
+    // Compute month summary for activeMonth
+    const monthDays = Object.values(dayMap).filter((d) => d.date.startsWith(activeMonth));
+    let totalNet = 0;
+    let totalGross = 0;
+    let totalCharges = 0;
+    let longNet = 0;
+    let shortNet = 0;
+    let longTrades = 0;
+    let shortTrades = 0;
+    let totalTrades = 0;
+    let wins = 0;
+    let losses = 0;
+    let greenDays = 0;
+    let redDays = 0;
+    let grossWinSum = 0;
+    let grossLossSum = 0;
+
+    monthDays.forEach((d) => {
+      totalNet += Number(d.net_pnl_rupees || 0);
+      totalGross += Number(d.gross_pnl_rupees || 0);
+      totalCharges += Number(d.charges_rupees || 0);
+      longNet += Number(d.long_book_net_pnl || 0);
+      shortNet += Number(d.short_book_net_pnl || 0);
+      longTrades += Number(d.long_book_trades || 0);
+      shortTrades += Number(d.short_book_trades || 0);
+      totalTrades += Number(d.trade_count || 0);
+      wins += Number(d.wins || 0);
+      losses += Number(d.losses || 0);
+      if (d.net_pnl_rupees > 0) greenDays += 1;
+      else if (d.net_pnl_rupees < 0) redDays += 1;
+      (d.trades || []).forEach((tr) => {
+        const np = Number(tr.net_pnl || 0);
+        if (np > 0) grossWinSum += np;
+        else if (np < 0) grossLossSum += Math.abs(np);
+      });
+    });
+
+    const monthSummary = {
+      month: activeMonth,
+      total_net_pnl: Number(totalNet.toFixed(2)),
+      total_gross_pnl: Number(totalGross.toFixed(2)),
+      total_charges: Number(totalCharges.toFixed(2)),
+      long_book_net_pnl: Number(longNet.toFixed(2)),
+      short_book_net_pnl: Number(shortNet.toFixed(2)),
+      long_book_trades: longTrades,
+      short_book_trades: shortTrades,
+      total_trades: totalTrades,
+      wins,
+      losses,
+      win_rate: totalTrades > 0 ? Number(((wins / totalTrades) * 100).toFixed(1)) : 0,
+      profit_factor:
+        grossLossSum > 0
+          ? Number((grossWinSum / grossLossSum).toFixed(2))
+          : grossWinSum > 0
+          ? 99.9
+          : 0,
+      green_days: greenDays,
+      red_days: redDays,
+      trading_days: monthDays.length,
+    };
+
+    // Build 5-column Monday–Friday calendar cells for activeMonth
+    const [yrStr, moStr] = activeMonth.split('-');
+    const yr = Number(yrStr);
+    const mo = Number(moStr); // 1..12
+    const daysInMonth = new Date(yr, mo, 0).getDate();
+    const weekdayCells = [];
+    let firstWeekdayAdded = false;
+
+    for (let dayNum = 1; dayNum <= daysInMonth; dayNum += 1) {
+      const dtObj = new Date(yr, mo - 1, dayNum);
+      const dow = dtObj.getDay(); // 0=Sun, 1=Mon ... 5=Fri, 6=Sat
+      if (dow === 0 || dow === 6) continue; // Skip weekends in 5-col Mon-Fri matrix
+
+      if (!firstWeekdayAdded) {
+        // Pad leading empty slots for Monday..day before first weekday
+        const padCount = dow - 1;
+        for (let p = 0; p < padCount; p += 1) {
+          weekdayCells.push({ isPadding: true, key: `pad-${p}` });
+        }
+        firstWeekdayAdded = true;
+      }
+
+      const isoDate = `${yrStr}-${String(mo).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
+      const existing = dayMap[isoDate];
+      weekdayCells.push(
+        existing || {
+          date: isoDate,
+          month: activeMonth,
+          trade_count: 0,
+          wins: 0,
+          losses: 0,
+          win_rate: 0,
+          gross_pnl_rupees: 0,
+          charges_rupees: 0,
+          net_pnl_rupees: 0,
+          long_book_net_pnl: 0,
+          short_book_net_pnl: 0,
+          long_book_trades: 0,
+          short_book_trades: 0,
+          trades: [],
+        }
+      );
+    }
+
+    return {
+      availableMonths,
+      activeMonth,
+      monthSummary,
+      weekdayCells,
+      dayMap,
+    };
+  }, [calendarData, tradesData, liveRecentIntents, bookFilter, selectedMonth]);
+
+  const formatMonthLabel = (ym) => {
+    if (!ym || !ym.includes('-')) return ym;
+    const [y, m] = ym.split('-');
+    const dt = new Date(Number(y), Number(m) - 1, 1);
+    return dt.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  };
 
   const formatINR = (val) => {
     const num = Number(val || 0);
@@ -260,10 +467,6 @@ export default function OptionSnifferAdvance() {
                 v1.0 Dual-Book Regime Router
               </span>
             </h1>
-            <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-3xl">
-              Institutional Dual-Book Option Engine combining <strong>Book 1 (1 Lot Option Buying — Wave-1 Convex Gamma Sniper)</strong> and{' '}
-              <strong>Book 2 (1 Lot Option Selling — Contraction Theta / Wave-2 Exhaustion / Diagonal OTM Wing Harvester)</strong> with Cross-Sectional Chain Intelligence (GEX, VRP, Put-Call Parity Basis, PCR, OI Walls &amp; Max Pain).
-            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
@@ -548,14 +751,17 @@ export default function OptionSnifferAdvance() {
       {/* Navigation Tabs */}
       <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-2">
         <button
-          onClick={() => setActiveTab('audit')}
-          className={`px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition cursor-pointer ${
-            activeTab === 'audit'
+          onClick={() => setActiveTab('calendar')}
+          className={`px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5 ${
+            activeTab === 'calendar'
               ? 'bg-indigo-600 text-white shadow'
               : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
           }`}
         >
-          1. Causal Walk-Forward Audit (Oct 19 – Oct 30: +₹17,911 | 85.7% WR)
+          <CalendarIcon size={13} />
+          <span>
+            1. P&amp;L Calendar ({formatMonthLabel(computedCalendar.activeMonth)}: {formatINR(computedCalendar.monthSummary.total_net_pnl)} | {computedCalendar.monthSummary.win_rate}% WR)
+          </span>
         </button>
         <button
           onClick={() => setActiveTab('live')}
@@ -590,101 +796,440 @@ export default function OptionSnifferAdvance() {
         </button>
       </div>
 
-      {/* TAB 1: CAUSAL WALK-FORWARD AUDIT */}
-      {activeTab === 'audit' && (
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-4 border-b border-slate-100">
+      {/* TAB 1: INTERACTIVE MONTHLY P&L CALENDAR (Zerodha Console / Capital Arena Style + Month Selector) */}
+      {activeTab === 'calendar' && (
+        <div className="bg-white rounded-3xl border border-slate-200/80 shadow-xs p-5 space-y-5">
+          {/* Calendar Top Bar: Title + Month Selector + Book Filter Pills */}
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pb-4 border-b border-slate-100">
             <div>
-              <h2 className="text-lg font-black text-slate-900 flex items-center gap-2">
-                <CheckCircle2 className="text-emerald-600" size={20} />
-                <span>Chronological Blind Walk-Forward Verification (Oct 19 – Oct 30, 2026)</span>
+              <h2 className="text-base font-black text-slate-900 flex items-center gap-2">
+                <CalendarIcon size={18} className="text-indigo-600" />
+                <span>Day-by-Day Realized P&amp;L Calendar — {formatMonthLabel(computedCalendar.activeMonth)}</span>
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Strictly point-in-time index bars and option quote snapshots (post-09:43 IST warm-up). Full Upstox statutory charges + 5 bps slippage on both Long Buying (ASK→BID) and Short Selling (BID→ASK).
+                Click any active trading day card to inspect the full Dual-Book trade execution ledger, MFE/MAE excursion, and Book 1 vs Book 2 breakdown.
               </p>
             </div>
 
-            <div className="flex items-center gap-2">
-              {['ALL', 'LONG_BOOK_BUY', 'SHORT_BOOK_SELL'].map((flt) => (
+            <div className="flex flex-wrap items-center gap-3">
+              {/* Month Selector (< Prev | Dropdown | Next >) */}
+              <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
                 <button
-                  key={flt}
-                  onClick={() => setBookFilter(flt)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold font-mono transition cursor-pointer ${
-                    bookFilter === flt
-                      ? 'bg-slate-900 text-white'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
+                  onClick={() => {
+                    const idx = computedCalendar.availableMonths.indexOf(computedCalendar.activeMonth);
+                    if (idx < computedCalendar.availableMonths.length - 1) {
+                      setSelectedMonth(computedCalendar.availableMonths[idx + 1]);
+                    }
+                  }}
+                  disabled={
+                    computedCalendar.availableMonths.indexOf(computedCalendar.activeMonth) >=
+                    computedCalendar.availableMonths.length - 1
+                  }
+                  className="p-1.5 rounded-lg text-slate-600 hover:bg-white hover:shadow-2xs disabled:opacity-40 cursor-pointer"
+                  title="Previous Month"
                 >
-                  {flt === 'ALL' ? 'ALL (14)' : flt === 'LONG_BOOK_BUY' ? 'BOOK 1: BUY (8)' : 'BOOK 2: SELL (6)'}
+                  <ChevronLeft size={14} />
                 </button>
-              ))}
+                <select
+                  value={computedCalendar.activeMonth}
+                  onChange={(e) => setSelectedMonth(e.target.value)}
+                  className="px-2.5 py-1 bg-white rounded-lg text-xs font-black font-mono text-indigo-900 border border-slate-200 focus:outline-none cursor-pointer"
+                >
+                  {computedCalendar.availableMonths.map((m) => (
+                    <option key={m} value={m}>
+                      {formatMonthLabel(m)}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => {
+                    const idx = computedCalendar.availableMonths.indexOf(computedCalendar.activeMonth);
+                    if (idx > 0) {
+                      setSelectedMonth(computedCalendar.availableMonths[idx - 1]);
+                    }
+                  }}
+                  disabled={computedCalendar.availableMonths.indexOf(computedCalendar.activeMonth) <= 0}
+                  className="p-1.5 rounded-lg text-slate-600 hover:bg-white hover:shadow-2xs disabled:opacity-40 cursor-pointer"
+                  title="Next Month"
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+
+              {/* Book Filter Pills */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[
+                  { id: 'ALL', label: 'ALL DUAL-BOOK' },
+                  { id: 'LONG_BOOK_BUY', label: 'BOOK 1: BUY' },
+                  { id: 'SHORT_BOOK_SELL', label: 'BOOK 2: SELL' },
+                  { id: 'LIVE_BROKER', label: 'LIVE BROKER' },
+                ].map((flt) => (
+                  <button
+                    key={flt.id}
+                    onClick={() => setBookFilter(flt.id)}
+                    className={`px-3 py-1.5 rounded-xl text-[11px] font-black font-mono transition cursor-pointer ${
+                      bookFilter === flt.id
+                        ? 'bg-indigo-600 text-white shadow-2xs'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {flt.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          <div className="overflow-x-auto mt-4">
-            <table className="w-full text-left border-collapse text-xs font-mono">
-              <thead>
-                <tr className="border-b border-slate-200 text-slate-500 uppercase text-[11px]">
-                  <th className="py-3 px-2">#</th>
-                  <th className="py-3 px-2">Entry → Exit (IST)</th>
-                  <th className="py-3 px-2">Book</th>
-                  <th className="py-3 px-2">Strategy Mode</th>
-                  <th className="py-3 px-2">Contract</th>
-                  <th className="py-3 px-2 text-right">Qty</th>
-                  <th className="py-3 px-2 text-right">Entry → Exit</th>
-                  <th className="py-3 px-2 text-right">MFE / MAE</th>
-                  <th className="py-3 px-2 text-right">Net P&amp;L</th>
-                  <th className="py-3 px-2">Exit Reason</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {auditTrades.map((t, idx) => {
-                  const isLong = t.book_type === 'LONG_BOOK_BUY';
-                  const isWin = Number(t.net_pnl || 0) > 0;
-                  return (
-                    <tr key={t.trade_id || idx} className="hover:bg-slate-50/80">
-                      <td className="py-3 px-2 font-bold text-slate-400">{idx + 1}</td>
-                      <td className="py-3 px-2 text-slate-700">
-                        <div>{String(t.entry_time || '').slice(0, 19).replace('T', ' ')}</div>
-                        <div className="text-[10px] text-slate-400">→ {String(t.exit_time || '').slice(11, 19)}</div>
-                      </td>
-                      <td className="py-3 px-2">
+          {/* Monthly KPI Summary Strip (4 Cards for Selected Month) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="bg-slate-50 rounded-2xl p-3.5 border border-slate-200/80">
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                <span>{formatMonthLabel(computedCalendar.activeMonth)} Net P&amp;L</span>
+                <span className="font-mono text-indigo-600">
+                  PF {computedCalendar.monthSummary.profit_factor}x
+                </span>
+              </div>
+              <div
+                className={`text-xl font-black font-mono mt-1 ${
+                  computedCalendar.monthSummary.total_net_pnl >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                }`}
+              >
+                {formatINR(computedCalendar.monthSummary.total_net_pnl)}
+              </div>
+              <div className="text-[10px] font-mono text-slate-500 mt-1 flex justify-between">
+                <span>Gross: {formatINR(computedCalendar.monthSummary.total_gross_pnl)}</span>
+                <span>Charges: ₹{Number(computedCalendar.monthSummary.total_charges || 0).toFixed(0)}</span>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 rounded-2xl p-3.5 border border-slate-200/80">
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                <span>Trading Sessions</span>
+                <span className="font-mono text-slate-600">
+                  {computedCalendar.monthSummary.trading_days} Active Days
+                </span>
+              </div>
+              <div className="text-xl font-black font-mono text-slate-900 mt-1 flex items-center gap-2">
+                <span className="text-emerald-600">{computedCalendar.monthSummary.green_days} Green</span>
+                <span className="text-slate-300">/</span>
+                <span className="text-rose-600">{computedCalendar.monthSummary.red_days} Red</span>
+              </div>
+              <div className="text-[10px] font-mono text-slate-500 mt-1">
+                Session Win Consistency:{' '}
+                <strong>
+                  {computedCalendar.monthSummary.trading_days > 0
+                    ? Math.round(
+                        (computedCalendar.monthSummary.green_days /
+                          computedCalendar.monthSummary.trading_days) *
+                          100
+                      )
+                    : 0}
+                  %
+                </strong>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 rounded-2xl p-3.5 border border-slate-200/80">
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                <span>Month Win Rate</span>
+                <span className="font-mono text-emerald-700">
+                  {computedCalendar.monthSummary.total_trades} Trades
+                </span>
+              </div>
+              <div className="text-xl font-black font-mono text-slate-900 mt-1">
+                {computedCalendar.monthSummary.win_rate}%
+              </div>
+              <div className="text-[10px] font-mono text-slate-500 mt-1">
+                <span className="text-emerald-600 font-bold">{computedCalendar.monthSummary.wins}W</span> /{' '}
+                <span className="text-rose-600 font-bold">{computedCalendar.monthSummary.losses}L</span> closed in{' '}
+                {formatMonthLabel(computedCalendar.activeMonth)}
+              </div>
+            </div>
+
+            <div className="bg-slate-50 rounded-2xl p-3.5 border border-slate-200/80">
+              <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                <span>Book 1 vs Book 2 Split</span>
+                <span className="font-mono text-indigo-600">
+                  {computedCalendar.monthSummary.long_book_trades}B1 / {computedCalendar.monthSummary.short_book_trades}B2
+                </span>
+              </div>
+              <div className="text-xs font-mono font-bold mt-1.5 space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">B1 (1-Lot Buy):</span>
+                  <span
+                    className={
+                      computedCalendar.monthSummary.long_book_net_pnl >= 0
+                        ? 'text-emerald-600 font-black'
+                        : 'text-rose-600 font-black'
+                    }
+                  >
+                    {formatINR(computedCalendar.monthSummary.long_book_net_pnl)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">B2 (1-Lot Sell):</span>
+                  <span
+                    className={
+                      computedCalendar.monthSummary.short_book_net_pnl >= 0
+                        ? 'text-cyan-600 font-black'
+                        : 'text-rose-600 font-black'
+                    }
+                  >
+                    {formatINR(computedCalendar.monthSummary.short_book_net_pnl)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 5-Column Weekday Header (Monday – Friday) */}
+          <div className="grid grid-cols-5 gap-2.5 text-center text-[10px] font-bold uppercase tracking-wider text-slate-400 px-1">
+            <div>Monday</div>
+            <div>Tuesday</div>
+            <div>Wednesday</div>
+            <div>Thursday</div>
+            <div>Friday</div>
+          </div>
+
+          {/* 5-Column Weekday Calendar Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+            {computedCalendar.weekdayCells.map((d) => {
+              if (d.isPadding) {
+                return (
+                  <div
+                    key={d.key}
+                    className="hidden sm:block rounded-2xl border border-dashed border-slate-100 bg-slate-50/30 p-3 min-h-[108px]"
+                  />
+                );
+              }
+              const net = Number(d.net_pnl_rupees || 0);
+              const hasTrades = Number(d.trade_count || 0) > 0;
+              const todayIso = new Date().toLocaleDateString('en-CA');
+              const isToday = d.date === todayIso;
+              const dtObj = new Date(`${d.date}T00:00:00`);
+              const dayLabel = dtObj.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+
+              let bgClass = 'bg-slate-50/60 border-slate-200/70 text-slate-400';
+              if (hasTrades) {
+                if (net > 0) {
+                  bgClass =
+                    'bg-emerald-50/75 border-emerald-300 text-emerald-950 hover:bg-emerald-50 hover:shadow-sm';
+                } else if (net < 0) {
+                  bgClass = 'bg-rose-50/75 border-rose-300 text-rose-950 hover:bg-rose-50 hover:shadow-sm';
+                } else {
+                  bgClass = 'bg-amber-50/60 border-amber-200 text-amber-900';
+                }
+              }
+
+              return (
+                <div
+                  key={d.date}
+                  onClick={() => hasTrades && setSelectedCalendarDay(d)}
+                  className={`rounded-2xl border p-3 transition-all min-h-[108px] flex flex-col justify-between ${bgClass} ${
+                    hasTrades ? 'cursor-pointer' : 'opacity-70'
+                  } ${isToday ? 'ring-2 ring-indigo-500/40' : ''}`}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
+                      <span>{dayLabel}</span>
+                      {isToday && (
+                        <span className="text-[8px] font-black uppercase px-1.5 py-0.5 rounded bg-indigo-600 text-white">
+                          Today
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-500">
+                      {hasTrades ? `${d.trade_count} trade${d.trade_count > 1 ? 's' : ''}` : '—'}
+                    </span>
+                  </div>
+
+                  {hasTrades ? (
+                    <div className="mt-2 space-y-1">
+                      <div
+                        className={`text-sm font-black font-mono ${
+                          net >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                        }`}
+                      >
+                        {net >= 0 ? '+' : '-'}₹
+                        {Math.abs(net).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] text-slate-600 font-mono">
+                        <span>{d.win_rate}% WR</span>
+                        <span>
+                          {d.wins}W/{d.losses}L
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-[9px] font-mono pt-1 border-t border-slate-200/60">
                         <span
-                          className={`px-2 py-0.5 rounded font-bold text-[10px] ${
-                            isLong
-                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                              : 'bg-cyan-50 text-cyan-700 border border-cyan-200'
-                          }`}
+                          className={
+                            (d.long_book_net_pnl || 0) >= 0 ? 'text-emerald-700 font-bold' : 'text-rose-600 font-bold'
+                          }
                         >
-                          {isLong ? 'BUY 1 LOT' : 'SELL 1 LOT'}
+                          B1: {d.long_book_trades > 0 ? `${d.long_book_net_pnl >= 0 ? '+' : '-'}₹${Math.abs(d.long_book_net_pnl).toFixed(0)}` : '—'}
                         </span>
-                      </td>
-                      <td className="py-3 px-2 font-semibold text-slate-700">{t.strategy_mode}</td>
-                      <td className="py-3 px-2 font-bold text-slate-900">
-                        {t.underlying} {Number(t.strike_price || 0).toFixed(0)} {t.option_type}
-                      </td>
-                      <td className="py-3 px-2 text-right text-slate-600">{t.quantity}</td>
-                      <td className="py-3 px-2 text-right text-slate-700">
-                        ₹{Number(t.entry_price || 0).toFixed(2)} → ₹{Number(t.exit_price || 0).toFixed(2)}
-                      </td>
-                      <td className="py-3 px-2 text-right">
-                        <span className="text-emerald-600">+{Number(t.mfe_pct || 0).toFixed(1)}%</span>
-                        {' / '}
-                        <span className="text-rose-500">{Number(t.mae_pct || 0).toFixed(1)}%</span>
-                      </td>
-                      <td className={`py-3 px-2 text-right font-black ${isWin ? 'text-emerald-600' : 'text-rose-600'}`}>
-                        {formatINR(t.net_pnl)}
-                      </td>
-                      <td className="py-3 px-2">
-                        <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[10px] font-semibold">
-                          {t.exit_reason}
+                        <span
+                          className={
+                            (d.short_book_net_pnl || 0) >= 0 ? 'text-cyan-700 font-bold' : 'text-rose-600 font-bold'
+                          }
+                        >
+                          B2: {d.short_book_trades > 0 ? `${d.short_book_net_pnl >= 0 ? '+' : '-'}₹${Math.abs(d.short_book_net_pnl).toFixed(0)}` : '—'}
                         </span>
-                      </td>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 text-[10px] text-slate-400 font-medium">No Closed Trades</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* DAY PERFORMANCE INSPECTOR MODAL (Click Any Calendar Day) */}
+      {selectedCalendarDay && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setSelectedCalendarDay(null)}
+        >
+          <div
+            className="bg-white rounded-3xl border border-slate-200 shadow-2xl max-w-4xl w-full max-h-[88vh] overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/70">
+              <div>
+                <div className="flex items-center gap-2">
+                  <CalendarIcon size={16} className="text-indigo-600" />
+                  <h3 className="text-base font-black text-slate-900">
+                    Day Performance: {selectedCalendarDay.date}
+                  </h3>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                      selectedCalendarDay.net_pnl_rupees >= 0
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : 'bg-rose-100 text-rose-700'
+                    }`}
+                  >
+                    {formatINR(selectedCalendarDay.net_pnl_rupees)}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Option Sniffer Advance Dual-Book Ledger • {selectedCalendarDay.trade_count} Closed Trades ({selectedCalendarDay.wins}W / {selectedCalendarDay.losses}L)
+                </p>
+              </div>
+              <button
+                onClick={() => setSelectedCalendarDay(null)}
+                className="p-2 rounded-xl bg-white border border-slate-200 text-slate-500 hover:text-slate-800 cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-4">
+              {/* 4 Day Summary Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
+                  <div className="text-[10px] uppercase font-bold text-slate-400">Total Trades</div>
+                  <div className="text-lg font-black text-slate-800 mt-0.5">
+                    {selectedCalendarDay.trade_count}
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-500">
+                    B1: {selectedCalendarDay.long_book_trades} | B2: {selectedCalendarDay.short_book_trades}
+                  </div>
+                </div>
+                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
+                  <div className="text-[10px] uppercase font-bold text-slate-400">Win Rate</div>
+                  <div className="text-lg font-black text-emerald-600 mt-0.5">
+                    {selectedCalendarDay.win_rate}% ({selectedCalendarDay.wins}W/{selectedCalendarDay.losses}L)
+                  </div>
+                </div>
+                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
+                  <div className="text-[10px] uppercase font-bold text-slate-400">Book 1 vs Book 2</div>
+                  <div className="text-xs font-mono font-bold mt-1 space-y-0.5">
+                    <div className="text-emerald-700">B1: {formatINR(selectedCalendarDay.long_book_net_pnl)}</div>
+                    <div className="text-cyan-700">B2: {formatINR(selectedCalendarDay.short_book_net_pnl)}</div>
+                  </div>
+                </div>
+                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
+                  <div className="text-[10px] uppercase font-bold text-slate-400">Net Realized P&amp;L</div>
+                  <div
+                    className={`text-lg font-black font-mono mt-0.5 ${
+                      selectedCalendarDay.net_pnl_rupees >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                    }`}
+                  >
+                    {formatINR(selectedCalendarDay.net_pnl_rupees)}
+                  </div>
+                  <div className="text-[10px] font-mono text-slate-400">
+                    Charges: ₹{Number(selectedCalendarDay.charges_rupees || 0).toFixed(2)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Day Trades Execution Table */}
+              <div className="overflow-x-auto border border-slate-200 rounded-2xl">
+                <table className="w-full text-left border-collapse text-xs font-mono">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-[10px] uppercase text-slate-500">
+                      <th className="py-2.5 px-3">Time (IST)</th>
+                      <th className="py-2.5 px-3">Book</th>
+                      <th className="py-2.5 px-3">Strategy</th>
+                      <th className="py-2.5 px-3">Contract</th>
+                      <th className="py-2.5 px-3 text-right">Qty</th>
+                      <th className="py-2.5 px-3 text-right">Entry → Exit</th>
+                      <th className="py-2.5 px-3 text-right">MFE / MAE</th>
+                      <th className="py-2.5 px-3 text-right">Net P&amp;L</th>
+                      <th className="py-2.5 px-3">Exit Reason</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {(selectedCalendarDay.trades || []).map((t, idx) => {
+                      const isLong = t.book_type === 'LONG_BOOK_BUY';
+                      const isWin = Number(t.net_pnl || 0) > 0;
+                      return (
+                        <tr key={t.trade_id || idx} className="hover:bg-slate-50">
+                          <td className="py-2.5 px-3 text-slate-700">
+                            <div>{String(t.entry_time || '').slice(11, 19)}</div>
+                            <div className="text-[10px] text-slate-400">→ {String(t.exit_time || '').slice(11, 19)}</div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span
+                              className={`px-2 py-0.5 rounded font-bold text-[10px] ${
+                                isLong
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-cyan-50 text-cyan-700 border border-cyan-200'
+                              }`}
+                            >
+                              {isLong ? 'BUY 1 LOT' : 'SELL 1 LOT'}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 font-semibold text-slate-700">{t.strategy_mode}</td>
+                          <td className="py-2.5 px-3 font-bold text-slate-900">
+                            {t.trading_symbol || `${t.underlying} ${Number(t.strike_price || 0).toFixed(0)} ${t.option_type}`}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-600">{t.quantity}</td>
+                          <td className="py-2.5 px-3 text-right text-slate-700">
+                            ₹{Number(t.entry_price || 0).toFixed(2)} → ₹{Number(t.exit_price || 0).toFixed(2)}
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
+                            <span className="text-emerald-600">+{Number(t.mfe_pct || 0).toFixed(1)}%</span>
+                            {' / '}
+                            <span className="text-rose-500">{Number(t.mae_pct || 0).toFixed(1)}%</span>
+                          </td>
+                          <td className={`py-2.5 px-3 text-right font-black ${isWin ? 'text-emerald-600' : 'text-rose-600'}`}>
+                            {formatINR(t.net_pnl)}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[10px] font-semibold">
+                              {t.exit_reason}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -829,7 +1374,7 @@ export default function OptionSnifferAdvance() {
             </h2>
             {(!tradesData.closed_trades || tradesData.closed_trades.length === 0) ? (
               <div className="text-xs text-slate-500 bg-slate-50 rounded-xl p-6 text-center border border-slate-100">
-                No closed sandbox trades in the live database table yet. See Tab 1 for the 14-trade Causal Walk-Forward Audit across Oct 19 – Oct 30, 2026.
+                No closed sandbox trades in the live database table yet. See Tab 1 for the Day-by-Day P&amp;L Calendar.
               </div>
             ) : (
               <div className="overflow-x-auto">

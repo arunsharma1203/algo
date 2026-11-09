@@ -44,9 +44,21 @@ def get_advance_status() -> Dict[str, Any]:
         bridge.start_background_follower()
         status = orch.get_status()
         status["live_bridge"] = bridge.get_live_status()
+        status["calendar"] = bridge.get_calendar_performance(book_filter="ALL")
         return status
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to get status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/calendar")
+def get_advance_calendar(book_filter: str = Query("ALL")) -> Dict[str, Any]:
+    """Returns read-only Day-by-Day and Month-by-Month P&L Calendar data across all months (`Oct 2026`, `Nov 2026`, etc.)."""
+    try:
+        bridge = get_advance_live_bridge()
+        return bridge.get_calendar_performance(book_filter=book_filter)
+    except Exception as e:
+        logger.error(f"[OptionSnifferAdvanceAPI] Failed to get calendar performance: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

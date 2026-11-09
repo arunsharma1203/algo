@@ -1058,6 +1058,181 @@ class AdvanceLiveBridge:
             "active_positions_count": len(active),
         }
 
+    def get_calendar_performance(self, book_filter: str = "ALL") -> Dict[str, Any]:
+        """
+        Read-only Day-by-Day & Month-by-Month P&L Calendar aggregation from `option_sniffer_advance_trades`
+        (or `option_advance_live_order_intents` when `book_filter == 'LIVE_BROKER'`).
+        Touches 0 bytes of core Option Sniffer Advance files (`mode=ro`).
+        """
+        flt = str(book_filter or "ALL").upper().strip()
+        cur_month = to_ist_naive().strftime("%Y-%m")
+        months_set = {cur_month}
+        days_map: Dict[str, Dict[str, Any]] = {}
+
+        try:
+            with self._get_ro_conn() as conn:
+                if flt == "LIVE_BROKER":
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            order_intent_id AS trade_id,
+                            signal_id,
+                            book_type,
+                            strategy_mode,
+                            direction,
+                            instrument_key,
+                            trading_symbol,
+                            underlying,
+                            option_type,
+                            strike,
+                            expiry,
+                            lot_size,
+                            target_quantity AS quantity,
+                            created_at AS entry_time,
+                            updated_at AS exit_time,
+                            average_fill_price AS entry_price_used,
+                            exit_fill_price AS exit_price_used,
+                            0.0 AS mfe_pct,
+                            0.0 AS mae_pct,
+                            gross_pnl,
+                            statutory_charges AS charges,
+                            0.0 AS slippage,
+                            realized_pnl AS net_pnl,
+                            exit_reason
+                        FROM option_advance_live_order_intents
+                        WHERE exit_state = 'CONFIRMED_FLAT'
+                        ORDER BY created_at ASC;
+                        """
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT *
+                        FROM option_sniffer_advance_trades
+                        WHERE status = 'CLOSED'
+                        ORDER BY entry_time ASC;
+                        """
+                    ).fetchall()
+        except Exception as e:
+            logger.debug(f"[AdvanceLiveBridge] Calendar query note: {e}")
+            rows = []
+
+        for r in rows:
+            t = dict(r)
+            btype = str(t.get("book_type") or BOOK_LONG_BUY)
+            entry_t = str(t.get("entry_time") or "")
+            day_str = entry_t[:10]
+            if len(day_str) != 10:
+                continue
+            month_str = day_str[:7]
+            months_set.add(month_str)
+
+            if flt in (BOOK_LONG_BUY, BOOK_SHORT_SELL) and btype != flt:
+                continue
+
+            t["entry_price"] = float(t.get("entry_price_used") or 0.0)
+            t["exit_price"] = float(t.get("exit_price_used") or 0.0)
+            t["strike_price"] = float(t.get("strike") or 0.0)
+            net = float(t.get("net_pnl") or 0.0)
+            gross = float(t.get("gross_pnl") or 0.0)
+            charges = float(t.get("charges") or 0.0) + float(t.get("slippage") or 0.0)
+
+            if day_str not in days_map:
+                days_map[day_str] = {
+                    "date": day_str,
+                    "month": month_str,
+                    "trade_count": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "win_rate": 0.0,
+                    "gross_pnl_rupees": 0.0,
+                    "charges_rupees": 0.0,
+                    "net_pnl_rupees": 0.0,
+                    "long_book_net_pnl": 0.0,
+                    "short_book_net_pnl": 0.0,
+                    "long_book_trades": 0,
+                    "short_book_trades": 0,
+                    "trades": [],
+                }
+
+            d_rec = days_map[day_str]
+            d_rec["trade_count"] += 1
+            if net > 0:
+                d_rec["wins"] += 1
+            else:
+                d_rec["losses"] += 1
+            d_rec["gross_pnl_rupees"] = round(d_rec["gross_pnl_rupees"] + gross, 2)
+            d_rec["charges_rupees"] = round(d_rec["charges_rupees"] + charges, 2)
+            d_rec["net_pnl_rupees"] = round(d_rec["net_pnl_rupees"] + net, 2)
+            if btype == BOOK_LONG_BUY:
+                d_rec["long_book_net_pnl"] = round(d_rec["long_book_net_pnl"] + net, 2)
+                d_rec["long_book_trades"] += 1
+            else:
+                d_rec["short_book_net_pnl"] = round(d_rec["short_book_net_pnl"] + net, 2)
+                d_rec["short_book_trades"] += 1
+            d_rec["trades"].append(t)
+
+        days_list: List[Dict[str, Any]] = []
+        months_summary: Dict[str, Dict[str, Any]] = {}
+        for m_str in sorted(months_set, reverse=True):
+            months_summary[m_str] = {
+                "month": m_str,
+                "total_net_pnl": 0.0,
+                "long_book_net_pnl": 0.0,
+                "short_book_net_pnl": 0.0,
+                "total_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0.0,
+                "profit_factor": 0.0,
+                "green_days": 0,
+                "red_days": 0,
+                "trading_days": 0,
+                "_gross_wins": 0.0,
+                "_gross_losses": 0.0,
+            }
+
+        for day_str in sorted(days_map.keys()):
+            d_rec = days_map[day_str]
+            tc = d_rec["trade_count"]
+            d_rec["win_rate"] = round((d_rec["wins"] / tc) * 100.0, 1) if tc > 0 else 0.0
+            days_list.append(d_rec)
+
+            m_str = d_rec["month"]
+            ms = months_summary[m_str]
+            ms["total_net_pnl"] = round(ms["total_net_pnl"] + d_rec["net_pnl_rupees"], 2)
+            ms["long_book_net_pnl"] = round(ms["long_book_net_pnl"] + d_rec["long_book_net_pnl"], 2)
+            ms["short_book_net_pnl"] = round(ms["short_book_net_pnl"] + d_rec["short_book_net_pnl"], 2)
+            ms["total_trades"] += tc
+            ms["wins"] += d_rec["wins"]
+            ms["losses"] += d_rec["losses"]
+            ms["trading_days"] += 1
+            if d_rec["net_pnl_rupees"] >= 0:
+                ms["green_days"] += 1
+            else:
+                ms["red_days"] += 1
+            for tr in d_rec["trades"]:
+                n_val = float(tr.get("net_pnl") or 0.0)
+                if n_val > 0:
+                    ms["_gross_wins"] += n_val
+                else:
+                    ms["_gross_losses"] += abs(n_val)
+
+        for ms in months_summary.values():
+            mtc = ms["total_trades"]
+            ms["win_rate"] = round((ms["wins"] / mtc) * 100.0, 1) if mtc > 0 else 0.0
+            gw = ms.pop("_gross_wins", 0.0)
+            gl = ms.pop("_gross_losses", 0.0)
+            ms["profit_factor"] = round(gw / gl, 2) if gl > 0 else (round(gw, 2) if gw > 0 else 0.0)
+
+        return {
+            "book_filter": flt,
+            "available_months": sorted(months_set, reverse=True),
+            "default_month": cur_month,
+            "months_summary": months_summary,
+            "days": days_list,
+        }
+
 
 def get_advance_live_bridge() -> AdvanceLiveBridge:
     global _BRIDGE_INSTANCE
