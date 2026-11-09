@@ -267,6 +267,135 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
         self.assertEqual(day_rec["short_book_trades"], 1)
         self.assertEqual(day_rec["net_pnl_rupees"], 4095.0)
 
+    def test_6_resting_exchange_sl_placed_on_entry_and_cancelled_before_exit(self):
+        """
+        Proves Safeguard #3:
+          - Upon entry fill, a linked Exchange-Resting Stop-Loss Limit (`order_type == 'SL'`) order is placed on Upstox.
+          - When the parent paper trade closes, the resting SL order is cancelled via `DELETE /order/cancel` before the exit order fires.
+        """
+        self._insert_advance_paper_trade("ADV_SL_301", book_type="LONG_BOOK_BUY", action="BUY", status="OPEN", entry_price=150.0)
+        call_log = []
+
+        def fake_broker_api(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                if payload and payload.get("order_type") == "SL":
+                    return True, 200, {"status": "success", "data": {"order_id": "SL_ORD_9001"}}
+                return True, 200, {"status": "success", "data": {"order_id": "ENTRY_OR_EXIT_ORD_9002"}}
+            if method == "DELETE" and endpoint == "/order/cancel":
+                return True, 200, {"status": "success"}
+            return True, 200, {"status": "success", "data": []}
+
+        self.mock_broker_api.side_effect = fake_broker_api
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 10, 30, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 30, 2))
+            active = self.bridge.get_active_live_positions()
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0]["broker_sl_order_id"], "SL_ORD_9001")
+
+            # Close paper trade and verify DELETE /order/cancel is called for SL_ORD_9001 before exit POST
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=180.0, exit_reason='TRAILING_STOP_HIT', net_pnl=1850.0 WHERE trade_id='ADV_SL_301';"
+            )
+            conn.commit()
+            conn.close()
+
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 40, 0))
+            delete_calls = [c for c in call_log if c[0] == "DELETE" and c[1] == "/order/cancel"]
+            self.assertEqual(len(delete_calls), 1)
+            self.assertEqual(delete_calls[0][3], {"order_id": "SL_ORD_9001"})
+
+    def test_7_exit_http_failure_keeps_exit_retry_pending_and_retries_until_confirmed_flat(self):
+        """
+        Proves Safeguard #1:
+          - If Upstox returns HTTP 502 on exit, `exit_state` is set to `'EXIT_RETRY_PENDING'` (NEVER `'CONFIRMED_FLAT'`).
+          - Position remains in `get_active_live_positions()` and automatically retries on the next 250ms tick until Upstox confirms flat.
+        """
+        self._insert_advance_paper_trade("ADV_RETRY_401", book_type="LONG_BOOK_BUY", action="BUY", status="OPEN", entry_price=150.0)
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 11, 0, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 0, 2))
+
+            # Close paper trade while broker API suffers a transient 502 outage
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=120.0, exit_reason='STOP_LOSS_HIT', net_pnl=-2005.0 WHERE trade_id='ADV_RETRY_401';"
+            )
+            conn.commit()
+            conn.close()
+
+            self.mock_broker_api.return_value = (False, 502, {"error": "Bad Gateway"})
+            sync_fail = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 5, 0))
+            self.assertEqual(len(sync_fail["exits_mirrored"]), 0)
+
+            # Position MUST still be in get_active_live_positions() with EXIT_RETRY_PENDING!
+            active_after_fail = self.bridge.get_active_live_positions()
+            self.assertEqual(len(active_after_fail), 1)
+            self.assertEqual(active_after_fail[0]["exit_state"], "EXIT_RETRY_PENDING")
+
+            # Now Upstox recovers (200 OK) on the next 250ms tick
+            self.mock_broker_api.return_value = (True, 200, {"status": "success", "data": {"order_id": "RECOVERED_EXIT_99"}})
+            sync_ok = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 5, 1))
+            self.assertEqual(len(sync_ok["exits_mirrored"]), 1)
+            self.assertEqual(len(self.bridge.get_active_live_positions()), 0)
+
+    def test_8_exchange_sl_triggered_on_broker_reconciles_confirmed_flat(self):
+        """
+        Proves Safeguard #2:
+          - If the Exchange-Resting SL-L order triggers directly on Upstox (`status == 'complete'`),
+            `_reconcile_open_live_intents_with_broker()` immediately marks `exit_state = 'CONFIRMED_FLAT'`
+            with `exit_reason = 'EXCHANGE_SL_ORDER_TRIGGERED'`.
+        """
+        self._insert_advance_paper_trade("ADV_EXSL_501", book_type="LONG_BOOK_BUY", action="BUY", status="OPEN", entry_price=150.0)
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 11, 15, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 15, 2))
+            active = self.bridge.get_active_live_positions()
+            self.assertEqual(len(active), 1)
+            sl_oid = active[0]["broker_sl_order_id"]
+
+            # Simulate Upstox `/order/retrieve-all` reporting the SL order completed at ₹120.0
+            def fake_retrieve_all(method, endpoint, payload=None, params=None, is_emergency=False):
+                if method == "GET" and endpoint == "/order/retrieve-all":
+                    return True, 200, {
+                        "status": "success",
+                        "data": [{"order_id": sl_oid, "status": "complete", "average_price": 120.0, "filled_quantity": 65}],
+                    }
+                return True, 200, {"status": "success", "data": {"order_id": "ORD_OK"}}
+
+            self.mock_broker_api.side_effect = fake_retrieve_all
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 16, 0))
+            self.assertEqual(len(self.bridge.get_active_live_positions()), 0)
+            intents = self.bridge.get_recent_order_intents()
+            self.assertEqual(intents[0]["exit_state"], "CONFIRMED_FLAT")
+            self.assertEqual(intents[0]["exit_reason"], "EXCHANGE_SL_ORDER_TRIGGERED")
+
 
 if __name__ == "__main__":
     unittest.main()

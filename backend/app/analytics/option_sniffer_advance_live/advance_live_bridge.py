@@ -514,8 +514,12 @@ class AdvanceLiveBridge:
         mirrored_exits: List[str] = []
         skipped_by_mode: List[Dict[str, Any]] = []
 
-        # 1. Check Exits FIRST (Always active even if disarmed while a live position was open)
+        # 1. Check Exits & Reconcile Broker Order Book FIRST (Always active even if disarmed while a live position was open)
         active_intents = self.get_active_live_positions()
+        if active_intents:
+            self._reconcile_open_live_intents_with_broker(active_intents, now_dt=now_dt)
+            active_intents = self.get_active_live_positions()
+
         if active_intents:
             try:
                 with self._get_ro_conn() as ro_conn:
@@ -717,11 +721,39 @@ class AdvanceLiveBridge:
             "POST", "/order/place", payload=payload, is_emergency=True
         )
 
+        broker_sl_oid: Optional[str] = None
         if success and isinstance(data, dict) and data.get("status") == "success":
             broker_oid = str(data.get("data", {}).get("order_id") or f"UPSTOX_ADV_{int(time.time()*1000)}")
             state = "FILLED"
             avg_fill = paper_entry
             rejection_reason = None
+
+            # Safeguard #3: Place Linked Exchange-Resting Stop-Loss Limit (SL-L) Order on Upstox
+            # Protects the position on Upstox's exchange servers even if local Wi-Fi/power drops mid-trade.
+            try:
+                sl_tx_type = "SELL" if action == "BUY" else "BUY"
+                sl_payload = {
+                    "quantity": qty,
+                    "product": "I",
+                    "validity": "DAY",
+                    "price": float(sl_limit),
+                    "tag": sanitize_upstox_tag(f"sl-{intent_id[-14:]}"),
+                    "instrument_token": ikey,
+                    "order_type": "SL",
+                    "transaction_type": sl_tx_type,
+                    "disclosed_quantity": 0,
+                    "trigger_price": float(sl_trigger),
+                    "is_amo": False,
+                }
+                sl_ok, _, sl_data = engine._call_upstox_broker_api(
+                    "POST", "/order/place", payload=sl_payload, is_emergency=True
+                )
+                if sl_ok and isinstance(sl_data, dict) and sl_data.get("status") == "success":
+                    broker_sl_oid = str(
+                        sl_data.get("data", {}).get("order_id") or f"UPSTOX_ADV_SL_{int(time.time()*1000)}"
+                    )
+            except Exception as sl_err:
+                logger.warning(f"[AdvanceLiveBridge] Exchange SL-L placement note for {intent_id}: {sl_err}")
         else:
             broker_oid = None
             state = "REJECTED"
@@ -736,10 +768,10 @@ class AdvanceLiveBridge:
                     book_type, strategy_mode, direction, action,
                     instrument_key, trading_symbol, underlying, strike, option_type, expiry,
                     lot_size, target_quantity, filled_quantity, limit_price, average_fill_price,
-                    state, broker_order_id, stop_loss_trigger, stop_loss_limit,
+                    state, broker_order_id, stop_loss_trigger, stop_loss_limit, broker_sl_order_id,
                     hedge_wing_strike, hedge_wing_instrument_key, hedge_wing_broker_order_id,
                     paper_entry_price, exit_state, rejection_reason, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
                 (
                     intent_id,
@@ -765,6 +797,7 @@ class AdvanceLiveBridge:
                     broker_oid,
                     sl_trigger,
                     sl_limit,
+                    broker_sl_oid,
                     hedge_wing_strike,
                     hedge_wing_ikey,
                     hedge_wing_oid,
@@ -781,8 +814,138 @@ class AdvanceLiveBridge:
             "order_intent_id": intent_id,
             "state": state,
             "broker_order_id": broker_oid,
+            "broker_sl_order_id": broker_sl_oid,
             "rejection_reason": rejection_reason,
         }
+
+    def _reconcile_open_live_intents_with_broker(
+        self,
+        active_intents: List[Dict[str, Any]],
+        now_dt: Optional[datetime] = None,
+    ) -> None:
+        """
+        Safeguard #2: Reconciles open live intents against Upstox `/order/retrieve-all`:
+          1. If the resting exchange `broker_sl_order_id` was triggered & completed on Upstox,
+             immediately marks `exit_state = 'CONFIRMED_FLAT'` (`EXCHANGE_SL_ORDER_TRIGGERED`)
+             so the bridge never fires a duplicate exit order.
+          2. If an entry `broker_order_id` was rejected/cancelled on the exchange with 0 fills,
+             cancels any resting SL and marks `state = 'CANCELLED'`, `exit_state = 'CONFIRMED_FLAT'`.
+          3. If the entry order completed with an actual exchange `average_price`, updates `average_fill_price`.
+        """
+        if not active_intents:
+            return
+        try:
+            engine = get_order_intent_engine()
+            ok, _, ob_data = engine._call_upstox_broker_api("GET", "/order/retrieve-all", is_emergency=False)
+            if not ok or not isinstance(ob_data, dict):
+                return
+            orders_list = ob_data.get("data")
+            if not isinstance(orders_list, list) or not orders_list:
+                return
+
+            order_map = {
+                str(o.get("order_id")): o
+                for o in orders_list
+                if isinstance(o, dict) and o.get("order_id")
+            }
+            if not order_map:
+                return
+
+            now_iso = to_ist_naive(now_dt).strftime("%Y-%m-%d %H:%M:%S")
+            for intent in active_intents:
+                intent_id = str(intent.get("order_intent_id") or "")
+                action = str(intent.get("action") or "BUY").upper()
+                qty = int(intent.get("filled_quantity") or intent.get("target_quantity") or 65)
+                entry_fill = float(intent.get("average_fill_price") or intent.get("limit_price") or 0.0)
+
+                # A. Check if Exchange-Resting SL-L Order triggered and completed on Upstox
+                sl_oid = str(intent.get("broker_sl_order_id") or "")
+                if sl_oid and sl_oid in order_map:
+                    sl_ord = order_map[sl_oid]
+                    sl_status = str(sl_ord.get("status") or "").lower()
+                    if sl_status == "complete":
+                        sl_fill = float(sl_ord.get("average_price") or intent.get("stop_loss_trigger") or entry_fill)
+                        if action == "BUY":
+                            gross = round((sl_fill - entry_fill) * qty, 2)
+                            costs = calculate_option_trade_costs(
+                                buy_price=entry_fill,
+                                sell_price=sl_fill,
+                                quantity=qty,
+                                apply_slippage=False,
+                                trade_date=now_iso[:10],
+                            )
+                            charges = float(costs.get("statutory_charges") or 55.0)
+                            net_pnl = round(gross - charges, 2)
+                        else:
+                            res_c = calculate_short_option_trade_costs(
+                                sell_entry_bid=entry_fill,
+                                buy_exit_ask=sl_fill,
+                                quantity=qty,
+                                apply_slippage=False,
+                                trade_date=now_iso[:10],
+                            )
+                            gross = float(res_c.get("gross_pnl") or 0.0)
+                            charges = float(res_c.get("statutory_charges") or 55.0)
+                            net_pnl = round(gross - charges, 2)
+
+                        with self._get_rw_conn() as conn:
+                            conn.execute(
+                                """
+                                UPDATE option_advance_live_order_intents
+                                SET exit_state = 'CONFIRMED_FLAT',
+                                    exit_broker_order_id = ?,
+                                    exit_fill_price = ?,
+                                    exit_reason = 'EXCHANGE_SL_ORDER_TRIGGERED',
+                                    gross_pnl = ?,
+                                    statutory_charges = ?,
+                                    realized_pnl = ?,
+                                    updated_at = ?
+                                WHERE order_intent_id = ?;
+                                """,
+                                (sl_oid, sl_fill, gross, charges, net_pnl, now_iso, intent_id),
+                            )
+                            conn.commit()
+                        continue
+
+                # B. Check Entry Order actual fill price or exchange cancellation/rejection
+                entry_oid = str(intent.get("broker_order_id") or "")
+                if entry_oid and entry_oid in order_map:
+                    ent_ord = order_map[entry_oid]
+                    ent_status = str(ent_ord.get("status") or "").lower()
+                    exch_avg = float(ent_ord.get("average_price") or 0.0)
+                    exch_qty = int(ent_ord.get("filled_quantity") or 0)
+                    if ent_status in ("rejected", "cancelled") and exch_qty == 0:
+                        if sl_oid:
+                            engine.cancel_broker_order(sl_oid)
+                        rej_msg = str(ent_ord.get("status_message") or f"Exchange {ent_status}")
+                        with self._get_rw_conn() as conn:
+                            conn.execute(
+                                """
+                                UPDATE option_advance_live_order_intents
+                                SET state = 'CANCELLED',
+                                    exit_state = 'CONFIRMED_FLAT',
+                                    rejection_reason = ?,
+                                    updated_at = ?
+                                WHERE order_intent_id = ?;
+                                """,
+                                (rej_msg, now_iso, intent_id),
+                            )
+                            conn.commit()
+                    elif ent_status == "complete" and exch_avg > 0 and abs(exch_avg - entry_fill) >= 0.05:
+                        with self._get_rw_conn() as conn:
+                            conn.execute(
+                                """
+                                UPDATE option_advance_live_order_intents
+                                SET average_fill_price = ?,
+                                    filled_quantity = ?,
+                                    updated_at = ?
+                                WHERE order_intent_id = ?;
+                                """,
+                                (exch_avg, exch_qty if exch_qty > 0 else qty, now_iso, intent_id),
+                            )
+                            conn.commit()
+        except Exception as rec_err:
+            logger.debug(f"[AdvanceLiveBridge] Order book reconciliation note: {rec_err}")
 
     def _execute_mirrored_live_exit(
         self,
@@ -790,7 +953,14 @@ class AdvanceLiveBridge:
         paper_row: Dict[str, Any],
         now_dt: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        """Fires an emergency-priority Upstox V2 exit order the instant the parent Paper trade closes."""
+        """
+        Fires an emergency-priority Upstox V2 exit order the instant the parent Paper trade closes.
+        Includes:
+          - Pre-exit cancellation of resting `broker_sl_order_id` so margin/qty never collides.
+          - Emergency retry with wider 5% marketable limit buffer on transient HTTP failure.
+          - Fail-Safe `EXIT_RETRY_PENDING` state if both attempts fail so the 250ms follower loop
+            automatically retries on the next cycle instead of leaving an orphan position.
+        """
         now_dt = to_ist_naive(now_dt)
         now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         intent_id = str(intent["order_intent_id"])
@@ -798,6 +968,20 @@ class AdvanceLiveBridge:
         exit_tx_type = "SELL" if action == "BUY" else "BUY"
         qty = int(intent.get("filled_quantity") or intent.get("target_quantity") or 65)
         ikey = str(intent["instrument_key"])
+        engine = get_order_intent_engine()
+
+        # 0. Cancel resting Exchange SL-L order first so Upstox does not block the exit order
+        broker_sl_oid = intent.get("broker_sl_order_id")
+        if broker_sl_oid:
+            try:
+                engine._call_upstox_broker_api(
+                    "DELETE",
+                    "/order/cancel",
+                    params={"order_id": str(broker_sl_oid)},
+                    is_emergency=True,
+                )
+            except Exception as sl_cancel_err:
+                logger.debug(f"[AdvanceLiveBridge] Cancel resting SL note for {broker_sl_oid}: {sl_cancel_err}")
 
         paper_exit = float(paper_row.get("exit_price_used") or 0.0)
         if paper_exit <= 0:
@@ -824,15 +1008,52 @@ class AdvanceLiveBridge:
             "is_amo": False,
         }
 
-        engine = get_order_intent_engine()
         success, status_code, data = engine._call_upstox_broker_api(
             "POST", "/order/place", payload=payload, is_emergency=True
         )
-        exit_oid = (
-            str(data.get("data", {}).get("order_id") or f"UPSTOX_ADV_EX_{int(time.time()*1000)}")
-            if (success and isinstance(data, dict) and data.get("status") == "success")
-            else f"UPSTOX_ADV_EX_{int(time.time()*1000)}"
-        )
+        exit_ok = bool(success and isinstance(data, dict) and data.get("status") == "success")
+
+        # Safeguard #1A: Immediate Emergency Retry with wider 5% marketable collar if primary exit call failed
+        if not exit_ok:
+            retry_limit = (
+                round_to_tick(max(0.05, paper_exit * 0.95))
+                if exit_tx_type == "SELL"
+                else round_to_tick(paper_exit * 1.05)
+            )
+            retry_payload = dict(payload, price=float(retry_limit), tag=sanitize_upstox_tag(f"exr-{intent_id[-13:]}"))
+            success, status_code, data = engine._call_upstox_broker_api(
+                "POST", "/order/place", payload=retry_payload, is_emergency=True
+            )
+            exit_ok = bool(success and isinstance(data, dict) and data.get("status") == "success")
+
+        # Safeguard #1B: Never mark CONFIRMED_FLAT if both exit HTTP calls failed!
+        # Keep in EXIT_RETRY_PENDING so `get_active_live_positions()` returns it on the next 250ms tick.
+        if not exit_ok:
+            err_reason = str((data or {}).get("error") or f"EXIT_HTTP_{status_code}")
+            with self._get_rw_conn() as conn:
+                conn.execute(
+                    """
+                    UPDATE option_advance_live_order_intents
+                    SET exit_state = 'EXIT_RETRY_PENDING',
+                        rejection_reason = ?,
+                        updated_at = ?
+                    WHERE order_intent_id = ?;
+                    """,
+                    (err_reason, now_iso, intent_id),
+                )
+                conn.commit()
+            logger.error(
+                f"⚠️ [AdvanceLiveBridge] Exit order failed for {intent_id} ({err_reason}); "
+                f"kept in EXIT_RETRY_PENDING for automatic 250ms retry."
+            )
+            return {
+                "exited": False,
+                "retry_pending": True,
+                "order_intent_id": intent_id,
+                "error": err_reason,
+            }
+
+        exit_oid = str(data.get("data", {}).get("order_id") or f"UPSTOX_ADV_EX_{int(time.time()*1000)}")
 
         # If this was a hedged short trade (DUAL_BOOK_HEDGED), also flatten the 200-pt OTM protective BUY wing
         hedge_wing_ikey = intent.get("hedge_wing_instrument_key")
@@ -902,6 +1123,7 @@ class AdvanceLiveBridge:
                     gross_pnl = ?,
                     statutory_charges = ?,
                     realized_pnl = ?,
+                    rejection_reason = NULL,
                     updated_at = ?
                 WHERE order_intent_id = ?;
                 """,
