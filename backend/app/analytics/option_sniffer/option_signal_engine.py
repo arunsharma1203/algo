@@ -554,6 +554,38 @@ class OptionSignalEngine:
                 f"Exhaustion climax detected; buying halted to prevent buying at peaks/troughs."
             )
 
+        # 7-Bar Consecutive Candle Exhaustion Climax Guard:
+        # Empirically blocks late-impulse exhaustion spikes (>= 7 consecutive same-color 1m candles)
+        # where lagging 14-bar ADX/ER turn green right at the reversal inflection point.
+        consec_dir_bars = 0
+        if underlying_df is not None and not underlying_df.empty and len(underlying_df) >= 15:
+            try:
+                df_comp = underlying_df
+                if "is_complete" in df_comp.columns:
+                    comp_mask = df_comp["is_complete"] == 1
+                    if comp_mask.sum() >= 15:
+                        df_comp = df_comp[comp_mask]
+                if "open" in df_comp.columns and "close" in df_comp.columns:
+                    o_seq = df_comp["open"].astype(float).values
+                    c_seq = df_comp["close"].astype(float).values
+                    has_both_polarities = any(c > o for o, c in zip(o_seq, c_seq)) and any(c < o for o, c in zip(o_seq, c_seq))
+                    if has_both_polarities:
+                        for idx in range(len(c_seq) - 1, -1, -1):
+                            if opt_type == "CE" and c_seq[idx] > o_seq[idx]:
+                                consec_dir_bars += 1
+                            elif opt_type == "PE" and c_seq[idx] < o_seq[idx]:
+                                consec_dir_bars += 1
+                            else:
+                                break
+                        if consec_dir_bars >= 7:
+                            is_climax_overextended = True
+                            rejection_reasons.append(
+                                f"Climax Overextension Guard: {consec_dir_bars} consecutive 1m {'bullish' if opt_type == 'CE' else 'bearish'} candles detected (>= 7). "
+                                f"Late-impulse exhaustion climax; buying halted to prevent buying at peaks/troughs."
+                            )
+            except Exception:
+                pass
+
         # Engine 3: Inter-Market Composite Breadth Vector (B_composite)
         b_composite = 1.0
         try:

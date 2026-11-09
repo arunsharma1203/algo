@@ -563,6 +563,26 @@ class OptionRegimeGate:
         h_arr = bars_df["high"].values
         l_arr = bars_df["low"].values
         c_arr = bars_df["close"].values
+        if "open" in bars_df.columns and len(bars_df) >= 15:
+            try:
+                o_arr = bars_df["open"].astype(float).values
+                c_flt = bars_df["close"].astype(float).values
+                if any(c > o for o, c in zip(o_arr, c_flt)) and any(c < o for o, c in zip(o_arr, c_flt)):
+                    consec_bars = 0
+                    for idx in range(len(c_flt) - 1, -1, -1):
+                        if opt_type == "CE" and c_flt[idx] > o_arr[idx]:
+                            consec_bars += 1
+                        elif opt_type == "PE" and c_flt[idx] < o_arr[idx]:
+                            consec_bars += 1
+                        else:
+                            break
+                    telemetry["consec_dir_bars"] = consec_bars
+                    if consec_bars >= 7:
+                        rejection_reasons.append(
+                            f"Climax Overextension Guard: {consec_bars} consecutive completed 1m {'bullish' if opt_type == 'CE' else 'bearish'} candles detected (>= 7). Late-impulse exhaustion climax."
+                        )
+            except Exception:
+                pass
 
         adx_res = compute_wilder_adx_canonical(h_arr, l_arr, c_arr, period=14)
         if adx_res is None:
@@ -635,8 +655,36 @@ class OptionRegimeGate:
         rv_15m_ann = compute_realized_vol_15m_annualized(c_arr, period=15)
         if rv_15m_ann is not None:
             telemetry["rv_15m_ann"] = rv_15m_ann
-            if option_iv is not None and float(option_iv) > 0:
-                norm_iv = float(option_iv) * 100.0 if 0.0 < float(option_iv) < 1.5 else float(option_iv)
+            eff_iv = float(option_iv) if (option_iv is not None and float(option_iv) > 0) else 0.0
+            norm_iv = eff_iv * 100.0 if 0.0 < eff_iv < 1.5 else eff_iv
+            # Cross-verify against live option chain snapshot when fallback IV (<= 16.0%) is passed
+            if norm_iv <= 16.0:
+                try:
+                    import sqlite3
+                    from app.core.config import DB_PATH
+                    now_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    day_str = now_dt.strftime("%Y-%m-%d")
+                    with sqlite3.connect(DB_PATH, timeout=2.0) as vconn:
+                        vcur = vconn.cursor()
+                        vcur.execute(
+                            """
+                            SELECT atm_iv, timestamp FROM option_sniffer_advance_chain_snapshots
+                            WHERE underlying = ? AND timestamp >= ? AND timestamp <= ?
+                            ORDER BY timestamp DESC LIMIT 1;
+                            """,
+                            (underlying, f"{day_str} 09:15:00", now_str),
+                        )
+                        vrow = vcur.fetchone()
+                        if vrow and vrow[0] is not None and float(vrow[0]) > 0:
+                            snap_dt = datetime.fromisoformat(str(vrow[1]))
+                            if abs((now_dt - snap_dt).total_seconds()) <= 180.0:
+                                snap_iv = float(vrow[0])
+                                snap_norm_iv = snap_iv * 100.0 if 0.0 < snap_iv < 1.5 else snap_iv
+                                if snap_norm_iv > norm_iv:
+                                    norm_iv = snap_norm_iv
+                except Exception:
+                    pass
+            if norm_iv > 0:
                 vrp_val = round(norm_iv - rv_15m_ann, 2)
                 telemetry["vrp"] = vrp_val
                 if (
@@ -646,6 +694,10 @@ class OptionRegimeGate:
                 ):
                     rejection_reasons.append(
                         f"Low-RV VRP Pinning Shield: VRP (+{vrp_val:.2f}% > +{VRP_PINNING_MAX_SPREAD_PCT:.1f}%) with low 15m RV ({rv_15m_ann:.2f}% < {VRP_PINNING_LOW_RV_THRESHOLD_PCT:.1f}%) and ATR ratio ({atr_ratio:.2f} < {LOW_ADX_IMPULSE_ATR_RATIO_MIN:.2f}) indicates overpriced gamma pinning."
+                    )
+                elif vrp_val >= 10.3 and (er_val is None or er_val < 0.45):
+                    rejection_reasons.append(
+                        f"High-VRP Pinning Shield: VRP (+{vrp_val:.2f}% >= +10.3%) with moderate Kaufman ER ({(er_val or 0.0):.2f} < 0.45) indicates severe IV overpricing relative to 15m RV ({rv_15m_ann:.2f}%)."
                     )
 
         # 5. Heavyweight Stock Alignment

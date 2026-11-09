@@ -1344,10 +1344,35 @@ class OrderIntentEngine:
                     pass
             mfe_pct = round(((current_peak - entry_fill) / entry_fill) * 100.0, 2)
 
-            # Holding duration
+            # Holding duration (synchronized with parent Paper trade entry timestamp when paired within 120s)
+            parent_paper_exit_reason = None
             try:
                 created_dt = to_ist_naive(datetime.fromisoformat(pos["created_at"]))
-                duration_min = (now_dt - created_dt).total_seconds() / 60.0
+                effective_entry_dt = created_dt
+                try:
+                    with self._get_db_conn() as sconn:
+                        scur = sconn.cursor()
+                        scur.execute(
+                            """
+                            SELECT entry_time, status, exit_reason
+                            FROM option_sniffer_paper_trades
+                            WHERE instrument_key = ?
+                            ORDER BY id DESC LIMIT 1;
+                            """,
+                            (str(pos.get("instrument_key") or ""),),
+                        )
+                        prow = scur.fetchone()
+                        if prow and prow[0]:
+                            p_entry_dt = to_ist_naive(datetime.fromisoformat(str(prow[0])))
+                            lag_sec = (created_dt - p_entry_dt).total_seconds()
+                            if -30.0 <= lag_sec <= 120.0:
+                                if p_entry_dt < effective_entry_dt:
+                                    effective_entry_dt = p_entry_dt
+                                if str(prow[1] or "").upper() == "CLOSED" and prow[2]:
+                                    parent_paper_exit_reason = str(prow[2])
+                except Exception:
+                    pass
+                duration_min = (now_dt - effective_entry_dt).total_seconds() / 60.0
             except Exception:
                 duration_min = 0.0
 
@@ -1409,7 +1434,10 @@ class OrderIntentEngine:
                             logger.debug(f"[OrderIntentEngine] Broker SL ratchet modify note: {sl_mod_err}")
 
             # 4. Theta Stagnation Stop (Apex Quant Velocity Protection + H3_22M Near-Miss Round-Trip Shield + Half-Risk Cap)
-            if not exit_reason and duration_min >= THETA_STAGNATION_TIMEOUT_MINUTES and mfe_pct < THETA_STAGNATION_MIN_MFE_PCT and current_pnl_pct < 0:
+            if not exit_reason and (
+                (duration_min >= THETA_STAGNATION_TIMEOUT_MINUTES and mfe_pct < THETA_STAGNATION_MIN_MFE_PCT and current_pnl_pct < 0)
+                or (parent_paper_exit_reason == "STAGNATION_TIME_STOP" and mfe_pct < THETA_STAGNATION_MIN_MFE_PCT and current_pnl_pct < 0)
+            ):
                 exit_reason = "STAGNATION_TIME_STOP"
             elif not exit_reason and duration_min >= 6.0 and (10.0 <= mfe_pct < 15.0) and current_pnl_pct <= -9.0:
                 exit_reason = "STAGNATION_TIME_STOP"
@@ -2003,7 +2031,7 @@ class OrderIntentEngine:
             "is_amo": False
         }
 
-        success, status_code, data = self._call_upstox_broker_api("POST", "/order/place", payload=payload)
+        success, status_code, data = self._call_upstox_broker_api("POST", "/order/place", payload=payload, is_emergency=True)
         now_iso = to_ist_naive().strftime("%Y-%m-%d %H:%M:%S")
 
         with self._get_db_conn() as conn:

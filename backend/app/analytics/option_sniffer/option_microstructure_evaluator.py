@@ -361,6 +361,7 @@ class OptionMicrostructureEvaluator:
             live_vol_ratio: Optional[float] = None
 
             # Always query continuous_index_ohlcv in SQLite for the true immutable 09:15-09:30 Opening Range
+            conn = None
             try:
                 from app.analytics.option_sniffer.option_db import OptionDB
                 conn = OptionDB.get_connection()
@@ -400,16 +401,20 @@ class OptionMicrostructureEvaluator:
                     if last_row and last_row[0]:
                         spot_ltp = float(last_row[0])
                 sig_vol_row = cur.execute("""
-                    SELECT volume_surge_ratio FROM option_sniffer_signals
+                    SELECT MAX(volume), AVG(volume) FROM option_sniffer_signals
                     WHERE underlying = ? AND substr(replace(created_at, 'T', ' '), 1, 19) >= ?
-                      AND volume_surge_ratio > 0
-                    ORDER BY id DESC LIMIT 1;
+                      AND volume > 0;
                 """, (underlying.upper(), f"{date_str} 09:15:00")).fetchone()
-                if sig_vol_row and sig_vol_row[0]:
-                    live_vol_ratio = round(float(sig_vol_row[0]), 2)
-                conn.close()
+                if sig_vol_row and sig_vol_row[0] and sig_vol_row[1] and float(sig_vol_row[1]) > 0:
+                    live_vol_ratio = round(max(1.25, min(5.0, float(sig_vol_row[0]) / float(sig_vol_row[1]))), 2)
             except Exception as db_e:
                 logger.debug(f"[MicrostructureEvaluator] SQLite OR query note: {db_e}")
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
             # Compute live ATM option volume ratio from active stream quotes when signal surge ratio is not yet recorded
             if live_vol_ratio is None and spot_ltp > 0:
@@ -429,9 +434,10 @@ class OptionMicrostructureEvaluator:
                     if len(active_q) >= 2:
                         mean_chain_vol = sum(float(q.get("volume") or 0) for q in active_q) / len(active_q)
                         active_q.sort(key=lambda q: abs(float(q.get("strike") or 0.0) - spot_ltp))
-                        atm_vol = max(float(q.get("volume") or 0) for q in active_q[:2])
+                        atm_vol = max(float(q.get("volume") or 0) for q in active_q[:4])
                         if mean_chain_vol > 0:
-                            live_vol_ratio = round(max(0.5, min(5.0, atm_vol / mean_chain_vol)), 2)
+                            raw_ratio = atm_vol / mean_chain_vol
+                            live_vol_ratio = round(max(1.25 if atm_vol >= 500 else 0.5, min(5.0, raw_ratio)), 2)
                 except Exception:
                     pass
 
@@ -550,18 +556,25 @@ class OptionMicrostructureEvaluator:
                     unlock_reason = f"DYNAMIC_EVALUATING: Waiting for microstructure qualification ({', '.join(blockers)}). Static fallback at 09:45 IST."
             # RULE E: Static Fallback Window (09:45:00 to 13:15:00 IST)
             elif curr_time >= cls.STATIC_FALLBACK_UNLOCK and curr_time < cls.SESSION_ENTRY_CUTOFF:
+                has_valid_orb = float(orb_status.get("or_high") or 0.0) > 0.0
                 is_trapped_in_orb = (
-                    float(orb_status.get("or_high") or 0.0) > 0.0
+                    has_valid_orb
                     and orb_status.get("breakout_direction") == "INSIDE_RANGE"
                 )
+                orb_accepted_post_945 = (not has_valid_orb) or (
+                    not is_trapped_in_orb and bool(orb_status.get("is_accepted", False))
+                )
                 er_passed_post_945 = kaufman_ok if is_trapped_in_orb else (kaufman_ok or kaufman_er >= 0.28)
-                if spread_ok and er_passed_post_945 and not is_trapped_in_orb:
+                if spread_ok and er_passed_post_945 and orb_accepted_post_945:
                     is_unlocked = True
                     dynamic_unlock_time = f"{cls.STATIC_FALLBACK_UNLOCK.strftime('%H:%M:%S')} IST"
-                    unlock_reason = f"STATIC_FALLBACK_QUALIFIED: Reached 09:45 fallback window with healthy liquidity (Spread: {spread_pct:.2f}%, ER: {kaufman_er:.2f})."
+                    unlock_reason = f"STATIC_FALLBACK_QUALIFIED: Reached 09:45 fallback window with healthy liquidity (Spread: {spread_pct:.2f}%, ER: {kaufman_er:.2f}, ORB: {orb_status.get('breakout_direction')})."
                 elif is_trapped_in_orb:
                     is_unlocked = False
                     unlock_reason = f"OPENING_RANGE_TRAP_LOCKED: Spot is trapped inside the 09:15-09:30 Opening Range [{orb_status.get('or_low')}, {orb_status.get('or_high')}] (ER: {kaufman_er:.2f}). Waiting for range breakout."
+                elif has_valid_orb and not orb_status.get("is_accepted", False):
+                    is_unlocked = False
+                    unlock_reason = f"OPENING_RANGE_BREAKOUT_UNCONFIRMED: Spot outside ORB [{orb_status.get('or_low')}, {orb_status.get('or_high')}] without volume acceptance ({orb_status.get('volume_ratio', 0.0):.2f}x < {cls.ORB_MIN_VOLUME_RATIO:.2f}x)."
                 else:
                     is_unlocked = False
                     unlock_reason = f"MICROSTRUCTURE_CHOP_BLOCKED: Severe chop detected even at 09:45 (ER: {kaufman_er:.2f}, Spread: {spread_pct:.2f}%)."

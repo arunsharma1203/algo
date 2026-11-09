@@ -420,9 +420,11 @@ function buildIntradayChartModel(
   const yMin = Number((rawMin - pad).toFixed(0));
   const yMax = Number((rawMax + pad).toFixed(0));
 
-  // Compute exact structural zone band boundaries for Recharts <ReferenceArea>
-  const retestHighTop = Math.min(dayHigh, Number((orbHigh * 1.0012).toFixed(2)));
-  const retestLowBot = Math.max(dayLow, Number((orbLow * 0.9988).toFixed(2)));
+  // Compute exact structural zone band boundaries for Recharts <ReferenceArea> & HUD telemetry
+  const retestHighTarget = Number((orbHigh * 1.0012).toFixed(2));
+  const retestLowTarget = Number((orbLow * 0.9988).toFixed(2));
+  const retestHighTop = Math.min(dayHigh, retestHighTarget);
+  const retestLowBot = Math.max(dayLow, retestLowTarget);
   const wickTol = underlyingKey === 'BANKNIFTY' ? 10.0 : 4.5;
   const breakoutHighFloor = Math.max(orbHigh, Number(Math.min(dayHigh - wickTol, dayHigh * 0.9985).toFixed(2)));
   const breakoutLowCeil = Math.min(orbLow, Number(Math.max(dayLow + wickTol, dayLow * 1.0015).toFixed(2)));
@@ -451,6 +453,8 @@ function buildIntradayChartModel(
     zoneShort: activeZone.shortLabel,
     zonePass: activeZone.pass,
     yDomain: [yMin, yMax],
+    retestHighTarget,
+    retestLowTarget,
     retestHighTop,
     retestLowBot,
     breakoutHighFloor,
@@ -1824,7 +1828,9 @@ export default function OptionSniffer() {
                 <div className="flex items-center gap-1.5">
                   <span className="text-indigo-300 font-bold">◆ ORB Retest (Zone 2A):</span>
                   <span className="text-slate-200">
-                    {(chart.orbHigh || 0).toFixed(0)}–{(chart.retestHighTop || 0).toFixed(0)}
+                    {chart.spot < chart.orbLow
+                      ? `${(chart.retestLowTarget || chart.retestLowBot || 0).toFixed(0)}–${(chart.orbLow || 0).toFixed(0)}`
+                      : `${(chart.orbHigh || 0).toFixed(0)}–${(chart.retestHighTarget || chart.retestHighTop || 0).toFixed(0)}`}
                   </span>
                 </div>
 
