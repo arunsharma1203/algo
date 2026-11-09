@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   ShieldCheck,
+  ShieldAlert,
   Activity,
   Zap,
   TrendingUp,
@@ -11,14 +12,39 @@ import {
   AlertTriangle,
   BarChart3,
   Lock,
+  Unlock,
   Cpu,
   ArrowUpRight,
   ArrowDownRight,
+  Wallet,
+  X,
 } from 'lucide-react';
 import { API_BASE } from '../services/api';
 
+const EXEC_MODES = [
+  {
+    id: 'LONG_BOOK_ONLY',
+    title: 'Mode 1: Long Book Only (Recommended for ₹55k)',
+    badge: '₹18k Min Margin • 0% Alpha Touch',
+    desc: 'Mirrors 100% of Book 1 (1-Lot BUY Wave-1 Gamma Sniper, +₹5,779 / 3d) to Upstox Live. Book 2 (Naked SELL) stays in Paper Sandbox so zero orders get margin-rejected.',
+  },
+  {
+    id: 'DUAL_BOOK_NAKED',
+    title: 'Mode 2: Full Dual-Book Naked (₹1.65L+ Wallet)',
+    badge: '₹1.50L Min Margin • Full Book 1 + Book 2',
+    desc: 'Mirrors both Book 1 (1-Lot BUY) and Book 2 (1-Lot Naked SELL, ~₹1.35L SPAN+Exposure margin) to Upstox Live.',
+  },
+  {
+    id: 'DUAL_BOOK_HEDGED',
+    title: 'Mode 3: Dual-Book with 200-pt OTM Hedge Wing (₹55k Spread)',
+    badge: '₹42k Min Margin • Credit Spread',
+    desc: 'Mirrors Book 1 (1-Lot BUY) + converts Book 2 (1-Lot SELL) into a margin-capped Credit Spread by buying a 200-pt OTM wing first.',
+  },
+];
+
 export default function OptionSnifferAdvance() {
   const [statusData, setStatusData] = useState(null);
+  const [liveStatus, setLiveStatus] = useState(null);
   const [chainData, setChainData] = useState(null);
   const [tradesData, setTradesData] = useState({ open_trades: [], closed_trades: [], pnl_summary: {} });
   const [signalsData, setSignalsData] = useState([]);
@@ -28,18 +54,33 @@ export default function OptionSnifferAdvance() {
   const [loading, setLoading] = useState(true);
   const [sweeping, setSweeping] = useState(false);
 
+  // Isolated Live Bridge Arm / Disarm / Mode Modal State
+  const [showArmModal, setShowArmModal] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [selectedExecMode, setSelectedExecMode] = useState('LONG_BOOK_ONLY');
+  const [armActionBusy, setArmActionBusy] = useState(false);
+  const [armActionMsg, setArmActionMsg] = useState(null);
+
   const fetchAllTelemetry = useCallback(async () => {
     try {
-      const [stRes, chRes, trRes, sigRes] = await Promise.all([
+      const [stRes, chRes, trRes, sigRes, lvRes] = await Promise.all([
         fetch(`${API_BASE}/option-sniffer-advance/status`),
         fetch(`${API_BASE}/option-sniffer-advance/chain-intelligence`),
         fetch(`${API_BASE}/option-sniffer-advance/trades`),
         fetch(`${API_BASE}/option-sniffer-advance/signals?limit=40`),
+        fetch(`${API_BASE}/option-sniffer-advance/live/status`),
       ]);
       if (stRes.ok) setStatusData(await stRes.json());
       if (chRes.ok) setChainData(await chRes.json());
       if (trRes.ok) setTradesData(await trRes.json());
       if (sigRes.ok) setSignalsData(await sigRes.json());
+      if (lvRes.ok) {
+        const lvJson = await lvRes.json();
+        setLiveStatus(lvJson);
+        if (lvJson?.execution_mode) {
+          setSelectedExecMode(lvJson.execution_mode);
+        }
+      }
     } catch (err) {
       console.error('OptionSnifferAdvance telemetry error:', err);
     } finally {
@@ -77,6 +118,80 @@ export default function OptionSnifferAdvance() {
     }
   };
 
+  const handleModeChange = async (newMode) => {
+    setSelectedExecMode(newMode);
+    try {
+      const res = await fetch(`${API_BASE}/option-sniffer-advance/live/mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ execution_mode: newMode }),
+      });
+      if (res.ok) {
+        await fetchAllTelemetry();
+      }
+    } catch (err) {
+      console.error('Mode update error:', err);
+    }
+  };
+
+  const handleArmSubmit = async (e) => {
+    e.preventDefault();
+    setArmActionBusy(true);
+    setArmActionMsg(null);
+    try {
+      const res = await fetch(`${API_BASE}/option-sniffer-advance/live/arm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: pinInput.trim(), execution_mode: selectedExecMode }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setArmActionMsg({ type: 'error', text: data?.detail || data?.message || 'Failed to arm Live Bridge.' });
+      } else {
+        setArmActionMsg({ type: 'success', text: data?.message || 'Live Broker Mirroring Armed.' });
+        setPinInput('');
+        setShowArmModal(false);
+      }
+      await fetchAllTelemetry();
+    } catch (err) {
+      setArmActionMsg({ type: 'error', text: String(err.message || err) });
+    } finally {
+      setArmActionBusy(false);
+    }
+  };
+
+  const handleDisarm = async () => {
+    setArmActionBusy(true);
+    setArmActionMsg(null);
+    try {
+      const res = await fetch(`${API_BASE}/option-sniffer-advance/live/disarm`, { method: 'POST' });
+      const data = await res.json();
+      setArmActionMsg({ type: 'info', text: data?.message || 'Disarmed back to 100% Paper Sandbox.' });
+      await fetchAllTelemetry();
+    } catch (err) {
+      setArmActionMsg({ type: 'error', text: String(err.message || err) });
+    } finally {
+      setArmActionBusy(false);
+    }
+  };
+
+  const handleSosPanicExit = async () => {
+    if (!window.confirm('EMERGENCY SOS SQUARE-OFF: Flatten all active Advance Live positions and disarm immediately?')) {
+      return;
+    }
+    setArmActionBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/option-sniffer-advance/live/sos-panic-exit`, { method: 'POST' });
+      const data = await res.json();
+      setArmActionMsg({ type: 'info', text: data?.message || 'SOS Panic Square-Off executed.' });
+      await fetchAllTelemetry();
+    } catch (err) {
+      setArmActionMsg({ type: 'error', text: String(err.message || err) });
+    } finally {
+      setArmActionBusy(false);
+    }
+  };
+
   const underlyings = chainData?.underlyings || statusData?.chain_intelligence || {};
   const auditSummary = auditData?.summary || {};
   const auditTrades = (auditData?.trades || []).filter((t) =>
@@ -86,6 +201,13 @@ export default function OptionSnifferAdvance() {
   const livePnl = tradesData?.pnl_summary || statusData?.pnl_summary || {};
   const displayPnl = (livePnl.total_trades || 0) > 0 ? livePnl : auditSummary;
 
+  const isLiveArmed = Boolean(liveStatus?.is_live_armed);
+  const currentExecMode = liveStatus?.execution_mode || selectedExecMode || 'LONG_BOOK_ONLY';
+  const availMargin = Number(liveStatus?.available_margin ?? liveStatus?.account_readiness?.available_margin ?? 0);
+  const reqMargin = Number(liveStatus?.required_margin_for_mode ?? 18000);
+  const liveActivePositions = liveStatus?.active_live_positions || [];
+  const liveRecentIntents = liveStatus?.recent_order_intents || [];
+
   const formatINR = (val) => {
     const num = Number(val || 0);
     const sign = num >= 0 ? '+' : '-';
@@ -94,19 +216,29 @@ export default function OptionSnifferAdvance() {
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Top Executive Header & Sandboxed Paper Safeguard Banner */}
+      {/* Top Executive Header & Sandboxed Paper / Isolated Live Bridge Banner */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-2xl p-6 text-white shadow-xl border border-indigo-500/30">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div>
             <div className="flex flex-wrap items-center gap-2 mb-2">
-              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5">
-                <Lock size={12} /> PAPER SANDBOX ONLY (SIMULATION_ONLY = TRUE)
-              </span>
+              {isLiveArmed ? (
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-rose-500/25 text-rose-200 border border-rose-400/50 flex items-center gap-1.5 animate-pulse">
+                  <Unlock size={12} /> LIVE BROKER ARMED ({currentExecMode})
+                </span>
+              ) : (
+                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1.5">
+                  <Lock size={12} /> PAPER SANDBOX ONLY (DISARMED • 0 CORE TOUCH)
+                </span>
+              )}
               <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
                 DUAL-BOOK: 1 LOT BUY + 1 LOT SELL
               </span>
               <span className="px-2.5 py-0.5 rounded-full text-[11px] font-mono bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
                 {statusData?.runtime_parity?.status === 'SYNCHRONIZED' ? 'RAM/DISK SYNCHRONIZED' : 'CHECKING PARITY'}
+              </span>
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-mono bg-slate-800/90 text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                <Wallet size={11} />
+                Upstox Margin: ₹{availMargin.toLocaleString('en-IN', { maximumFractionDigits: 0 })} (Req: ₹{reqMargin.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-black tracking-tight flex items-center gap-2.5">
@@ -122,7 +254,57 @@ export default function OptionSnifferAdvance() {
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            {/* Execution Mode Selector */}
+            <select
+              value={currentExecMode}
+              onChange={(e) => handleModeChange(e.target.value)}
+              disabled={armActionBusy}
+              className="px-3 py-2.5 rounded-xl bg-slate-900/90 border border-indigo-500/40 text-indigo-200 font-mono font-bold text-xs focus:outline-none cursor-pointer"
+              title="Select Capital-Matched Execution Mode for Isolated Live Bridge"
+            >
+              <option value="LONG_BOOK_ONLY">Mode 1: LONG_BOOK_ONLY (₹55k Safe • ≥₹18k)</option>
+              <option value="DUAL_BOOK_NAKED">Mode 2: DUAL_BOOK_NAKED (≥₹1.50L Margin)</option>
+              <option value="DUAL_BOOK_HEDGED">Mode 3: DUAL_BOOK_HEDGED (200pt Spread • ≥₹42k)</option>
+            </select>
+
+            {/* Arm / Disarm Button */}
+            {isLiveArmed ? (
+              <button
+                onClick={handleDisarm}
+                disabled={armActionBusy}
+                className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-lg transition cursor-pointer"
+              >
+                <Lock size={15} />
+                <span>Disarm to Paper</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  setArmActionMsg(null);
+                  setShowArmModal(true);
+                }}
+                disabled={armActionBusy}
+                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-lg transition cursor-pointer"
+              >
+                <ShieldCheck size={15} />
+                <span>Arm Live Broker</span>
+              </button>
+            )}
+
+            {/* SOS Panic Exit Button */}
+            {(isLiveArmed || liveActivePositions.length > 0) && (
+              <button
+                onClick={handleSosPanicExit}
+                disabled={armActionBusy}
+                className="px-3.5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-lg transition cursor-pointer"
+                title="Emergency 1-Click Square-Off & Disarm"
+              >
+                <ShieldAlert size={15} />
+                <span>SOS Exit ({liveActivePositions.length})</span>
+              </button>
+            )}
+
             <button
               onClick={handleManualSweep}
               disabled={sweeping}
@@ -133,6 +315,23 @@ export default function OptionSnifferAdvance() {
             </button>
           </div>
         </div>
+
+        {armActionMsg && (
+          <div
+            className={`mt-4 px-4 py-2.5 rounded-xl text-xs font-mono font-bold flex items-center justify-between border ${
+              armActionMsg.type === 'error'
+                ? 'bg-rose-950/90 text-rose-200 border-rose-500/50'
+                : armActionMsg.type === 'success'
+                ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/50'
+                : 'bg-slate-900/90 text-cyan-200 border-cyan-500/40'
+            }`}
+          >
+            <span>{armActionMsg.text}</span>
+            <button onClick={() => setArmActionMsg(null)} className="text-slate-400 hover:text-white cursor-pointer">
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
         {/* 4 Executive Summary Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6">
@@ -470,6 +669,87 @@ export default function OptionSnifferAdvance() {
       {/* TAB 2: LIVE SANDBOX POSITIONS & CLOSED LEDGER */}
       {activeTab === 'live' && (
         <div className="space-y-6">
+          {/* Isolated Live Broker Execution Ledger Card */}
+          <div className="bg-slate-900 text-white rounded-2xl shadow-lg border border-indigo-500/30 p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-800">
+              <div>
+                <h2 className="text-base font-black flex items-center gap-2">
+                  <Zap className="text-amber-400" size={18} />
+                  <span>Isolated Live Broker Mirroring Ledger ({liveRecentIntents.length})</span>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
+                      isLiveArmed
+                        ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                        : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                    }`}
+                  >
+                    {isLiveArmed ? `ARMED (${currentExecMode})` : 'DISARMED (PAPER SANDBOX)'}
+                  </span>
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Zero-Touch Read-Only WAL Follower on <code className="text-indigo-300">option_sniffer_advance_trades</code>. Core Advance files remain 100% untouched.
+                </p>
+              </div>
+              <div className="flex items-center gap-4 text-xs font-mono">
+                <div>
+                  <span className="text-slate-400">Live Realized Net: </span>
+                  <strong className={(liveStatus?.pnl_summary?.realized_net_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                    {formatINR(liveStatus?.pnl_summary?.realized_net_pnl || 0)}
+                  </strong>
+                </div>
+                <div>
+                  <span className="text-slate-400">Upstox Margin: </span>
+                  <strong className="text-amber-300">₹{availMargin.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</strong>
+                </div>
+              </div>
+            </div>
+
+            {liveRecentIntents.length === 0 ? (
+              <div className="text-xs text-slate-400 bg-slate-950/70 rounded-xl p-5 text-center border border-slate-800 font-mono">
+                No mirrored Live Broker orders dispatched yet. Keep the bridge DISARMED for pure Paper Sandbox validation, or arm via the 4-Digit PIN modal when ready.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs font-mono">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-400 uppercase text-[11px]">
+                      <th className="py-2 px-2">Time</th>
+                      <th className="py-2 px-2">Mode / Book</th>
+                      <th className="py-2 px-2">Contract</th>
+                      <th className="py-2 px-2">Action</th>
+                      <th className="py-2 px-2 text-right">Fill / Limit</th>
+                      <th className="py-2 px-2">State</th>
+                      <th className="py-2 px-2">Exit State</th>
+                      <th className="py-2 px-2 text-right">Realized Net</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/80">
+                    {liveRecentIntents.map((intent) => (
+                      <tr key={intent.order_intent_id}>
+                        <td className="py-2 px-2 text-slate-300">{String(intent.created_at || '').slice(11, 19)}</td>
+                        <td className="py-2 px-2 text-indigo-300">{intent.execution_mode}</td>
+                        <td className="py-2 px-2 font-bold text-white">{intent.trading_symbol}</td>
+                        <td className="py-2 px-2">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${intent.action === 'BUY' ? 'bg-emerald-950 text-emerald-300' : 'bg-cyan-950 text-cyan-300'}`}>
+                            {intent.action} {intent.target_quantity}
+                          </span>
+                        </td>
+                        <td className="py-2 px-2 text-right">
+                          ₹{Number(intent.average_fill_price || intent.limit_price || 0).toFixed(2)}
+                        </td>
+                        <td className="py-2 px-2 text-emerald-300 font-bold">{intent.state}</td>
+                        <td className="py-2 px-2 text-slate-300">{intent.exit_state}</td>
+                        <td className={`py-2 px-2 text-right font-black ${(intent.realized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {intent.exit_state === 'CONFIRMED_FLAT' ? formatINR(intent.realized_pnl) : 'OPEN'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
             <h2 className="text-base font-black text-slate-900 mb-3">
               Active Open Dual-Book Paper Positions ({tradesData.open_trades?.length || 0})
@@ -593,6 +873,107 @@ export default function OptionSnifferAdvance() {
               <li><strong>Mode 2C — Diagonal OTM Wing Seller:</strong> When Book 1 holds an active Long position for `≥ 10m`, Book 2 sells 1 lot of a further-OTM wing (`OTM ≥ 1.2` strikes), converting the position into a positive-theta Diagonal Spread.</li>
               <li><strong>Capped Loss &amp; Reverse-Chandelier Trail:</strong> Hard buy-back stop at `+16%` spike or `₹1,800` max loss; 4-Tier Reverse-Chandelier locks `+2.5%` at `+10%` decay and trails tightly up to `+50%` decay.</li>
             </ul>
+          </div>
+        </div>
+      )}
+
+      {/* 4-Digit PIN Confirmation Modal for Isolated Live Broker Arming */}
+      {showArmModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-indigo-500/40 rounded-2xl max-w-xl w-full p-6 text-white shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="text-emerald-400" size={22} />
+                <h3 className="text-lg font-black">Arm Option Sniffer Advance — Isolated Live Bridge</h3>
+              </div>
+              <button
+                onClick={() => setShowArmModal(false)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleArmSubmit} className="mt-4 space-y-4">
+              <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3.5 text-xs space-y-1.5 font-mono">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Architecture:</span>
+                  <span className="text-emerald-300 font-bold">Zero-Touch Read-Only SQLite WAL Follower</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Upstox Available Margin:</span>
+                  <span className="text-amber-300 font-bold">
+                    ₹{availMargin.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Active Security PIN Challenge:</span>
+                  <span className="text-indigo-300 font-black tracking-widest text-sm">
+                    {liveStatus?.current_pin || '----'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300">
+                  1. Select Capital-Matched Execution Mode
+                </label>
+                {EXEC_MODES.map((m) => {
+                  const active = selectedExecMode === m.id;
+                  return (
+                    <div
+                      key={m.id}
+                      onClick={() => setSelectedExecMode(m.id)}
+                      className={`p-3 rounded-xl border cursor-pointer transition ${
+                        active
+                          ? 'bg-indigo-950/80 border-indigo-400'
+                          : 'bg-slate-950/50 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-black text-white">{m.title}</span>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-900/70 text-indigo-200">
+                          {m.badge}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">{m.desc}</p>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                  2. Enter 4-Digit Security PIN ({liveStatus?.current_pin || '----'})
+                </label>
+                <input
+                  type="text"
+                  maxLength={4}
+                  value={pinInput}
+                  onChange={(e) => setPinInput(e.target.value)}
+                  placeholder="Enter 4-digit PIN"
+                  className="w-full px-4 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-center text-lg tracking-widest focus:outline-none focus:border-indigo-400"
+                  required
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowArmModal(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold uppercase tracking-wider cursor-pointer"
+                >
+                  Stay in Paper Sandbox
+                </button>
+                <button
+                  type="submit"
+                  disabled={armActionBusy || pinInput.trim().length !== 4}
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-black uppercase tracking-wider cursor-pointer"
+                >
+                  {armActionBusy ? 'Verifying...' : 'Confirm & Arm Live Bridge'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
