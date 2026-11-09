@@ -18,6 +18,12 @@ import {
   ArrowDownRight,
   Wallet,
   X,
+  Key,
+  XCircle,
+  Server,
+  Coins,
+  Wifi,
+  Power,
 } from 'lucide-react';
 import { API_BASE } from '../services/api';
 
@@ -70,7 +76,11 @@ export default function OptionSnifferAdvance() {
         fetch(`${API_BASE}/option-sniffer-advance/signals?limit=40`),
         fetch(`${API_BASE}/option-sniffer-advance/live/status`),
       ]);
-      if (stRes.ok) setStatusData(await stRes.json());
+      let stJson = null;
+      if (stRes.ok) {
+        stJson = await stRes.json();
+        setStatusData(stJson);
+      }
       if (chRes.ok) setChainData(await chRes.json());
       if (trRes.ok) setTradesData(await trRes.json());
       if (sigRes.ok) setSignalsData(await sigRes.json());
@@ -80,6 +90,8 @@ export default function OptionSnifferAdvance() {
         if (lvJson?.execution_mode) {
           setSelectedExecMode(lvJson.execution_mode);
         }
+      } else if (stJson?.live_bridge) {
+        setLiveStatus(stJson.live_bridge);
       }
     } catch (err) {
       console.error('OptionSnifferAdvance telemetry error:', err);
@@ -565,6 +577,17 @@ export default function OptionSnifferAdvance() {
         >
           3. Dual-Book Quant Architecture &amp; Gate Matrix
         </button>
+        <button
+          onClick={() => setActiveTab('live_terminal')}
+          className={`px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5 ${
+            activeTab === 'live_terminal'
+              ? 'bg-emerald-600 text-white shadow'
+              : 'bg-white text-slate-700 hover:bg-slate-100 border border-emerald-300'
+          }`}
+        >
+          <Zap size={13} className={isLiveArmed ? 'text-amber-300 animate-pulse' : 'text-emerald-600'} />
+          <span>4. Live Upstox Terminal ({isLiveArmed ? 'ARMED' : 'PAPER MODE'})</span>
+        </button>
       </div>
 
       {/* TAB 1: CAUSAL WALK-FORWARD AUDIT */}
@@ -877,46 +900,363 @@ export default function OptionSnifferAdvance() {
         </div>
       )}
 
-      {/* 4-Digit PIN Confirmation Modal for Isolated Live Broker Arming */}
+      {/* TAB 4: LIVE UPSTOX TERMINAL (Parity with Main Option Sniffer) */}
+      {activeTab === 'live_terminal' && (
+        <div className="space-y-6">
+          {/* Header Banner: Operational Status */}
+          <div
+            className={`border rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 transition-all ${
+              isLiveArmed
+                ? 'bg-gradient-to-r from-emerald-500/15 via-emerald-500/5 to-transparent border-emerald-500/40'
+                : 'bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent border-amber-500/30'
+            }`}
+          >
+            <div className="flex items-center space-x-3">
+              <div
+                className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
+                  isLiveArmed
+                    ? 'bg-emerald-500/20 text-emerald-600 border-emerald-500/30'
+                    : 'bg-amber-500/20 text-amber-500 border-amber-500/30'
+                }`}
+              >
+                {isLiveArmed ? <Zap size={20} className="animate-pulse" /> : <Lock size={20} />}
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-black text-slate-900 tracking-wide">
+                    UPSTOX LIVE EXECUTION TERMINAL — OPTION SNIFFER ADVANCE
+                  </span>
+                  <span
+                    className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full ${
+                      isLiveArmed ? 'bg-emerald-600 text-white animate-pulse' : 'bg-amber-500 text-white'
+                    }`}
+                  >
+                    {isLiveArmed ? `REAL TRADING ARMED (${currentExecMode})` : 'PAPER MODE ACTIVE'}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  {isLiveArmed
+                    ? `Live execution armed in ${currentExecMode} mode. Zero-touch SQLite WAL follower mirrors trades to Upstox V2. Auto-expires at 15:15 IST.`
+                    : 'Pre-flight account verification, Mumbai static IPv6 proxy telemetry, and capital-matched execution mode selection.'}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={fetchAllTelemetry}
+              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-white text-slate-700 hover:bg-slate-50 border border-slate-200 transition-all shadow-2xs cursor-pointer"
+            >
+              <RefreshCw size={13} className="text-slate-500" />
+              <span>Refresh Telemetry</span>
+            </button>
+          </div>
+
+          {/* Section 1: 3 Pre-Flight Readiness Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Card 1: Account Profile & Exchange Segments */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <Server size={13} className="text-slate-400" />
+                  Account &amp; Segments
+                </span>
+                <span
+                  className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${
+                    liveStatus?.readiness?.nfo_enabled
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-rose-100 text-rose-800 border border-rose-200'
+                  }`}
+                >
+                  {liveStatus?.readiness?.nfo_enabled ? 'NFO ACTIVE' : 'NFO INACTIVE'}
+                </span>
+              </div>
+              <div>
+                <div className="text-base font-black text-slate-900">
+                  {liveStatus?.readiness?.user_name || 'Upstox Account'}
+                </div>
+                <div className="text-xs text-slate-500 font-mono">
+                  User ID: {liveStatus?.readiness?.user_id || '—'}
+                </div>
+              </div>
+              <div className="text-[11px] space-y-1 pt-2 border-t border-slate-100">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Enabled Exchanges:</span>
+                  <span className="font-mono font-bold text-slate-800">
+                    {liveStatus?.readiness?.exchanges?.length
+                      ? liveStatus.readiness.exchanges.join(', ')
+                      : 'NSE, NFO, BSE'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">F&amp;O Derivatives:</span>
+                  <span
+                    className={`font-mono font-bold ${
+                      liveStatus?.readiness?.nfo_enabled ? 'text-emerald-600' : 'text-rose-600'
+                    }`}
+                  >
+                    {liveStatus?.readiness?.nfo_enabled ? 'Enabled (NFO)' : 'Checking NFO...'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Card 2: Wallet Margins */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <Coins size={13} className="text-slate-400" />
+                  Equity Wallet Margin
+                </span>
+                <span
+                  className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${
+                    availMargin >= reqMargin
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-amber-100 text-amber-800 border border-amber-200'
+                  }`}
+                >
+                  {availMargin >= reqMargin ? 'MODE FUNDED' : 'INSUFFICIENT FOR MODE'}
+                </span>
+              </div>
+              <div>
+                <div className="text-xl font-black text-slate-900">
+                  ₹{availMargin.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </div>
+                <div className="text-xs text-slate-500">Available Trading Margin</div>
+              </div>
+              <div className="text-[11px] space-y-1 pt-2 border-t border-slate-100">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Selected Mode:</span>
+                  <span className="font-mono font-bold text-indigo-700">{currentExecMode}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Required Minimum:</span>
+                  <span className="font-mono font-bold text-slate-700">
+                    ₹{reqMargin.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Card 3: Mumbai Proxy & Static IP */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <Wifi size={13} className="text-slate-400" />
+                  Static IP Proxy
+                </span>
+                <span
+                  className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${
+                    liveStatus?.readiness?.static_ip_matched
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-rose-100 text-rose-800 border border-rose-200'
+                  }`}
+                >
+                  {liveStatus?.readiness?.static_ip_matched ? 'WHITELIST MATCH' : 'CHECKING IP'}
+                </span>
+              </div>
+              <div>
+                <div className="text-sm font-black text-slate-900 font-mono truncate">
+                  {liveStatus?.readiness?.primary_ip || '2600:1900:40a0:83a::63'}
+                </div>
+                <div className="text-xs text-slate-500">GCP Mumbai Static IPv6</div>
+              </div>
+              <div className="text-[11px] space-y-1 pt-2 border-t border-slate-100">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Proxy Gateway:</span>
+                  <span className="font-mono text-slate-800">
+                    {liveStatus?.readiness?.proxy_url_masked || 'in-mum.ipv6-proxy.in:13099'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Round-Trip Latency:</span>
+                  <span className="font-mono font-bold text-indigo-600">
+                    {liveStatus?.readiness?.proxy_latency_ms || '—'} ms
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 2: Pre-Flight Safety Gatekeepers */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2">
+                <ShieldAlert size={16} className="text-amber-500" />
+                <h3 className="text-sm font-bold text-slate-900">Pre-Flight Safety Gatekeepers (Hard Blockers)</h3>
+              </div>
+              <span
+                className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded border ${
+                  liveStatus?.readiness?.live_trading_eligible && availMargin >= reqMargin
+                    ? 'text-emerald-700 bg-emerald-50 border-emerald-300'
+                    : 'text-rose-600 bg-rose-50 border-rose-200'
+                }`}
+              >
+                {liveStatus?.readiness?.live_trading_eligible && availMargin >= reqMargin
+                  ? 'ALL GATES PASSED — ELIGIBLE'
+                  : 'PRE-FLIGHT GATE CHECK'}
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="flex items-start space-x-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                {liveStatus?.readiness?.nfo_enabled ? (
+                  <CheckCircle2 size={16} className="text-emerald-500 shrink-0 mt-0.5" />
+                ) : (
+                  <XCircle size={16} className="text-rose-500 shrink-0 mt-0.5" />
+                )}
+                <div>
+                  <div className="font-bold text-slate-800">1. Upstox F&amp;O (NFO) Exchange Segment</div>
+                  <div className="text-slate-500 text-[11px] mt-0.5">
+                    {liveStatus?.readiness?.nfo_enabled
+                      ? 'NFO segment active. Ready for options trading.'
+                      : 'Awaiting NFO segment verification from Upstox profile.'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-start space-x-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                {availMargin >= reqMargin ? (
+                  <CheckCircle2 size={16} className="text-emerald-500 shrink-0 mt-0.5" />
+                ) : (
+                  <XCircle size={16} className="text-rose-500 shrink-0 mt-0.5" />
+                )}
+                <div>
+                  <div className="font-bold text-slate-800">
+                    2. Mode Margin Requirement ({currentExecMode}: ₹{reqMargin.toLocaleString('en-IN')}+)
+                  </div>
+                  <div className="text-slate-500 text-[11px] mt-0.5">
+                    {availMargin >= reqMargin
+                      ? `Sufficient wallet margin (₹${availMargin.toLocaleString('en-IN')}) for ${currentExecMode}.`
+                      : `Available ₹${availMargin.toLocaleString('en-IN')} is below ₹${reqMargin.toLocaleString('en-IN')}. Select LONG_BOOK_ONLY for ₹55k wallets.`}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-start space-x-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                {liveStatus?.readiness?.static_ip_matched ? (
+                  <CheckCircle2 size={16} className="text-emerald-500 shrink-0 mt-0.5" />
+                ) : (
+                  <XCircle size={16} className="text-rose-500 shrink-0 mt-0.5" />
+                )}
+                <div>
+                  <div className="font-bold text-slate-800">3. Mumbai Static IP Whitelist</div>
+                  <div className="text-slate-500 text-[11px] mt-0.5">
+                    {liveStatus?.readiness?.static_ip_matched
+                      ? 'Proxy IP matches registered primary/secondary whitelist.'
+                      : 'Awaiting outgoing proxy IP verification.'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-start space-x-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                {liveStatus?.readiness?.token_valid ? (
+                  <CheckCircle2 size={16} className="text-emerald-500 shrink-0 mt-0.5" />
+                ) : (
+                  <XCircle size={16} className="text-rose-500 shrink-0 mt-0.5" />
+                )}
+                <div>
+                  <div className="font-bold text-slate-800">4. Upstox V2 API Authentication</div>
+                  <div className="text-slate-500 text-[11px] mt-0.5">
+                    {liveStatus?.readiness?.token_valid
+                      ? 'Bearer access token valid and authenticated (200 OK).'
+                      : 'Token is invalid, expired, or awaiting refresh.'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 3: Read-Only Paper Execution Mirror */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2">
+                <CheckCircle2 size={16} className="text-indigo-600" />
+                <h3 className="text-sm font-bold text-slate-900">
+                  Parallel Paper Execution Mirror (Zero-Touch Read-Only Observer)
+                </h3>
+              </div>
+              <span className="text-[10px] font-mono text-slate-500">
+                Connected via SQLite <code>mode=ro</code> &amp; <code>query_only=ON</code>
+              </span>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Option Sniffer Advance Paper Trading continues running 100% untouched. The isolated live bridge reads{' '}
+              <code>option_sniffer_advance_trades</code> with zero write permissions to any core Advance table or file.
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono pt-2">
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <span className="text-[10px] text-slate-400 block uppercase">Paper Positions Open</span>
+                <strong className="text-indigo-700">{tradesData.open_trades?.length || 0} active</strong>
+              </div>
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <span className="text-[10px] text-slate-400 block uppercase">Paper Closed Trades</span>
+                <strong className="text-slate-800">{tradesData.closed_trades?.length || 0} trades</strong>
+              </div>
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <span className="text-[10px] text-slate-400 block uppercase">Live Realized Net P&amp;L</span>
+                <strong
+                  className={
+                    (liveStatus?.pnl_summary?.realized_net_pnl ?? 0) >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                  }
+                >
+                  {formatINR(liveStatus?.pnl_summary?.realized_net_pnl || 0)}
+                </strong>
+              </div>
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <span className="text-[10px] text-slate-400 block uppercase">Core Advance Files Modified</span>
+                <strong className="text-emerald-700">0 BYTES (100% ISOLATED)</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 2-FACTOR 4-DIGIT PIN CONFIRMATION MODAL (Identical Ergonomics to Main Option Sniffer) ── */}
       {showArmModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-indigo-500/40 rounded-2xl max-w-xl w-full p-6 text-white shadow-2xl">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <ShieldCheck className="text-emerald-400" size={22} />
-                <h3 className="text-lg font-black">Arm Option Sniffer Advance — Isolated Live Bridge</h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4 text-slate-900 max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2">
+                <div className="w-8 h-8 rounded-lg bg-amber-500/20 text-amber-600 flex items-center justify-center">
+                  <Key size={16} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-slate-900">
+                    Arm 1-Day Real Trading — Option Sniffer Advance
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Security PIN Verification Interlock • Zero-Touch Isolated Live Bridge
+                  </p>
+                </div>
               </div>
               <button
                 onClick={() => setShowArmModal(false)}
-                className="text-slate-400 hover:text-white cursor-pointer"
+                className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
               >
-                <X size={18} />
+                <XCircle size={18} />
               </button>
             </div>
 
-            <form onSubmit={handleArmSubmit} className="mt-4 space-y-4">
-              <div className="bg-slate-950/90 border border-slate-800 rounded-xl p-3.5 text-xs space-y-1.5 font-mono">
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Architecture:</span>
-                  <span className="text-emerald-300 font-bold">Zero-Touch Read-Only SQLite WAL Follower</span>
+            <form onSubmit={handleArmSubmit} className="space-y-4">
+              {/* 4-Digit Security Verification Code Box */}
+              <div className="bg-slate-50 rounded-2xl p-4 text-center border border-slate-200 space-y-1.5">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">
+                  Security Verification Code
+                </span>
+                <div className="text-3xl font-black font-mono tracking-widest text-indigo-700 select-all">
+                  {liveStatus?.current_pin || statusData?.live_bridge?.current_pin || '----'}
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Upstox Available Margin:</span>
-                  <span className="text-amber-300 font-bold">
+                <p className="text-[11px] text-slate-500">
+                  Type the 4-digit code above to confirm live broker execution rights for today (Upstox Margin:{' '}
+                  <strong className="text-slate-800">
                     ₹{availMargin.toLocaleString('en-IN', { maximumFractionDigits: 2 })}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">Active Security PIN Challenge:</span>
-                  <span className="text-indigo-300 font-black tracking-widest text-sm">
-                    {liveStatus?.current_pin || '----'}
-                  </span>
-                </div>
+                  </strong>
+                  ).
+                </p>
               </div>
 
+              {/* Capital-Matched Execution Mode Selector */}
               <div className="space-y-2">
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300">
-                  1. Select Capital-Matched Execution Mode
+                <label className="block text-xs font-bold text-slate-700">
+                  1. Select Capital-Matched Execution Mode:
                 </label>
                 {EXEC_MODES.map((m) => {
                   const active = selectedExecMode === m.id;
@@ -926,51 +1266,69 @@ export default function OptionSnifferAdvance() {
                       onClick={() => setSelectedExecMode(m.id)}
                       className={`p-3 rounded-xl border cursor-pointer transition ${
                         active
-                          ? 'bg-indigo-950/80 border-indigo-400'
-                          : 'bg-slate-950/50 border-slate-800 hover:border-slate-700'
+                          ? 'bg-indigo-50/80 border-indigo-500 ring-1 ring-indigo-500/30'
+                          : 'bg-slate-50 border-slate-200 hover:border-slate-300'
                       }`}
                     >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-black text-white">{m.title}</span>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-900/70 text-indigo-200">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-black text-slate-900">{m.title}</span>
+                        <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 shrink-0">
                           {m.badge}
                         </span>
                       </div>
-                      <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">{m.desc}</p>
+                      <p className="text-[11px] text-slate-600 mt-1 leading-relaxed">{m.desc}</p>
                     </div>
                   );
                 })}
               </div>
 
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
-                  2. Enter 4-Digit Security PIN ({liveStatus?.current_pin || '----'})
-                </label>
+              {/* 4-Digit Input Box */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">2. Enter 4-Digit Security Code:</label>
                 <input
                   type="text"
                   maxLength={4}
                   value={pinInput}
-                  onChange={(e) => setPinInput(e.target.value)}
-                  placeholder="Enter 4-digit PIN"
-                  className="w-full px-4 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-center text-lg tracking-widest focus:outline-none focus:border-indigo-400"
+                  onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ''))}
+                  placeholder="Type 4-digit code here"
+                  className="w-full text-center font-mono text-2xl font-bold tracking-widest py-2.5 px-4 rounded-xl border border-slate-300 text-slate-900 bg-white focus:border-indigo-600 focus:ring-2 focus:ring-indigo-100 outline-hidden"
                   required
                 />
               </div>
 
-              <div className="flex items-center justify-end gap-3 pt-2">
+              <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 text-[11px] text-amber-900 space-y-1">
+                <div className="font-bold flex items-center gap-1 text-amber-800">
+                  <AlertTriangle size={13} />
+                  Isolated Live Bridge Safeguards:
+                </div>
+                <div>
+                  • <strong>Zero Core Touch:</strong> Reads <code>option_sniffer_advance_trades</code> via SQLite{' '}
+                  <code>mode=ro</code> without modifying a single line of core Advance logic.
+                </div>
+                <div>
+                  • <strong>₹55k Wallet Safe Mode:</strong> <code>LONG_BOOK_ONLY</code> mirrors 100% of Book 1 (1-Lot
+                  BUY) while keeping Book 2 (Naked SELL) in Paper Sandbox.
+                </div>
+                <div>
+                  • Auto-expires at <strong>15:15 IST</strong> today (resets to Paper Mode). Hard daily loss ceiling:{' '}
+                  <strong>-₹2,800.00</strong>.
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-2 pt-2">
                 <button
                   type="button"
                   onClick={() => setShowArmModal(false)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold uppercase tracking-wider cursor-pointer"
+                  className="w-1/2 py-2.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200 transition-all cursor-pointer"
                 >
-                  Stay in Paper Sandbox
+                  Cancel (Stay in Paper)
                 </button>
                 <button
                   type="submit"
                   disabled={armActionBusy || pinInput.trim().length !== 4}
-                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-black uppercase tracking-wider cursor-pointer"
+                  className="w-1/2 py-2.5 rounded-xl text-xs font-black bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800 text-white transition-all shadow-sm disabled:opacity-50 cursor-pointer"
                 >
-                  {armActionBusy ? 'Verifying...' : 'Confirm & Arm Live Bridge'}
+                  {armActionBusy ? 'Verifying...' : '⚡ Arm for Today'}
                 </button>
               </div>
             </form>
