@@ -1412,6 +1412,318 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
             self.assertEqual(len(exit_place_calls), 1)
             self.assertEqual(exit_place_calls[0][2]["quantity"], 65)
 
+    def test_24_invalid_spread_quote_and_submitted_unfilled_order_never_trip_daily_circuit_breaker(self):
+        """
+        Round-4 Finding 1 Proof:
+          1. A transient wide-spread / invalid tick (`is_valid=False`, `spread_pct=100.0`) from `OptionStreamManager`
+             must never corrupt `unrealized_pnl` or permanently latch `circuit_breaker_tripped = 1` in SQLite.
+          2. An unfilled `SUBMITTED` order (`filled_quantity = 0`) must report `unrealized_pnl = 0.0` (never `0 or 65 -> 65`).
+          3. Only `realized_pnl <= -6000.0` permanently latches `circuit_breaker_tripped = 1` in SQLite.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_CB_2401",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=150.0,
+            entry_time="2026-11-09 11:50:00",
+        )
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 11, 49, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 50, 1))
+
+            # Inject an invalid wide-spread quote (bid=10, ask=160, spread_pct=100%, is_valid=False)
+            with patch(
+                "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+            ) as mock_sm_cls:
+                mock_sm_cls.return_value.get_option_quote.return_value = {
+                    "bid": 10.0,
+                    "ask": 160.0,
+                    "ltp": 150.0,
+                    "spread_pct": 100.0,
+                    "is_valid": False,
+                }
+                cb = self.bridge.get_circuit_breaker_status(session_date="2026-11-09")
+                self.assertFalse(cb["is_session_halted"], "Invalid wide-spread quote must NEVER halt session!")
+                self.assertEqual(cb["unrealized_pnl_inr"], 0.0)
+
+            # Verify SQLite circuit_breaker_tripped is still 0
+            conn = sqlite3.connect(self.db_path)
+            row_cb = conn.execute(
+                "SELECT circuit_breaker_tripped FROM option_advance_live_risk_ledger WHERE session_date='2026-11-09';"
+            ).fetchone()
+            self.assertTrue(row_cb is None or int(row_cb[0]) == 0)
+
+            # Transition order to SUBMITTED with filled_quantity = 0 and verify unrealized_pnl is 0.0 even with a valid quote
+            conn.execute(
+                "UPDATE option_advance_live_order_intents SET state='SUBMITTED', filled_quantity=0;"
+            )
+            conn.commit()
+            conn.close()
+
+            with patch(
+                "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+            ) as mock_sm_cls:
+                mock_sm_cls.return_value.get_option_quote.return_value = {
+                    "bid": 40.0,
+                    "ask": 41.0,
+                    "ltp": 40.5,
+                    "spread_pct": 2.4,
+                    "is_valid": True,
+                }
+                active_sub = self.bridge.get_active_live_positions()
+                self.assertEqual(len(active_sub), 1)
+                self.assertEqual(active_sub[0]["unrealized_pnl"], 0.0, "Unfilled SUBMITTED order must have 0.0 MTM!")
+
+    def test_25_idempotent_exit_and_op_lock_prevent_duplicate_exit_on_concurrent_sos_and_follower(self):
+        """
+        Round-4 Finding 2 Proof:
+          Calling `_execute_mirrored_live_exit` a second time on an already flattened intent
+          returns `already_flat=True` and fires 0 duplicate exit orders to Upstox.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_IDEM_2501",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=120.0,
+            entry_time="2026-11-09 12:00:00",
+        )
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 11, 59, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 0, 1))
+            active = self.bridge.get_active_live_positions()
+            self.assertEqual(len(active), 1)
+            stale_snapshot = dict(active[0])
+
+            # First exit via SOS panic square-off
+            self.bridge.execute_sos_panic_exit()
+            self.mock_broker_api.reset_mock()
+
+            # Second exit call using stale snapshot (simulating concurrent follower loop)
+            res2 = self.bridge._execute_mirrored_live_exit(
+                intent=stale_snapshot,
+                paper_row={"exit_price_used": 125.0, "exit_reason": "TARGET_HIT", "net_pnl": 260.0},
+                now_dt=datetime(2026, 11, 9, 12, 0, 2),
+            )
+            self.assertTrue(res2.get("exited"))
+            self.assertTrue(res2.get("already_flat"))
+            self.assertEqual(self.mock_broker_api.call_count, 0, "Zero duplicate broker calls allowed on already flat intent!")
+
+    def test_26_rejected_sl_order_cancel_never_falsely_marks_confirmed_flat_and_partial_entry_resizes_sl(self):
+        """
+        Round-4 Finding 3 Proof:
+          1. When `DELETE /order/cancel` on `broker_sl_order_id` returns `False` with
+             `"Order SL_1 is already rejected and cannot be cancelled"`, `_execute_mirrored_live_exit()`
+             must NOT falsely mark `EXCHANGE_SL_ORDER_TRIGGERED` and MUST fire the `POST /order/place` exit order.
+          2. When `_reconcile_open_live_intents_with_broker()` sees a partial entry fill (`65` of `130`),
+             it cancels the oversized `130`-qty SL order and places a resized `65`-qty SL order.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_SLREJ_2601",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=140.0,
+            entry_time="2026-11-09 12:10:00",
+        )
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE option_sniffer_advance_trades SET quantity=130 WHERE trade_id='ADV_SLREJ_2601';")
+        conn.commit()
+        conn.close()
+
+        call_log = []
+
+        def fake_sl_rej_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                otype = (payload or {}).get("order_type")
+                tx = (payload or {}).get("transaction_type")
+                if otype == "SL":
+                    qty_sl = (payload or {}).get("quantity")
+                    return True, 200, {"status": "success", "data": {"order_id": f"SL_QTY_{qty_sl}"}}
+                if tx == "BUY":
+                    return True, 200, {"status": "success", "data": {"order_id": "ENTRY_2601"}}
+                return True, 200, {"status": "success", "data": {"order_id": "EXIT_2601"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return True, 200, {
+                    "status": "success",
+                    "data": [
+                        {
+                            "order_id": "ENTRY_2601",
+                            "status": "open",
+                            "quantity": 130,
+                            "filled_quantity": 65,
+                            "average_price": 140.0,
+                        },
+                        {
+                            "order_id": "SL_QTY_130",
+                            "status": "trigger pending",
+                            "quantity": 130,
+                            "filled_quantity": 0,
+                        },
+                    ],
+                }
+            if method == "DELETE" and endpoint == "/order/cancel":
+                oid = (params or {}).get("order_id")
+                if oid == "SL_QTY_65":
+                    return False, 400, {"status": "error", "error": "Order SL_QTY_65 is already rejected and cannot be cancelled"}
+                return True, 200, {"status": "success", "data": {}}
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_sl_rej_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 12, 9, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 10, 1))
+            # Reconcile pass at +5s: sees 65/130 partial fill and SL_QTY_130 (130 qty) -> cancels SL_QTY_130 and places SL_QTY_65!
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 10, 6))
+
+            active = self.bridge.get_active_live_positions()
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0]["broker_sl_order_id"], "SL_QTY_65")
+
+            # Close paper trade and verify exit fires POST /order/place even though SL_QTY_65 cancel returned "already rejected"
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=155.0, exit_reason='TARGET_HIT', net_pnl=910.0 WHERE trade_id='ADV_SLREJ_2601';"
+            )
+            conn.commit()
+            conn.close()
+
+            call_log.clear()
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 11, 0))
+            exit_orders = [c for c in call_log if c[0] == "POST" and c[1] == "/order/place"]
+            self.assertEqual(len(exit_orders), 1, "Must place actual exit order when SL cancel says 'already rejected'!")
+            self.assertEqual(exit_orders[0][2]["quantity"], 65)
+
+    def test_27_pending_exit_verification_survives_same_pass_and_validation_pending(self):
+        """
+        Round-4 Finding 4 Proof:
+          1. An exit order placed during Step 1A of `sync_once_with_advance_paper_table()` is NOT popped
+             during Step 0B of the same pass (`pre_existing_pending_ids` isolation).
+          2. On the next reconciliation pass, if the exit order is in `'validation pending'` with 0 fills,
+             it is NOT prematurely cancelled on attempt 1, allowing it to complete on attempt 2.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_PEND_2701",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=110.0,
+            entry_time="2026-11-09 12:20:00",
+        )
+        retrieve_stage = {"stage": 0}
+        cancel_calls = []
+
+        def fake_pend_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            if method == "POST" and endpoint == "/order/place":
+                otype = (payload or {}).get("order_type")
+                tx = (payload or {}).get("transaction_type")
+                if otype == "SL":
+                    return True, 200, {"status": "success", "data": {"order_id": "SL_2701"}}
+                if tx == "BUY":
+                    return True, 200, {"status": "success", "data": {"order_id": "ENTRY_2701"}}
+                return True, 200, {"status": "success", "data": {"order_id": "EXIT_2701"}}
+            if method == "DELETE" and endpoint == "/order/cancel":
+                cancel_calls.append((params or {}).get("order_id"))
+                return True, 200, {"status": "success", "data": {}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                st = retrieve_stage["stage"]
+                if st == 0:
+                    return True, 200, {
+                        "status": "success",
+                        "data": [{"order_id": "ENTRY_2701", "status": "complete", "quantity": 65, "filled_quantity": 65, "average_price": 110.0}],
+                    }
+                elif st == 1:
+                    # Exit order is in 'validation pending' right after placement
+                    return True, 200, {
+                        "status": "success",
+                        "data": [{"order_id": "EXIT_2701", "status": "validation pending", "quantity": 65, "filled_quantity": 0, "average_price": 0.0}],
+                    }
+                else:
+                    return True, 200, {
+                        "status": "success",
+                        "data": [{"order_id": "EXIT_2701", "status": "complete", "quantity": 65, "filled_quantity": 65, "average_price": 132.5}],
+                    }
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_pend_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 12, 19, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 20, 1))
+
+            # Close paper trade at 12:20:06 (when 3.0s reconcile also triggers in the same pass)
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=130.0, exit_reason='TARGET_HIT', net_pnl=1235.0 WHERE trade_id='ADV_PEND_2701';"
+            )
+            conn.commit()
+            conn.close()
+
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 20, 6))
+            self.assertEqual(len(self.bridge._pending_exit_verifications), 1, "Exit verification must survive same-pass Step 0B!")
+
+            # Next pass at 12:20:10 sees 'validation pending' -> must NOT cancel EXIT_2701 on attempt 1!
+            retrieve_stage["stage"] = 1
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 20, 10))
+            self.assertNotIn("EXIT_2701", cancel_calls, "Must not cancel 5ms-old 'validation pending' exit order!")
+            self.assertEqual(len(self.bridge._pending_exit_verifications), 1)
+
+            # Next pass at 12:20:14 sees 'complete' at 132.5 -> updates exit_fill_price to 132.5 and pops pending!
+            retrieve_stage["stage"] = 2
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 20, 14))
+            self.assertEqual(len(self.bridge._pending_exit_verifications), 0)
+            intents = self.bridge.get_recent_order_intents(limit=1)
+            self.assertAlmostEqual(float(intents[0]["exit_fill_price"]), 132.5, places=2)
+
+    def test_28_get_live_status_reuses_active_positions_without_redundant_queries(self):
+        """
+        Round-4 Finding 5 Proof:
+          `get_live_status()` (polled every 1,000ms) must call `get_active_live_positions()`
+          at most 1 time per invocation instead of 4 times.
+        """
+        with patch.object(
+            self.bridge,
+            "get_active_live_positions",
+            wraps=self.bridge.get_active_live_positions,
+        ) as spy_active:
+            status = self.bridge.get_live_status()
+            self.assertIn("circuit_breaker", status)
+            self.assertIn("pnl_summary", status)
+            self.assertEqual(spy_active.call_count, 1, "get_live_status() must call get_active_live_positions() exactly once!")
+
 
 if __name__ == "__main__":
     unittest.main()

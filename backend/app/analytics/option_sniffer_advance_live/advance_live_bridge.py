@@ -170,6 +170,7 @@ class AdvanceLiveBridge:
         self._last_broker_reconcile_sim_dt: Optional[datetime] = None
         self._reconciled_once_intent_ids: set = set()
         self._pending_exit_verifications: Dict[str, str] = {}
+        self._pending_exit_attempts: Dict[str, int] = {}
         self._last_priority_quote_refresh_ts: float = -999999.0
 
     @property
@@ -229,12 +230,17 @@ class AdvanceLiveBridge:
             "message": f"Execution mode updated to {clean_mode}.",
         }
 
-    def get_circuit_breaker_status(self, session_date: Optional[str] = None) -> Dict[str, Any]:
+    def get_circuit_breaker_status(
+        self,
+        session_date: Optional[str] = None,
+        active_positions: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         today = session_date or to_ist_naive().strftime("%Y-%m-%d")
         realized_pnl = 0.0
         unrealized_pnl = 0.0
         consec_losses = 0
         tripped = False
+        realized_tripped = False
         reason = None
         try:
             with self._get_ro_conn() as conn:
@@ -268,13 +274,15 @@ class AdvanceLiveBridge:
                     else:
                         consec_losses = 0
 
-            for pos in self.get_active_live_positions():
+            pos_list = active_positions if active_positions is not None else self.get_active_live_positions()
+            for pos in pos_list:
                 if str(pos.get("created_at") or "")[:10] == today:
                     unrealized_pnl += float(pos.get("unrealized_pnl") or 0.0)
 
             total_exposure_pnl = realized_pnl + min(0.0, unrealized_pnl)
             if realized_pnl <= -MAX_DAILY_COMBINED_LOSS_INR:
                 tripped = True
+                realized_tripped = True
                 reason = f"Daily Live Loss Ceiling Reached (₹{realized_pnl:,.2f} <= -₹{MAX_DAILY_COMBINED_LOSS_INR:,.2f})"
             elif total_exposure_pnl <= -MAX_DAILY_COMBINED_LOSS_INR:
                 tripped = True
@@ -284,7 +292,7 @@ class AdvanceLiveBridge:
                     f"<= -₹{MAX_DAILY_COMBINED_LOSS_INR:,.2f})"
                 )
 
-            if tripped:
+            if realized_tripped:
                 now_iso = to_ist_naive().strftime("%Y-%m-%d %H:%M:%S")
                 with self._get_rw_conn() as rw_conn:
                     rw_conn.execute(
@@ -329,6 +337,9 @@ class AdvanceLiveBridge:
         now = to_ist_naive()
         today = now.strftime("%Y-%m-%d")
 
+        active_positions = self.get_active_live_positions()
+        cb_status = self.get_circuit_breaker_status(today, active_positions=active_positions)
+
         with self._op_lock:
             if self._is_live_armed:
                 if self._armed_for_date != today:
@@ -337,11 +348,9 @@ class AdvanceLiveBridge:
                 elif now.time() >= dt_time(15, 15):
                     logger.info("[AdvanceLiveBridge] Session cutoff (15:15 IST) reached. Reverting to Paper Mode.")
                     self._is_live_armed = False
-                else:
-                    cb = self.get_circuit_breaker_status(today)
-                    if cb.get("is_session_halted"):
-                        logger.warning(f"🚨 [AdvanceLiveBridge] Auto-disarming due to live circuit breaker: {cb.get('halt_reason')}")
-                        self._is_live_armed = False
+                elif cb_status.get("is_session_halted"):
+                    logger.warning(f"🚨 [AdvanceLiveBridge] Auto-disarming due to live circuit breaker: {cb_status.get('halt_reason')}")
+                    self._is_live_armed = False
 
         # Reuse cached 30s Upstox readiness snapshot from OptionLiveAdapter (0 extra REST calls)
         base_adapter = self._live_adapter
@@ -350,10 +359,8 @@ class AdvanceLiveBridge:
         req_margin = self.get_mode_margin_requirement(self._execution_mode)
         mode_margin_ok = avail_margin >= req_margin
 
-        active_positions = self.get_active_live_positions()
         order_intents = self.get_recent_order_intents(limit=25)
-        pnl_summary = self.get_live_pnl_summary()
-        cb_status = self.get_circuit_breaker_status(today)
+        pnl_summary = self.get_live_pnl_summary(active_positions=active_positions)
 
         return {
             "is_live_armed": self._is_live_armed,
@@ -539,7 +546,7 @@ class AdvanceLiveBridge:
     def _follower_loop(self) -> None:
         while self._follower_running:
             try:
-                has_active = len(self.get_active_live_positions()) > 0
+                has_active = len(self.get_active_live_positions()) > 0 or bool(self._pending_exit_verifications)
                 if self._is_live_armed or has_active:
                     self.sync_once_with_advance_paper_table()
                     time.sleep(0.25)
@@ -746,18 +753,62 @@ class AdvanceLiveBridge:
                     logger.info("[AdvanceLiveBridge] Session cutoff (15:15 IST) reached in follower sync. Reverting to Paper Mode.")
                     self._is_live_armed = False
 
-        had_pending_exit_verifications = bool(self._pending_exit_verifications)
-        active_intents = self.get_active_live_positions()
+            pre_existing_pending_ids = set(self._pending_exit_verifications.keys())
+            had_pending_exit_verifications = bool(pre_existing_pending_ids)
+            active_intents = self.get_active_live_positions()
 
-        # 1A. Sub-250ms Local SQLite Exit Fast-Path FIRST (Zero network blocking before checking paper exits)
-        if active_intents:
-            try:
-                with self._get_ro_conn() as ro_conn:
-                    ro_cur = ro_conn.cursor()
-                    for intent in active_intents:
-                        adv_tid = intent.get("advance_trade_id")
-                        prow = None
-                        if adv_tid:
+            # 1A. Sub-250ms Local SQLite Exit Fast-Path FIRST (Zero network blocking before checking paper exits)
+            if active_intents:
+                try:
+                    with self._get_ro_conn() as ro_conn:
+                        ro_cur = ro_conn.cursor()
+                        for intent in active_intents:
+                            adv_tid = intent.get("advance_trade_id")
+                            prow = None
+                            if adv_tid:
+                                prow = ro_cur.execute(
+                                    """
+                                    SELECT status, exit_price_used, exit_bid, exit_ask, exit_reason, net_pnl
+                                    FROM option_sniffer_advance_trades
+                                    WHERE trade_id = ? LIMIT 1;
+                                    """,
+                                    (adv_tid,),
+                                ).fetchone()
+                            if prow and str(prow["status"] or "").upper() == "CLOSED":
+                                res = self._execute_mirrored_live_exit(
+                                    intent=intent,
+                                    paper_row=dict(prow),
+                                    now_dt=now_dt,
+                                )
+                                if res.get("exited"):
+                                    mirrored_exits.append(intent["order_intent_id"])
+                            elif is_past_cutoff:
+                                # Force-flatten any open live position at 15:15 IST cutoff even if paper row hasn't closed yet
+                                res = self._execute_mirrored_live_exit(
+                                    intent=intent,
+                                    paper_row={
+                                        "exit_price_used": intent.get("current_bid") if intent.get("action") == "BUY" else intent.get("current_ask"),
+                                        "exit_reason": "SESSION_CUTOFF_1515_AUTO_EXIT",
+                                        "net_pnl": intent.get("unrealized_pnl", 0.0),
+                                    },
+                                    now_dt=now_dt,
+                                )
+                                if res.get("exited"):
+                                    mirrored_exits.append(intent["order_intent_id"])
+                except Exception as ex_err:
+                    logger.error(f"[AdvanceLiveBridge] Exit sync error: {ex_err}")
+
+            # 0B. Prioritize still-open Option Sniffer Advance contracts for real-time ticks & stale-quote fallback
+            still_open_after_1a = self.get_active_live_positions()
+            prio_res = self._prioritize_advance_real_time_ticks(still_open_after_1a, now_dt=now_dt)
+            if prio_res.get("refreshed_via_rest") and still_open_after_1a:
+                try:
+                    with self._get_ro_conn() as ro_conn:
+                        ro_cur = ro_conn.cursor()
+                        for intent in still_open_after_1a:
+                            adv_tid = intent.get("advance_trade_id")
+                            if not adv_tid:
+                                continue
                             prow = ro_cur.execute(
                                 """
                                 SELECT status, exit_price_used, exit_bid, exit_ask, exit_reason, net_pnl
@@ -766,165 +817,128 @@ class AdvanceLiveBridge:
                                 """,
                                 (adv_tid,),
                             ).fetchone()
-                        if prow and str(prow["status"] or "").upper() == "CLOSED":
-                            res = self._execute_mirrored_live_exit(
-                                intent=intent,
-                                paper_row=dict(prow),
-                                now_dt=now_dt,
-                            )
-                            if res.get("exited"):
-                                mirrored_exits.append(intent["order_intent_id"])
-                        elif is_past_cutoff:
-                            # Force-flatten any open live position at 15:15 IST cutoff even if paper row hasn't closed yet
-                            res = self._execute_mirrored_live_exit(
-                                intent=intent,
-                                paper_row={
-                                    "exit_price_used": intent.get("current_bid") if intent.get("action") == "BUY" else intent.get("current_ask"),
-                                    "exit_reason": "SESSION_CUTOFF_1515_AUTO_EXIT",
-                                    "net_pnl": intent.get("unrealized_pnl", 0.0),
-                                },
-                                now_dt=now_dt,
-                            )
-                            if res.get("exited"):
-                                mirrored_exits.append(intent["order_intent_id"])
-            except Exception as ex_err:
-                logger.error(f"[AdvanceLiveBridge] Exit sync error: {ex_err}")
+                            if prow and str(prow["status"] or "").upper() == "CLOSED":
+                                res = self._execute_mirrored_live_exit(
+                                    intent=intent,
+                                    paper_row=dict(prow),
+                                    now_dt=now_dt,
+                                )
+                                if res.get("exited"):
+                                    mirrored_exits.append(intent["order_intent_id"])
+                except Exception:
+                    pass
 
-        # 0B. Prioritize still-open Option Sniffer Advance contracts for real-time ticks & stale-quote fallback
-        still_open_after_1a = self.get_active_live_positions()
-        prio_res = self._prioritize_advance_real_time_ticks(still_open_after_1a, now_dt=now_dt)
-        if prio_res.get("refreshed_via_rest") and still_open_after_1a:
+            # 1B. Throttled (3.0s) Broker Order-Book Reconciliation for Still-Open Live Positions & Pending Exit Verifications
+            # Prevents 0.25s /order/retrieve-all polling from exhausting the 64 req/min Upstox rate limit
+            still_open_intents = self.get_active_live_positions()
+            if still_open_intents or had_pending_exit_verifications:
+                has_unreconciled_new_intent = any(
+                    str(i.get("order_intent_id") or "") not in self._reconciled_once_intent_ids
+                    for i in still_open_intents
+                )
+                now_mono = time.monotonic()
+                mono_elapsed = now_mono - self._last_broker_reconcile_mono
+                sim_elapsed = (
+                    abs((now_dt - self._last_broker_reconcile_sim_dt).total_seconds())
+                    if (now_dt and self._last_broker_reconcile_sim_dt)
+                    else 999999.0
+                )
+                if has_unreconciled_new_intent or had_pending_exit_verifications or (mono_elapsed >= 3.0) or (sim_elapsed >= 3.0):
+                    self._last_broker_reconcile_mono = now_mono
+                    self._last_broker_reconcile_sim_dt = now_dt
+                    for i in still_open_intents:
+                        iid = str(i.get("order_intent_id") or "")
+                        if iid:
+                            self._reconciled_once_intent_ids.add(iid)
+                    self._reconcile_open_live_intents_with_broker(
+                        still_open_intents,
+                        now_dt=now_dt,
+                        pending_ids_to_verify=pre_existing_pending_ids,
+                    )
+
+            # 2. Check Entries if Armed
+            if not self._is_live_armed:
+                return {
+                    "status": "STANDBY_PAPER",
+                    "entries_mirrored": mirrored_entries,
+                    "exits_mirrored": mirrored_exits,
+                    "skipped_by_mode": skipped_by_mode,
+                }
+
+            cb = self.get_circuit_breaker_status(today_str, active_positions=still_open_intents)
+            if cb.get("is_session_halted"):
+                self._is_live_armed = False
+                return {
+                    "status": "HALTED_CIRCUIT_BREAKER",
+                    "entries_mirrored": mirrored_entries,
+                    "exits_mirrored": mirrored_exits,
+                    "skipped_by_mode": skipped_by_mode,
+                }
+
             try:
                 with self._get_ro_conn() as ro_conn:
                     ro_cur = ro_conn.cursor()
-                    for intent in still_open_after_1a:
-                        adv_tid = intent.get("advance_trade_id")
-                        if not adv_tid:
-                            continue
-                        prow = ro_cur.execute(
-                            """
-                            SELECT status, exit_price_used, exit_bid, exit_ask, exit_reason, net_pnl
-                            FROM option_sniffer_advance_trades
-                            WHERE trade_id = ? LIMIT 1;
-                            """,
-                            (adv_tid,),
-                        ).fetchone()
-                        if prow and str(prow["status"] or "").upper() == "CLOSED":
-                            res = self._execute_mirrored_live_exit(
-                                intent=intent,
-                                paper_row=dict(prow),
-                                now_dt=now_dt,
-                            )
-                            if res.get("exited"):
-                                mirrored_exits.append(intent["order_intent_id"])
-            except Exception:
-                pass
+                    open_rows = ro_cur.execute(
+                        """
+                        SELECT * FROM option_sniffer_advance_trades
+                        WHERE status = 'OPEN'
+                          AND SUBSTR(entry_time, 1, 10) = ?
+                        ORDER BY id ASC;
+                        """,
+                        (today_str,),
+                    ).fetchall()
+            except Exception as e:
+                logger.debug(f"[AdvanceLiveBridge] Read open paper trades note: {e}")
+                open_rows = []
 
-        # 1B. Throttled (3.0s) Broker Order-Book Reconciliation for Still-Open Live Positions & Pending Exit Verifications
-        # Prevents 0.25s /order/retrieve-all polling from exhausting the 64 req/min Upstox rate limit
-        still_open_intents = self.get_active_live_positions()
-        if still_open_intents or had_pending_exit_verifications:
-            has_unreconciled_new_intent = any(
-                str(i.get("order_intent_id") or "") not in self._reconciled_once_intent_ids
-                for i in still_open_intents
-            )
-            now_mono = time.monotonic()
-            mono_elapsed = now_mono - self._last_broker_reconcile_mono
-            sim_elapsed = (
-                abs((now_dt - self._last_broker_reconcile_sim_dt).total_seconds())
-                if (now_dt and self._last_broker_reconcile_sim_dt)
-                else 999999.0
-            )
-            if has_unreconciled_new_intent or had_pending_exit_verifications or (mono_elapsed >= 3.0) or (sim_elapsed >= 3.0):
-                self._last_broker_reconcile_mono = now_mono
-                self._last_broker_reconcile_sim_dt = now_dt
-                for i in still_open_intents:
-                    iid = str(i.get("order_intent_id") or "")
-                    if iid:
-                        self._reconciled_once_intent_ids.add(iid)
-                self._reconcile_open_live_intents_with_broker(still_open_intents, now_dt=now_dt)
+            armed_ts_norm = str(self._armed_at_iso or "").strip().replace("T", " ")[:19]
+            for prow in open_rows:
+                if not self._is_live_armed:
+                    break
+                pdict = dict(prow)
+                adv_tid = str(pdict.get("trade_id") or "")
+                if not adv_tid:
+                    continue
 
-        # 2. Check Entries if Armed
-        if not self._is_live_armed:
+                if self._has_intent_for_advance_trade(adv_tid):
+                    continue
+
+                book_type = str(pdict.get("book_type") or BOOK_LONG_BUY)
+                entry_ts_norm = str(pdict.get("entry_time") or "").strip().replace("T", " ")[:19]
+                if armed_ts_norm and entry_ts_norm and entry_ts_norm < armed_ts_norm:
+                    # Never retroactively mirror a stale paper trade that opened BEFORE the user armed live trading
+                    skipped_by_mode.append(
+                        {
+                            "trade_id": adv_tid,
+                            "book_type": book_type,
+                            "reason": "PRE_ARM_OPEN_TRADE_SKIPPED",
+                            "entry_time": entry_ts_norm,
+                            "armed_at": armed_ts_norm,
+                        }
+                    )
+                    continue
+
+                if self._execution_mode == MODE_LONG_BOOK_ONLY and book_type != BOOK_LONG_BUY:
+                    # In LONG_BOOK_ONLY mode (for ₹55k wallet), Book 2 stays strictly in Paper Sandbox
+                    skipped_by_mode.append(
+                        {
+                            "trade_id": adv_tid,
+                            "book_type": book_type,
+                            "reason": "LONG_BOOK_ONLY_SKIP_SHORT",
+                        }
+                    )
+                    continue
+
+                res = self._execute_mirrored_live_entry(pdict, now_dt=now_dt)
+                if res.get("order_intent_id"):
+                    mirrored_entries.append(res["order_intent_id"])
+
             return {
-                "status": "STANDBY_PAPER",
+                "status": "ARMED_SYNC",
                 "entries_mirrored": mirrored_entries,
                 "exits_mirrored": mirrored_exits,
                 "skipped_by_mode": skipped_by_mode,
             }
-
-        cb = self.get_circuit_breaker_status(today_str)
-        if cb.get("is_session_halted"):
-            self._is_live_armed = False
-            return {
-                "status": "HALTED_CIRCUIT_BREAKER",
-                "entries_mirrored": mirrored_entries,
-                "exits_mirrored": mirrored_exits,
-                "skipped_by_mode": skipped_by_mode,
-            }
-
-        try:
-            with self._get_ro_conn() as ro_conn:
-                ro_cur = ro_conn.cursor()
-                open_rows = ro_cur.execute(
-                    """
-                    SELECT * FROM option_sniffer_advance_trades
-                    WHERE status = 'OPEN'
-                      AND SUBSTR(entry_time, 1, 10) = ?
-                    ORDER BY id ASC;
-                    """,
-                    (today_str,),
-                ).fetchall()
-        except Exception as e:
-            logger.debug(f"[AdvanceLiveBridge] Read open paper trades note: {e}")
-            open_rows = []
-
-        armed_ts_norm = str(self._armed_at_iso or "").strip().replace("T", " ")[:19]
-        for prow in open_rows:
-            pdict = dict(prow)
-            adv_tid = str(pdict.get("trade_id") or "")
-            if not adv_tid:
-                continue
-
-            if self._has_intent_for_advance_trade(adv_tid):
-                continue
-
-            book_type = str(pdict.get("book_type") or BOOK_LONG_BUY)
-            entry_ts_norm = str(pdict.get("entry_time") or "").strip().replace("T", " ")[:19]
-            if armed_ts_norm and entry_ts_norm and entry_ts_norm < armed_ts_norm:
-                # Never retroactively mirror a stale paper trade that opened BEFORE the user armed live trading
-                skipped_by_mode.append(
-                    {
-                        "trade_id": adv_tid,
-                        "book_type": book_type,
-                        "reason": "PRE_ARM_OPEN_TRADE_SKIPPED",
-                        "entry_time": entry_ts_norm,
-                        "armed_at": armed_ts_norm,
-                    }
-                )
-                continue
-
-            if self._execution_mode == MODE_LONG_BOOK_ONLY and book_type != BOOK_LONG_BUY:
-                # In LONG_BOOK_ONLY mode (for ₹55k wallet), Book 2 stays strictly in Paper Sandbox
-                skipped_by_mode.append(
-                    {
-                        "trade_id": adv_tid,
-                        "book_type": book_type,
-                        "reason": "LONG_BOOK_ONLY_SKIP_SHORT",
-                    }
-                )
-                continue
-
-            res = self._execute_mirrored_live_entry(pdict, now_dt=now_dt)
-            if res.get("order_intent_id"):
-                mirrored_entries.append(res["order_intent_id"])
-
-        return {
-            "status": "ARMED_SYNC",
-            "entries_mirrored": mirrored_entries,
-            "exits_mirrored": mirrored_exits,
-            "skipped_by_mode": skipped_by_mode,
-        }
 
     def _has_intent_for_advance_trade(self, advance_trade_id: str) -> bool:
         try:
@@ -1204,6 +1218,7 @@ class AdvanceLiveBridge:
         self,
         active_intents: List[Dict[str, Any]],
         now_dt: Optional[datetime] = None,
+        pending_ids_to_verify: Optional[set] = None,
     ) -> None:
         """
         Safeguard #2: Reconciles open live intents against Upstox `/order/retrieve-all`:
@@ -1215,9 +1230,14 @@ class AdvanceLiveBridge:
           3. If an entry `broker_order_id` is still `'open'` (0 fills on exchange), transitions `state = 'SUBMITTED'`,
              `filled_quantity = 0`, and cancels any premature SL until the entry fills.
           4. If the entry order completed with an actual exchange `average_price`, updates `state = 'FILLED'`,
-             `average_fill_price`, and ensures a resting SL-L is active.
+             `average_fill_price`, and ensures a resting SL-L is active (resizing if partially filled, or replacing if rejected).
         """
-        if not active_intents and not self._pending_exit_verifications:
+        target_pending_ids = (
+            set(self._pending_exit_verifications.keys())
+            if pending_ids_to_verify is None
+            else (set(pending_ids_to_verify) & set(self._pending_exit_verifications.keys()))
+        )
+        if not active_intents and not target_pending_ids:
             return
         try:
             engine = get_order_intent_engine()
@@ -1226,7 +1246,6 @@ class AdvanceLiveBridge:
                 return
             orders_list = ob_data.get("data")
             if not isinstance(orders_list, list) or not orders_list:
-                self._pending_exit_verifications.clear()
                 return
 
             order_map = {
@@ -1235,22 +1254,39 @@ class AdvanceLiveBridge:
                 if isinstance(o, dict) and o.get("order_id")
             }
             if not order_map:
-                self._pending_exit_verifications.clear()
                 return
 
             now_iso = to_ist_naive(now_dt).strftime("%Y-%m-%d %H:%M:%S")
 
-            # 0. Verify any recently placed exit LIMIT orders (`_pending_exit_verifications`) against the exchange order book
-            if self._pending_exit_verifications:
-                for p_intent_id, p_exit_oid in list(self._pending_exit_verifications.items()):
-                    self._pending_exit_verifications.pop(p_intent_id, None)
-                    if not p_exit_oid or p_exit_oid not in order_map:
+            # 0. Verify recently placed exit LIMIT orders (`_pending_exit_verifications`) against the exchange order book
+            if target_pending_ids:
+                for p_intent_id in list(target_pending_ids):
+                    p_exit_oid = self._pending_exit_verifications.get(p_intent_id)
+                    if not p_exit_oid:
+                        self._pending_exit_verifications.pop(p_intent_id, None)
+                        self._pending_exit_attempts.pop(p_intent_id, None)
+                        continue
+                    if p_exit_oid not in order_map:
+                        att = int(self._pending_exit_attempts.get(p_intent_id, 0)) + 1
+                        self._pending_exit_attempts[p_intent_id] = att
+                        if att >= 3:
+                            self._pending_exit_verifications.pop(p_intent_id, None)
+                            self._pending_exit_attempts.pop(p_intent_id, None)
                         continue
                     ex_ord = order_map[p_exit_oid]
                     ex_status = str(ex_ord.get("status") or "").lower()
                     ex_qty = int(ex_ord.get("filled_quantity") or 0)
                     ex_target_qty = int(ex_ord.get("quantity") or ex_qty or 0)
                     ex_avg = float(ex_ord.get("average_price") or 0.0)
+                    if ex_status in ("validation pending", "put order req received") and ex_qty == 0:
+                        att = int(self._pending_exit_attempts.get(p_intent_id, 0)) + 1
+                        self._pending_exit_attempts[p_intent_id] = att
+                        if att < 3:
+                            # Give NSE OMS at least 2 reconciliation passes to finish initial order validation before cancelling
+                            continue
+
+                    self._pending_exit_verifications.pop(p_intent_id, None)
+                    self._pending_exit_attempts.pop(p_intent_id, None)
                     if ex_status in ("open", "trigger pending", "validation pending", "put order req received", "rejected", "cancelled") and (
                         ex_qty == 0 or (ex_target_qty > 0 and ex_qty < ex_target_qty)
                     ):
@@ -1348,7 +1384,7 @@ class AdvanceLiveBridge:
                 target_qty = int(intent.get("target_quantity") or qty or 65)
                 entry_fill = float(intent.get("average_fill_price") or intent.get("limit_price") or 0.0)
 
-                # A. Check if Exchange-Resting SL-L Order triggered and completed on Upstox
+                # A. Check if Exchange-Resting SL-L Order triggered and completed on Upstox (or was rejected/cancelled)
                 sl_oid = str(intent.get("broker_sl_order_id") or "")
                 if sl_oid and sl_oid in order_map:
                     sl_ord = order_map[sl_oid]
@@ -1403,6 +1439,15 @@ class AdvanceLiveBridge:
                             )
                             conn.commit()
                         continue
+                    elif sl_status in ("rejected", "cancelled"):
+                        # Resting SL-L order was rejected or cancelled on exchange; clear sl_oid so Section B places a fresh SL-L
+                        sl_oid = ""
+                        with self._get_rw_conn() as conn:
+                            conn.execute(
+                                "UPDATE option_advance_live_order_intents SET broker_sl_order_id = NULL, updated_at = ? WHERE order_intent_id = ?;",
+                                (now_iso, intent_id),
+                            )
+                            conn.commit()
 
                 # B. Check Entry Order actual fill price, working open state, or exchange cancellation/rejection
                 entry_oid = str(intent.get("broker_order_id") or "")
@@ -1478,6 +1523,21 @@ class AdvanceLiveBridge:
                         )
                         new_state = "PARTIALLY_FILLED" if is_partial_open else "FILLED"
                         is_exiting_retry = str(intent.get("exit_state") or "").upper() == "EXIT_RETRY_PENDING"
+                        if sl_oid and not is_exiting_retry:
+                            sl_ord_existing = order_map.get(sl_oid) or {}
+                            sl_existing_qty = int(sl_ord_existing.get("quantity") or target_qty)
+                            if sl_existing_qty != eff_qty:
+                                # Entry filled partially (`eff_qty != sl_existing_qty`): cancel oversized SL-L and replace with `eff_qty`!
+                                try:
+                                    engine._call_upstox_broker_api(
+                                        "DELETE",
+                                        "/order/cancel",
+                                        params={"order_id": str(sl_oid)},
+                                        is_emergency=True,
+                                    )
+                                except Exception:
+                                    pass
+                                sl_oid = ""
                         new_sl_oid = (sl_oid or None) if not is_exiting_retry else None
                         if not new_sl_oid and not is_exiting_retry:
                             try:
@@ -1509,7 +1569,7 @@ class AdvanceLiveBridge:
                                 SET state = ?,
                                     average_fill_price = ?,
                                     filled_quantity = ?,
-                                    broker_sl_order_id = COALESCE(?, broker_sl_order_id),
+                                    broker_sl_order_id = ?,
                                     updated_at = ?
                                 WHERE order_intent_id = ?;
                                 """,
@@ -1528,6 +1588,7 @@ class AdvanceLiveBridge:
         """
         Fires an emergency-priority Upstox V2 exit order the instant the parent Paper trade closes.
         Includes:
+          - Idempotent SQLite `CONFIRMED_FLAT` guard so concurrent exit callers never fire duplicate exit orders.
           - Unfilled entry guard: if entry order never filled (`state == 'SUBMITTED'` and `filled_quantity == 0`),
             cancels the entry order instead of sending an opposite exit order.
           - Safe exit price resolution BEFORE cancelling the resting `broker_sl_order_id`.
@@ -1539,6 +1600,25 @@ class AdvanceLiveBridge:
         now_dt = to_ist_naive(now_dt)
         now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S")
         intent_id = str(intent["order_intent_id"])
+
+        # 0-pre. Idempotent Exit Guard: verify in SQLite that this intent has not already been flattened
+        try:
+            with self._get_ro_conn() as conn:
+                cur_row = conn.execute(
+                    "SELECT * FROM option_advance_live_order_intents WHERE order_intent_id = ? LIMIT 1;",
+                    (intent_id,),
+                ).fetchone()
+                if cur_row:
+                    intent = dict(cur_row)
+                    if str(intent.get("exit_state") or "").upper() == "CONFIRMED_FLAT":
+                        return {
+                            "exited": True,
+                            "order_intent_id": intent_id,
+                            "realized_pnl": float(intent.get("realized_pnl") or 0.0),
+                            "already_flat": True,
+                        }
+        except Exception:
+            pass
 
         # 0. Pre-Exit Unreconciled Entry Verification:
         # If an exit or SOS panic square-off triggers before the first 3.0s reconciliation pass ever verified
@@ -1664,12 +1744,14 @@ class AdvanceLiveBridge:
                 logger.debug(f"[AdvanceLiveBridge] Cancel resting SL note for {broker_sl_oid}: {sl_cancel_err}")
 
             sl_err_text = str(sl_cancel_data or "").lower()
-            is_already_cancelled_msg = (
-                ("already cancel" in sl_err_text or "is cancel" in sl_err_text or "status cancel" in sl_err_text)
-                and ("complete" not in sl_err_text and "filled" not in sl_err_text and "traded" not in sl_err_text)
-            )
-            if not sl_cancel_ok and not is_already_cancelled_msg and (
-                "complete" in sl_err_text or "already" in sl_err_text or "filled" in sl_err_text or "traded" in sl_err_text
+            is_non_fill_cancel_err = (
+                "already cancel" in sl_err_text
+                or "is cancel" in sl_err_text
+                or "status cancel" in sl_err_text
+                or "reject" in sl_err_text
+            ) and ("complete" not in sl_err_text and "filled" not in sl_err_text and "traded" not in sl_err_text)
+            if not sl_cancel_ok and not is_non_fill_cancel_err and (
+                "complete" in sl_err_text or "filled" in sl_err_text or "traded" in sl_err_text
             ):
                 # Exchange SL-L already filled milliseconds before software exit! Do NOT send a duplicate exit order!
                 self._reconcile_open_live_intents_with_broker([intent], now_dt=now_dt)
@@ -1899,6 +1981,7 @@ class AdvanceLiveBridge:
 
         # Queue exit order ID for exchange fill verification on the next reconciliation pass
         self._pending_exit_verifications[intent_id] = str(exit_oid)
+        self._pending_exit_attempts[intent_id] = 0
 
         logger.info(
             f"⚡ [AdvanceLiveBridge] Mirrored Exit ({exit_reason}) for {intent.get('trading_symbol')}: "
@@ -1955,23 +2038,44 @@ class AdvanceLiveBridge:
             if positions:
                 stream_mgr = OptionStreamManager()
                 for pos in positions:
+                    state_u = str(pos.get("state") or "").upper()
+                    filled_q = int(pos.get("filled_quantity") or 0)
+                    if state_u == "SUBMITTED" and filled_q == 0:
+                        qty = 0
+                        pos["unrealized_pnl"] = 0.0
+                    elif state_u == "PARTIALLY_FILLED":
+                        qty = filled_q
+                    else:
+                        qty = int(filled_q or pos.get("target_quantity") or 65)
+
                     ikey = pos.get("instrument_key")
                     q = stream_mgr.get_option_quote(ikey) if ikey else None
-                    if q:
+                    if isinstance(q, dict) and q:
                         cbid = float(q.get("bid") or q.get("ltp") or 0.0)
                         cask = float(q.get("ask") or q.get("ltp") or cbid)
-                        pos["current_bid"] = round(cbid, 2)
-                        pos["current_ask"] = round(cask, 2)
-                        entry_f = float(pos.get("average_fill_price") or pos.get("limit_price") or 0.0)
-                        qty = int(pos.get("filled_quantity") or pos.get("target_quantity") or 65)
-                        if entry_f > 0 and qty > 0:
-                            if pos.get("action") == "BUY" and cbid > 0:
-                                gross = (cbid - entry_f) * qty
-                            elif pos.get("action") == "SELL" and cask > 0:
-                                gross = (entry_f - cask) * qty
-                            else:
-                                gross = 0.0
-                            pos["unrealized_pnl"] = round(gross - 65.0, 2)
+                        cspread_pct = (
+                            float(q.get("spread_pct"))
+                            if q.get("spread_pct") is not None
+                            else (((cask - cbid) / ((cask + cbid) / 2.0)) * 100.0 if (cask + cbid) > 0 else 0.0)
+                        )
+                        quote_usable = (
+                            q.get("is_valid") is not False
+                            and cbid > 0.0
+                            and cask >= cbid
+                            and cspread_pct <= 15.0
+                        )
+                        if quote_usable:
+                            pos["current_bid"] = round(cbid, 2)
+                            pos["current_ask"] = round(cask, 2)
+                            entry_f = float(pos.get("average_fill_price") or pos.get("limit_price") or 0.0)
+                            if entry_f > 0 and qty > 0:
+                                if pos.get("action") == "BUY" and cbid > 0:
+                                    gross = (cbid - entry_f) * qty
+                                elif pos.get("action") == "SELL" and cask > 0:
+                                    gross = (entry_f - cask) * qty
+                                else:
+                                    gross = 0.0
+                                pos["unrealized_pnl"] = round(gross - 65.0, 2)
             return positions
         except Exception as e:
             logger.debug(f"[AdvanceLiveBridge] Active positions query note: {e}")
@@ -1988,7 +2092,10 @@ class AdvanceLiveBridge:
         except Exception:
             return []
 
-    def get_live_pnl_summary(self) -> Dict[str, Any]:
+    def get_live_pnl_summary(
+        self,
+        active_positions: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         today = to_ist_naive().strftime("%Y-%m-%d")
         realized_gross = 0.0
         statutory = 0.0
@@ -2022,7 +2129,7 @@ class AdvanceLiveBridge:
         except Exception:
             pass
 
-        active = self.get_active_live_positions()
+        active = active_positions if active_positions is not None else self.get_active_live_positions()
         unrealized = sum(float(p.get("unrealized_pnl") or 0.0) for p in active)
         return {
             "session_date": today,
@@ -2224,6 +2331,8 @@ if _PREV_BRIDGE_INSTANCE is not None:
         _PREV_BRIDGE_INSTANCE._reconciled_once_intent_ids = set()
     if not hasattr(_PREV_BRIDGE_INSTANCE, "_pending_exit_verifications"):
         _PREV_BRIDGE_INSTANCE._pending_exit_verifications = {}
+    if not hasattr(_PREV_BRIDGE_INSTANCE, "_pending_exit_attempts"):
+        _PREV_BRIDGE_INSTANCE._pending_exit_attempts = {}
     if not hasattr(_PREV_BRIDGE_INSTANCE, "_last_priority_quote_refresh_ts"):
         _PREV_BRIDGE_INSTANCE._last_priority_quote_refresh_ts = -999999.0
     _BRIDGE_INSTANCE = _PREV_BRIDGE_INSTANCE
