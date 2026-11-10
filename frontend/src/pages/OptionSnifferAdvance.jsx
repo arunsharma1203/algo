@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   ShieldCheck,
   ShieldAlert,
@@ -72,7 +72,40 @@ export default function OptionSnifferAdvance() {
   const [selectedExecMode, setSelectedExecMode] = useState('LONG_BOOK_ONLY');
   const [armActionBusy, setArmActionBusy] = useState(false);
   const [armActionMsg, setArmActionMsg] = useState(null);
+  const fastPollInFlightRef = useRef(false);
+  const showArmModalRef = useRef(false);
+  useEffect(() => {
+    showArmModalRef.current = showArmModal;
+  }, [showArmModal]);
 
+  // Tier 1 Fast Poll (1,000 ms): Real-time RAM quotes & MTM for Open Positions + Live Broker Bridge (0 Upstox API calls)
+  const fetchFastLiveTicks = useCallback(async () => {
+    if (fastPollInFlightRef.current) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+    fastPollInFlightRef.current = true;
+    try {
+      const [lvRes, trRes] = await Promise.all([
+        fetch(`${API_BASE}/option-sniffer-advance/live/status`),
+        fetch(`${API_BASE}/option-sniffer-advance/trades`),
+      ]);
+      if (lvRes.ok) {
+        const lvJson = await lvRes.json();
+        setLiveStatus(lvJson);
+        if (lvJson?.execution_mode && !showArmModalRef.current) {
+          setSelectedExecMode(lvJson.execution_mode);
+        }
+      }
+      if (trRes.ok) {
+        setTradesData(await trRes.json());
+      }
+    } catch {
+      // Silent background tick error; Tier 2 full poll handles diagnostics
+    } finally {
+      fastPollInFlightRef.current = false;
+    }
+  }, []);
+
+  // Tier 2 Heavy Poll (8,000 ms): Full Option Chain Intelligence, Signals & Monthly P&L Calendar
   const fetchAllTelemetry = useCallback(async () => {
     try {
       const [stRes, chRes, trRes, sigRes, lvRes, calRes] = await Promise.all([
@@ -94,7 +127,7 @@ export default function OptionSnifferAdvance() {
       if (lvRes.ok) {
         const lvJson = await lvRes.json();
         setLiveStatus(lvJson);
-        if (lvJson?.execution_mode) {
+        if (lvJson?.execution_mode && !showArmModalRef.current) {
           setSelectedExecMode(lvJson.execution_mode);
         }
       } else if (stJson?.live_bridge) {
@@ -115,9 +148,13 @@ export default function OptionSnifferAdvance() {
 
   useEffect(() => {
     fetchAllTelemetry();
-    const interval = setInterval(fetchAllTelemetry, 8000);
-    return () => clearInterval(interval);
-  }, [fetchAllTelemetry]);
+    const heavyInterval = setInterval(fetchAllTelemetry, 8000);
+    const fastInterval = setInterval(fetchFastLiveTicks, 1000);
+    return () => {
+      clearInterval(heavyInterval);
+      clearInterval(fastInterval);
+    };
+  }, [fetchAllTelemetry, fetchFastLiveTicks]);
 
   const handleManualSweep = async () => {
     setSweeping(true);
@@ -1258,7 +1295,13 @@ export default function OptionSnifferAdvance() {
                   Zero-Touch Read-Only WAL Follower on <code className="text-indigo-300">option_sniffer_advance_trades</code>. Core Advance files remain 100% untouched.
                 </p>
               </div>
-              <div className="flex items-center gap-4 text-xs font-mono">
+              <div className="flex flex-wrap items-center gap-4 text-xs font-mono">
+                <div>
+                  <span className="text-slate-400">Live Unrealized: </span>
+                  <strong className={(liveStatus?.pnl_summary?.unrealized_net_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                    {formatINR(liveStatus?.pnl_summary?.unrealized_net_pnl || 0)}
+                  </strong>
+                </div>
                 <div>
                   <span className="text-slate-400">Live Realized Net: </span>
                   <strong className={(liveStatus?.pnl_summary?.realized_net_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
@@ -1292,26 +1335,54 @@ export default function OptionSnifferAdvance() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/80">
-                    {liveRecentIntents.map((intent) => (
-                      <tr key={intent.order_intent_id}>
-                        <td className="py-2 px-2 text-slate-300">{String(intent.created_at || '').slice(11, 19)}</td>
-                        <td className="py-2 px-2 text-indigo-300">{intent.execution_mode}</td>
-                        <td className="py-2 px-2 font-bold text-white">{intent.trading_symbol}</td>
-                        <td className="py-2 px-2">
-                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${intent.action === 'BUY' ? 'bg-emerald-950 text-emerald-300' : 'bg-cyan-950 text-cyan-300'}`}>
-                            {intent.action} {intent.target_quantity}
-                          </span>
-                        </td>
-                        <td className="py-2 px-2 text-right">
-                          ₹{Number(intent.average_fill_price || intent.limit_price || 0).toFixed(2)}
-                        </td>
-                        <td className="py-2 px-2 text-emerald-300 font-bold">{intent.state}</td>
-                        <td className="py-2 px-2 text-slate-300">{intent.exit_state}</td>
-                        <td className={`py-2 px-2 text-right font-black ${(intent.realized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                          {intent.exit_state === 'CONFIRMED_FLAT' ? formatINR(intent.realized_pnl) : 'OPEN'}
-                        </td>
-                      </tr>
-                    ))}
+                    {liveRecentIntents.map((intent) => {
+                      const activeMatch = liveActivePositions.find(
+                        (p) => p.order_intent_id === intent.order_intent_id
+                      );
+                      const livePrice =
+                        activeMatch &&
+                        (intent.action === 'BUY' ? activeMatch.current_bid : activeMatch.current_ask);
+                      const liveUnr = activeMatch?.unrealized_pnl;
+                      return (
+                        <tr key={intent.order_intent_id}>
+                          <td className="py-2 px-2 text-slate-300">{String(intent.created_at || '').slice(11, 19)}</td>
+                          <td className="py-2 px-2 text-indigo-300">{intent.execution_mode}</td>
+                          <td className="py-2 px-2 font-bold text-white">{intent.trading_symbol}</td>
+                          <td className="py-2 px-2">
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${intent.action === 'BUY' ? 'bg-emerald-950 text-emerald-300' : 'bg-cyan-950 text-cyan-300'}`}>
+                              {intent.action} {intent.target_quantity}
+                            </span>
+                          </td>
+                          <td className="py-2 px-2 text-right">
+                            ₹{Number(intent.average_fill_price || intent.limit_price || 0).toFixed(2)}
+                            {intent.exit_state !== 'CONFIRMED_FLAT' && Number(livePrice) > 0 && (
+                              <span className="text-cyan-300 ml-1">
+                                → ₹{Number(livePrice).toFixed(2)}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2 px-2 text-emerald-300 font-bold">{intent.state}</td>
+                          <td className="py-2 px-2 text-slate-300">{intent.exit_state}</td>
+                          <td
+                            className={`py-2 px-2 text-right font-black ${
+                              intent.exit_state === 'CONFIRMED_FLAT'
+                                ? (intent.realized_pnl || 0) >= 0
+                                  ? 'text-emerald-400'
+                                  : 'text-rose-400'
+                                : (liveUnr || 0) >= 0
+                                ? 'text-emerald-400'
+                                : 'text-rose-400'
+                            }`}
+                          >
+                            {intent.exit_state === 'CONFIRMED_FLAT'
+                              ? formatINR(intent.realized_pnl)
+                              : typeof liveUnr === 'number'
+                              ? `OPEN (${formatINR(liveUnr)})`
+                              : 'OPEN'}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
