@@ -166,6 +166,10 @@ class AdvanceLiveBridge:
         self._follower_thread: Optional[threading.Thread] = None
         self._follower_running: bool = False
         self._op_lock = threading.RLock()
+        self._last_broker_reconcile_mono: float = -999999.0
+        self._last_broker_reconcile_sim_dt: Optional[datetime] = None
+        self._reconciled_once_intent_ids: set = set()
+        self._last_priority_quote_refresh_ts: float = -999999.0
 
     @property
     def db_path(self) -> str:
@@ -544,6 +548,135 @@ class AdvanceLiveBridge:
                 logger.debug(f"[AdvanceLiveBridge] Follower loop note: {e}")
                 time.sleep(1.0)
 
+    def _prioritize_advance_real_time_ticks(
+        self,
+        active_intents: List[Dict[str, Any]],
+        now_dt: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """
+        Isolated Real-Time Tick & Stream Priority Guard for Option Sniffer Advance:
+          1. Pins all open Advance paper trades and active live intents (`instrument_key` + `hedge_wing_instrument_key`)
+             into `OptionStreamManager._key_to_contract` and `UpstoxStreamService` WebSocket V3 so Advance's open
+             strikes never drop out of `get_all_active_option_quotes()` when NIFTY/BANKNIFTY shifts by 2+ strikes.
+          2. If any open Advance trade's quote is older than 2,500ms (2.5s) while armed or holding a live position,
+             proactively calls `refresh_quotes_via_rest(min_interval_sec=2.5)` and feeds the fresh quote directly into
+             `AdvancePaperExecution.evaluate_subsecond_tick_guard()` so Chandelier/Reverse-Chandelier and Hard SL
+             triggers never wait 10s for Main Option Sniffer's sweep.
+        """
+        pinned_keys: List[str] = []
+        refreshed_via_rest = False
+        if not self._is_live_armed and not active_intents:
+            return {"pinned_keys": pinned_keys, "refreshed_via_rest": refreshed_via_rest}
+
+        priority_contracts: Dict[str, Dict[str, Any]] = {}
+        for intent in active_intents:
+            ikey = str(intent.get("instrument_key") or "").strip()
+            if ikey:
+                priority_contracts[ikey] = {
+                    "instrument_key": ikey,
+                    "trading_symbol": intent.get("trading_symbol") or ikey,
+                    "underlying": intent.get("underlying") or "NIFTY",
+                    "strike": float(intent.get("strike") or 0.0),
+                    "option_type": intent.get("option_type") or "CE",
+                    "expiry": intent.get("expiry") or "",
+                    "lot_size": int(intent.get("lot_size") or 65),
+                }
+            hw_key = str(intent.get("hedge_wing_instrument_key") or "").strip()
+            if hw_key and hw_key not in priority_contracts:
+                priority_contracts[hw_key] = {
+                    "instrument_key": hw_key,
+                    "trading_symbol": f"{intent.get('underlying', 'NIFTY')} HEDGE WING",
+                    "underlying": intent.get("underlying") or "NIFTY",
+                    "strike": float(intent.get("hedge_wing_strike") or 0.0),
+                    "option_type": intent.get("option_type") or "CE",
+                    "expiry": intent.get("expiry") or "",
+                    "lot_size": int(intent.get("lot_size") or 65),
+                }
+
+        try:
+            with self._get_ro_conn() as ro_conn:
+                open_p_rows = ro_conn.execute(
+                    """
+                    SELECT instrument_key, trading_symbol, underlying, strike, option_type, expiry, lot_size
+                    FROM option_sniffer_advance_trades
+                    WHERE status = 'OPEN';
+                    """
+                ).fetchall()
+                for r in open_p_rows:
+                    pk = str(r["instrument_key"] or "").strip()
+                    if pk and pk not in priority_contracts:
+                        priority_contracts[pk] = {
+                            "instrument_key": pk,
+                            "trading_symbol": r["trading_symbol"] or pk,
+                            "underlying": r["underlying"] or "NIFTY",
+                            "strike": float(r["strike"] or 0.0),
+                            "option_type": r["option_type"] or "CE",
+                            "expiry": r["expiry"] or "",
+                            "lot_size": int(r["lot_size"] or 65),
+                        }
+        except Exception:
+            pass
+
+        if not priority_contracts:
+            return {"pinned_keys": pinned_keys, "refreshed_via_rest": refreshed_via_rest}
+
+        try:
+            stream_mgr = OptionStreamManager()
+            k2c = getattr(stream_mgr, "_key_to_contract", None)
+            if isinstance(k2c, dict):
+                lock_ctx = getattr(stream_mgr, "_lock", None)
+                if lock_ctx is not None and hasattr(lock_ctx, "__enter__"):
+                    with lock_ctx:
+                        for ik, cmeta in priority_contracts.items():
+                            if ik not in k2c:
+                                k2c[ik] = cmeta
+                                pinned_keys.append(ik)
+                else:
+                    for ik, cmeta in priority_contracts.items():
+                        if ik not in k2c:
+                            k2c[ik] = cmeta
+                            pinned_keys.append(ik)
+
+                if pinned_keys:
+                    try:
+                        from app.data.upstox_stream_service import get_stream_service
+                        stream_svc = get_stream_service()
+                        if hasattr(stream_svc, "subscribe_additional_keys"):
+                            stream_svc.subscribe_additional_keys(pinned_keys)
+                    except Exception:
+                        pass
+
+            # Check quote freshness for all priority open contracts (2,500ms threshold)
+            has_stale_priority_quote = False
+            for ik in priority_contracts:
+                q_obj = stream_mgr.get_option_quote(ik)
+                if not isinstance(q_obj, dict):
+                    has_stale_priority_quote = True
+                    break
+                q_age = q_obj.get("quote_age_ms")
+                if isinstance(q_age, (int, float)) and float(q_age) > 2500.0:
+                    has_stale_priority_quote = True
+                    break
+
+            now_mono = time.monotonic()
+            if has_stale_priority_quote and (now_mono - self._last_priority_quote_refresh_ts) >= 2.5:
+                self._last_priority_quote_refresh_ts = now_mono
+                if hasattr(stream_mgr, "refresh_quotes_via_rest"):
+                    stream_mgr.refresh_quotes_via_rest(min_interval_sec=2.5)
+                    refreshed_via_rest = True
+                try:
+                    from app.analytics.option_sniffer_advance.advance_paper_execution import AdvancePaperExecution
+                    for ik in priority_contracts:
+                        fresh_q = stream_mgr.get_option_quote(ik)
+                        if isinstance(fresh_q, dict) and float(fresh_q.get("ltp") or fresh_q.get("bid") or 0.0) > 0:
+                            AdvancePaperExecution.evaluate_subsecond_tick_guard(ik, fresh_q)
+                except Exception:
+                    pass
+        except Exception as prio_err:
+            logger.debug(f"[AdvanceLiveBridge] Priority tick guard note: {prio_err}")
+
+        return {"pinned_keys": pinned_keys, "refreshed_via_rest": refreshed_via_rest}
+
     def sync_once_with_advance_paper_table(
         self,
         now_dt: Optional[datetime] = None,
@@ -552,8 +685,9 @@ class AdvanceLiveBridge:
         """
         Single deterministic pass of the SQLite WAL Follower:
           0. Enforces 15:15 IST session cutoff and date-rollover auto-disarm directly inside the background follower.
-          1. Checks all active live intents against `option_sniffer_advance_trades`:
-             if the parent paper trade is now `CLOSED` (or past 15:15 IST cutoff), immediately fires the live broker square-off!
+          0B. Prioritizes Option Sniffer Advance open contracts for real-time ticks & 2.5s stale-quote fallback.
+          1A. Sub-250ms Local SQLite Exit Fast-Path FIRST (Zero network blocking before checking paper exits).
+          1B. Throttled (3.0s) Broker Order-Book Reconciliation for Still-Open Live Positions.
           2. If `_is_live_armed` is True, checks for any newly opened (`status = 'OPEN'` and `entry_time >= _armed_at_iso`)
              trade in `option_sniffer_advance_trades` and mirrors it to Upstox according to `_execution_mode`.
         """
@@ -573,12 +707,11 @@ class AdvanceLiveBridge:
                     logger.info("[AdvanceLiveBridge] Session cutoff (15:15 IST) reached in follower sync. Reverting to Paper Mode.")
                     self._is_live_armed = False
 
-        # 1. Check Exits & Reconcile Broker Order Book FIRST (Always active even if disarmed while a live position was open)
+        # 0B. Prioritize Option Sniffer Advance open contracts for real-time ticks & 2.5s stale-quote fallback
         active_intents = self.get_active_live_positions()
-        if active_intents:
-            self._reconcile_open_live_intents_with_broker(active_intents, now_dt=now_dt)
-            active_intents = self.get_active_live_positions()
+        self._prioritize_advance_real_time_ticks(active_intents, now_dt=now_dt)
 
+        # 1A. Sub-250ms Local SQLite Exit Fast-Path FIRST (Zero network blocking before checking paper exits)
         if active_intents:
             try:
                 with self._get_ro_conn() as ro_conn:
@@ -618,6 +751,30 @@ class AdvanceLiveBridge:
                                 mirrored_exits.append(intent["order_intent_id"])
             except Exception as ex_err:
                 logger.error(f"[AdvanceLiveBridge] Exit sync error: {ex_err}")
+
+        # 1B. Throttled (3.0s) Broker Order-Book Reconciliation for Still-Open Live Positions
+        # Prevents 0.25s /order/retrieve-all polling from exhausting the 64 req/min Upstox rate limit
+        still_open_intents = self.get_active_live_positions()
+        if still_open_intents:
+            has_unreconciled_new_intent = any(
+                str(i.get("order_intent_id") or "") not in self._reconciled_once_intent_ids
+                for i in still_open_intents
+            )
+            now_mono = time.monotonic()
+            mono_elapsed = now_mono - self._last_broker_reconcile_mono
+            sim_elapsed = (
+                abs((now_dt - self._last_broker_reconcile_sim_dt).total_seconds())
+                if (now_dt and self._last_broker_reconcile_sim_dt)
+                else 999999.0
+            )
+            if has_unreconciled_new_intent or (mono_elapsed >= 3.0) or (sim_elapsed >= 3.0):
+                self._last_broker_reconcile_mono = now_mono
+                self._last_broker_reconcile_sim_dt = now_dt
+                for i in still_open_intents:
+                    iid = str(i.get("order_intent_id") or "")
+                    if iid:
+                        self._reconciled_once_intent_ids.add(iid)
+                self._reconcile_open_live_intents_with_broker(still_open_intents, now_dt=now_dt)
 
         # 2. Check Entries if Armed
         if not self._is_live_armed:
@@ -1822,6 +1979,14 @@ class AdvanceLiveBridge:
 
 if _PREV_BRIDGE_INSTANCE is not None:
     _PREV_BRIDGE_INSTANCE.__class__ = AdvanceLiveBridge
+    if not hasattr(_PREV_BRIDGE_INSTANCE, "_last_broker_reconcile_mono"):
+        _PREV_BRIDGE_INSTANCE._last_broker_reconcile_mono = -999999.0
+    if not hasattr(_PREV_BRIDGE_INSTANCE, "_last_broker_reconcile_sim_dt"):
+        _PREV_BRIDGE_INSTANCE._last_broker_reconcile_sim_dt = None
+    if not hasattr(_PREV_BRIDGE_INSTANCE, "_reconciled_once_intent_ids"):
+        _PREV_BRIDGE_INSTANCE._reconciled_once_intent_ids = set()
+    if not hasattr(_PREV_BRIDGE_INSTANCE, "_last_priority_quote_refresh_ts"):
+        _PREV_BRIDGE_INSTANCE._last_priority_quote_refresh_ts = -999999.0
     _BRIDGE_INSTANCE = _PREV_BRIDGE_INSTANCE
 
 

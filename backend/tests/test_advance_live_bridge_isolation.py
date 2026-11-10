@@ -707,6 +707,116 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
             ]
             self.assertEqual(len(wing_flatten_calls), 1)
 
+    def test_15_broker_reconcile_throttled_to_3s_and_paper_exit_fires_first_without_rate_limit_wait(self):
+        """
+        Proves Real-Time Latency & Rate-Limit Protection Fix:
+          - Across rapid 0.25s follower ticks while a position is open, `/order/retrieve-all` runs once
+            on initial fill verification and is then throttled for 3.0s (preventing 240 req/min rate-limit exhaustion).
+          - When the parent paper trade closes in SQLite, Step 1A fires `_execute_mirrored_live_exit()`
+            FIRST without calling `GET /order/retrieve-all` before the exit.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_FAST_1501",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=140.0,
+            entry_time="2026-11-09 10:00:01",
+        )
+        call_log = []
+
+        def fake_fast_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params, is_emergency))
+            if method == "POST" and endpoint == "/order/place":
+                return True, 200, {"status": "success", "data": {"order_id": f"FAST_ORD_{len(call_log)}"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return True, 200, {
+                    "status": "success",
+                    "data": [{"order_id": "FAST_ORD_1", "status": "complete", "filled_quantity": 65, "average_price": 140.0}],
+                }
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_fast_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 10, 0, 0),
+            )
+            # Tick 0 (10:00:01): Mirrors entry
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 0, 1))
+            # Tick 1 (10:00:01.25): Initial fill verification reconcile runs once
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 0, 1, 250000))
+            retrieve_count_initial = sum(1 for c in call_log if c[0] == "GET" and c[1] == "/order/retrieve-all")
+            self.assertEqual(retrieve_count_initial, 1)
+
+            # Ticks 2..8 (10:00:01.50 to 10:00:03.00 — 6 rapid 0.25s passes within 3.0s window):
+            # Must make ZERO additional GET /order/retrieve-all calls!
+            for ms in (500000, 750000, 1000000, 1250000, 1500000, 1750000):
+                sec_add = 1 + (ms // 1000000)
+                usec = ms % 1000000
+                self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 0, sec_add, usec))
+            retrieve_count_throttled = sum(1 for c in call_log if c[0] == "GET" and c[1] == "/order/retrieve-all")
+            self.assertEqual(retrieve_count_throttled, 1, "Broker order-book polling must be throttled for 3.0s!")
+
+            # Now close paper trade at 10:00:03.50 (Chandelier trailing stop hit)
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=168.0, exit_reason='TRAILING_STOP_HIT', net_pnl=1755.0 WHERE trade_id='ADV_FAST_1501';"
+            )
+            conn.commit()
+            conn.close()
+
+            call_log.clear()
+            sync_exit = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 0, 3, 500000))
+            self.assertEqual(len(sync_exit["exits_mirrored"]), 1)
+            # Verify exit fired immediately with 0 GET /order/retrieve-all calls blocking it!
+            retrieve_on_exit = [c for c in call_log if c[0] == "GET" and c[1] == "/order/retrieve-all"]
+            self.assertEqual(len(retrieve_on_exit), 0)
+
+    def test_16_priority_tick_guard_pins_open_contracts_and_refreshes_stale_quotes_in_2_5s(self):
+        """
+        Proves Real-Time Tick & Stream Priority Guard:
+          - `_prioritize_advance_real_time_ticks()` pins open Advance contract keys into
+            `OptionStreamManager()._key_to_contract` so they never drop out on 2+ strike ATM shifts.
+          - When an open contract's quote has `quote_age_ms > 2500`, it triggers `refresh_quotes_via_rest(min_interval_sec=2.5)`
+            and feeds the refreshed quote into `AdvancePaperExecution.evaluate_subsecond_tick_guard()`.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_PRIO_1601",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=150.0,
+            entry_time="2026-11-09 10:10:00",
+        )
+        fake_k2c = {}
+        with patch(
+            "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+        ) as mock_sm_cls, patch(
+            "app.analytics.option_sniffer_advance.advance_paper_execution.AdvancePaperExecution.evaluate_subsecond_tick_guard"
+        ) as mock_tick_guard:
+            sm_inst = mock_sm_cls.return_value
+            sm_inst._key_to_contract = fake_k2c
+            sm_inst._lock = None
+            # First call returns a stale quote (age = 4200ms > 2500ms); second call after REST refresh returns fresh quote
+            sm_inst.get_option_quote.side_effect = [
+                {"instrument_key": "NSE_FO|65628", "bid": 155.0, "ask": 156.0, "ltp": 155.5, "quote_age_ms": 4200},
+                {"instrument_key": "NSE_FO|65628", "bid": 158.0, "ask": 159.0, "ltp": 158.5, "quote_age_ms": 0},
+            ]
+            self.bridge._is_live_armed = True
+            self.bridge._last_priority_quote_refresh_ts = -999999.0
+            res = self.bridge._prioritize_advance_real_time_ticks(active_intents=[], now_dt=datetime(2026, 11, 9, 10, 10, 5))
+            self.assertIn("NSE_FO|65628", fake_k2c)
+            self.assertEqual(res["pinned_keys"], ["NSE_FO|65628"])
+            self.assertTrue(res["refreshed_via_rest"])
+            sm_inst.refresh_quotes_via_rest.assert_called_once_with(min_interval_sec=2.5)
+            mock_tick_guard.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
