@@ -874,6 +874,196 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
             self.bridge._prioritize_advance_real_time_ticks(active_intents=[], now_dt=datetime(2026, 11, 9, 10, 15, 12))
             mock_tick_guard.assert_called_once()
 
+    def test_18_fast_exit_or_sos_before_first_reconcile_verifies_entry_and_never_opens_reverse_position(self):
+        """
+        Proves Finding A Fix (Pre-Exit Unreconciled Entry Verification):
+          - If an entry order is placed (`ENTRY_ORD_1`) and an exit or 1-Click SOS Panic Exit triggers
+            BEFORE any intermediate open-position reconcile pass ever ran (`intent_id not in _reconciled_once_intent_ids`),
+            and `/order/retrieve-all` shows `ENTRY_ORD_1` is still `'open'` (`filled_quantity == 0`),
+            `_execute_mirrored_live_exit()` reconciles first, cancels the unfilled entry order (`DELETE /order/cancel`),
+            and NEVER sends a reverse naked exit order (`0` `POST /order/place` exit calls).
+        """
+        self._insert_advance_paper_trade(
+            "ADV_FAST_UNFILLED_1801",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=125.0,
+            entry_time="2026-11-09 10:20:00",
+        )
+        call_log = []
+
+        def fake_unfilled_fast_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                return True, 200, {"status": "success", "data": {"order_id": f"FAST_UNFILLED_ORD_{len(call_log)}"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return True, 200, {
+                    "status": "success",
+                    "data": [
+                        {
+                            "order_id": "FAST_UNFILLED_ORD_1",
+                            "status": "open",
+                            "filled_quantity": 0,
+                            "average_price": 0.0,
+                        }
+                    ],
+                }
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_unfilled_fast_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 10, 19, 0),
+            )
+            # Pass 1: Mirrors entry (`FAST_UNFILLED_ORD_1`). Notice NO intermediate reconcile pass runs!
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 20, 1))
+            call_log.clear()
+
+            # Immediate 1-Click SOS Panic Exit (or sub-second exit) BEFORE first reconcile pass:
+            sos_res = self.bridge.execute_sos_panic_exit()
+            self.assertEqual(sos_res["status"], "SOS_EXECUTED_AND_DISARMED")
+            self.assertEqual(sos_res["positions_flattened"], 1)
+
+            # Must have 0 opposite POST /order/place exit orders (only DELETE /order/cancel for entry + SL)!
+            post_exit_calls = [c for c in call_log if c[0] == "POST" and c[1] == "/order/place"]
+            self.assertEqual(len(post_exit_calls), 0, "Must NEVER send opposite exit order for unfilled entry!")
+            delete_calls = [c for c in call_log if c[0] == "DELETE" and c[1] == "/order/cancel"]
+            self.assertGreaterEqual(len(delete_calls), 1)
+
+            intents = self.bridge.get_recent_order_intents()
+            self.assertEqual(intents[0]["state"], "CANCELLED")
+            self.assertEqual(intents[0]["exit_state"], "CONFIRMED_FLAT")
+            self.assertEqual(intents[0]["exit_reason"], "UNFILLED_ENTRY_CANCELLED_ON_EXIT")
+
+    def test_19_unfilled_or_rejected_exit_limit_order_reopens_exit_retry_pending_until_confirmed_complete(self):
+        """
+        Proves Finding B Fix (Pending Exit Order Exchange Verification):
+          - When an exit `LIMIT` order (`EXIT_ORD_STUCK`) returns HTTP 200 OK (`order_id`), it is queued in
+            `_pending_exit_verifications`.
+          - On the next reconciliation pass, if `/order/retrieve-all` reports `EXIT_ORD_STUCK` is still `'open'`
+            (`filled_quantity == 0`) due to a flash gap beyond the 1.5% limit collar, the bridge cancels `EXIT_ORD_STUCK`
+            and transitions `exit_state` back to `'EXIT_RETRY_PENDING'`.
+          - On the subsequent follower pass, `_execute_mirrored_live_exit()` automatically retries with the wider
+            `5.0%` marketable collar and flattens the position cleanly.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_EXIT_VERIFY_1901",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=150.0,
+            entry_time="2026-11-09 10:30:00",
+        )
+        call_log = []
+        order_book_state = {
+            "mode": "ENTRY_COMPLETE",
+        }
+
+        def fake_exit_verify_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                tx = (payload or {}).get("transaction_type")
+                otype = (payload or {}).get("order_type")
+                if otype == "SL":
+                    return True, 200, {"status": "success", "data": {"order_id": "SL_1901"}}
+                if tx == "BUY":
+                    return True, 200, {"status": "success", "data": {"order_id": "ENTRY_1901"}}
+                # SELL exit order
+                if order_book_state["mode"] == "EXIT_STUCK_OPEN":
+                    return True, 200, {"status": "success", "data": {"order_id": "EXIT_STUCK_1901"}}
+                return True, 200, {"status": "success", "data": {"order_id": "EXIT_COMPLETE_1902"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                if order_book_state["mode"] == "ENTRY_COMPLETE":
+                    return True, 200, {
+                        "status": "success",
+                        "data": [{"order_id": "ENTRY_1901", "status": "complete", "filled_quantity": 65, "average_price": 150.0}],
+                    }
+                if order_book_state["mode"] == "EXIT_STUCK_OPEN":
+                    return True, 200, {
+                        "status": "success",
+                        "data": [
+                            {
+                                "order_id": "EXIT_STUCK_1901",
+                                "status": "open",
+                                "quantity": 65,
+                                "filled_quantity": 0,
+                                "average_price": 0.0,
+                                "status_message": "Working limit order on NSE",
+                            }
+                        ],
+                    }
+                return True, 200, {
+                    "status": "success",
+                    "data": [
+                        {
+                            "order_id": "EXIT_COMPLETE_1902",
+                            "status": "complete",
+                            "quantity": 65,
+                            "filled_quantity": 65,
+                            "average_price": 118.50,
+                        }
+                    ],
+                }
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_exit_verify_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 10, 29, 0),
+            )
+            # Tick 1 & 2: Mirror entry and verify entry complete
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 30, 1))
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 30, 2))
+
+            # Now close paper trade at ₹120.0 while the first exit LIMIT order sits unfilled ('open') on NSE
+            order_book_state["mode"] = "EXIT_STUCK_OPEN"
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=120.0, exit_reason='STOP_LOSS_HIT', net_pnl=-2015.0 WHERE trade_id='ADV_EXIT_VERIFY_1901';"
+            )
+            conn.commit()
+            conn.close()
+
+            # Tick 3 (10:31:00): Places first exit order `EXIT_STUCK_1901` (1.5% collar = 118.20)
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 31, 0))
+            self.assertEqual(len(self.bridge._pending_exit_verifications), 1)
+
+            # Tick 4 (10:31:01): Next pass verifies `EXIT_STUCK_1901` against `/order/retrieve-all`, sees `status == 'open'` (`filled_quantity == 0`),
+            # cancels `EXIT_STUCK_1901`, and transitions `exit_state` back to `'EXIT_RETRY_PENDING'`!
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 31, 1))
+            active_reopened = self.bridge.get_active_live_positions()
+            self.assertEqual(len(active_reopened), 1)
+            self.assertEqual(active_reopened[0]["exit_state"], "EXIT_RETRY_PENDING")
+
+            # Tick 5 (10:31:02): Next 250ms pass retries exit with wider 5.0% collar (`120.0 * 0.95 = 114.00`) and fills!
+            order_book_state["mode"] = "EXIT_COMPLETE"
+            call_log.clear()
+            sync_retry = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 31, 2))
+            self.assertEqual(len(sync_retry["exits_mirrored"]), 1)
+            retry_places = [c for c in call_log if c[0] == "POST" and c[1] == "/order/place"]
+            self.assertEqual(len(retry_places), 1)
+            self.assertAlmostEqual(retry_places[0][2]["price"], 114.0, places=2)
+
+            # Tick 6 (10:31:03): Verifies `EXIT_COMPLETE_1902` filled at ₹118.50 on NSE and updates `exit_fill_price`!
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 31, 3))
+            self.assertEqual(len(self.bridge.get_active_live_positions()), 0)
+            intents = self.bridge.get_recent_order_intents()
+            self.assertEqual(intents[0]["exit_state"], "CONFIRMED_FLAT")
+            self.assertAlmostEqual(intents[0]["exit_fill_price"], 118.50, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()
