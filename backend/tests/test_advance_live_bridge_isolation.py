@@ -1994,6 +1994,241 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
             self.assertEqual(len(placed_prices), 1)
             self.assertAlmostEqual(placed_prices[0], 101.40, places=2)
 
+    def test_33_multi_position_same_pass_exit_does_not_cancel_sibling_pending_exit(self):
+        """
+        Round 6 Finding 1 Verification:
+        When Position 1 places an exit order (`EX_ORD_33_1` in `_pending_exit_verifications`) and Position 2
+        (`intent_id not in _reconciled_once_intent_ids`) exits in the same pass, Position 2's pre-exit reconcile
+        (`pending_ids_to_verify=set()`) must NOT inspect or cancel Position 1's newly queued exit order.
+        """
+        self.bridge._pending_exit_verifications["adv_live_POS_33_1"] = "EX_ORD_33_1"
+        self.bridge._pending_exit_attempts["adv_live_POS_33_1"] = 0
+
+        with self.bridge._get_rw_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO option_advance_live_order_intents (
+                    order_intent_id, advance_trade_id, signal_id, book_type, strategy_mode,
+                    direction, action, execution_mode, instrument_key, trading_symbol,
+                    underlying, option_type, strike, expiry, lot_size, target_quantity,
+                    filled_quantity, limit_price, average_fill_price, stop_loss_trigger,
+                    stop_loss_limit, broker_order_id, broker_sl_order_id,
+                    state, exit_state, created_at, updated_at
+                ) VALUES (
+                    'adv_live_POS_33_2', 'ADV_POS_33_2', 'SIG_33_2', 'LONG_BOOK_BUY', 'LONG_GAMMA_SNIPER',
+                    'BULLISH', 'BUY', 'LONG_BOOK_ONLY', 'NSE_FO|65628', 'NIFTY26NOV24000CE',
+                    'NIFTY', 'CE', 24000, '2026-11-26', 65, 65,
+                    65, 120.0, 120.0, 96.0,
+                    95.0, 'ENTRY_ORD_33_2', NULL,
+                    'FILLED', 'NONE', '2026-11-09 13:00:00', '2026-11-09 13:00:00'
+                );
+                """
+            )
+            conn.commit()
+
+        # Ensure POS_33_2 is NOT in _reconciled_once_intent_ids when its exit fires
+        self.bridge._reconciled_once_intent_ids.discard("adv_live_POS_33_2")
+
+        cancelled_oids = []
+
+        def fake_multi_exit_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return (
+                    True,
+                    200,
+                    {
+                        "status": "success",
+                        "data": [
+                            {"order_id": "EX_ORD_33_1", "status": "open", "filled_quantity": 0, "quantity": 65, "average_price": 0.0},
+                            {"order_id": "ENTRY_ORD_33_2", "status": "complete", "filled_quantity": 65, "quantity": 65, "average_price": 120.0},
+                        ],
+                    },
+                )
+            if method == "DELETE" and endpoint == "/order/cancel":
+                c_oid = str((params or {}).get("order_id") or "")
+                cancelled_oids.append(c_oid)
+                return True, 200, {"status": "success", "data": {"order_id": c_oid}}
+            if method == "POST" and endpoint == "/order/place":
+                return True, 200, {"status": "success", "data": {"order_id": "EX_ORD_33_2"}}
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_multi_exit_broker
+        intent_2 = [
+            p for p in self.bridge.get_active_live_positions() if p["order_intent_id"] == "adv_live_POS_33_2"
+        ][0]
+        self.bridge._execute_mirrored_live_exit(
+            intent=intent_2,
+            paper_row={"exit_price_used": 126.0, "exit_reason": "SOS_PANIC_EXIT", "net_pnl": 335.0},
+            now_dt=datetime(2026, 11, 9, 13, 0, 2),
+        )
+        self.assertNotIn(
+            "EX_ORD_33_1",
+            cancelled_oids,
+            "Sibling position exit in the same pass must NOT prematurely cancel EX_ORD_33_1!",
+        )
+        self.assertEqual(self.bridge._pending_exit_verifications.get("adv_live_POS_33_1"), "EX_ORD_33_1")
+
+    def test_34_partial_exit_fill_accumulates_full_quantity_and_weighted_pnl(self):
+        """
+        Round 6 Finding 2 Verification:
+        If a 60-qty position partially fills 25 qty @ 112.00 on its first exit order (`rem_qty = 35`),
+        the retry exit order must place only 35 qty (`0` over-selling), and when the remaining 35 qty
+        completes @ 114.00, the final closed row must record `filled_quantity = 60`, weighted
+        `exit_fill_price = 113.17`, and compute realized P&L across all 60 shares.
+        """
+        with self.bridge._get_rw_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO option_advance_live_order_intents (
+                    order_intent_id, advance_trade_id, signal_id, book_type, strategy_mode,
+                    direction, action, execution_mode, instrument_key, trading_symbol,
+                    underlying, option_type, strike, expiry, lot_size, target_quantity,
+                    filled_quantity, limit_price, average_fill_price, stop_loss_trigger,
+                    stop_loss_limit, broker_order_id, broker_sl_order_id, exit_broker_order_id,
+                    state, exit_state, created_at, updated_at
+                ) VALUES (
+                    'adv_live_PART_EX_3401', 'ADV_PART_EX_3401', 'SIG_3401', 'LONG_BOOK_BUY', 'LONG_GAMMA_SNIPER',
+                    'BULLISH', 'BUY', 'LONG_BOOK_ONLY', 'NSE_FO|65628', 'NIFTY26NOV24000CE',
+                    'NIFTY', 'CE', 24000, '2026-11-26', 60, 60,
+                    60, 100.0, 100.0, 80.0,
+                    79.0, 'ENT_3401', NULL, 'EX_LEG_1',
+                    'FILLED', 'CONFIRMED_FLAT', '2026-11-09 13:10:00', '2026-11-09 13:15:00'
+                );
+                """
+            )
+            conn.commit()
+
+        self.bridge._pending_exit_verifications["adv_live_PART_EX_3401"] = "EX_LEG_1"
+        self.bridge._pending_exit_attempts["adv_live_PART_EX_3401"] = 0
+        self.bridge._reconciled_once_intent_ids.add("adv_live_PART_EX_3401")
+
+        # Pass 1: EX_LEG_1 partially fills 25 of 60 @ 112.00 and is still 'open'
+        def fake_leg1_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return (
+                    True,
+                    200,
+                    {
+                        "status": "success",
+                        "data": [
+                            {
+                                "order_id": "EX_LEG_1",
+                                "status": "open",
+                                "filled_quantity": 25,
+                                "quantity": 60,
+                                "average_price": 112.0,
+                            }
+                        ],
+                    },
+                )
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_leg1_broker
+        self.bridge._reconcile_open_live_intents_with_broker(
+            active_intents=[],
+            now_dt=datetime(2026, 11, 9, 13, 15, 1),
+            pending_ids_to_verify={"adv_live_PART_EX_3401"},
+        )
+
+        # Verify SQLite has `exit_state = 'EXIT_RETRY_PENDING'` and `filled_quantity = 35` for the retry order
+        active_retry = [
+            p for p in self.bridge.get_active_live_positions() if p["order_intent_id"] == "adv_live_PART_EX_3401"
+        ]
+        self.assertEqual(len(active_retry), 1)
+        self.assertEqual(int(active_retry[0]["filled_quantity"]), 35)
+
+        # Pass 2: Retry exit order dispatches strictly 35 qty and completes @ 114.00
+        placed_exit_qtys = []
+
+        def fake_leg2_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            if method == "POST" and endpoint == "/order/place":
+                placed_exit_qtys.append(int(payload["quantity"]))
+                return True, 200, {"status": "success", "data": {"order_id": "EX_LEG_2"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return (
+                    True,
+                    200,
+                    {
+                        "status": "success",
+                        "data": [
+                            {
+                                "order_id": "EX_LEG_2",
+                                "status": "complete",
+                                "filled_quantity": 35,
+                                "quantity": 35,
+                                "average_price": 114.0,
+                            }
+                        ],
+                    },
+                )
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_leg2_broker
+        self.bridge._execute_mirrored_live_exit(
+            intent=active_retry[0],
+            paper_row={"exit_price_used": 114.0, "exit_reason": "TRAILING_STOP", "net_pnl": 750.0},
+            now_dt=datetime(2026, 11, 9, 13, 15, 2),
+        )
+        self.assertEqual(placed_exit_qtys, [35], "Retry exit order must only dispatch the remaining 35 qty!")
+
+        # Reconcile EX_LEG_2 completion on exchange
+        self.bridge._reconcile_open_live_intents_with_broker(
+            active_intents=[],
+            now_dt=datetime(2026, 11, 9, 13, 15, 3),
+            pending_ids_to_verify={"adv_live_PART_EX_3401"},
+        )
+
+        with self.bridge._get_ro_conn() as conn:
+            final_row = dict(
+                conn.execute(
+                    "SELECT * FROM option_advance_live_order_intents WHERE order_intent_id = 'adv_live_PART_EX_3401';"
+                ).fetchone()
+            )
+        self.assertEqual(int(final_row["filled_quantity"]), 60)
+        # Weighted exit price: (25 * 112.0 + 35 * 114.0) / 60 = 6790 / 60 = 113.17
+        self.assertAlmostEqual(float(final_row["exit_fill_price"]), 113.17, places=2)
+        # Gross PnL on 60 shares: (113.17 - 100.0) * 60 = 790.20
+        self.assertAlmostEqual(float(final_row["gross_pnl"]), 790.20, places=2)
+        self.assertGreater(float(final_row["realized_pnl"]), 700.0)
+
+    def test_35_cancelled_unfilled_entries_excluded_from_closed_losses_and_calendar(self):
+        """
+        Round 6 Finding 3 Verification:
+        Unfilled cancelled entry intents (`state = 'CANCELLED'`, `filled_quantity = 0`, `exit_state = 'CONFIRMED_FLAT'`)
+        must NOT be counted as closed losing trades in `get_live_pnl_summary()`, `get_calendar_performance('LIVE_BROKER')`,
+        or `get_circuit_breaker_status()`.
+        """
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        with self.bridge._get_rw_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO option_advance_live_order_intents (
+                    order_intent_id, advance_trade_id, signal_id, book_type, strategy_mode,
+                    direction, action, execution_mode, instrument_key, trading_symbol,
+                    underlying, option_type, strike, expiry, lot_size, target_quantity,
+                    filled_quantity, limit_price, average_fill_price,
+                    state, exit_state, gross_pnl, statutory_charges, realized_pnl,
+                    created_at, updated_at
+                ) VALUES (
+                    'adv_live_CANC_3501', 'ADV_CANC_3501', 'SIG_3501', 'LONG_BOOK_BUY', 'LONG_GAMMA_SNIPER',
+                    'BULLISH', 'BUY', 'LONG_BOOK_ONLY', 'NSE_FO|65628', 'NIFTY26NOV24000CE',
+                    'NIFTY', 'CE', 24000, '2026-11-26', 65, 65,
+                    0, 100.0, 0.0,
+                    'CANCELLED', 'CONFIRMED_FLAT', 0.0, 0.0, 0.0,
+                    ?, ?
+                );
+                """,
+                (f"{today_str} 10:05:00", f"{today_str} 10:06:00"),
+            )
+            conn.commit()
+
+        pnl_sum = self.bridge.get_live_pnl_summary(active_positions=[])
+        self.assertEqual(pnl_sum["closed_trades_count"], 0)
+        self.assertEqual(pnl_sum["loss_count"], 0)
+
+        cal_live = self.bridge.get_calendar_performance(book_filter="LIVE_BROKER")
+        self.assertEqual(len(cal_live["days"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

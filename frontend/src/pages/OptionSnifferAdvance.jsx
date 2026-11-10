@@ -263,23 +263,28 @@ export default function OptionSnifferAdvance() {
     const filteredTrades =
       bookFilter === 'LIVE_BROKER'
         ? (liveRecentIntents || [])
-            .filter((i) => i.exit_state === 'CONFIRMED_FLAT')
+            .filter(
+              (i) =>
+                i.exit_state === 'CONFIRMED_FLAT' &&
+                i.state !== 'CANCELLED' &&
+                Number(i.filled_quantity || 0) > 0
+            )
             .map((i) => ({
               trade_id: i.order_intent_id,
-              trading_date: String(i.updated_at || i.created_at || '').slice(0, 10),
+              trading_date: String(i.trading_date || i.created_at || i.updated_at || '').slice(0, 10),
               book_type: i.action === 'BUY' ? 'LONG_BOOK_BUY' : 'SHORT_BOOK_SELL',
               strategy_mode: i.execution_mode,
               underlying: i.underlying,
               trading_symbol: i.trading_symbol,
               option_type: i.option_type,
-              strike_price: i.strike_price,
+              strike_price: i.strike ?? i.strike_price,
               quantity: i.filled_quantity || i.target_quantity,
               entry_time: i.created_at,
               exit_time: i.updated_at,
               entry_price: i.average_fill_price || i.limit_price,
               exit_price: i.exit_fill_price,
-              gross_pnl: i.realized_pnl,
-              charges: 0,
+              gross_pnl: i.gross_pnl ?? i.realized_pnl,
+              charges: i.statutory_charges ?? i.charges ?? 0,
               net_pnl: i.realized_pnl,
               mfe_pct: 0,
               mae_pct: 0,
@@ -1395,11 +1400,19 @@ export default function OptionSnifferAdvance() {
                               </span>
                             )}
                           </td>
-                          <td className="py-2 px-2 text-emerald-300 font-bold">{intent.state}</td>
+                          <td
+                            className={`py-2 px-2 font-bold ${
+                              intent.state === 'CANCELLED' ? 'text-slate-400' : 'text-emerald-300'
+                            }`}
+                          >
+                            {intent.state}
+                          </td>
                           <td className="py-2 px-2 text-slate-300">{intent.exit_state}</td>
                           <td
                             className={`py-2 px-2 text-right font-black ${
-                              intent.exit_state === 'CONFIRMED_FLAT'
+                              intent.state === 'CANCELLED'
+                                ? 'text-slate-400'
+                                : intent.exit_state === 'CONFIRMED_FLAT'
                                 ? (intent.realized_pnl || 0) >= 0
                                   ? 'text-emerald-400'
                                   : 'text-rose-400'
@@ -1408,7 +1421,9 @@ export default function OptionSnifferAdvance() {
                                 : 'text-rose-400'
                             }`}
                           >
-                            {intent.exit_state === 'CONFIRMED_FLAT'
+                            {intent.state === 'CANCELLED'
+                              ? 'CANCELLED (0 FILL)'
+                              : intent.exit_state === 'CONFIRMED_FLAT'
                               ? formatINR(intent.realized_pnl)
                               : typeof liveUnr === 'number'
                               ? `OPEN (${formatINR(liveUnr)})`

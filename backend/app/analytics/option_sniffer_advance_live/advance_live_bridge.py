@@ -171,6 +171,7 @@ class AdvanceLiveBridge:
         self._reconciled_once_intent_ids: set = set()
         self._pending_exit_verifications: Dict[str, str] = {}
         self._pending_exit_attempts: Dict[str, int] = {}
+        self._partial_exit_accum: Dict[str, Dict[str, Any]] = {}
         self._last_priority_quote_refresh_ts: float = -999999.0
 
     @property
@@ -262,6 +263,8 @@ class AdvanceLiveBridge:
                     SELECT realized_pnl FROM option_advance_live_order_intents
                     WHERE SUBSTR(created_at, 1, 10) = ?
                       AND exit_state = 'CONFIRMED_FLAT'
+                      AND COALESCE(state, '') != 'CANCELLED'
+                      AND COALESCE(filled_quantity, 0) > 0
                     ORDER BY id ASC;
                     """,
                     (today,),
@@ -1338,6 +1341,15 @@ class AdvanceLiveBridge:
                         with self._get_rw_conn() as conn:
                             if ex_qty > 0 and ex_target_qty > ex_qty:
                                 rem_qty = max(1, ex_target_qty - ex_qty)
+                                prev_acc = self._partial_exit_accum.get(p_intent_id) or {
+                                    "exited_qty": 0,
+                                    "exit_notional": 0.0,
+                                }
+                                part_px = ex_avg if ex_avg > 0 else float(ex_ord.get("price") or 0.0)
+                                self._partial_exit_accum[p_intent_id] = {
+                                    "exited_qty": int(prev_acc.get("exited_qty") or 0) + ex_qty,
+                                    "exit_notional": float(prev_acc.get("exit_notional") or 0.0) + (ex_qty * part_px),
+                                }
                                 conn.execute(
                                     """
                                     UPDATE option_advance_live_order_intents
@@ -1351,16 +1363,22 @@ class AdvanceLiveBridge:
                                     (rem_qty, ex_msg, now_iso, p_intent_id),
                                 )
                             else:
+                                retry_rem_qty = (
+                                    ex_target_qty
+                                    if (p_intent_id in self._partial_exit_accum and ex_target_qty > 0)
+                                    else 0
+                                )
                                 conn.execute(
                                     """
                                     UPDATE option_advance_live_order_intents
-                                    SET exit_state = 'EXIT_RETRY_PENDING',
+                                    SET filled_quantity = CASE WHEN ? > 0 THEN ? ELSE filled_quantity END,
+                                        exit_state = 'EXIT_RETRY_PENDING',
                                         broker_sl_order_id = NULL,
                                         rejection_reason = ?,
                                         updated_at = ?
                                     WHERE order_intent_id = ?;
                                     """,
-                                    (ex_msg, now_iso, p_intent_id),
+                                    (retry_rem_qty, retry_rem_qty, ex_msg, now_iso, p_intent_id),
                                 )
                             conn.commit()
                     elif ex_status == "complete" and ex_avg > 0:
@@ -1371,13 +1389,30 @@ class AdvanceLiveBridge:
                             ).fetchone()
                             if row_c:
                                 c_act = str(row_c["action"] or "BUY").upper()
-                                c_qty = int(row_c["filled_quantity"] or row_c["target_quantity"] or 65)
-                                c_ent = float(row_c["average_fill_price"] or row_c["limit_price"] or ex_avg)
+                                part_acc = self._partial_exit_accum.pop(p_intent_id, None)
+                                if part_acc and int(part_acc.get("exited_qty") or 0) > 0:
+                                    leg_qty = int(
+                                        ex_qty
+                                        if ex_qty > 0
+                                        else (ex_target_qty or row_c["filled_quantity"] or row_c["target_quantity"] or 65)
+                                    )
+                                    prev_ex_qty = int(part_acc.get("exited_qty") or 0)
+                                    prev_ex_notional = float(part_acc.get("exit_notional") or 0.0)
+                                    c_qty = prev_ex_qty + leg_qty
+                                    eff_ex_avg = (
+                                        round((prev_ex_notional + (leg_qty * ex_avg)) / c_qty, 2)
+                                        if prev_ex_notional > 0
+                                        else ex_avg
+                                    )
+                                else:
+                                    c_qty = int(row_c["filled_quantity"] or row_c["target_quantity"] or 65)
+                                    eff_ex_avg = ex_avg
+                                c_ent = float(row_c["average_fill_price"] or row_c["limit_price"] or eff_ex_avg)
                                 if c_act == "BUY":
-                                    c_gross = round((ex_avg - c_ent) * c_qty, 2)
+                                    c_gross = round((eff_ex_avg - c_ent) * c_qty, 2)
                                     c_costs = calculate_option_trade_costs(
                                         buy_price=c_ent,
-                                        sell_price=ex_avg,
+                                        sell_price=eff_ex_avg,
                                         quantity=c_qty,
                                         apply_slippage=False,
                                         trade_date=now_iso[:10],
@@ -1387,7 +1422,7 @@ class AdvanceLiveBridge:
                                 else:
                                     c_res = calculate_short_option_trade_costs(
                                         sell_entry_bid=c_ent,
-                                        buy_exit_ask=ex_avg,
+                                        buy_exit_ask=eff_ex_avg,
                                         quantity=c_qty,
                                         apply_slippage=False,
                                         trade_date=now_iso[:10],
@@ -1398,14 +1433,15 @@ class AdvanceLiveBridge:
                                 conn.execute(
                                     """
                                     UPDATE option_advance_live_order_intents
-                                    SET exit_fill_price = ?,
+                                    SET filled_quantity = ?,
+                                        exit_fill_price = ?,
                                         gross_pnl = ?,
                                         statutory_charges = ?,
                                         realized_pnl = ?,
                                         updated_at = ?
                                     WHERE order_intent_id = ?;
                                     """,
-                                    (ex_avg, c_gross, c_chg, c_net, now_iso, p_intent_id),
+                                    (c_qty, eff_ex_avg, c_gross, c_chg, c_net, now_iso, p_intent_id),
                                 )
                                 conn.commit()
 
@@ -1678,7 +1714,9 @@ class AdvanceLiveBridge:
         # order status once so an unfilled (`status == 'open'`) or rejected entry is cancelled/aborted
         # cleanly instead of firing an opposite naked exit order.
         if intent_id not in self._reconciled_once_intent_ids:
-            self._reconcile_open_live_intents_with_broker([intent], now_dt=now_dt)
+            self._reconcile_open_live_intents_with_broker(
+                [intent], now_dt=now_dt, pending_ids_to_verify=set()
+            )
             self._reconciled_once_intent_ids.add(intent_id)
             try:
                 with self._get_ro_conn() as conn:
@@ -1818,7 +1856,9 @@ class AdvanceLiveBridge:
                 "complete" in sl_err_text or "filled" in sl_err_text or "traded" in sl_err_text
             ):
                 # Exchange SL-L already filled milliseconds before software exit! Do NOT send a duplicate exit order!
-                self._reconcile_open_live_intents_with_broker([intent], now_dt=now_dt)
+                self._reconcile_open_live_intents_with_broker(
+                    [intent], now_dt=now_dt, pending_ids_to_verify=set()
+                )
                 still_open = [p for p in self.get_active_live_positions() if p.get("order_intent_id") == intent_id]
                 if not still_open:
                     return {"exited": True, "order_intent_id": intent_id, "already_closed_by_sl": True}
@@ -1986,12 +2026,26 @@ class AdvanceLiveBridge:
             )
 
         exit_fill = paper_exit
+        part_acc = self._partial_exit_accum.get(intent_id)
+        if part_acc and int(part_acc.get("exited_qty") or 0) > 0:
+            prev_ex_qty = int(part_acc.get("exited_qty") or 0)
+            prev_ex_notional = float(part_acc.get("exit_notional") or 0.0)
+            pnl_qty = prev_ex_qty + qty
+            eff_exit_fill = (
+                round((prev_ex_notional + (qty * exit_fill)) / pnl_qty, 2)
+                if prev_ex_notional > 0
+                else exit_fill
+            )
+        else:
+            pnl_qty = qty
+            eff_exit_fill = exit_fill
+
         if action == "BUY":
-            gross = round((exit_fill - entry_fill) * qty, 2)
+            gross = round((eff_exit_fill - entry_fill) * pnl_qty, 2)
             costs = calculate_option_trade_costs(
                 buy_price=entry_fill,
-                sell_price=exit_fill,
-                quantity=qty,
+                sell_price=eff_exit_fill,
+                quantity=pnl_qty,
                 apply_slippage=False,
                 trade_date=now_iso[:10],
             )
@@ -2000,8 +2054,8 @@ class AdvanceLiveBridge:
         else:
             res_c = calculate_short_option_trade_costs(
                 sell_entry_bid=entry_fill,
-                buy_exit_ask=exit_fill,
-                quantity=qty,
+                buy_exit_ask=eff_exit_fill,
+                quantity=pnl_qty,
                 apply_slippage=False,
                 trade_date=now_iso[:10],
             )
@@ -2015,7 +2069,8 @@ class AdvanceLiveBridge:
             conn.execute(
                 """
                 UPDATE option_advance_live_order_intents
-                SET exit_state = 'CONFIRMED_FLAT',
+                SET filled_quantity = ?,
+                    exit_state = 'CONFIRMED_FLAT',
                     exit_broker_order_id = ?,
                     exit_fill_price = ?,
                     exit_reason = ?,
@@ -2029,8 +2084,9 @@ class AdvanceLiveBridge:
                 WHERE order_intent_id = ?;
                 """,
                 (
+                    pnl_qty,
                     exit_oid,
-                    exit_fill,
+                    eff_exit_fill,
                     exit_reason,
                     paper_exit,
                     paper_net,
@@ -2184,6 +2240,8 @@ class AdvanceLiveBridge:
                     SELECT gross_pnl, statutory_charges, realized_pnl
                     FROM option_advance_live_order_intents
                     WHERE exit_state = 'CONFIRMED_FLAT'
+                      AND COALESCE(state, '') != 'CANCELLED'
+                      AND COALESCE(filled_quantity, 0) > 0
                       AND SUBSTR(created_at, 1, 10) = ?;
                     """,
                     (today,),
@@ -2248,7 +2306,7 @@ class AdvanceLiveBridge:
                             strike,
                             expiry,
                             lot_size,
-                            target_quantity AS quantity,
+                            COALESCE(NULLIF(filled_quantity, 0), target_quantity) AS quantity,
                             created_at AS entry_time,
                             updated_at AS exit_time,
                             average_fill_price AS entry_price_used,
@@ -2262,6 +2320,8 @@ class AdvanceLiveBridge:
                             exit_reason
                         FROM option_advance_live_order_intents
                         WHERE exit_state = 'CONFIRMED_FLAT'
+                          AND COALESCE(state, '') != 'CANCELLED'
+                          AND COALESCE(filled_quantity, 0) > 0
                         ORDER BY created_at ASC;
                         """
                     ).fetchall()
@@ -2407,6 +2467,8 @@ if _PREV_BRIDGE_INSTANCE is not None:
         _PREV_BRIDGE_INSTANCE._pending_exit_verifications = {}
     if not hasattr(_PREV_BRIDGE_INSTANCE, "_pending_exit_attempts"):
         _PREV_BRIDGE_INSTANCE._pending_exit_attempts = {}
+    if not hasattr(_PREV_BRIDGE_INSTANCE, "_partial_exit_accum"):
+        _PREV_BRIDGE_INSTANCE._partial_exit_accum = {}
     if not hasattr(_PREV_BRIDGE_INSTANCE, "_last_priority_quote_refresh_ts"):
         _PREV_BRIDGE_INSTANCE._last_priority_quote_refresh_ts = -999999.0
     _BRIDGE_INSTANCE = _PREV_BRIDGE_INSTANCE
