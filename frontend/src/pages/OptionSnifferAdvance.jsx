@@ -59,9 +59,13 @@ export default function OptionSnifferAdvance() {
   const [tradesData, setTradesData] = useState({ open_trades: [], closed_trades: [], pnl_summary: {} });
   const [signalsData, setSignalsData] = useState([]);
   const [calendarData, setCalendarData] = useState(null);
+  const defaultCurrentMonth = useMemo(
+    () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).slice(0, 7),
+    []
+  );
   const [activeTab, setActiveTab] = useState('calendar');
   const [bookFilter, setBookFilter] = useState('ALL');
-  const [selectedMonth, setSelectedMonth] = useState('2026-11');
+  const [selectedMonth, setSelectedMonth] = useState(defaultCurrentMonth);
   const [selectedCalendarDay, setSelectedCalendarDay] = useState(null);
   const [loading, setLoading] = useState(true);
   const [sweeping, setSweeping] = useState(false);
@@ -283,57 +287,68 @@ export default function OptionSnifferAdvance() {
             }))
         : rawClosed.filter((t) => (bookFilter === 'ALL' ? true : t.book_type === bookFilter));
 
-    // Group by date YYYY-MM-DD
+    // Group by date YYYY-MM-DD, seeding from 8s calendarData and merging 1s fast-polled closed trades
     const dayMap = {};
+    const seenTradeIds = new Set();
     if (calendarData?.days && calendarData?.book_filter === bookFilter) {
       calendarData.days.forEach((d) => {
-        dayMap[d.date] = d;
-      });
-    } else {
-      filteredTrades.forEach((t) => {
-        const dt = String(t.trading_date || t.exit_time || t.entry_time || '').slice(0, 10);
-        if (!dt || dt.length < 10) return;
-        if (!dayMap[dt]) {
-          dayMap[dt] = {
-            date: dt,
-            month: dt.slice(0, 7),
-            trade_count: 0,
-            wins: 0,
-            losses: 0,
-            win_rate: 0,
-            gross_pnl_rupees: 0,
-            charges_rupees: 0,
-            net_pnl_rupees: 0,
-            long_book_net_pnl: 0,
-            short_book_net_pnl: 0,
-            long_book_trades: 0,
-            short_book_trades: 0,
-            trades: [],
-          };
-        }
-        const rec = dayMap[dt];
-        const net = Number(t.net_pnl || 0);
-        const gross = Number(t.gross_pnl ?? net);
-        const chg = Number(t.charges || 0);
-        rec.trade_count += 1;
-        if (net > 0) rec.wins += 1;
-        else rec.losses += 1;
-        rec.gross_pnl_rupees = Number((rec.gross_pnl_rupees + gross).toFixed(2));
-        rec.charges_rupees = Number((rec.charges_rupees + chg).toFixed(2));
-        rec.net_pnl_rupees = Number((rec.net_pnl_rupees + net).toFixed(2));
-        if (t.book_type === 'LONG_BOOK_BUY') {
-          rec.long_book_net_pnl = Number((rec.long_book_net_pnl + net).toFixed(2));
-          rec.long_book_trades += 1;
-        } else {
-          rec.short_book_net_pnl = Number((rec.short_book_net_pnl + net).toFixed(2));
-          rec.short_book_trades += 1;
-        }
-        rec.win_rate = Number(((rec.wins / rec.trade_count) * 100).toFixed(1));
-        rec.trades.push(t);
+        const clonedTrades = Array.isArray(d.trades) ? [...d.trades] : [];
+        clonedTrades.forEach((tr) => {
+          if (tr?.trade_id) seenTradeIds.add(String(tr.trade_id));
+        });
+        dayMap[d.date] = {
+          ...d,
+          trades: clonedTrades,
+        };
       });
     }
 
-    const monthSet = new Set(['2026-11', '2026-10']);
+    filteredTrades.forEach((t) => {
+      const tid = t?.trade_id ? String(t.trade_id) : null;
+      if (tid && seenTradeIds.has(tid)) return;
+      const dt = String(t.trading_date || t.exit_time || t.entry_time || '').slice(0, 10);
+      if (!dt || dt.length < 10) return;
+      if (tid) seenTradeIds.add(tid);
+      if (!dayMap[dt]) {
+        dayMap[dt] = {
+          date: dt,
+          month: dt.slice(0, 7),
+          trade_count: 0,
+          wins: 0,
+          losses: 0,
+          win_rate: 0,
+          gross_pnl_rupees: 0,
+          charges_rupees: 0,
+          net_pnl_rupees: 0,
+          long_book_net_pnl: 0,
+          short_book_net_pnl: 0,
+          long_book_trades: 0,
+          short_book_trades: 0,
+          trades: [],
+        };
+      }
+      const rec = dayMap[dt];
+      const net = Number(t.net_pnl || 0);
+      const gross = Number(t.gross_pnl ?? net);
+      const chg = Number(t.charges || 0);
+      rec.trade_count += 1;
+      if (net > 0) rec.wins += 1;
+      else rec.losses += 1;
+      rec.gross_pnl_rupees = Number((rec.gross_pnl_rupees + gross).toFixed(2));
+      rec.charges_rupees = Number((rec.charges_rupees + chg).toFixed(2));
+      rec.net_pnl_rupees = Number((rec.net_pnl_rupees + net).toFixed(2));
+      if (t.book_type === 'LONG_BOOK_BUY') {
+        rec.long_book_net_pnl = Number((rec.long_book_net_pnl + net).toFixed(2));
+        rec.long_book_trades += 1;
+      } else {
+        rec.short_book_net_pnl = Number((rec.short_book_net_pnl + net).toFixed(2));
+        rec.short_book_trades += 1;
+      }
+      rec.win_rate = Number(((rec.wins / rec.trade_count) * 100).toFixed(1));
+      rec.trades.push(t);
+    });
+
+    const monthSet = new Set([defaultCurrentMonth, '2026-11', '2026-10']);
     Object.keys(dayMap).forEach((d) => monthSet.add(d.slice(0, 7)));
     if (calendarData?.available_months) {
       calendarData.available_months.forEach((m) => monthSet.add(m));
@@ -341,7 +356,7 @@ export default function OptionSnifferAdvance() {
     const availableMonths = Array.from(monthSet).sort().reverse();
     const activeMonth = availableMonths.includes(selectedMonth)
       ? selectedMonth
-      : availableMonths[0] || '2026-11';
+      : availableMonths[0] || defaultCurrentMonth;
 
     // Compute month summary for activeMonth
     const monthDays = Object.values(dayMap).filter((d) => d.date.startsWith(activeMonth));
@@ -455,7 +470,12 @@ export default function OptionSnifferAdvance() {
       weekdayCells,
       dayMap,
     };
-  }, [calendarData, tradesData, liveRecentIntents, bookFilter, selectedMonth]);
+  }, [calendarData, tradesData, liveRecentIntents, bookFilter, selectedMonth, defaultCurrentMonth]);
+
+  const activeCalendarDay = useMemo(() => {
+    if (!selectedCalendarDay) return null;
+    return computedCalendar.dayMap[selectedCalendarDay.date] || selectedCalendarDay;
+  }, [selectedCalendarDay, computedCalendar]);
 
   const formatMonthLabel = (ym) => {
     if (!ym || !ym.includes('-')) return ym;
@@ -642,8 +662,22 @@ export default function OptionSnifferAdvance() {
           <div className="bg-slate-900/90 border border-slate-700/80 rounded-xl p-4">
             <div className="flex items-center justify-between text-xs text-slate-400 font-bold uppercase tracking-wider">
               <span>Capped Risk &amp; Trail</span>
-              <span className={`text-[10px] font-mono px-2 py-0.5 rounded ${statusData?.circuit_breaker?.is_tripped ? 'bg-rose-950 text-rose-300' : 'bg-emerald-950 text-emerald-300'}`}>
-                {statusData?.circuit_breaker?.is_tripped ? 'HALTED' : 'ARMED (PAPER)'}
+              <span
+                className={`text-[10px] font-mono px-2 py-0.5 rounded ${
+                  liveStatus?.circuit_breaker?.is_session_halted ||
+                  tradesData?.pnl_summary?.circuit_breaker?.is_tripped ||
+                  statusData?.circuit_breaker?.is_tripped
+                    ? 'bg-rose-950 text-rose-300'
+                    : 'bg-emerald-950 text-emerald-300'
+                }`}
+              >
+                {liveStatus?.circuit_breaker?.is_session_halted ||
+                tradesData?.pnl_summary?.circuit_breaker?.is_tripped ||
+                statusData?.circuit_breaker?.is_tripped
+                  ? 'HALTED'
+                  : isLiveArmed
+                  ? 'ARMED (LIVE)'
+                  : 'ARMED (PAPER)'}
               </span>
             </div>
             <div className="text-sm font-bold text-white mt-2 space-y-1 font-mono">
@@ -1124,7 +1158,7 @@ export default function OptionSnifferAdvance() {
       )}
 
       {/* DAY PERFORMANCE INSPECTOR MODAL (Click Any Calendar Day) */}
-      {selectedCalendarDay && (
+      {activeCalendarDay && (
         <div
           className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
           onClick={() => setSelectedCalendarDay(null)}
@@ -1138,20 +1172,20 @@ export default function OptionSnifferAdvance() {
                 <div className="flex items-center gap-2">
                   <CalendarIcon size={16} className="text-indigo-600" />
                   <h3 className="text-base font-black text-slate-900">
-                    Day Performance: {selectedCalendarDay.date}
+                    Day Performance: {activeCalendarDay.date}
                   </h3>
                   <span
                     className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold ${
-                      selectedCalendarDay.net_pnl_rupees >= 0
+                      activeCalendarDay.net_pnl_rupees >= 0
                         ? 'bg-emerald-100 text-emerald-700'
                         : 'bg-rose-100 text-rose-700'
                     }`}
                   >
-                    {formatINR(selectedCalendarDay.net_pnl_rupees)}
+                    {formatINR(activeCalendarDay.net_pnl_rupees)}
                   </span>
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Option Sniffer Advance Dual-Book Ledger • {selectedCalendarDay.trade_count} Closed Trades ({selectedCalendarDay.wins}W / {selectedCalendarDay.losses}L)
+                  Option Sniffer Advance Dual-Book Ledger • {activeCalendarDay.trade_count} Closed Trades ({activeCalendarDay.wins}W / {activeCalendarDay.losses}L)
                 </p>
               </div>
               <button
@@ -1168,36 +1202,36 @@ export default function OptionSnifferAdvance() {
                 <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
                   <div className="text-[10px] uppercase font-bold text-slate-400">Total Trades</div>
                   <div className="text-lg font-black text-slate-800 mt-0.5">
-                    {selectedCalendarDay.trade_count}
+                    {activeCalendarDay.trade_count}
                   </div>
                   <div className="text-[10px] font-mono text-slate-500">
-                    B1: {selectedCalendarDay.long_book_trades} | B2: {selectedCalendarDay.short_book_trades}
+                    B1: {activeCalendarDay.long_book_trades} | B2: {activeCalendarDay.short_book_trades}
                   </div>
                 </div>
                 <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
                   <div className="text-[10px] uppercase font-bold text-slate-400">Win Rate</div>
                   <div className="text-lg font-black text-emerald-600 mt-0.5">
-                    {selectedCalendarDay.win_rate}% ({selectedCalendarDay.wins}W/{selectedCalendarDay.losses}L)
+                    {activeCalendarDay.win_rate}% ({activeCalendarDay.wins}W/{activeCalendarDay.losses}L)
                   </div>
                 </div>
                 <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
                   <div className="text-[10px] uppercase font-bold text-slate-400">Book 1 vs Book 2</div>
                   <div className="text-xs font-mono font-bold mt-1 space-y-0.5">
-                    <div className="text-emerald-700">B1: {formatINR(selectedCalendarDay.long_book_net_pnl)}</div>
-                    <div className="text-cyan-700">B2: {formatINR(selectedCalendarDay.short_book_net_pnl)}</div>
+                    <div className="text-emerald-700">B1: {formatINR(activeCalendarDay.long_book_net_pnl)}</div>
+                    <div className="text-cyan-700">B2: {formatINR(activeCalendarDay.short_book_net_pnl)}</div>
                   </div>
                 </div>
                 <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
                   <div className="text-[10px] uppercase font-bold text-slate-400">Net Realized P&amp;L</div>
                   <div
                     className={`text-lg font-black font-mono mt-0.5 ${
-                      selectedCalendarDay.net_pnl_rupees >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                      activeCalendarDay.net_pnl_rupees >= 0 ? 'text-emerald-600' : 'text-rose-600'
                     }`}
                   >
-                    {formatINR(selectedCalendarDay.net_pnl_rupees)}
+                    {formatINR(activeCalendarDay.net_pnl_rupees)}
                   </div>
                   <div className="text-[10px] font-mono text-slate-400">
-                    Charges: ₹{Number(selectedCalendarDay.charges_rupees || 0).toFixed(2)}
+                    Charges: ₹{Number(activeCalendarDay.charges_rupees || 0).toFixed(2)}
                   </div>
                 </div>
               </div>
@@ -1219,7 +1253,7 @@ export default function OptionSnifferAdvance() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {(selectedCalendarDay.trades || []).map((t, idx) => {
+                    {(activeCalendarDay.trades || []).map((t, idx) => {
                       const isLong = t.book_type === 'LONG_BOOK_BUY';
                       const isWin = Number(t.net_pnl || 0) > 0;
                       return (

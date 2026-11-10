@@ -1724,6 +1724,276 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
             self.assertIn("pnl_summary", status)
             self.assertEqual(spy_active.call_count, 1, "get_live_status() must call get_active_live_positions() exactly once!")
 
+    def test_29_decoupled_open_position_quote_never_blanks_mtm_on_scanner_spread_gate_or_age(self):
+        """
+        Round-5 Finding A1 Proof:
+          1. When an open contract's spread widens to `4.15%` (`> 3.5%` scanner entry hurdle) or its quote age is `16,000ms`
+             (`> 15,000ms`), `OptionStreamManager` sets `is_valid=False`.
+          2. Because `get_active_live_positions()` decouples open-position MTM/UI display from the scanner entry gate
+             (`cspread_pct <= 15.0`), `current_bid`, `current_ask`, and `unrealized_pnl` remain populated (never `None`).
+        """
+        self._insert_advance_paper_trade(
+            "ADV_MTM_2901",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=100.0,
+            entry_time="2026-11-09 12:30:00",
+        )
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 12, 29, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 30, 1))
+
+            with patch(
+                "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+            ) as mock_sm_cls:
+                # Case 1: 4.15% spread (is_valid=False from scanner 3.5% hurdle, but <= 15.0% open-position sanity cap)
+                mock_sm_cls.return_value.get_option_quote.return_value = {
+                    "instrument_key": "NSE_FO|65628",
+                    "bid": 98.0,
+                    "ask": 102.15,
+                    "ltp": 100.0,
+                    "spread_pct": 4.15,
+                    "quote_age_ms": 800,
+                    "is_valid": False,
+                }
+                active_1 = self.bridge.get_active_live_positions()
+                self.assertEqual(len(active_1), 1)
+                self.assertEqual(active_1[0].get("current_bid"), 98.0)
+                self.assertEqual(active_1[0].get("current_ask"), 102.15)
+                self.assertAlmostEqual(float(active_1[0].get("unrealized_pnl")), -195.0, places=2)
+
+                # Case 2: 16s quote age with 1.0% spread (is_valid=False from 15s hurdle, but book spread is sane)
+                mock_sm_cls.return_value.get_option_quote.return_value = {
+                    "instrument_key": "NSE_FO|65628",
+                    "bid": 104.0,
+                    "ask": 105.0,
+                    "ltp": 104.5,
+                    "spread_pct": 0.95,
+                    "quote_age_ms": 16000,
+                    "is_valid": False,
+                }
+                active_2 = self.bridge.get_active_live_positions()
+                self.assertEqual(active_2[0].get("current_bid"), 104.0)
+                self.assertAlmostEqual(float(active_2[0].get("unrealized_pnl")), 195.0, places=2)
+
+    def test_30_fallback_exit_quote_rejects_corrupt_wide_spread_bid_and_uses_ltp_with_emergency_collar(self):
+        """
+        Round-5 Finding B1 Proof:
+          During an emergency SOS exit when `OptionStreamManager` returns a corrupted wide-spread quote
+          (`bid=10.0, ask=160.0, ltp=150.0, spread_pct=100.0`), `_execute_mirrored_live_exit()` refuses to use
+          the corrupt `bid=10.0` and instead anchors to `ltp=150.0` with the 15% emergency collar (`127.50`).
+        """
+        self._insert_advance_paper_trade(
+            "ADV_BADQ_3001",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=150.0,
+            entry_time="2026-11-09 12:35:00",
+        )
+        call_log = []
+
+        def fake_badq_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                return True, 200, {"status": "success", "data": {"order_id": f"ORD_30_{len(call_log)}"}}
+            return True, 200, {"status": "success", "data": []}
+
+        self.mock_broker_api.side_effect = fake_badq_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ), patch(
+            "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+        ) as mock_sm_cls:
+            mock_sm_cls.return_value.get_option_quote.return_value = {
+                "instrument_key": "NSE_FO|65628",
+                "bid": 10.0,
+                "ask": 160.0,
+                "ltp": 150.0,
+                "spread_pct": 100.0,
+                "is_valid": False,
+            }
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 12, 34, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 35, 1))
+            call_log.clear()
+
+            sos_res = self.bridge.execute_sos_panic_exit()
+            self.assertEqual(sos_res["positions_flattened"], 1)
+            exit_orders = [c for c in call_log if c[0] == "POST" and c[1] == "/order/place"]
+            self.assertEqual(len(exit_orders), 1)
+            # Must anchor to ltp=150.0 * 0.85 = 127.50, NEVER corrupt bid=10.0 * 0.985 = 9.85!
+            self.assertAlmostEqual(float(exit_orders[0][2]["price"]), 127.50, places=2)
+
+    def test_31_exchange_sl_trigger_on_partial_entry_cancels_remaining_open_entry_and_uses_actual_sl_qty(self):
+        """
+        Round-5 Finding B2 Proof:
+          When `broker_sl_order_id` completes (`status == 'complete'`, `filled_quantity == 65`) while the
+          130-qty entry order (`ENTRY_3101`) still has 65 sitting `'open'` on NSE:
+            1. Section A cancels `ENTRY_3101` (`DELETE /order/cancel`) so the residual 65 never fills later.
+            2. Section A computes `realized_pnl` and `filled_quantity` using `sl_qty = 65` (NOT `target_qty = 130`).
+        """
+        self._insert_advance_paper_trade(
+            "ADV_PARTIAL_SL_3101",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=140.0,
+            entry_time="2026-11-09 12:40:00",
+        )
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE option_sniffer_advance_trades SET quantity=130 WHERE trade_id='ADV_PARTIAL_SL_3101';")
+        conn.commit()
+        conn.close()
+
+        cancel_oids = []
+
+        def fake_partial_sl_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            if method == "POST" and endpoint == "/order/place":
+                if (payload or {}).get("order_type") == "SL":
+                    return True, 200, {"status": "success", "data": {"order_id": "SL_3101"}}
+                return True, 200, {"status": "success", "data": {"order_id": "ENTRY_3101"}}
+            if method == "DELETE" and endpoint == "/order/cancel":
+                cancel_oids.append((params or {}).get("order_id"))
+                return True, 200, {"status": "success", "data": {}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return True, 200, {
+                    "status": "success",
+                    "data": [
+                        {
+                            "order_id": "ENTRY_3101",
+                            "status": "open",
+                            "quantity": 130,
+                            "filled_quantity": 65,
+                            "average_price": 140.0,
+                        },
+                        {
+                            "order_id": "SL_3101",
+                            "status": "complete",
+                            "quantity": 65,
+                            "filled_quantity": 65,
+                            "average_price": 112.0,
+                        },
+                    ],
+                }
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_partial_sl_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 12, 39, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 40, 1))
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 40, 5))
+
+            self.assertIn("ENTRY_3101", cancel_oids, "Must cancel remaining open entry leg when SL completes!")
+            intents = self.bridge.get_recent_order_intents(limit=1)
+            self.assertEqual(intents[0]["exit_state"], "CONFIRMED_FLAT")
+            self.assertEqual(intents[0]["filled_quantity"], 65)
+            # Gross loss on 65 qty (`(112 - 140) * 65 = -1820.0`), NOT 130 qty (`-3640.0`)!
+            self.assertAlmostEqual(float(intents[0]["gross_pnl"]), -1820.0, places=2)
+
+    def test_32_long_book_only_excludes_unmirrored_short_paper_trade_from_rest_refresh_and_live_entry_collar_chases_up_to_1_5_pct(self):
+        """
+        Round-5 Findings B3 & B4 Proof:
+          1. In `LONG_BOOK_ONLY` mode, an open `SHORT_BOOK_SELL` paper trade is pinned to `_key_to_contract`
+             (for WebSocket V3) but excluded from `main_leg_keys` so its stale quote never triggers `refresh_quotes_via_rest()`.
+          2. When a `LONG_BOOK_BUY` trade opens at `₹100.0` and the live stream Ask is `₹100.80` (`+0.80% <= 1.5%`),
+             `_execute_mirrored_live_entry()` anchors `limit_price` to `min(100.80 * 1.006, 100.0 * 1.015) = ₹101.40`.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_SHORT_ONLY_3201",
+            book_type="SHORT_BOOK_SELL",
+            action="SELL",
+            status="OPEN",
+            entry_price=110.0,
+            entry_time="2026-11-09 12:45:00",
+        )
+        fake_k2c = {}
+        with patch(
+            "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+        ) as mock_sm_cls:
+            sm_inst = mock_sm_cls.return_value
+            sm_inst._key_to_contract = fake_k2c
+            sm_inst._lock = None
+            sm_inst.get_option_quote.return_value = {
+                "instrument_key": "NSE_FO|65628",
+                "bid": 110.0,
+                "ask": 111.0,
+                "ltp": 110.5,
+                "quote_age_ms": 9000,
+                "is_valid": True,
+            }
+            self.bridge._is_live_armed = True
+            self.bridge._execution_mode = MODE_LONG_BOOK_ONLY
+            self.bridge._last_priority_quote_refresh_ts = -999999.0
+            res = self.bridge._prioritize_advance_real_time_ticks(active_intents=[], now_dt=datetime(2026, 11, 9, 12, 45, 5))
+            self.assertIn("NSE_FO|65628", fake_k2c, "Must still pin to WebSocket V3!")
+            self.assertFalse(res["refreshed_via_rest"], "Unmirrored Book 2 trade in LONG_BOOK_ONLY must NOT trigger REST refresh!")
+            sm_inst.refresh_quotes_via_rest.assert_not_called()
+
+        # Part 2: Verify B4 live entry Ask drift collar (+0.8% drift -> 100.80 * 1.006 = 101.40)
+        self._insert_advance_paper_trade(
+            "ADV_DRIFT_BUY_3202",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=100.0,
+            entry_time="2026-11-09 12:46:00",
+        )
+        placed_prices = []
+
+        def fake_drift_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            if method == "POST" and endpoint == "/order/place" and (payload or {}).get("order_type") == "LIMIT":
+                placed_prices.append(float(payload["price"]))
+            return True, 200, {"status": "success", "data": {"order_id": f"ORD_32_{len(placed_prices)}"}}
+
+        self.mock_broker_api.side_effect = fake_drift_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ), patch(
+            "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+        ) as mock_sm_cls:
+            mock_sm_cls.return_value.get_option_quote.return_value = {
+                "instrument_key": "NSE_FO|65628",
+                "bid": 100.20,
+                "ask": 100.80,
+                "ltp": 100.50,
+                "spread_pct": 0.60,
+                "quote_age_ms": 200,
+                "is_valid": True,
+            }
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 12, 45, 30),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 12, 46, 1))
+            self.assertEqual(len(placed_prices), 1)
+            self.assertAlmostEqual(placed_prices[0], 101.40, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

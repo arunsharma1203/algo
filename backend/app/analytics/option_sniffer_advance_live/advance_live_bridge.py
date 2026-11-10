@@ -608,13 +608,14 @@ class AdvanceLiveBridge:
             with self._get_ro_conn() as ro_conn:
                 open_p_rows = ro_conn.execute(
                     """
-                    SELECT instrument_key, trading_symbol, underlying, strike, option_type, expiry, lot_size
+                    SELECT instrument_key, trading_symbol, underlying, strike, option_type, expiry, lot_size, book_type
                     FROM option_sniffer_advance_trades
                     WHERE status = 'OPEN';
                     """
                 ).fetchall()
                 for r in open_p_rows:
                     pk = str(r["instrument_key"] or "").strip()
+                    btype = str(r["book_type"] or BOOK_LONG_BUY)
                     if pk:
                         if pk not in priority_contracts:
                             priority_contracts[pk] = {
@@ -626,6 +627,10 @@ class AdvanceLiveBridge:
                                 "expiry": r["expiry"] or "",
                                 "lot_size": int(r["lot_size"] or 65),
                             }
+                        if self._execution_mode == MODE_LONG_BOOK_ONLY and btype != BOOK_LONG_BUY:
+                            # In LONG_BOOK_ONLY mode, Book 2 stays strictly in Paper Sandbox (not mirrored live);
+                            # still pin to WebSocket V3 (`priority_contracts`), but exclude from REST-fallback rate-limit budget!
+                            continue
                         if pk not in main_leg_keys:
                             main_leg_keys.append(pk)
         except Exception:
@@ -1029,13 +1034,40 @@ class AdvanceLiveBridge:
         paper_entry = float(paper_trade.get("entry_price_used") or 0.0)
         sl_pct = float(paper_trade.get("stop_loss_pct") or (16.0 if action == "SELL" else 20.0))
 
-        # Marketable limit buffer (0.6% above Ask for BUY; 0.6% below Bid for SELL)
+        # Marketable limit buffer (0.6% above Ask for BUY; 0.6% below Bid for SELL).
+        # If the live stream Ask/Bid has drifted slightly (within a safe 1.5% chase cap) between the paper signal
+        # and the 250ms follower sync, anchor the marketable limit price to the live Ask/Bid so a fast Wave-1
+        # impulse doesn't leave the entry LIMIT order sitting unfilled.
+        ref_entry = paper_entry
+        if paper_entry > 0:
+            try:
+                stream_mgr = OptionStreamManager()
+                q_ent = stream_mgr.get_option_quote(ikey)
+                if isinstance(q_ent, dict) and q_ent.get("instrument_key") in (None, ikey):
+                    q_b = float(q_ent.get("bid") or 0.0)
+                    q_a = float(q_ent.get("ask") or 0.0)
+                    q_age = float(q_ent.get("quote_age_ms") or 0.0)
+                    q_sp = (
+                        float(q_ent.get("spread_pct"))
+                        if q_ent.get("spread_pct") is not None
+                        else (((q_a - q_b) / ((q_a + q_b) / 2.0)) * 100.0 if (q_a + q_b) > 0 else 999.0)
+                    )
+                    if q_b > 0.0 and q_a >= q_b and q_sp <= 10.0 and q_age <= 5000.0:
+                        if action == "BUY" and q_a > paper_entry and ((q_a - paper_entry) / paper_entry) <= 0.015:
+                            ref_entry = q_a
+                        elif action == "SELL" and 0.0 < q_b < paper_entry and ((paper_entry - q_b) / paper_entry) <= 0.015:
+                            ref_entry = q_b
+            except Exception:
+                ref_entry = paper_entry
+
         if action == "BUY":
-            limit_price = round_to_tick(paper_entry * 1.006)
+            limit_price = round_to_tick(min(ref_entry * 1.006, paper_entry * 1.015) if paper_entry > 0 else ref_entry * 1.006)
             sl_trigger = round_to_tick(paper_entry * (1.0 - sl_pct / 100.0))
             sl_limit = round_to_tick(sl_trigger * 0.985)
         else:
-            limit_price = round_to_tick(max(0.05, paper_entry * 0.994))
+            limit_price = round_to_tick(
+                max(0.05, max(ref_entry * 0.994, paper_entry * 0.985) if paper_entry > 0 else ref_entry * 0.994)
+            )
             sl_trigger = round_to_tick(paper_entry * (1.0 + sl_pct / 100.0))
             sl_limit = round_to_tick(sl_trigger * 1.015)
 
@@ -1386,24 +1418,42 @@ class AdvanceLiveBridge:
 
                 # A. Check if Exchange-Resting SL-L Order triggered and completed on Upstox (or was rejected/cancelled)
                 sl_oid = str(intent.get("broker_sl_order_id") or "")
+                entry_oid = str(intent.get("broker_order_id") or "")
                 if sl_oid and sl_oid in order_map:
                     sl_ord = order_map[sl_oid]
                     sl_status = str(sl_ord.get("status") or "").lower()
                     if sl_status == "complete":
+                        sl_qty = int(sl_ord.get("filled_quantity") or sl_ord.get("quantity") or qty or target_qty)
+                        # If entry order was only partially filled and still has an open working leg on NSE, cancel it immediately!
+                        ent_ord_a = order_map.get(entry_oid) or {}
+                        ent_st_a = str(ent_ord_a.get("status") or "").lower()
+                        if entry_oid and (
+                            str(intent.get("state") or "").upper() in ("PARTIALLY_FILLED", "SUBMITTED")
+                            or ent_st_a in ("open", "trigger pending", "validation pending", "put order req received")
+                        ):
+                            try:
+                                engine._call_upstox_broker_api(
+                                    "DELETE",
+                                    "/order/cancel",
+                                    params={"order_id": str(entry_oid)},
+                                    is_emergency=True,
+                                )
+                            except Exception:
+                                pass
                         sl_fill = float(sl_ord.get("average_price") or intent.get("stop_loss_trigger") or entry_fill)
                         if action == "SELL" and intent.get("hedge_wing_instrument_key"):
                             self._flatten_hedge_wing_if_present(
                                 hedge_wing_ikey=str(intent.get("hedge_wing_instrument_key")),
                                 hedge_wing_oid=intent.get("hedge_wing_broker_order_id"),
-                                qty=target_qty,
+                                qty=sl_qty,
                                 intent_id=intent_id,
                             )
                         if action == "BUY":
-                            gross = round((sl_fill - entry_fill) * target_qty, 2)
+                            gross = round((sl_fill - entry_fill) * sl_qty, 2)
                             costs = calculate_option_trade_costs(
                                 buy_price=entry_fill,
                                 sell_price=sl_fill,
-                                quantity=target_qty,
+                                quantity=sl_qty,
                                 apply_slippage=False,
                                 trade_date=now_iso[:10],
                             )
@@ -1413,7 +1463,7 @@ class AdvanceLiveBridge:
                             res_c = calculate_short_option_trade_costs(
                                 sell_entry_bid=entry_fill,
                                 buy_exit_ask=sl_fill,
-                                quantity=target_qty,
+                                quantity=sl_qty,
                                 apply_slippage=False,
                                 trade_date=now_iso[:10],
                             )
@@ -1425,7 +1475,9 @@ class AdvanceLiveBridge:
                             conn.execute(
                                 """
                                 UPDATE option_advance_live_order_intents
-                                SET exit_state = 'CONFIRMED_FLAT',
+                                SET state = 'FILLED',
+                                    filled_quantity = ?,
+                                    exit_state = 'CONFIRMED_FLAT',
                                     exit_broker_order_id = ?,
                                     exit_fill_price = ?,
                                     exit_reason = 'EXCHANGE_SL_ORDER_TRIGGERED',
@@ -1435,7 +1487,7 @@ class AdvanceLiveBridge:
                                     updated_at = ?
                                 WHERE order_intent_id = ?;
                                 """,
-                                (sl_oid, sl_fill, gross, charges, net_pnl, now_iso, intent_id),
+                                (sl_qty, sl_oid, sl_fill, gross, charges, net_pnl, now_iso, intent_id),
                             )
                             conn.commit()
                         continue
@@ -1720,11 +1772,23 @@ class AdvanceLiveBridge:
                     q = q_res
             except Exception:
                 q = {}
-            side_px = q.get("bid") if exit_tx_type == "SELL" else q.get("ask")
-            cand_px = side_px if (side_px is not None and float(side_px or 0.0) > 0) else q.get("ltp")
-            if cand_px is not None and float(cand_px or 0.0) > 0:
+            q_bid = float(q.get("bid") or 0.0)
+            q_ask = float(q.get("ask") or 0.0)
+            q_ltp = float(q.get("ltp") or 0.0)
+            if q_bid > 0.0 and q_ask >= q_bid:
+                q_spread_pct = (
+                    float(q.get("spread_pct"))
+                    if q.get("spread_pct") is not None
+                    else (((q_ask - q_bid) / ((q_ask + q_bid) / 2.0)) * 100.0 if (q_ask + q_bid) > 0 else 0.0)
+                )
+                q_book_sane = q_spread_pct <= 15.0
+            else:
+                q_book_sane = False
+            side_px = (q_bid if exit_tx_type == "SELL" else q_ask) if q_book_sane else 0.0
+            cand_px = side_px if side_px > 0.0 else q_ltp
+            if cand_px > 0.0:
                 paper_exit = float(cand_px)
-                has_live_exit_quote = True
+                has_live_exit_quote = bool(q_book_sane)
             else:
                 paper_exit = float(entry_fill if entry_fill > 0 else 100.0)
 
@@ -2051,16 +2115,24 @@ class AdvanceLiveBridge:
                     ikey = pos.get("instrument_key")
                     q = stream_mgr.get_option_quote(ikey) if ikey else None
                     if isinstance(q, dict) and q:
-                        cbid = float(q.get("bid") or q.get("ltp") or 0.0)
-                        cask = float(q.get("ask") or q.get("ltp") or cbid)
-                        cspread_pct = (
-                            float(q.get("spread_pct"))
-                            if q.get("spread_pct") is not None
-                            else (((cask - cbid) / ((cask + cbid) / 2.0)) * 100.0 if (cask + cbid) > 0 else 0.0)
-                        )
+                        raw_bid = float(q.get("bid") or 0.0)
+                        raw_ask = float(q.get("ask") or 0.0)
+                        cltp = float(q.get("ltp") or 0.0)
+                        cbid = raw_bid if raw_bid > 0.0 else cltp
+                        cask = raw_ask if raw_ask > 0.0 else (cltp if cltp >= cbid else cbid)
+                        if raw_bid > 0.0 and raw_ask >= raw_bid:
+                            cspread_pct = (
+                                float(q.get("spread_pct"))
+                                if q.get("spread_pct") is not None
+                                else (((cask - cbid) / ((cask + cbid) / 2.0)) * 100.0 if (cask + cbid) > 0 else 0.0)
+                            )
+                        else:
+                            cspread_pct = 0.0 if cbid > 0.0 else 999.0
+                        # Decoupled Open-Position Quote Contract:
+                        # Do NOT couple open-position MTM/UI display to scanner entry gate `q["is_valid"]` (which rejects >3.5% spread or >15s age).
+                        # Instead, enforce open-position book sanity (`cbid > 0 and cask >= cbid and cspread_pct <= 15.0`).
                         quote_usable = (
-                            q.get("is_valid") is not False
-                            and cbid > 0.0
+                            cbid > 0.0
                             and cask >= cbid
                             and cspread_pct <= 15.0
                         )
@@ -2076,6 +2148,8 @@ class AdvanceLiveBridge:
                                 else:
                                     gross = 0.0
                                 pos["unrealized_pnl"] = round(gross - 65.0, 2)
+                        elif cltp > 0.0:
+                            pos["current_ltp"] = round(cltp, 2)
             return positions
         except Exception as e:
             logger.debug(f"[AdvanceLiveBridge] Active positions query note: {e}")
