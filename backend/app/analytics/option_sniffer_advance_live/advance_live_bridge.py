@@ -65,8 +65,9 @@ MIN_MARGIN_LONG_ONLY_INR: float = 18000.0
 MIN_MARGIN_DUAL_HEDGED_INR: float = 42000.0
 MIN_MARGIN_DUAL_NAKED_INR: float = 150000.0
 
-_BRIDGE_LOCK = threading.RLock()
-_BRIDGE_INSTANCE: Optional["AdvanceLiveBridge"] = None
+_BRIDGE_LOCK = globals().get("_BRIDGE_LOCK") or threading.RLock()
+_PREV_BRIDGE_INSTANCE = globals().get("_BRIDGE_INSTANCE")
+_BRIDGE_INSTANCE: Optional["AdvanceLiveBridge"] = _PREV_BRIDGE_INSTANCE
 
 
 def init_advance_live_tables(db_path: Optional[str] = None) -> None:
@@ -226,12 +227,25 @@ class AdvanceLiveBridge:
     def get_circuit_breaker_status(self, session_date: Optional[str] = None) -> Dict[str, Any]:
         today = session_date or to_ist_naive().strftime("%Y-%m-%d")
         realized_pnl = 0.0
+        unrealized_pnl = 0.0
         consec_losses = 0
         tripped = False
         reason = None
         try:
             with self._get_ro_conn() as conn:
                 cur = conn.cursor()
+                latch_row = cur.execute(
+                    """
+                    SELECT circuit_breaker_tripped, trip_reason
+                    FROM option_advance_live_risk_ledger
+                    WHERE session_date = ? LIMIT 1;
+                    """,
+                    (today,),
+                ).fetchone()
+                if latch_row and int(latch_row[0] or 0) == 1:
+                    tripped = True
+                    reason = str(latch_row[1] or "Daily Live Loss Ceiling Reached")
+
                 rows = cur.execute(
                     """
                     SELECT realized_pnl FROM option_advance_live_order_intents
@@ -248,15 +262,49 @@ class AdvanceLiveBridge:
                         consec_losses += 1
                     else:
                         consec_losses = 0
-                if realized_pnl <= -MAX_DAILY_COMBINED_LOSS_INR:
-                    tripped = True
-                    reason = f"Daily Live Loss Ceiling Reached (₹{realized_pnl:,.2f} <= -₹{MAX_DAILY_COMBINED_LOSS_INR:,.2f})"
+
+            for pos in self.get_active_live_positions():
+                if str(pos.get("created_at") or "")[:10] == today:
+                    unrealized_pnl += float(pos.get("unrealized_pnl") or 0.0)
+
+            total_exposure_pnl = realized_pnl + min(0.0, unrealized_pnl)
+            if realized_pnl <= -MAX_DAILY_COMBINED_LOSS_INR:
+                tripped = True
+                reason = f"Daily Live Loss Ceiling Reached (₹{realized_pnl:,.2f} <= -₹{MAX_DAILY_COMBINED_LOSS_INR:,.2f})"
+            elif total_exposure_pnl <= -MAX_DAILY_COMBINED_LOSS_INR:
+                tripped = True
+                reason = (
+                    f"Daily Live Total Exposure Ceiling Reached "
+                    f"(₹{total_exposure_pnl:,.2f} [Realized ₹{realized_pnl:,.2f} + Open MTM ₹{unrealized_pnl:,.2f}] "
+                    f"<= -₹{MAX_DAILY_COMBINED_LOSS_INR:,.2f})"
+                )
+
+            if tripped:
+                now_iso = to_ist_naive().strftime("%Y-%m-%d %H:%M:%S")
+                with self._get_rw_conn() as rw_conn:
+                    rw_conn.execute(
+                        """
+                        INSERT INTO option_advance_live_risk_ledger
+                        (session_date, realized_pnl_inr, consecutive_losses, circuit_breaker_tripped, trip_reason, updated_at)
+                        VALUES (?, ?, ?, 1, ?, ?)
+                        ON CONFLICT(session_date) DO UPDATE SET
+                            realized_pnl_inr = excluded.realized_pnl_inr,
+                            consecutive_losses = excluded.consecutive_losses,
+                            circuit_breaker_tripped = 1,
+                            trip_reason = excluded.trip_reason,
+                            updated_at = excluded.updated_at;
+                        """,
+                        (today, round(realized_pnl, 2), consec_losses, reason, now_iso),
+                    )
+                    rw_conn.commit()
         except Exception as e:
             logger.debug(f"[AdvanceLiveBridge] Circuit breaker check note: {e}")
 
         return {
             "session_date": today,
             "realized_pnl_inr": round(realized_pnl, 2),
+            "unrealized_pnl_inr": round(unrealized_pnl, 2),
+            "total_exposure_pnl_inr": round(realized_pnl + min(0.0, unrealized_pnl), 2),
             "max_daily_loss_inr": MAX_DAILY_COMBINED_LOSS_INR,
             "consecutive_losses": consec_losses,
             "is_session_halted": tripped,
@@ -503,16 +551,27 @@ class AdvanceLiveBridge:
     ) -> Dict[str, Any]:
         """
         Single deterministic pass of the SQLite WAL Follower:
+          0. Enforces 15:15 IST session cutoff and date-rollover auto-disarm directly inside the background follower.
           1. Checks all active live intents against `option_sniffer_advance_trades`:
-             if the parent paper trade is now `CLOSED`, immediately fires the live broker square-off!
-          2. If `_is_live_armed` is True, checks for any newly opened (`status = 'OPEN'`) trade in
-             `option_sniffer_advance_trades` and mirrors it to Upstox according to `_execution_mode`.
+             if the parent paper trade is now `CLOSED` (or past 15:15 IST cutoff), immediately fires the live broker square-off!
+          2. If `_is_live_armed` is True, checks for any newly opened (`status = 'OPEN'` and `entry_time >= _armed_at_iso`)
+             trade in `option_sniffer_advance_trades` and mirrors it to Upstox according to `_execution_mode`.
         """
         now_dt = to_ist_naive(now_dt or as_of_time)
         today_str = now_dt.strftime("%Y-%m-%d")
+        is_past_cutoff = now_dt.time() >= dt_time(15, 15)
         mirrored_entries: List[str] = []
         mirrored_exits: List[str] = []
         skipped_by_mode: List[Dict[str, Any]] = []
+
+        with self._op_lock:
+            if self._is_live_armed:
+                if self._armed_for_date and self._armed_for_date != today_str:
+                    logger.info("[AdvanceLiveBridge] 1-day session expired on date rollover in follower sync. Reverting to Paper Mode.")
+                    self._is_live_armed = False
+                elif is_past_cutoff:
+                    logger.info("[AdvanceLiveBridge] Session cutoff (15:15 IST) reached in follower sync. Reverting to Paper Mode.")
+                    self._is_live_armed = False
 
         # 1. Check Exits & Reconcile Broker Order Book FIRST (Always active even if disarmed while a live position was open)
         active_intents = self.get_active_live_positions()
@@ -526,20 +585,33 @@ class AdvanceLiveBridge:
                     ro_cur = ro_conn.cursor()
                     for intent in active_intents:
                         adv_tid = intent.get("advance_trade_id")
-                        if not adv_tid:
-                            continue
-                        prow = ro_cur.execute(
-                            """
-                            SELECT status, exit_price_used, exit_bid, exit_ask, exit_reason, net_pnl
-                            FROM option_sniffer_advance_trades
-                            WHERE trade_id = ? LIMIT 1;
-                            """,
-                            (adv_tid,),
-                        ).fetchone()
+                        prow = None
+                        if adv_tid:
+                            prow = ro_cur.execute(
+                                """
+                                SELECT status, exit_price_used, exit_bid, exit_ask, exit_reason, net_pnl
+                                FROM option_sniffer_advance_trades
+                                WHERE trade_id = ? LIMIT 1;
+                                """,
+                                (adv_tid,),
+                            ).fetchone()
                         if prow and str(prow["status"] or "").upper() == "CLOSED":
                             res = self._execute_mirrored_live_exit(
                                 intent=intent,
                                 paper_row=dict(prow),
+                                now_dt=now_dt,
+                            )
+                            if res.get("exited"):
+                                mirrored_exits.append(intent["order_intent_id"])
+                        elif is_past_cutoff:
+                            # Force-flatten any open live position at 15:15 IST cutoff even if paper row hasn't closed yet
+                            res = self._execute_mirrored_live_exit(
+                                intent=intent,
+                                paper_row={
+                                    "exit_price_used": intent.get("current_bid") if intent.get("action") == "BUY" else intent.get("current_ask"),
+                                    "exit_reason": "SESSION_CUTOFF_1515_AUTO_EXIT",
+                                    "net_pnl": intent.get("unrealized_pnl", 0.0),
+                                },
                                 now_dt=now_dt,
                             )
                             if res.get("exited"):
@@ -582,6 +654,7 @@ class AdvanceLiveBridge:
             logger.debug(f"[AdvanceLiveBridge] Read open paper trades note: {e}")
             open_rows = []
 
+        armed_ts_norm = str(self._armed_at_iso or "").strip().replace("T", " ")[:19]
         for prow in open_rows:
             pdict = dict(prow)
             adv_tid = str(pdict.get("trade_id") or "")
@@ -592,6 +665,20 @@ class AdvanceLiveBridge:
                 continue
 
             book_type = str(pdict.get("book_type") or BOOK_LONG_BUY)
+            entry_ts_norm = str(pdict.get("entry_time") or "").strip().replace("T", " ")[:19]
+            if armed_ts_norm and entry_ts_norm and entry_ts_norm < armed_ts_norm:
+                # Never retroactively mirror a stale paper trade that opened BEFORE the user armed live trading
+                skipped_by_mode.append(
+                    {
+                        "trade_id": adv_tid,
+                        "book_type": book_type,
+                        "reason": "PRE_ARM_OPEN_TRADE_SKIPPED",
+                        "entry_time": entry_ts_norm,
+                        "armed_at": armed_ts_norm,
+                    }
+                )
+                continue
+
             if self._execution_mode == MODE_LONG_BOOK_ONLY and book_type != BOOK_LONG_BUY:
                 # In LONG_BOOK_ONLY mode (for ₹55k wallet), Book 2 stays strictly in Paper Sandbox
                 skipped_by_mode.append(
@@ -624,6 +711,64 @@ class AdvanceLiveBridge:
                 return row is not None
         except Exception:
             return False
+
+    def _flatten_hedge_wing_if_present(
+        self,
+        hedge_wing_ikey: Optional[str],
+        hedge_wing_oid: Optional[str],
+        qty: int,
+        intent_id: str,
+    ) -> None:
+        """
+        Safeguard #4: Cancels or flattens the 200-pt OTM protective BUY wing whenever:
+          - The main SELL leg fails or is rejected on entry (prevents an untracked orphan wing),
+          - The main SELL leg's Exchange-Resting SL-L order triggers on Upstox, or
+          - The main SELL leg is closed via software/SOS exit.
+        """
+        if not hedge_wing_ikey and not hedge_wing_oid:
+            return
+        engine = get_order_intent_engine()
+        if hedge_wing_oid:
+            try:
+                engine._call_upstox_broker_api(
+                    "DELETE",
+                    "/order/cancel",
+                    params={"order_id": str(hedge_wing_oid)},
+                    is_emergency=True,
+                )
+            except Exception as h_cancel_err:
+                logger.debug(f"[AdvanceLiveBridge] Cancel hedge wing note: {h_cancel_err}")
+        if hedge_wing_ikey:
+            try:
+                hq = {}
+                try:
+                    stream_mgr = OptionStreamManager()
+                    hq = stream_mgr.get_option_quote(str(hedge_wing_ikey)) or {}
+                except Exception:
+                    hq = {}
+                if not isinstance(hq, dict):
+                    hq = {}
+                raw_h_bid = hq.get("bid") if (hq.get("bid") is not None and float(hq.get("bid") or 0.0) > 0) else hq.get("ltp")
+                h_bid = float(raw_h_bid if (raw_h_bid is not None and float(raw_h_bid or 0.0) > 0) else 2.0)
+                h_exit_limit = round_to_tick(max(0.05, h_bid * 0.90))
+                hedge_exit_payload = {
+                    "quantity": int(qty),
+                    "product": "I",
+                    "validity": "DAY",
+                    "price": float(h_exit_limit),
+                    "tag": sanitize_upstox_tag(f"hx-{intent_id[-14:]}"),
+                    "instrument_token": str(hedge_wing_ikey),
+                    "order_type": "LIMIT",
+                    "transaction_type": "SELL",
+                    "disclosed_quantity": 0,
+                    "trigger_price": 0.0,
+                    "is_amo": False,
+                }
+                engine._call_upstox_broker_api(
+                    "POST", "/order/place", payload=hedge_exit_payload, is_emergency=True
+                )
+            except Exception as he:
+                logger.warning(f"[AdvanceLiveBridge] Hedge wing flatten note: {he}")
 
     def _execute_mirrored_live_entry(
         self,
@@ -680,7 +825,8 @@ class AdvanceLiveBridge:
                         and abs(float(q_cand.get("strike") or 0.0) - hedge_wing_strike) < 1.0
                     ):
                         hedge_wing_ikey = str(q_cand.get("instrument_key") or "")
-                        wing_ask = float(q_cand.get("ask") or q_cand.get("ltp") or 25.0)
+                        raw_w_ask = q_cand.get("ask") if (q_cand.get("ask") is not None and float(q_cand.get("ask") or 0.0) > 0) else q_cand.get("ltp")
+                        wing_ask = float(raw_w_ask if (raw_w_ask is not None and float(raw_w_ask or 0.0) > 0) else 25.0)
                         wing_payload = {
                             "quantity": qty,
                             "product": "I",
@@ -755,6 +901,15 @@ class AdvanceLiveBridge:
             except Exception as sl_err:
                 logger.warning(f"[AdvanceLiveBridge] Exchange SL-L placement note for {intent_id}: {sl_err}")
         else:
+            # If the protective BUY hedge wing was placed right before the main SELL leg failed/rejected,
+            # immediately cancel and flatten the hedge wing so it never becomes an untracked orphan!
+            if hedge_wing_ikey or hedge_wing_oid:
+                self._flatten_hedge_wing_if_present(
+                    hedge_wing_ikey=hedge_wing_ikey,
+                    hedge_wing_oid=hedge_wing_oid,
+                    qty=qty,
+                    intent_id=intent_id,
+                )
             broker_oid = None
             state = "REJECTED"
             avg_fill = 0.0
@@ -827,10 +982,13 @@ class AdvanceLiveBridge:
         Safeguard #2: Reconciles open live intents against Upstox `/order/retrieve-all`:
           1. If the resting exchange `broker_sl_order_id` was triggered & completed on Upstox,
              immediately marks `exit_state = 'CONFIRMED_FLAT'` (`EXCHANGE_SL_ORDER_TRIGGERED`)
-             so the bridge never fires a duplicate exit order.
+             and flattens any protective hedge wing so the bridge never fires a duplicate exit order.
           2. If an entry `broker_order_id` was rejected/cancelled on the exchange with 0 fills,
-             cancels any resting SL and marks `state = 'CANCELLED'`, `exit_state = 'CONFIRMED_FLAT'`.
-          3. If the entry order completed with an actual exchange `average_price`, updates `average_fill_price`.
+             cancels any resting SL, flattens any hedge wing, and marks `state = 'CANCELLED'`, `exit_state = 'CONFIRMED_FLAT'`.
+          3. If an entry `broker_order_id` is still `'open'` (0 fills on exchange), transitions `state = 'SUBMITTED'`,
+             `filled_quantity = 0`, and cancels any premature SL until the entry fills.
+          4. If the entry order completed with an actual exchange `average_price`, updates `state = 'FILLED'`,
+             `average_fill_price`, and ensures a resting SL-L is active.
         """
         if not active_intents:
             return
@@ -856,6 +1014,7 @@ class AdvanceLiveBridge:
                 intent_id = str(intent.get("order_intent_id") or "")
                 action = str(intent.get("action") or "BUY").upper()
                 qty = int(intent.get("filled_quantity") or intent.get("target_quantity") or 65)
+                target_qty = int(intent.get("target_quantity") or qty or 65)
                 entry_fill = float(intent.get("average_fill_price") or intent.get("limit_price") or 0.0)
 
                 # A. Check if Exchange-Resting SL-L Order triggered and completed on Upstox
@@ -865,12 +1024,19 @@ class AdvanceLiveBridge:
                     sl_status = str(sl_ord.get("status") or "").lower()
                     if sl_status == "complete":
                         sl_fill = float(sl_ord.get("average_price") or intent.get("stop_loss_trigger") or entry_fill)
+                        if action == "SELL" and intent.get("hedge_wing_instrument_key"):
+                            self._flatten_hedge_wing_if_present(
+                                hedge_wing_ikey=str(intent.get("hedge_wing_instrument_key")),
+                                hedge_wing_oid=intent.get("hedge_wing_broker_order_id"),
+                                qty=target_qty,
+                                intent_id=intent_id,
+                            )
                         if action == "BUY":
-                            gross = round((sl_fill - entry_fill) * qty, 2)
+                            gross = round((sl_fill - entry_fill) * target_qty, 2)
                             costs = calculate_option_trade_costs(
                                 buy_price=entry_fill,
                                 sell_price=sl_fill,
-                                quantity=qty,
+                                quantity=target_qty,
                                 apply_slippage=False,
                                 trade_date=now_iso[:10],
                             )
@@ -880,7 +1046,7 @@ class AdvanceLiveBridge:
                             res_c = calculate_short_option_trade_costs(
                                 sell_entry_bid=entry_fill,
                                 buy_exit_ask=sl_fill,
-                                quantity=qty,
+                                quantity=target_qty,
                                 apply_slippage=False,
                                 trade_date=now_iso[:10],
                             )
@@ -907,7 +1073,7 @@ class AdvanceLiveBridge:
                             conn.commit()
                         continue
 
-                # B. Check Entry Order actual fill price or exchange cancellation/rejection
+                # B. Check Entry Order actual fill price, working open state, or exchange cancellation/rejection
                 entry_oid = str(intent.get("broker_order_id") or "")
                 if entry_oid and entry_oid in order_map:
                     ent_ord = order_map[entry_oid]
@@ -916,13 +1082,29 @@ class AdvanceLiveBridge:
                     exch_qty = int(ent_ord.get("filled_quantity") or 0)
                     if ent_status in ("rejected", "cancelled") and exch_qty == 0:
                         if sl_oid:
-                            engine.cancel_broker_order(sl_oid)
+                            try:
+                                engine._call_upstox_broker_api(
+                                    "DELETE",
+                                    "/order/cancel",
+                                    params={"order_id": str(sl_oid)},
+                                    is_emergency=True,
+                                )
+                            except Exception:
+                                pass
+                        if action == "SELL" and (intent.get("hedge_wing_instrument_key") or intent.get("hedge_wing_broker_order_id")):
+                            self._flatten_hedge_wing_if_present(
+                                hedge_wing_ikey=intent.get("hedge_wing_instrument_key"),
+                                hedge_wing_oid=intent.get("hedge_wing_broker_order_id"),
+                                qty=target_qty,
+                                intent_id=intent_id,
+                            )
                         rej_msg = str(ent_ord.get("status_message") or f"Exchange {ent_status}")
                         with self._get_rw_conn() as conn:
                             conn.execute(
                                 """
                                 UPDATE option_advance_live_order_intents
                                 SET state = 'CANCELLED',
+                                    filled_quantity = 0,
                                     exit_state = 'CONFIRMED_FLAT',
                                     rejection_reason = ?,
                                     updated_at = ?
@@ -931,17 +1113,70 @@ class AdvanceLiveBridge:
                                 (rej_msg, now_iso, intent_id),
                             )
                             conn.commit()
-                    elif ent_status == "complete" and exch_avg > 0 and abs(exch_avg - entry_fill) >= 0.05:
+                    elif ent_status in ("open", "trigger pending", "validation pending", "put order req received") and exch_qty == 0:
+                        # Entry order has NOT filled yet on NSE: cancel any premature SL-L and mark state = SUBMITTED (0 filled)
+                        if sl_oid:
+                            try:
+                                engine._call_upstox_broker_api(
+                                    "DELETE",
+                                    "/order/cancel",
+                                    params={"order_id": str(sl_oid)},
+                                    is_emergency=True,
+                                )
+                            except Exception:
+                                pass
                         with self._get_rw_conn() as conn:
                             conn.execute(
                                 """
                                 UPDATE option_advance_live_order_intents
-                                SET average_fill_price = ?,
-                                    filled_quantity = ?,
+                                SET state = 'SUBMITTED',
+                                    filled_quantity = 0,
+                                    broker_sl_order_id = NULL,
                                     updated_at = ?
                                 WHERE order_intent_id = ?;
                                 """,
-                                (exch_avg, exch_qty if exch_qty > 0 else qty, now_iso, intent_id),
+                                (now_iso, intent_id),
+                            )
+                            conn.commit()
+                    elif ent_status == "complete" or exch_qty > 0:
+                        eff_avg = exch_avg if exch_avg > 0 else entry_fill
+                        eff_qty = exch_qty if exch_qty > 0 else target_qty
+                        new_sl_oid = sl_oid or None
+                        if not new_sl_oid:
+                            try:
+                                sl_tx_type = "SELL" if action == "BUY" else "BUY"
+                                sl_payload = {
+                                    "quantity": eff_qty,
+                                    "product": "I",
+                                    "validity": "DAY",
+                                    "price": float(intent.get("stop_loss_limit") or 0.05),
+                                    "tag": sanitize_upstox_tag(f"sl-{intent_id[-14:]}"),
+                                    "instrument_token": str(intent.get("instrument_key") or ""),
+                                    "order_type": "SL",
+                                    "transaction_type": sl_tx_type,
+                                    "disclosed_quantity": 0,
+                                    "trigger_price": float(intent.get("stop_loss_trigger") or 0.05),
+                                    "is_amo": False,
+                                }
+                                sl_ok, _, sl_data = engine._call_upstox_broker_api(
+                                    "POST", "/order/place", payload=sl_payload, is_emergency=True
+                                )
+                                if sl_ok and isinstance(sl_data, dict) and sl_data.get("status") == "success":
+                                    new_sl_oid = str(sl_data.get("data", {}).get("order_id") or f"UPSTOX_ADV_SL_{int(time.time()*1000)}")
+                            except Exception:
+                                pass
+                        with self._get_rw_conn() as conn:
+                            conn.execute(
+                                """
+                                UPDATE option_advance_live_order_intents
+                                SET state = 'FILLED',
+                                    average_fill_price = ?,
+                                    filled_quantity = ?,
+                                    broker_sl_order_id = COALESCE(?, broker_sl_order_id),
+                                    updated_at = ?
+                                WHERE order_intent_id = ?;
+                                """,
+                                (eff_avg, eff_qty, new_sl_oid, now_iso, intent_id),
                             )
                             conn.commit()
         except Exception as rec_err:
@@ -956,10 +1191,13 @@ class AdvanceLiveBridge:
         """
         Fires an emergency-priority Upstox V2 exit order the instant the parent Paper trade closes.
         Includes:
-          - Pre-exit cancellation of resting `broker_sl_order_id` so margin/qty never collides.
-          - Emergency retry with wider 5% marketable limit buffer on transient HTTP failure.
-          - Fail-Safe `EXIT_RETRY_PENDING` state if both attempts fail so the 250ms follower loop
-            automatically retries on the next cycle instead of leaving an orphan position.
+          - Unfilled entry guard: if entry order never filled (`state == 'SUBMITTED'` and `filled_quantity == 0`),
+            cancels the entry order instead of sending an opposite exit order.
+          - Safe exit price resolution BEFORE cancelling the resting `broker_sl_order_id`.
+          - Simultaneous SL-fill race guard: if cancelling `broker_sl_order_id` indicates the SL already completed
+            on the exchange, reconciles and marks `CONFIRMED_FLAT` without firing a duplicate exit order.
+          - Emergency retry with wider 5% (or 15% on SOS without stream quote) marketable limit buffer.
+          - Fail-Safe `EXIT_RETRY_PENDING` state if both attempts fail so the 250ms follower loop retries.
         """
         now_dt = to_ist_naive(now_dt)
         now_iso = now_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -968,13 +1206,80 @@ class AdvanceLiveBridge:
         exit_tx_type = "SELL" if action == "BUY" else "BUY"
         qty = int(intent.get("filled_quantity") or intent.get("target_quantity") or 65)
         ikey = str(intent["instrument_key"])
+        entry_fill = float(intent.get("average_fill_price") or intent.get("limit_price") or 100.0)
+        exit_reason = str(paper_row.get("exit_reason") or "MIRRORED_PAPER_EXIT")
         engine = get_order_intent_engine()
 
-        # 0. Cancel resting Exchange SL-L order first so Upstox does not block the exit order
+        # 0A. Unfilled Entry Guard: If entry order is still SUBMITTED with 0 filled quantity, cancel entry order!
+        if str(intent.get("state") or "").upper() == "SUBMITTED" and int(intent.get("filled_quantity") or 0) == 0:
+            entry_oid = intent.get("broker_order_id")
+            if entry_oid:
+                try:
+                    engine._call_upstox_broker_api(
+                        "DELETE", "/order/cancel", params={"order_id": str(entry_oid)}, is_emergency=True
+                    )
+                except Exception:
+                    pass
+            broker_sl_oid = intent.get("broker_sl_order_id")
+            if broker_sl_oid:
+                try:
+                    engine._call_upstox_broker_api(
+                        "DELETE", "/order/cancel", params={"order_id": str(broker_sl_oid)}, is_emergency=True
+                    )
+                except Exception:
+                    pass
+            if action == "SELL" and (intent.get("hedge_wing_instrument_key") or intent.get("hedge_wing_broker_order_id")):
+                self._flatten_hedge_wing_if_present(
+                    hedge_wing_ikey=intent.get("hedge_wing_instrument_key"),
+                    hedge_wing_oid=intent.get("hedge_wing_broker_order_id"),
+                    qty=int(intent.get("target_quantity") or 65),
+                    intent_id=intent_id,
+                )
+            with self._get_rw_conn() as conn:
+                conn.execute(
+                    """
+                    UPDATE option_advance_live_order_intents
+                    SET state = 'CANCELLED',
+                        filled_quantity = 0,
+                        exit_state = 'CONFIRMED_FLAT',
+                        exit_reason = 'UNFILLED_ENTRY_CANCELLED_ON_EXIT',
+                        realized_pnl = 0.0,
+                        updated_at = ?
+                    WHERE order_intent_id = ?;
+                    """,
+                    (now_iso, intent_id),
+                )
+                conn.commit()
+            return {"exited": True, "order_intent_id": intent_id, "realized_pnl": 0.0, "cancelled_unfilled": True}
+
+        # 0B. Resolve exit price safely BEFORE cancelling the resting SL-L order (prevents any NoneType crash after SL cancel)
+        raw_exit_px = paper_row.get("exit_price_used")
+        paper_exit = float(raw_exit_px) if (raw_exit_px is not None and float(raw_exit_px or 0.0) > 0) else 0.0
+        has_live_exit_quote = paper_exit > 0
+        if paper_exit <= 0:
+            q: Dict[str, Any] = {}
+            try:
+                stream_mgr = OptionStreamManager()
+                q_res = stream_mgr.get_option_quote(ikey)
+                if isinstance(q_res, dict):
+                    q = q_res
+            except Exception:
+                q = {}
+            side_px = q.get("bid") if exit_tx_type == "SELL" else q.get("ask")
+            cand_px = side_px if (side_px is not None and float(side_px or 0.0) > 0) else q.get("ltp")
+            if cand_px is not None and float(cand_px or 0.0) > 0:
+                paper_exit = float(cand_px)
+                has_live_exit_quote = True
+            else:
+                paper_exit = float(entry_fill if entry_fill > 0 else 100.0)
+
+        # 0C. Cancel resting Exchange SL-L order & guard against simultaneous SL-fill race condition
         broker_sl_oid = intent.get("broker_sl_order_id")
         if broker_sl_oid:
+            sl_cancel_ok = True
+            sl_cancel_data: Any = {}
             try:
-                engine._call_upstox_broker_api(
+                sl_cancel_ok, _, sl_cancel_data = engine._call_upstox_broker_api(
                     "DELETE",
                     "/order/cancel",
                     params={"order_id": str(broker_sl_oid)},
@@ -983,16 +1288,94 @@ class AdvanceLiveBridge:
             except Exception as sl_cancel_err:
                 logger.debug(f"[AdvanceLiveBridge] Cancel resting SL note for {broker_sl_oid}: {sl_cancel_err}")
 
-        paper_exit = float(paper_row.get("exit_price_used") or 0.0)
-        if paper_exit <= 0:
-            stream_mgr = OptionStreamManager()
-            q = stream_mgr.get_option_quote(ikey) or {}
-            paper_exit = float(q.get("bid") if exit_tx_type == "SELL" else q.get("ask") or q.get("ltp") or intent.get("average_fill_price") or 100.0)
+            sl_err_text = str(sl_cancel_data or "").lower()
+            if not sl_cancel_ok and ("complete" in sl_err_text or "already" in sl_err_text or "filled" in sl_err_text):
+                # Exchange SL-L already filled milliseconds before software exit! Do NOT send a duplicate exit order!
+                self._reconcile_open_live_intents_with_broker([intent], now_dt=now_dt)
+                still_open = [p for p in self.get_active_live_positions() if p.get("order_intent_id") == intent_id]
+                if not still_open:
+                    return {"exited": True, "order_intent_id": intent_id, "already_closed_by_sl": True}
 
-        if exit_tx_type == "SELL":
-            exit_limit = round_to_tick(max(0.05, paper_exit * 0.985))
+                sl_fill = float(intent.get("stop_loss_trigger") or paper_exit or entry_fill)
+                if action == "SELL" and intent.get("hedge_wing_instrument_key"):
+                    self._flatten_hedge_wing_if_present(
+                        hedge_wing_ikey=str(intent.get("hedge_wing_instrument_key")),
+                        hedge_wing_oid=intent.get("hedge_wing_broker_order_id"),
+                        qty=qty,
+                        intent_id=intent_id,
+                    )
+                if action == "BUY":
+                    gross = round((sl_fill - entry_fill) * qty, 2)
+                    costs = calculate_option_trade_costs(
+                        buy_price=entry_fill,
+                        sell_price=sl_fill,
+                        quantity=qty,
+                        apply_slippage=False,
+                        trade_date=now_iso[:10],
+                    )
+                    charges = float(costs.get("statutory_charges") or 55.0)
+                    net_pnl = round(gross - charges, 2)
+                else:
+                    res_c = calculate_short_option_trade_costs(
+                        sell_entry_bid=entry_fill,
+                        buy_exit_ask=sl_fill,
+                        quantity=qty,
+                        apply_slippage=False,
+                        trade_date=now_iso[:10],
+                    )
+                    gross = float(res_c.get("gross_pnl") or 0.0)
+                    charges = float(res_c.get("statutory_charges") or 55.0)
+                    net_pnl = round(gross - charges, 2)
+
+                with self._get_rw_conn() as conn:
+                    conn.execute(
+                        """
+                        UPDATE option_advance_live_order_intents
+                        SET exit_state = 'CONFIRMED_FLAT',
+                            exit_broker_order_id = ?,
+                            exit_fill_price = ?,
+                            exit_reason = 'EXCHANGE_SL_ORDER_TRIGGERED',
+                            paper_exit_price = ?,
+                            paper_net_pnl = ?,
+                            gross_pnl = ?,
+                            statutory_charges = ?,
+                            realized_pnl = ?,
+                            rejection_reason = NULL,
+                            updated_at = ?
+                        WHERE order_intent_id = ?;
+                        """,
+                        (
+                            str(broker_sl_oid),
+                            sl_fill,
+                            paper_exit,
+                            float(paper_row.get("net_pnl") or 0.0),
+                            gross,
+                            charges,
+                            net_pnl,
+                            now_iso,
+                            intent_id,
+                        ),
+                    )
+                    conn.commit()
+                logger.info(
+                    f"🛡️ [AdvanceLiveBridge] Zero-Duplicate-Exit Guard: Exchange SL-L ({broker_sl_oid}) already completed "
+                    f"for {intent_id}; suppressed duplicate software exit order."
+                )
+                return {"exited": True, "order_intent_id": intent_id, "realized_pnl": net_pnl, "already_closed_by_sl": True}
+
+        is_emergency_reason = exit_reason in ("SOS_PANIC_EXIT", "SESSION_CUTOFF_1515_AUTO_EXIT")
+        if is_emergency_reason and not has_live_exit_quote:
+            # When stream quote is missing during an emergency SOS/15:15 exit, use a wider 15% marketable collar
+            # so the limit order still crosses the NSE order book even if the option moved sharply from entry.
+            if exit_tx_type == "SELL":
+                exit_limit = round_to_tick(max(0.05, paper_exit * 0.85))
+            else:
+                exit_limit = round_to_tick(paper_exit * 1.15)
         else:
-            exit_limit = round_to_tick(paper_exit * 1.015)
+            if exit_tx_type == "SELL":
+                exit_limit = round_to_tick(max(0.05, paper_exit * 0.985))
+            else:
+                exit_limit = round_to_tick(paper_exit * 1.015)
 
         payload = {
             "quantity": qty,
@@ -1058,31 +1441,13 @@ class AdvanceLiveBridge:
         # If this was a hedged short trade (DUAL_BOOK_HEDGED), also flatten the 200-pt OTM protective BUY wing
         hedge_wing_ikey = intent.get("hedge_wing_instrument_key")
         if hedge_wing_ikey and action == "SELL":
-            try:
-                stream_mgr = OptionStreamManager()
-                hq = stream_mgr.get_option_quote(str(hedge_wing_ikey)) or {}
-                h_bid = float(hq.get("bid") or hq.get("ltp") or 2.0)
-                h_exit_limit = round_to_tick(max(0.05, h_bid * 0.95))
-                hedge_exit_payload = {
-                    "quantity": qty,
-                    "product": "I",
-                    "validity": "DAY",
-                    "price": float(h_exit_limit),
-                    "tag": sanitize_upstox_tag(f"hx-{intent_id[-14:]}"),
-                    "instrument_token": str(hedge_wing_ikey),
-                    "order_type": "LIMIT",
-                    "transaction_type": "SELL",
-                    "disclosed_quantity": 0,
-                    "trigger_price": 0.0,
-                    "is_amo": False,
-                }
-                engine._call_upstox_broker_api(
-                    "POST", "/order/place", payload=hedge_exit_payload, is_emergency=True
-                )
-            except Exception as he:
-                logger.warning(f"[AdvanceLiveBridge] Hedge wing flatten note: {he}")
+            self._flatten_hedge_wing_if_present(
+                hedge_wing_ikey=str(hedge_wing_ikey),
+                hedge_wing_oid=intent.get("hedge_wing_broker_order_id"),
+                qty=qty,
+                intent_id=intent_id,
+            )
 
-        entry_fill = float(intent.get("average_fill_price") or intent.get("limit_price") or paper_exit)
         exit_fill = paper_exit
         if action == "BUY":
             gross = round((exit_fill - entry_fill) * qty, 2)
@@ -1107,7 +1472,6 @@ class AdvanceLiveBridge:
             charges = float(res_c.get("statutory_charges") or 55.0)
             net_pnl = round(gross - charges, 2)
 
-        exit_reason = str(paper_row.get("exit_reason") or "MIRRORED_PAPER_EXIT")
         paper_net = float(paper_row.get("net_pnl") or 0.0)
 
         with self._get_rw_conn() as conn:
@@ -1456,9 +1820,16 @@ class AdvanceLiveBridge:
         }
 
 
+if _PREV_BRIDGE_INSTANCE is not None:
+    _PREV_BRIDGE_INSTANCE.__class__ = AdvanceLiveBridge
+    _BRIDGE_INSTANCE = _PREV_BRIDGE_INSTANCE
+
+
 def get_advance_live_bridge() -> AdvanceLiveBridge:
     global _BRIDGE_INSTANCE
     with _BRIDGE_LOCK:
         if _BRIDGE_INSTANCE is None:
             _BRIDGE_INSTANCE = AdvanceLiveBridge()
+        elif _BRIDGE_INSTANCE.__class__ is not AdvanceLiveBridge:
+            _BRIDGE_INSTANCE.__class__ = AdvanceLiveBridge
         return _BRIDGE_INSTANCE

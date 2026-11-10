@@ -63,6 +63,8 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
         exit_price: float = 0.0,
         exit_reason: str = "",
         net_pnl: float = 0.0,
+        entry_time: str = "2026-11-09 11:20:00",
+        regime_context_json: str = "{}",
     ):
         conn = sqlite3.connect(self.db_path)
         conn.execute(
@@ -72,8 +74,8 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
                 instrument_key, trading_symbol, underlying, option_type, strike, expiry,
                 lot_size, quantity, entry_time, entry_bid, entry_ask, entry_price_used,
                 peak_price, trough_price, trailing_stop, stop_loss_pct, mfe_pct, mae_pct,
-                status, exit_price_used, exit_reason, net_pnl
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                status, exit_price_used, exit_reason, net_pnl, regime_context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             (
                 trade_id,
@@ -89,7 +91,7 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
                 "2026-11-10",
                 65,
                 65,
-                "2026-11-09 10:15:00",
+                entry_time,
                 entry_price,
                 entry_price,
                 entry_price,
@@ -103,6 +105,7 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
                 exit_price,
                 exit_reason,
                 net_pnl,
+                regime_context_json,
             ),
         )
         conn.commit()
@@ -395,6 +398,314 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
             intents = self.bridge.get_recent_order_intents()
             self.assertEqual(intents[0]["exit_state"], "CONFIRMED_FLAT")
             self.assertEqual(intents[0]["exit_reason"], "EXCHANGE_SL_ORDER_TRIGGERED")
+
+    def test_9_pre_arm_stale_open_paper_trade_is_skipped_and_post_arm_trade_is_mirrored(self):
+        """
+        Proves Bug #2 Fix:
+          - A paper trade that opened at 09:44:00 BEFORE the user armed at 10:05:00 is skipped (`PRE_ARM_OPEN_TRADE_SKIPPED`).
+          - A new paper trade that opens at 10:06:00 AFTER arming is mirrored cleanly.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_PRE_ARM_0944",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=120.0,
+            entry_time="2026-11-09 09:44:00",
+        )
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 10, 5, 0),
+            )
+            sync_pre = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 5, 2))
+            self.assertEqual(len(sync_pre["entries_mirrored"]), 0)
+            self.assertEqual(len(sync_pre["skipped_by_mode"]), 1)
+            self.assertEqual(sync_pre["skipped_by_mode"][0]["reason"], "PRE_ARM_OPEN_TRADE_SKIPPED")
+
+            # Now insert a fresh post-arm trade at 10:06:00
+            self._insert_advance_paper_trade(
+                "ADV_POST_ARM_1006",
+                book_type="LONG_BOOK_BUY",
+                action="BUY",
+                status="OPEN",
+                entry_price=135.0,
+                entry_time="2026-11-09 10:06:00",
+            )
+            sync_post = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 6, 1))
+            self.assertEqual(len(sync_post["entries_mirrored"]), 1)
+
+    def test_10_sos_panic_exit_with_missing_stream_quote_does_not_crash_and_uses_emergency_collar(self):
+        """
+        Proves Bug #1 Fix:
+          - If `OptionStreamManager().get_option_quote()` returns `None` during a 1-Click SOS Panic Exit,
+            `execute_sos_panic_exit()` never raises `TypeError: float(None)` and dispatches an emergency
+            15% collar (`0.85 * entry_fill`) marketable limit exit order.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_SOS_601",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=100.0,
+            entry_time="2026-11-09 10:20:00",
+        )
+        call_log = []
+
+        def fake_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                return True, 200, {"status": "success", "data": {"order_id": f"SOS_ORD_{len(call_log)}"}}
+            return True, 200, {"status": "success", "data": []}
+
+        self.mock_broker_api.side_effect = fake_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ), patch(
+            "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+        ) as mock_sm_cls:
+            mock_sm_cls.return_value.get_option_quote.return_value = None
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 10, 15, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 20, 1))
+            call_log.clear()
+
+            sos_res = self.bridge.execute_sos_panic_exit()
+            self.assertEqual(sos_res["status"], "SOS_EXECUTED_AND_DISARMED")
+            self.assertEqual(sos_res["positions_flattened"], 1)
+            self.assertFalse(self.bridge.is_live_armed)
+            exit_places = [c for c in call_log if c[0] == "POST" and c[1] == "/order/place"]
+            self.assertEqual(len(exit_places), 1)
+            self.assertAlmostEqual(exit_places[0][2]["price"], 85.0, places=2)
+
+    def test_11_simultaneous_exchange_sl_fill_and_software_exit_race_suppresses_duplicate_exit(self):
+        """
+        Proves Bug #3 Fix:
+          - When `DELETE /order/cancel` on `broker_sl_order_id` returns HTTP 400 (`Order is already complete`),
+            `_execute_mirrored_live_exit()` suppresses the duplicate software exit order and marks `CONFIRMED_FLAT`
+            (`EXCHANGE_SL_ORDER_TRIGGERED`).
+        """
+        self._insert_advance_paper_trade(
+            "ADV_RACE_701",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=100.0,
+            entry_time="2026-11-09 10:30:00",
+        )
+        call_log = []
+
+        def fake_race_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                return True, 200, {"status": "success", "data": {"order_id": f"ORD_RACE_{len(call_log)}"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return True, 200, {"status": "success", "data": [{"order_id": "ORD_RACE_2", "status": "trigger pending"}]}
+            if method == "DELETE" and endpoint == "/order/cancel":
+                return False, 400, {"status": "error", "error": "Order ORD_RACE_2 is already complete and cannot be cancelled"}
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_race_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 10, 25, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 30, 1))
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=80.0, exit_reason='HARD_SL', net_pnl=-1355.0 WHERE trade_id='ADV_RACE_701';"
+            )
+            conn.commit()
+            conn.close()
+
+            call_log.clear()
+            sync_exit = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 32, 0))
+            self.assertEqual(len(sync_exit["exits_mirrored"]), 1)
+            # Zero duplicate POST /order/place exit calls should have been fired!
+            post_exit_calls = [c for c in call_log if c[0] == "POST" and c[1] == "/order/place"]
+            self.assertEqual(len(post_exit_calls), 0)
+            intents = self.bridge.get_recent_order_intents()
+            self.assertEqual(intents[0]["exit_state"], "CONFIRMED_FLAT")
+            self.assertEqual(intents[0]["exit_reason"], "EXCHANGE_SL_ORDER_TRIGGERED")
+
+    def test_12_unfilled_working_entry_order_reconciles_submitted_and_cancels_cleanly_on_exit(self):
+        """
+        Proves Bug #4 Fix:
+          - If `/order/retrieve-all` shows the entry order is still `'open'` (`filled_quantity == 0`),
+            `_reconcile_open_live_intents_with_broker()` transitions `state = 'SUBMITTED'`, `filled_quantity = 0`,
+            and cancels any premature SL order.
+          - If the trade then exits while `filled_quantity == 0`, `_execute_mirrored_live_exit()` cancels the
+            unfilled entry order without sending an opposite exit order.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_UNFILLED_801",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=100.0,
+            entry_time="2026-11-09 10:40:00",
+        )
+        call_log = []
+
+        def fake_unfilled_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                return True, 200, {"status": "success", "data": {"order_id": f"UNFILLED_ORD_{len(call_log)}"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return True, 200, {
+                    "status": "success",
+                    "data": [{"order_id": "UNFILLED_ORD_1", "status": "open", "filled_quantity": 0, "average_price": 0.0}],
+                }
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_unfilled_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 10, 35, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 40, 1))
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 40, 2))
+            active = self.bridge.get_active_live_positions()
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0]["state"], "SUBMITTED")
+            self.assertEqual(active[0]["filled_quantity"], 0)
+            self.assertIsNone(active[0]["broker_sl_order_id"])
+
+            # Now close paper trade while entry order is still unfilled
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=101.0, exit_reason='TIME_STOP', net_pnl=0.0 WHERE trade_id='ADV_UNFILLED_801';"
+            )
+            conn.commit()
+            conn.close()
+
+            call_log.clear()
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 10, 41, 0))
+            post_exit_calls = [c for c in call_log if c[0] == "POST" and c[1] == "/order/place"]
+            self.assertEqual(len(post_exit_calls), 0)
+            intents = self.bridge.get_recent_order_intents()
+            self.assertEqual(intents[0]["state"], "CANCELLED")
+            self.assertEqual(intents[0]["exit_state"], "CONFIRMED_FLAT")
+            self.assertEqual(intents[0]["exit_reason"], "UNFILLED_ENTRY_CANCELLED_ON_EXIT")
+
+    def test_13_follower_sync_enforces_1515_cutoff_and_auto_flattens_without_ui_poll(self):
+        """
+        Proves Bug #5 Fix:
+          - `sync_once_with_advance_paper_table()` at >= 15:15 IST automatically disarms `_is_live_armed`
+            and force-flattens any remaining open live positions even when `get_live_status()` is not polled.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_EOD_901",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=120.0,
+            entry_time="2026-11-09 14:50:00",
+        )
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 14, 45, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 14, 50, 2))
+            self.assertEqual(len(self.bridge.get_active_live_positions()), 1)
+
+            # Now background follower runs at 15:15:01 IST (without calling get_live_status)
+            sync_cutoff = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 15, 15, 1))
+            self.assertFalse(self.bridge.is_live_armed)
+            self.assertEqual(sync_cutoff["status"], "STANDBY_PAPER")
+            self.assertEqual(len(sync_cutoff["exits_mirrored"]), 1)
+            self.assertEqual(len(self.bridge.get_active_live_positions()), 0)
+
+    def test_14_dual_book_hedged_short_rejection_flattens_orphan_wing(self):
+        """
+        Proves Bug #6 Fix:
+          - In `DUAL_BOOK_HEDGED` mode, if the 200-pt OTM BUY hedge wing succeeds and the main SELL leg
+            is rejected by Upstox RMS, `_flatten_hedge_wing_if_present()` immediately cancels and flattens
+            the hedge wing so no orphan long option remains in the broker account.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_HEDGE_1001",
+            book_type="SHORT_BOOK_SELL",
+            action="SELL",
+            status="OPEN",
+            entry_price=110.0,
+            entry_time="2026-11-09 11:00:00",
+            regime_context_json='{"hedge_wing_strike": 23650}',
+        )
+        call_log = []
+
+        def fake_hedge_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                if payload.get("instrument_token") == "NSE_FO|99200" and payload.get("transaction_type") == "BUY":
+                    return True, 200, {"status": "success", "data": {"order_id": "WING_BUY_ORD_1"}}
+                if payload.get("instrument_token") == "NSE_FO|65628" and payload.get("transaction_type") == "SELL":
+                    return False, 400, {"error": "RMS: Insufficient margin for short option"}
+                return True, 200, {"status": "success", "data": {"order_id": "WING_FLATTEN_ORD_2"}}
+            return True, 200, {"status": "success", "data": []}
+
+        self.mock_broker_api.side_effect = fake_hedge_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ), patch(
+            "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+        ) as mock_sm_cls:
+            mock_sm_cls.return_value.get_all_active_option_quotes.return_value = [
+                {
+                    "underlying": "NIFTY",
+                    "option_type": "CE",
+                    "strike": 23650.0,
+                    "instrument_key": "NSE_FO|99200",
+                    "ask": 18.0,
+                    "bid": 17.5,
+                }
+            ]
+            mock_sm_cls.return_value.get_option_quote.return_value = {"bid": 17.5, "ltp": 17.5}
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_DUAL_BOOK_HEDGED,
+                now_dt=datetime(2026, 11, 9, 10, 55, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 0, 1))
+            wing_flatten_calls = [
+                c
+                for c in call_log
+                if c[0] == "POST"
+                and c[1] == "/order/place"
+                and c[2].get("instrument_token") == "NSE_FO|99200"
+                and c[2].get("transaction_type") == "SELL"
+            ]
+            self.assertEqual(len(wing_flatten_calls), 1)
 
 
 if __name__ == "__main__":
