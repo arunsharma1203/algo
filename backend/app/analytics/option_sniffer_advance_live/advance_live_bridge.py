@@ -661,17 +661,39 @@ class AdvanceLiveBridge:
             now_mono = time.monotonic()
             if has_stale_priority_quote and (now_mono - self._last_priority_quote_refresh_ts) >= 2.5:
                 self._last_priority_quote_refresh_ts = now_mono
+                refresh_cnt = 0
                 if hasattr(stream_mgr, "refresh_quotes_via_rest"):
-                    stream_mgr.refresh_quotes_via_rest(min_interval_sec=2.5)
-                    refreshed_via_rest = True
-                try:
-                    from app.analytics.option_sniffer_advance.advance_paper_execution import AdvancePaperExecution
-                    for ik in priority_contracts:
-                        fresh_q = stream_mgr.get_option_quote(ik)
-                        if isinstance(fresh_q, dict) and float(fresh_q.get("ltp") or fresh_q.get("bid") or 0.0) > 0:
-                            AdvancePaperExecution.evaluate_subsecond_tick_guard(ik, fresh_q)
-                except Exception:
-                    pass
+                    raw_cnt = stream_mgr.refresh_quotes_via_rest(min_interval_sec=2.5)
+                    refresh_cnt = int(raw_cnt) if isinstance(raw_cnt, (int, float)) else 1
+                    refreshed_via_rest = refresh_cnt > 0
+                if refreshed_via_rest:
+                    try:
+                        from app.analytics.option_sniffer_advance.advance_paper_execution import AdvancePaperExecution
+                        for ik in priority_contracts:
+                            fresh_q = stream_mgr.get_option_quote(ik)
+                            if not isinstance(fresh_q, dict):
+                                continue
+                            f_bid = float(fresh_q.get("bid") or 0.0)
+                            f_ask = float(fresh_q.get("ask") or f_bid)
+                            f_ltp = float(fresh_q.get("ltp") or f_bid)
+                            f_age = float(fresh_q.get("quote_age_ms") or 0.0)
+                            f_spread_pct = float(
+                                fresh_q.get("spread_pct")
+                                if fresh_q.get("spread_pct") is not None
+                                else (((f_ask - f_bid) / f_ltp * 100.0) if f_ltp > 0 else 999.0)
+                            )
+                            is_quote_valid = (
+                                bool(fresh_q.get("is_valid", True))
+                                and f_ltp > 0.0
+                                and f_bid > 0.0
+                                and f_ask >= f_bid
+                                and f_spread_pct <= 3.5
+                                and f_age <= 2500.0
+                            )
+                            if is_quote_valid:
+                                AdvancePaperExecution.evaluate_subsecond_tick_guard(ik, fresh_q)
+                    except Exception:
+                        pass
         except Exception as prio_err:
             logger.debug(f"[AdvanceLiveBridge] Priority tick guard note: {prio_err}")
 

@@ -817,6 +817,63 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
             sm_inst.refresh_quotes_via_rest.assert_called_once_with(min_interval_sec=2.5)
             mock_tick_guard.assert_called_once()
 
+    def test_17_invalid_wide_spread_or_stale_rest_quote_never_triggers_false_stop_out(self):
+        """
+        Proves Alpha Protection Shield in `_prioritize_advance_real_time_ticks()`:
+          - Case A: If REST refresh returns a freak wide-spread quote (`spread_pct = 29.6% > 3.5%`, `is_valid = False`),
+            `evaluate_subsecond_tick_guard` is NEVER called (preventing false stop-outs on momentary depth gaps).
+          - Case B: If REST refresh fails to update the quote (`quote_age_ms = 4200 > 2500`),
+            `evaluate_subsecond_tick_guard` is NEVER called.
+          - Case C: When REST refresh returns a valid, tight-spread (`spread_pct = 0.63% <= 3.5%`, `is_valid = True`,
+            `quote_age_ms = 120ms <= 2500ms`) quote, `evaluate_subsecond_tick_guard` IS called immediately.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_SHIELD_1701",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=150.0,
+            entry_time="2026-11-09 10:15:00",
+        )
+        fake_k2c = {}
+        with patch(
+            "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+        ) as mock_sm_cls, patch(
+            "app.analytics.option_sniffer_advance.advance_paper_execution.AdvancePaperExecution.evaluate_subsecond_tick_guard"
+        ) as mock_tick_guard:
+            sm_inst = mock_sm_cls.return_value
+            sm_inst._key_to_contract = fake_k2c
+            sm_inst._lock = None
+            sm_inst.refresh_quotes_via_rest.return_value = 1
+            self.bridge._is_live_armed = True
+
+            # Case A: Freak wide spread after REST refresh (Bid=115, Ask=155, Spread=29.6%, is_valid=False)
+            sm_inst.get_option_quote.side_effect = [
+                {"instrument_key": "NSE_FO|65628", "bid": 150.0, "ask": 151.0, "ltp": 150.5, "quote_age_ms": 4000, "is_valid": False},
+                {"instrument_key": "NSE_FO|65628", "bid": 115.0, "ask": 155.0, "ltp": 135.0, "spread_pct": 29.63, "quote_age_ms": 50, "is_valid": False},
+            ]
+            self.bridge._last_priority_quote_refresh_ts = -999999.0
+            self.bridge._prioritize_advance_real_time_ticks(active_intents=[], now_dt=datetime(2026, 11, 9, 10, 15, 5))
+            mock_tick_guard.assert_not_called()
+
+            # Case B: REST refresh failed to update quote age (still 4000ms > 2500ms)
+            sm_inst.get_option_quote.side_effect = [
+                {"instrument_key": "NSE_FO|65628", "bid": 150.0, "ask": 151.0, "ltp": 150.5, "quote_age_ms": 4000, "is_valid": True},
+                {"instrument_key": "NSE_FO|65628", "bid": 150.0, "ask": 151.0, "ltp": 150.5, "spread_pct": 0.66, "quote_age_ms": 4000, "is_valid": True},
+            ]
+            self.bridge._last_priority_quote_refresh_ts = -999999.0
+            self.bridge._prioritize_advance_real_time_ticks(active_intents=[], now_dt=datetime(2026, 11, 9, 10, 15, 8))
+            mock_tick_guard.assert_not_called()
+
+            # Case C: Valid, fresh, tight-spread quote (Bid=158, Ask=159, Spread=0.63%, age=120ms, is_valid=True)
+            sm_inst.get_option_quote.side_effect = [
+                {"instrument_key": "NSE_FO|65628", "bid": 150.0, "ask": 151.0, "ltp": 150.5, "quote_age_ms": 4000, "is_valid": True},
+                {"instrument_key": "NSE_FO|65628", "bid": 158.0, "ask": 159.0, "ltp": 158.5, "spread_pct": 0.63, "quote_age_ms": 120, "is_valid": True},
+            ]
+            self.bridge._last_priority_quote_refresh_ts = -999999.0
+            self.bridge._prioritize_advance_real_time_ticks(active_intents=[], now_dt=datetime(2026, 11, 9, 10, 15, 12))
+            mock_tick_guard.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
