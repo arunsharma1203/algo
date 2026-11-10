@@ -1064,6 +1064,354 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
             self.assertEqual(intents[0]["exit_state"], "CONFIRMED_FLAT")
             self.assertAlmostEqual(intents[0]["exit_fill_price"], 118.50, places=2)
 
+    def test_20_exit_retry_after_sl_cancelled_never_falsely_marks_confirmed_flat(self):
+        """
+        Proves Round-3 Finding 1 Fix:
+          - If an exit attempt cancels `broker_sl_order_id` (`SL_2001`) and both exit `POST /order/place` calls
+            fail (or if a second `DELETE /order/cancel` on `SL_2001` returns `"Order SL_2001 is already cancelled"`),
+            the bridge NEVER falsely marks `exit_state = 'CONFIRMED_FLAT'` (`EXCHANGE_SL_ORDER_TRIGGERED`).
+          - Instead, it clears `broker_sl_order_id = NULL` on `EXIT_RETRY_PENDING` and retries on the next 250ms tick
+            until the exit order succeeds on Upstox.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_SL_CANCEL_RETRY_2001",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=150.0,
+            entry_time="2026-11-09 11:10:00",
+        )
+        call_log = []
+        state = {"exit_attempt": 0, "sl_cancelled": False}
+
+        def fake_sl_retry_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                otype = (payload or {}).get("order_type")
+                tx = (payload or {}).get("transaction_type")
+                if otype == "SL":
+                    return True, 200, {"status": "success", "data": {"order_id": "SL_2001"}}
+                if tx == "BUY":
+                    return True, 200, {"status": "success", "data": {"order_id": "ENTRY_2001"}}
+                # SELL exit order: fail first 2 attempts (primary + immediate retry), succeed on 3rd attempt (next 250ms tick)
+                state["exit_attempt"] += 1
+                if state["exit_attempt"] <= 2:
+                    return False, 502, {"status": "error", "error": "Upstox gateway timeout"}
+                return True, 200, {"status": "success", "data": {"order_id": "EXIT_2001"}}
+            if method == "DELETE" and endpoint == "/order/cancel":
+                oid = (params or {}).get("order_id")
+                if oid == "SL_2001":
+                    if not state["sl_cancelled"]:
+                        state["sl_cancelled"] = True
+                        return True, 200, {"status": "success"}
+                    return False, 400, {"status": "error", "error": "Order SL_2001 is already cancelled and cannot be cancelled"}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return True, 200, {
+                    "status": "success",
+                    "data": [{"order_id": "ENTRY_2001", "status": "complete", "filled_quantity": 65, "average_price": 150.0}],
+                }
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_sl_retry_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 11, 9, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 10, 1))
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 10, 2))
+
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=120.0, exit_reason='STOP_LOSS_HIT', net_pnl=-2005.0 WHERE trade_id='ADV_SL_CANCEL_RETRY_2001';"
+            )
+            conn.commit()
+            conn.close()
+
+            # First exit sync: cancels SL_2001 (200 OK), both exit POSTs fail (502), transitions to EXIT_RETRY_PENDING with broker_sl_order_id=NULL
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 11, 0))
+            active_mid = self.bridge.get_active_live_positions()
+            self.assertEqual(len(active_mid), 1)
+            self.assertEqual(active_mid[0]["exit_state"], "EXIT_RETRY_PENDING")
+            self.assertIsNone(active_mid[0]["broker_sl_order_id"])
+
+            # Also verify that even if broker_sl_order_id were still populated when "already cancelled" is returned,
+            # it NEVER triggers EXCHANGE_SL_ORDER_TRIGGERED and instead places the exit order!
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("UPDATE option_advance_live_order_intents SET broker_sl_order_id='SL_2001' WHERE advance_trade_id='ADV_SL_CANCEL_RETRY_2001';")
+            conn.commit()
+            conn.close()
+
+            sync_retry = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 11, 1))
+            self.assertEqual(len(sync_retry["exits_mirrored"]), 1)
+            intents = self.bridge.get_recent_order_intents()
+            self.assertEqual(intents[0]["exit_state"], "CONFIRMED_FLAT")
+            self.assertEqual(intents[0]["exit_broker_order_id"], "EXIT_2001")
+            self.assertNotEqual(intents[0]["exit_reason"], "EXCHANGE_SL_ORDER_TRIGGERED")
+
+    def test_21_exit_fast_path_runs_before_priority_rest_refresh_and_ws_connected_uses_5s_threshold(self):
+        """
+        Proves Round-3 Findings 2 & 3 Fix:
+          - Step 1A (`Sub-250ms Local SQLite Exit Fast-Path`) runs BEFORE Step 0B (`_prioritize_advance_real_time_ticks`),
+            so a closed paper trade fires its exit order immediately without waiting for any REST quote refresh.
+          - When WebSocket V3 is connected (`_is_connected is True`), `_prioritize_advance_real_time_ticks` uses a
+            5.0s (`5000ms`) staleness threshold and excludes `hedge_wing_instrument_key` from stale-quote REST polling.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_FAST_ORDER_2101",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=150.0,
+            entry_time="2026-11-09 11:20:00",
+        )
+        events = []
+        ord_seq = {"n": 0}
+
+        def fake_order_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            if method == "POST" and endpoint == "/order/place":
+                ord_seq["n"] += 1
+                tx = (payload or {}).get("transaction_type")
+                otype = (payload or {}).get("order_type")
+                if tx == "SELL" and otype == "LIMIT":
+                    events.append("EXIT_ORDER_PLACED")
+                return True, 200, {"status": "success", "data": {"order_id": f"ORD_21_{ord_seq['n']}"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return True, 200, {
+                    "status": "success",
+                    "data": [{"order_id": "ORD_21_1", "status": "complete", "filled_quantity": 65, "average_price": 150.0}],
+                }
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_order_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ), patch(
+            "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+        ) as mock_sm_cls, patch(
+            "app.data.upstox_stream_service.get_stream_service"
+        ) as mock_get_ws:
+            sm_inst = mock_sm_cls.return_value
+            sm_inst._key_to_contract = {}
+            sm_inst._lock = None
+            sm_inst.refresh_quotes_via_rest.side_effect = lambda **kw: (events.append("REST_QUOTE_REFRESH"), 1)[1]
+            ws_inst = mock_get_ws.return_value
+            ws_inst._is_connected = True
+
+            # Quote age is 3500ms (which is > 2500ms but <= 5000ms when WebSocket is connected!)
+            sm_inst.get_option_quote.return_value = {
+                "instrument_key": "NSE_FO|65628",
+                "bid": 152.0,
+                "ask": 153.0,
+                "ltp": 152.5,
+                "quote_age_ms": 3500,
+                "is_valid": True,
+            }
+
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 11, 19, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 20, 1))
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 20, 2))
+            # Because ws_connected is True and quote_age_ms=3500 <= 5000ms, 0 REST quote refreshes should have fired!
+            self.assertNotIn("REST_QUOTE_REFRESH", events)
+
+            # Now close the paper trade AND make quote stale (9000ms): Step 1A must exit BEFORE Step 0B!
+            sm_inst.get_option_quote.return_value = {
+                "instrument_key": "NSE_FO|65628",
+                "bid": 165.0,
+                "ask": 166.0,
+                "ltp": 165.5,
+                "quote_age_ms": 9000,
+                "is_valid": True,
+            }
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=165.0, exit_reason='TARGET_HIT', net_pnl=920.0 WHERE trade_id='ADV_FAST_ORDER_2101';"
+            )
+            conn.commit()
+            conn.close()
+
+            events.clear()
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 21, 0))
+            self.assertIn("EXIT_ORDER_PLACED", events)
+            # Because the only open trade closed in Step 1A, Step 0B sees 0 remaining open trades and skips REST refresh altogether!
+            self.assertNotIn("REST_QUOTE_REFRESH", events)
+
+    def test_22_dual_book_hedged_rejected_buy_wing_never_fires_naked_sell_wing_on_flatten(self):
+        """
+        Proves Round-3 Finding 4 Fix:
+          - In `DUAL_BOOK_HEDGED` mode, if the 200-pt OTM protective `BUY` hedge wing order (`NSE_FO|99200`)
+            is rejected by Upstox (`w_ok == False`), `hedge_wing_ikey` and `hedge_wing_oid` both remain `None`,
+            and `_flatten_hedge_wing_if_present()` NEVER sends a naked `SELL` order on the hedge wing.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_WING_REJ_2201",
+            book_type="SHORT_BOOK_SELL",
+            action="SELL",
+            status="OPEN",
+            entry_price=110.0,
+            entry_time="2026-11-09 11:30:00",
+            regime_context_json='{"hedge_wing_strike": 23650}',
+        )
+        call_log = []
+
+        def fake_wing_rej_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                if (payload or {}).get("instrument_token") == "NSE_FO|99200" and (payload or {}).get("transaction_type") == "BUY":
+                    # Protective BUY wing rejected (e.g., OI freeze / circuit limit)
+                    return False, 400, {"status": "error", "error": "Strike under OI freeze"}
+                return True, 200, {"status": "success", "data": {"order_id": f"MAIN_SELL_{len(call_log)}"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return True, 200, {
+                    "status": "success",
+                    "data": [{"order_id": "MAIN_SELL_2", "status": "complete", "filled_quantity": 65, "average_price": 110.0}],
+                }
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_wing_rej_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ), patch(
+            "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager"
+        ) as mock_sm_cls:
+            mock_sm_cls.return_value.get_all_active_option_quotes.return_value = [
+                {
+                    "underlying": "NIFTY",
+                    "option_type": "CE",
+                    "strike": 23650.0,
+                    "instrument_key": "NSE_FO|99200",
+                    "ask": 18.0,
+                    "bid": 17.5,
+                }
+            ]
+            mock_sm_cls.return_value.get_option_quote.return_value = {"bid": 17.5, "ltp": 17.5}
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_DUAL_BOOK_HEDGED,
+                now_dt=datetime(2026, 11, 9, 11, 29, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 30, 1))
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 30, 2))
+
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=90.0, exit_reason='TARGET_HIT', net_pnl=1245.0 WHERE trade_id='ADV_WING_REJ_2201';"
+            )
+            conn.commit()
+            conn.close()
+
+            call_log.clear()
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 31, 0))
+            naked_wing_sell_calls = [
+                c
+                for c in call_log
+                if c[0] == "POST"
+                and c[1] == "/order/place"
+                and (c[2] or {}).get("instrument_token") == "NSE_FO|99200"
+                and (c[2] or {}).get("transaction_type") == "SELL"
+            ]
+            self.assertEqual(len(naked_wing_sell_calls), 0, "Must NEVER send a SELL wing order when BUY wing failed!")
+
+    def test_23_partial_entry_fill_sets_partially_filled_and_cancels_remainder_on_exit(self):
+        """
+        Proves Round-3 Finding 5 Fix:
+          - If `/order/retrieve-all` reports the entry order is `'open'` with a partial fill (`filled_quantity = 65`
+            out of `target_quantity = 130`), `_reconcile_open_live_intents_with_broker()` sets `state = 'PARTIALLY_FILLED'`
+            (instead of `'FILLED'`) and updates `filled_quantity = 65`.
+          - When the trade subsequently exits, Step 0A-bis (`Partially-Filled Entry Guard`) cancels the remaining
+            unfilled 65 qty on `ENTRY_PARTIAL_1` BEFORE sending the 65-qty exit order.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_PARTIAL_2301",
+            book_type="LONG_BOOK_BUY",
+            action="BUY",
+            status="OPEN",
+            entry_price=140.0,
+            entry_time="2026-11-09 11:40:00",
+        )
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE option_sniffer_advance_trades SET quantity=130 WHERE trade_id='ADV_PARTIAL_2301';")
+        conn.commit()
+        conn.close()
+
+        call_log = []
+
+        def fake_partial_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            call_log.append((method, endpoint, payload, params))
+            if method == "POST" and endpoint == "/order/place":
+                otype = (payload or {}).get("order_type")
+                tx = (payload or {}).get("transaction_type")
+                if otype == "SL":
+                    return True, 200, {"status": "success", "data": {"order_id": "SL_PARTIAL_1"}}
+                if tx == "BUY":
+                    return True, 200, {"status": "success", "data": {"order_id": "ENTRY_PARTIAL_1"}}
+                return True, 200, {"status": "success", "data": {"order_id": "EXIT_PARTIAL_1"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return True, 200, {
+                    "status": "success",
+                    "data": [
+                        {
+                            "order_id": "ENTRY_PARTIAL_1",
+                            "status": "open",
+                            "quantity": 130,
+                            "filled_quantity": 65,
+                            "average_price": 140.0,
+                        }
+                    ],
+                }
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_partial_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 55000.0},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_LONG_BOOK_ONLY,
+                now_dt=datetime(2026, 11, 9, 11, 39, 0),
+            )
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 40, 1))
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 40, 2))
+
+            active = self.bridge.get_active_live_positions()
+            self.assertEqual(len(active), 1)
+            self.assertEqual(active[0]["state"], "PARTIALLY_FILLED")
+            self.assertEqual(active[0]["filled_quantity"], 65)
+
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET status='CLOSED', exit_price_used=160.0, exit_reason='TARGET_HIT', net_pnl=1240.0 WHERE trade_id='ADV_PARTIAL_2301';"
+            )
+            conn.commit()
+            conn.close()
+
+            call_log.clear()
+            self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 41, 0))
+            cancel_entry_calls = [
+                c
+                for c in call_log
+                if c[0] == "DELETE" and c[1] == "/order/cancel" and (c[3] or {}).get("order_id") == "ENTRY_PARTIAL_1"
+            ]
+            self.assertEqual(len(cancel_entry_calls), 1, "Must cancel remaining unfilled entry quantity on exit!")
+            exit_place_calls = [c for c in call_log if c[0] == "POST" and c[1] == "/order/place"]
+            self.assertEqual(len(exit_place_calls), 1)
+            self.assertEqual(exit_place_calls[0][2]["quantity"], 65)
+
 
 if __name__ == "__main__":
     unittest.main()
