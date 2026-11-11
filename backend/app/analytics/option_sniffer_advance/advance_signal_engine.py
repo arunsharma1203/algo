@@ -325,17 +325,32 @@ class AdvanceSignalEngine:
         c_dir = str(effective_upstream.get("consensus_direction") or "").upper().strip()
         apply_seller_directional_mirror = False
         if is_short_regime and not is_diagonal_otm_short:
-            # OptionFeatureExtractor & OptionAlphaModel use Buyer polarity (CE+BULLISH=1.0, PE+BEARISH=1.0).
-            # For standalone Option Selling: BULLISH consensus favors SELL_PE ('BEARISH' key);
-            # BEARISH consensus favors SELL_CE ('BULLISH' key).
+            # OptionFeatureExtractor & OptionAlphaModel use Buyer polarity (CE+BULLISH=1.0, PE+BEARISH=1.0;
+            # CE expects vwap_dist >= 0 or rsi >= 50, PE expects vwap_dist <= 0 or rsi <= 50).
+            # For standalone Option Selling:
+            #   1) Mirror underlying VWAP/RSI features ONLY for trend-aligned wing selling across Session TPB
+            #      (SELL_CE below TPB in bearish drift, or SELL_PE above TPB in bullish drift), preserving
+            #      in-range mean-reversion wing fades (SELL_CE above TPB / SELL_PE below TPB).
+            #   2) Invert explicit upstream consensus, AND when c_dir == 'NEUTRAL' invert directional key
+            #      under active bearish distribution / bullish accumulation so opposite-side wing selling wins.
+            if not is_wave2_exhaustion_short and session_tpb > 0:
+                if (opt_type == "CE" and spot_ltp < session_tpb) or (opt_type == "PE" and spot_ltp > session_tpb):
+                    apply_seller_directional_mirror = True
+            tpb_dist_polar = (((spot_ltp - session_tpb) / session_tpb) * 100.0) if session_tpb > 0 else 0.0
             if c_dir in ("BUY", "BULL", "BULLISH"):
                 effective_upstream["consensus_direction"] = "BEARISH"
-                if not is_wave2_exhaustion_short:
-                    apply_seller_directional_mirror = True
             elif c_dir in ("SELL", "BEAR", "BEARISH"):
                 effective_upstream["consensus_direction"] = "BULLISH"
-                if not is_wave2_exhaustion_short:
-                    apply_seller_directional_mirror = True
+            elif not is_wave2_exhaustion_short and (
+                minus_di > plus_di and (tpb_dist_polar <= -0.15 or syn_basis <= -2.0)
+            ):
+                effective_upstream["consensus_direction"] = "BULLISH"
+                effective_upstream.setdefault("consensus_confidence", 65.0)
+            elif not is_wave2_exhaustion_short and (
+                plus_di > minus_di and syn_basis >= 0.0 and (tpb_dist_polar >= 0.15 or syn_basis >= 4.0)
+            ):
+                effective_upstream["consensus_direction"] = "BEARISH"
+                effective_upstream.setdefault("consensus_confidence", 65.0)
             else:
                 effective_upstream["consensus_direction"] = "BULLISH" if opt_type == "CE" else "BEARISH"
                 effective_upstream.setdefault("consensus_confidence", 65.0)
@@ -473,34 +488,36 @@ class AdvanceSignalEngine:
                     rejection_reasons.append(
                         f"Contraction Short VRP Guard: VRP ({vrp:+.2f}% < 0.0%) indicates underpriced IV relative to 15m RV ({rv_15m_ann:.1f}%)"
                     )
+                tpb_dist_pct = (((spot_ltp - session_tpb) / session_tpb) * 100.0) if session_tpb > 0 else 0.0
                 if opt_type == "CE":
-                    orb_edge_pts = 55.0 if "BANK" in u_sym else 22.0
                     if has_orb and spot_ltp > orb_high:
                         rejection_reasons.append(
                             f"Contraction Short ORB Breakout Guard: Spot ({spot_ltp:.1f}) > ORB High ({orb_high:.1f}); naked SELL_CE blocked"
                         )
-                    elif has_orb and (orb_high - spot_ltp) <= orb_edge_pts and syn_basis >= 4.0 and plus_di > minus_di:
+                    elif plus_di > minus_di and syn_basis >= 4.0:
                         rejection_reasons.append(
-                            f"Contraction Short Bullish Basis Near ORB High: Spot ({spot_ltp:.1f}) within {orb_high - spot_ltp:.1f} pts of ORB High ({orb_high:.1f}) with Synthetic Basis {syn_basis:+.2f} bps"
+                            f"Contraction Short Bullish Basis Near ORB High / Chain Flow: +DI ({plus_di:.1f}) > -DI ({minus_di:.1f}) with Synthetic Basis {syn_basis:+.2f} bps; all naked SELL_CE strikes blocked"
+                        )
+                    elif tpb_dist_pct >= 0.15 and plus_di > minus_di and syn_basis >= 0.0:
+                        rejection_reasons.append(
+                            f"Contraction Short Above-TPB Bullish Flow Guard: Spot ({spot_ltp:.1f}) is +{tpb_dist_pct:.2f}% above Session TPB ({session_tpb:.1f}) with +DI ({plus_di:.1f}) > -DI ({minus_di:.1f})"
                         )
                     elif (plus_di - minus_di) > 4.0 or kaufman_er >= 0.20:
                         rejection_reasons.append(
                             f"Contraction Short Trend Conflict: +DI ({plus_di:.1f}) vs -DI ({minus_di:.1f}) with ER {kaufman_er:.2f}; naked SELL_CE blocked"
                         )
                 elif opt_type == "PE":
-                    orb_edge_pts = 55.0 if "BANK" in u_sym else 22.0
                     if has_orb and spot_ltp < orb_low:
                         rejection_reasons.append(
                             f"Contraction Short ORB Breakdown Guard: Spot ({spot_ltp:.1f}) < ORB Low ({orb_low:.1f}); naked SELL_PE blocked"
                         )
-                    elif (
-                        has_orb
-                        and ((spot_ltp - orb_low) <= orb_edge_pts or strike > orb_low)
-                        and syn_basis <= -2.0
-                        and minus_di > plus_di
-                    ):
+                    elif minus_di > plus_di and syn_basis <= -2.0:
                         rejection_reasons.append(
-                            f"Contraction Short Bearish Basis Near ORB Low: Strike {strike:.0f} / Spot {spot_ltp:.1f} vs ORB Low {orb_low:.1f} with Synthetic Basis {syn_basis:+.2f} bps"
+                            f"Contraction Short Bearish Basis Near ORB Low / Chain Flow: -DI ({minus_di:.1f}) > +DI ({plus_di:.1f}) with Synthetic Basis {syn_basis:+.2f} bps; all naked SELL_PE strikes blocked"
+                        )
+                    elif tpb_dist_pct <= -0.15 and minus_di > plus_di:
+                        rejection_reasons.append(
+                            f"Contraction Short Below-TPB Bearish Distribution Guard: Spot ({spot_ltp:.1f}) is {tpb_dist_pct:.2f}% below Session TPB ({session_tpb:.1f}) with -DI ({minus_di:.1f}) > +DI ({plus_di:.1f})"
                         )
                     elif (minus_di - plus_di) > 4.0 or kaufman_er >= 0.20:
                         rejection_reasons.append(
@@ -639,9 +656,14 @@ class AdvanceSignalEngine:
                 rejection_reasons.append(
                     f"Volatility Contraction Guard for Long Buying: ATR_Ratio {atr_ratio:.3f} < 0.88 without extrema breakout"
                 )
-            if vrp > 14.0 and net_gex > 50.0 and not (is_extrema_break and kaufman_er >= 0.38):
+            is_true_extrema_break = (
+                (has_day_extrema and spot_ltp >= day_high)
+                if opt_type == "CE"
+                else (has_day_extrema and spot_ltp <= day_low)
+            )
+            if vrp > 14.0 and net_gex > -500.0 and not (is_true_extrema_break and kaufman_er >= 0.42):
                 rejection_reasons.append(
-                    f"Extreme VRP Long-Gamma Pinning Guard: VRP +{vrp:.2f}% > +14.0% with Net GEX +{net_gex:.1f} Cr"
+                    f"Extreme VRP Long-Gamma Pinning Guard: VRP +{vrp:.2f}% > +14.0% with Net GEX {net_gex:+.1f} Cr (> -500.0 Cr Short-Gamma floor)"
                 )
             if cal_prob < 0.48 or exp_net_ret < 1.5:
                 rejection_reasons.append(f"Model conviction below Long Sniper hurdle (P={cal_prob:.2f}, E[R]={exp_net_ret:.1f}%)")

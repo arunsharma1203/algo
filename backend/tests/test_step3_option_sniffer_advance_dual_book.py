@@ -1306,6 +1306,231 @@ class TestStep3OptionSnifferAdvanceDualBook(unittest.TestCase):
             self.assertNotEqual(res_stale["status"], "ACTIVE")
             self.assertTrue(any("Index 1m feed unhealthy" in r for r in res_stale["rejection_reasons"]))
 
+    def test_13_v211_domino_immunity_neutral_seller_mirror_chain_flow_and_gex_flicker_vrp(self):
+        """
+        Verifies Option Sniffer Advance v2.1.1 Isolated Domino-Immunity Patches (P1 + P3):
+          1. P1a + P1b (Trade #51 `NEUTRAL` Consensus Seller Polarity + Below-TPB Bearish Distribution Guard):
+             At 2026-11-11 12:59:02 IST (`c_dir == 'NEUTRAL'`, Spot 25303.25 < TPB 25357.52, -DI 27.11 > +DI 25.10),
+             unmocked OptionAlphaModel mirrors Seller polarity so SELL 25250 PE is strictly rejected while
+             trend-aligned SELL 25400 CE qualifies as ACTIVE.
+          2. P1b (Nov 09 12:15:01 Strike-Hop Domino Immunity):
+             When -DI > +DI and Synthetic Basis <= -2.0 bps, BOTH 24900 PE and 24850 PE (< ORB Low) are rejected
+             chain-wide so blocking 24900 PE cannot domino into 24850 PE.
+          3. P3 (Nov 09 10:43:24 `-161.5 Cr` GEX-Flicker Extreme VRP Guard vs Nov 03 Deep Short-Gamma Squeeze):
+             Blocks VRP > 14.0% when Net GEX > -500.0 Cr (`-161.5 Cr` noise without true extrema), while preserving
+             genuine deep Short-Gamma Squeeze breakouts (`Net GEX <= -500.0 Cr`).
+        """
+        engine = AdvanceSignalEngine()
+        AdvanceSignalEngine.reset_state()
+
+        # --- 1. Exact reproduction of 2026-11-11 12:59:02 IST (`Trade #51`) with REAL unmocked OptionAlphaModel ---
+        t_1259 = datetime(2026, 11, 11, 12, 59, 2)
+        u_1259 = {"spot_ltp": 25303.25, "open": 25320.0, "high": 25424.35, "low": 25263.80, "vwap": 25357.52}
+        intel_1259 = {
+            "spot_price": 25303.25,
+            "session_tpb": 25357.52,
+            "orb_high": 25399.10,
+            "orb_low": 25263.80,
+            "day_high": 25424.35,
+            "day_low": 25263.80,
+            "completed_bars_count": 224,
+            "is_index_feed_healthy": True,
+            "adx_14": 19.4,
+            "plus_di": 25.10,
+            "minus_di": 27.11,
+            "kaufman_er": 0.176,
+            "atr_ratio": 0.759,
+            "vrp": 8.83,
+            "rv_15m_ann": 8.97,
+            "net_gex": 520.0,
+            "synthetic_basis_bps": 5.71,
+            "call_wall_strike": 25400.0,
+            "put_wall_strike": 25200.0,
+        }
+        neutral_upstream = {"consensus_direction": "NEUTRAL", "consensus_confidence": 50.0}
+
+        pe_25250 = {
+            "instrument_key": "NSE_FO|T51_25250PE",
+            "trading_symbol": "NIFTY 25250 PE 17 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 25250.0,
+            "option_type": "PE",
+            "lot_size": 65,
+            "expiry": "2026-11-17",
+        }
+        q_pe_25250 = {
+            **pe_25250,
+            "ltp": 198.9,
+            "bid": 198.7,
+            "ask": 199.1,
+            "spread_pct": 0.20,
+            "volume": 420000,
+            "oi": 3200000,
+            "iv": 17.8,
+            "delta": -0.44,
+            "quote_age_ms": 60,
+        }
+        ce_25400 = {
+            "instrument_key": "NSE_FO|T51_25400CE",
+            "trading_symbol": "NIFTY 25400 CE 17 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 25400.0,
+            "option_type": "CE",
+            "lot_size": 65,
+            "expiry": "2026-11-17",
+        }
+        q_ce_25400 = {
+            **ce_25400,
+            "ltp": 194.1,
+            "bid": 193.85,
+            "ask": 194.30,
+            "spread_pct": 0.23,
+            "volume": 460000,
+            "oi": 4100000,
+            "iv": 17.8,
+            "delta": 0.43,
+            "quote_age_ms": 60,
+        }
+
+        res_pe_t51 = engine.evaluate_contract(
+            contract=pe_25250,
+            quote=q_pe_25250,
+            underlying_quote=u_1259,
+            chain_intel=intel_1259,
+            upstream_signals=neutral_upstream,
+            as_of_time=t_1259,
+            enforce_cutoff=True,
+            defer_open=True,
+        )
+        res_ce_t51 = engine.evaluate_contract(
+            contract=ce_25400,
+            quote=q_ce_25400,
+            underlying_quote=u_1259,
+            chain_intel=intel_1259,
+            upstream_signals=neutral_upstream,
+            as_of_time=t_1259,
+            enforce_cutoff=True,
+            defer_open=True,
+        )
+        self.assertNotEqual(res_pe_t51["status"], "ACTIVE")
+        self.assertTrue(
+            any("Below-TPB Bearish Distribution Guard" in r for r in res_pe_t51["rejection_reasons"]),
+            f"Expected Below-TPB Bearish Distribution Guard on Trade #51 PE, got: {res_pe_t51['rejection_reasons']}",
+        )
+        self.assertLess(res_pe_t51["calibrated_prob"], 0.44)
+        self.assertEqual(res_ce_t51["status"], "ACTIVE")
+        self.assertEqual(res_ce_t51["direction"], "SELL_CE")
+        self.assertGreaterEqual(res_ce_t51["calibrated_prob"], 0.50)
+
+        # --- 2. Chain-Wide Strike-Hop Domino Immunity (Nov 09 12:15:01: 24900 PE -> 24850 PE both blocked) ---
+        AdvanceSignalEngine.reset_state()
+        t_nov09_1215 = datetime(2026, 11, 9, 12, 15, 1)
+        intel_nov09_1215 = {
+            **intel_1259,
+            "spot_price": 24924.0,
+            "session_tpb": 24930.0,
+            "orb_high": 25084.05,
+            "orb_low": 24897.85,
+            "day_high": 25084.05,
+            "day_low": 24838.75,
+            "plus_di": 17.2,
+            "minus_di": 20.4,
+            "kaufman_er": 0.14,
+            "atr_ratio": 0.74,
+            "vrp": 16.5,
+            "synthetic_basis_bps": -3.10,
+        }
+        for strike_k in (24900.0, 24850.0):
+            c_pe = {
+                "instrument_key": f"NSE_FO|DOM_{int(strike_k)}PE",
+                "trading_symbol": f"NIFTY {int(strike_k)} PE 17 NOV 26",
+                "underlying": "NIFTY",
+                "strike": strike_k,
+                "option_type": "PE",
+                "lot_size": 65,
+                "expiry": "2026-11-17",
+            }
+            q_pe = {**c_pe, "ltp": 216.6, "bid": 216.45, "ask": 216.8, "spread_pct": 0.16, "volume": 350000, "oi": 2900000, "iv": 19.5, "delta": -0.42, "quote_age_ms": 50}
+            res_dom = engine.evaluate_contract(
+                contract=c_pe,
+                quote=q_pe,
+                underlying_quote={"spot_ltp": 24924.0, "open": 25010.0, "vwap": 24930.0},
+                chain_intel=intel_nov09_1215,
+                upstream_signals=neutral_upstream,
+                as_of_time=t_nov09_1215,
+                enforce_cutoff=True,
+                defer_open=True,
+            )
+            self.assertNotEqual(res_dom["status"], "ACTIVE")
+            self.assertTrue(
+                any("Bearish Basis Near ORB Low" in r for r in res_dom["rejection_reasons"]),
+                f"Expected chain-wide Bearish Basis guard on {strike_k} PE, got: {res_dom['rejection_reasons']}",
+            )
+
+        # --- 3. P3: GEX-Flicker Extreme VRP Guard (-161.5 Cr blocked vs -8295.0 Cr deep Short-Gamma allowed) ---
+        AdvanceSignalEngine.reset_state()
+        with patch.object(
+            engine.model,
+            "predict_contract",
+            return_value={"calibrated_prob": 0.56, "expected_net_return_pct": 12.0},
+        ):
+            c_24850pe = {
+                "instrument_key": "NSE_FO|FLICKER_24850PE",
+                "trading_symbol": "NIFTY 24850 PE 17 NOV 26",
+                "underlying": "NIFTY",
+                "strike": 24850.0,
+                "option_type": "PE",
+                "lot_size": 65,
+                "expiry": "2026-11-17",
+            }
+            q_24850pe = {**c_24850pe, "ltp": 265.4, "bid": 265.1, "ask": 265.65, "spread_pct": 0.21, "volume": 410000, "oi": 3400000, "iv": 31.5, "delta": -0.49, "quote_age_ms": 50}
+            intel_flicker = {
+                "spot_price": 24855.4,
+                "session_tpb": 24930.45,
+                "orb_high": 25084.05,
+                "orb_low": 24897.85,
+                "day_high": 25084.05,
+                "day_low": 24851.3,
+                "completed_bars_count": 88,
+                "is_index_feed_healthy": True,
+                "adx_14": 18.5,
+                "plus_di": 12.59,
+                "minus_di": 43.48,
+                "kaufman_er": 0.384,
+                "atr_ratio": 1.349,
+                "vrp": 18.20,
+                "rv_15m_ann": 13.34,
+                "net_gex": -161.5,
+                "synthetic_basis_bps": -11.63,
+            }
+            res_flicker = engine.evaluate_contract(
+                contract=c_24850pe,
+                quote=q_24850pe,
+                underlying_quote={"spot_ltp": 24855.4, "open": 25010.0, "vwap": 24930.45},
+                chain_intel=intel_flicker,
+                as_of_time=datetime(2026, 11, 9, 10, 43, 24),
+                enforce_cutoff=True,
+                defer_open=True,
+            )
+            self.assertNotEqual(res_flicker["status"], "ACTIVE")
+            self.assertTrue(
+                any("Extreme VRP Long-Gamma Pinning Guard" in r for r in res_flicker["rejection_reasons"]),
+                f"Expected Extreme VRP guard on -161.5 Cr GEX flicker, got: {res_flicker['rejection_reasons']}",
+            )
+
+            # Deep Short-Gamma Squeeze (net_gex = -8295.0 Cr <= -500.0 Cr) preserves Nov 03 13:00 squeeze winner!
+            intel_squeeze = {**intel_flicker, "net_gex": -8295.0}
+            res_squeeze = engine.evaluate_contract(
+                contract=c_24850pe,
+                quote=q_24850pe,
+                underlying_quote={"spot_ltp": 24855.4, "open": 25010.0, "vwap": 24930.45},
+                chain_intel=intel_squeeze,
+                as_of_time=datetime(2026, 11, 9, 10, 43, 24),
+                enforce_cutoff=True,
+                defer_open=True,
+            )
+            self.assertEqual(res_squeeze["status"], "ACTIVE")
+
 
 if __name__ == "__main__":
     unittest.main()
