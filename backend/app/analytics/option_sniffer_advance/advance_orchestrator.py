@@ -251,18 +251,19 @@ class OptionSnifferAdvanceOrchestrator:
                 for u in ("NIFTY", "BANKNIFTY")
             }
 
-            # 1. Update open Dual-Book positions
-            closed_trades = AdvancePaperExecution.update_open_trades(
-                live_quotes_map=live_quotes,
-                underlying_quotes_map=underlying_quotes,
-                as_of_time=now_dt,
-            )
-
-            # 2. Compute Cross-Sectional Chain Intelligence
+            # 1. Compute Cross-Sectional Chain Intelligence first so open-trade surveillance receives live ER/ATR_Ratio
             chain_intel_map = self.compute_live_chain_intelligence(now_dt=now_dt)
             for u, intel in chain_intel_map.items():
                 if float(intel.get("spot_price") or 0.0) > 0:
                     AdvanceDB.save_chain_snapshot(intel)
+
+            # 2. Update open Dual-Book positions (with live chain_intel_map for regime-break stagnation guards)
+            closed_trades = AdvancePaperExecution.update_open_trades(
+                live_quotes_map=live_quotes,
+                underlying_quotes_map=underlying_quotes,
+                as_of_time=now_dt,
+                chain_intel_map=chain_intel_map,
+            )
 
             # 3. Evaluate contracts if within trading window (09:15 - 15:15 IST Mon-Fri)
             evaluated_count = 0
@@ -325,7 +326,10 @@ class OptionSnifferAdvanceOrchestrator:
                             if opt_t == "CE"
                             else ((spot_val - strike_val) / strike_step)
                         )
-                        if u_intel.get("recommended_book") == BOOK_SHORT_SELL and otm_dist >= 0.40:
+                        if (
+                            u_intel.get("recommended_book") == BOOK_SHORT_SELL
+                            or u_intel.get("active_strategy_mode") == STRATEGY_CONTRACTION_THETA_SELLER
+                        ) and otm_dist >= 0.40:
                             return (exp_penalty, abs(otm_dist - SHORT_SWEET_SPOT_OTM_STRIKES) * strike_step, exp_str, strike_val)
                         return (exp_penalty, abs(strike_val - spot_val), exp_str, strike_val)
                     return (exp_penalty, 0.0, exp_str, strike_val)
@@ -342,6 +346,7 @@ class OptionSnifferAdvanceOrchestrator:
                         except Exception:
                             pass
 
+                active_candidates_by_bucket: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
                 ordered_contracts = sorted(contracts, key=_atm_sort_key)
                 for contract in ordered_contracts:
                     u_sym = str(contract.get("underlying") or "NIFTY").upper()
@@ -380,12 +385,32 @@ class OptionSnifferAdvanceOrchestrator:
                         upstream_signals=upstream_signals,
                         as_of_time=now_dt,
                         enforce_cutoff=True,
+                        defer_open=True,
                     )
                     if res.get("status") in ("ACTIVE", "QUALIFIED"):
                         if res.get("book_type") == BOOK_LONG_BUY:
                             qualified_long.append(res)
                         elif res.get("book_type") == BOOK_SHORT_SELL:
                             qualified_short.append(res)
+                    if res.get("status") == "ACTIVE":
+                        b_key = (str(res.get("book_type") or ""), u_sym)
+                        active_candidates_by_bucket[b_key].append(res)
+
+                # Execute the single highest-scoring candidate across CE & PE per (book_type, underlying)
+                for b_key, cand_list in active_candidates_by_bucket.items():
+                    if not cand_list:
+                        continue
+                    best_sig = max(
+                        cand_list,
+                        key=lambda s: (
+                            float(s.get("candidate_rank_score") or 0.0),
+                            float(s.get("calibrated_prob") or 0.0),
+                            -abs(float(s.get("otm_strikes") or 0.0) - SHORT_SWEET_SPOT_OTM_STRIKES),
+                        ),
+                    )
+                    self.signal_engine.execute_deferred_signal(
+                        best_sig, as_of_time=now_dt, enforce_cutoff=True
+                    )
 
             elapsed = round(time.time() - sweep_start, 3)
             self._total_sweeps += 1

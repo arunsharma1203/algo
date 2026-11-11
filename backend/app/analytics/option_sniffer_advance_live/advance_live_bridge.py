@@ -46,6 +46,8 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     MAX_DAILY_COMBINED_LOSS_INR,
     calculate_short_option_trade_costs,
 )
+from app.analytics.option_sniffer_advance.advance_paper_execution import AdvancePaperExecution
+from app.analytics.option_sniffer_advance.advance_signal_engine import AdvanceSignalEngine
 from app.data.historical_data_layer import get_db_path
 
 logger = logging.getLogger(__name__)
@@ -173,6 +175,8 @@ class AdvanceLiveBridge:
         self._pending_exit_attempts: Dict[str, int] = {}
         self._partial_exit_accum: Dict[str, Dict[str, Any]] = {}
         self._last_priority_quote_refresh_ts: float = -999999.0
+        self._last_sl_modify_epoch: Dict[str, float] = {}
+        self._sl_reanchored_intent_ids: set = set()
 
     @property
     def db_path(self) -> str:
@@ -202,6 +206,83 @@ class AdvanceLiveBridge:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _sync_parent_paper_trade_closed(
+        self,
+        advance_trade_id: str,
+        exit_price: float,
+        exit_reason: str,
+        net_pnl: float = 0.0,
+        gross_pnl: float = 0.0,
+        charges: float = 0.0,
+        now_dt: Optional[datetime] = None,
+    ) -> None:
+        """
+        Synchronizes parent `option_sniffer_advance_trades` row to CLOSED whenever the live bridge
+        autonomously flattens a position (e.g. `SOS_PANIC_EXIT` or `EXCHANGE_SL_ORDER_TRIGGERED`),
+        preventing Paper-vs-Live split-brain on anti-clustering locks and circuit breakers.
+        """
+        adv_tid = str(advance_trade_id or "").strip()
+        if not adv_tid:
+            return
+        ts_dt = to_ist_naive(now_dt)
+        ts_iso = ts_dt.isoformat()
+        try:
+            with self._get_rw_conn() as conn:
+                p_row = conn.execute(
+                    "SELECT * FROM option_sniffer_advance_trades WHERE trade_id = ? LIMIT 1;",
+                    (adv_tid,),
+                ).fetchone()
+                if not p_row or str(p_row["status"] or "").upper() != "OPEN":
+                    return
+                p_dict = dict(p_row)
+                entry_p = float(p_dict.get("entry_price_used") or 0.0)
+                eff_exit = float(exit_price or entry_p)
+                dur_sec = 0
+                try:
+                    ent_dt = datetime.fromisoformat(str(p_dict["entry_time"]).replace("T", " ")[:19])
+                    dur_sec = max(0, int((ts_dt - ent_dt).total_seconds()))
+                except Exception:
+                    dur_sec = int(p_dict.get("holding_duration_seconds") or 0)
+                net_pct = round(((net_pnl / (entry_p * max(1, int(p_dict.get("quantity") or 65)))) * 100.0), 2) if entry_p > 0 else 0.0
+                conn.execute(
+                    """
+                    UPDATE option_sniffer_advance_trades
+                    SET status = 'CLOSED',
+                        exit_time = ?,
+                        exit_bid = ?,
+                        exit_ask = ?,
+                        exit_price_used = ?,
+                        gross_pnl = ?,
+                        charges = ?,
+                        net_pnl = ?,
+                        net_pnl_pct = ?,
+                        holding_duration_seconds = ?,
+                        exit_reason = ?
+                    WHERE trade_id = ? AND status = 'OPEN';
+                    """,
+                    (
+                        ts_iso,
+                        eff_exit,
+                        eff_exit,
+                        eff_exit,
+                        round(float(gross_pnl), 2),
+                        round(float(charges), 2),
+                        round(float(net_pnl), 2),
+                        net_pct,
+                        dur_sec,
+                        str(exit_reason or "SOS_PANIC_EXIT"),
+                        adv_tid,
+                    ),
+                )
+                conn.commit()
+                AdvanceSignalEngine.record_exit_cooldown(
+                    book_type=str(p_dict.get("book_type") or BOOK_LONG_BUY),
+                    instrument_key=str(p_dict.get("instrument_key") or ""),
+                    as_of_time=ts_dt,
+                )
+        except Exception as sync_err:
+            logger.debug(f"[AdvanceLiveBridge] Parent paper trade sync note for {adv_tid}: {sync_err}")
 
     def _get_ro_conn(self) -> sqlite3.Connection:
         uri = f"file:{os.path.abspath(self.db_path)}?mode=ro"
@@ -1526,6 +1607,14 @@ class AdvanceLiveBridge:
                                 (sl_qty, sl_oid, sl_fill, gross, charges, net_pnl, now_iso, intent_id),
                             )
                             conn.commit()
+                        self._sync_parent_paper_trade_closed(
+                            advance_trade_id=str(intent.get("advance_trade_id") or ""),
+                            exit_price=sl_fill,
+                            exit_reason="EXCHANGE_SL_ORDER_TRIGGERED",
+                            net_pnl=net_pnl,
+                            gross_pnl=gross,
+                            charges=charges,
+                        )
                         continue
                     elif sl_status in ("rejected", "cancelled"):
                         # Resting SL-L order was rejected or cancelled on exchange; clear sl_oid so Section B places a fresh SL-L
@@ -1611,6 +1700,51 @@ class AdvanceLiveBridge:
                         )
                         new_state = "PARTIALLY_FILLED" if is_partial_open else "FILLED"
                         is_exiting_retry = str(intent.get("exit_state") or "").upper() == "EXIT_RETRY_PENDING"
+                        cur_sl_trig = float(intent.get("stop_loss_trigger") or 0.05)
+                        cur_sl_lim = float(intent.get("stop_loss_limit") or 0.05)
+
+                        # Fetch parent paper trade stop_loss_pct & live trailing_stop for SL re-anchoring and ratchet
+                        p_sl_pct = 20.0 if action == "BUY" else 16.0
+                        p_trail = 0.0
+                        try:
+                            with self._get_ro_conn() as ro_conn:
+                                prow = ro_conn.execute(
+                                    "SELECT stop_loss_pct, trailing_stop FROM option_sniffer_advance_trades WHERE trade_id = ? LIMIT 1;",
+                                    (str(intent.get("advance_trade_id") or ""),),
+                                ).fetchone()
+                                if prow:
+                                    if prow["stop_loss_pct"] is not None:
+                                        p_sl_pct = float(prow["stop_loss_pct"])
+                                    if prow["trailing_stop"] is not None:
+                                        p_trail = float(prow["trailing_stop"])
+                        except Exception:
+                            pass
+
+                        # Fix #6A: Re-anchor SL trigger to actual exchange fill `eff_avg` on first fill reconciliation
+                        need_reanchor_modify = False
+                        reanchor_trig = cur_sl_trig
+                        reanchor_lim = cur_sl_lim
+                        if exch_avg > 0 and intent_id not in self._sl_reanchored_intent_ids:
+                            self._sl_reanchored_intent_ids.add(intent_id)
+                            paper_ent_ref = float(intent.get("paper_entry_price") or entry_fill or exch_avg)
+                            if abs(exch_avg - paper_ent_ref) >= 0.50:
+                                if action == "BUY":
+                                    eff_sl_pct = AdvancePaperExecution.calculate_long_capped_sl_pct(
+                                        exch_avg, eff_qty, p_sl_pct
+                                    )
+                                    re_trig = round_to_tick(exch_avg * (1.0 - eff_sl_pct / 100.0))
+                                    re_lim = round_to_tick(re_trig * 0.985)
+                                else:
+                                    eff_sl_pct = AdvancePaperExecution.calculate_short_capped_sl_pct(
+                                        exch_avg, eff_qty, p_sl_pct
+                                    )
+                                    re_trig = round_to_tick(exch_avg * (1.0 + eff_sl_pct / 100.0))
+                                    re_lim = round_to_tick(re_trig * 1.015)
+                                if abs(re_trig - cur_sl_trig) >= 0.50:
+                                    reanchor_trig = re_trig
+                                    reanchor_lim = re_lim
+                                    need_reanchor_modify = True
+
                         if sl_oid and not is_exiting_retry:
                             sl_ord_existing = order_map.get(sl_oid) or {}
                             sl_existing_qty = int(sl_ord_existing.get("quantity") or target_qty)
@@ -1628,19 +1762,21 @@ class AdvanceLiveBridge:
                                 sl_oid = ""
                         new_sl_oid = (sl_oid or None) if not is_exiting_retry else None
                         if not new_sl_oid and not is_exiting_retry:
+                            place_trig = reanchor_trig if need_reanchor_modify else cur_sl_trig
+                            place_lim = reanchor_lim if need_reanchor_modify else cur_sl_lim
                             try:
                                 sl_tx_type = "SELL" if action == "BUY" else "BUY"
                                 sl_payload = {
                                     "quantity": eff_qty,
                                     "product": "I",
                                     "validity": "DAY",
-                                    "price": float(intent.get("stop_loss_limit") or 0.05),
+                                    "price": float(place_lim),
                                     "tag": sanitize_upstox_tag(f"sl-{intent_id[-14:]}"),
                                     "instrument_token": str(intent.get("instrument_key") or ""),
                                     "order_type": "SL",
                                     "transaction_type": sl_tx_type,
                                     "disclosed_quantity": 0,
-                                    "trigger_price": float(intent.get("stop_loss_trigger") or 0.05),
+                                    "trigger_price": float(place_trig),
                                     "is_amo": False,
                                 }
                                 sl_ok, _, sl_data = engine._call_upstox_broker_api(
@@ -1648,8 +1784,81 @@ class AdvanceLiveBridge:
                                 )
                                 if sl_ok and isinstance(sl_data, dict) and sl_data.get("status") == "success":
                                     new_sl_oid = str(sl_data.get("data", {}).get("order_id") or f"UPSTOX_ADV_SL_{int(time.time()*1000)}")
+                                    cur_sl_trig = place_trig
+                                    cur_sl_lim = place_lim
+                                    need_reanchor_modify = False
                             except Exception:
                                 pass
+
+                        # Fix #6B: Throttled Exchange-Side Trailing SL-L Ratchet (or Re-Anchor) via PUT /order/modify
+                        if new_sl_oid and not is_exiting_retry:
+                            target_mod_trig = None
+                            target_mod_lim = None
+                            mono_now = time.monotonic()
+                            can_modify_now = (mono_now - self._last_sl_modify_epoch.get(intent_id, -9999.0)) >= 5.0
+                            paper_ent_base = float(intent.get("paper_entry_price") or entry_fill or eff_avg)
+                            paper_init_sl = (
+                                round_to_tick(paper_ent_base * (1.0 - p_sl_pct / 100.0))
+                                if action == "BUY"
+                                else round_to_tick(paper_ent_base * (1.0 + p_sl_pct / 100.0))
+                            )
+                            paper_has_ratcheted = (
+                                (action == "BUY" and p_trail >= round(paper_init_sl + 1.00, 2))
+                                or (action == "SELL" and 0.05 < p_trail <= round(paper_init_sl - 1.00, 2))
+                            )
+
+                            if p_trail > 0 and paper_has_ratcheted and can_modify_now and not need_reanchor_modify:
+                                cand_trig = round_to_tick(p_trail)
+                                is_protective_step = (
+                                    (action == "BUY" and cand_trig >= round(cur_sl_trig + 2.00, 2))
+                                    or (action == "SELL" and 0.05 < cand_trig <= round(cur_sl_trig - 2.00, 2))
+                                )
+                                if is_protective_step:
+                                    # Ensure >= ₹1.00 buffer away from live market price so NSE never rejects SL modify
+                                    market_safe = True
+                                    try:
+                                        q_live = OptionStreamManager().get_option_quote(str(intent.get("instrument_key") or ""))
+                                        if q_live:
+                                            q_b = float(q_live.get("bid") or q_live.get("ltp") or 0.0)
+                                            q_a = float(q_live.get("ask") or q_live.get("ltp") or 0.0)
+                                            if action == "BUY" and q_b > 0 and cand_trig > (q_b - 1.00):
+                                                market_safe = False
+                                            elif action == "SELL" and q_a > 0 and cand_trig < (q_a + 1.00):
+                                                market_safe = False
+                                    except Exception:
+                                        pass
+                                    if market_safe:
+                                        target_mod_trig = cand_trig
+                                        target_mod_lim = (
+                                            round_to_tick(cand_trig * 0.985)
+                                            if action == "BUY"
+                                            else round_to_tick(cand_trig * 1.015)
+                                        )
+                            elif need_reanchor_modify:
+                                target_mod_trig = reanchor_trig
+                                target_mod_lim = reanchor_lim
+
+                            if target_mod_trig is not None and target_mod_lim is not None:
+                                try:
+                                    mod_payload = {
+                                        "order_id": str(new_sl_oid),
+                                        "quantity": int(eff_qty),
+                                        "validity": "DAY",
+                                        "price": float(target_mod_lim),
+                                        "order_type": "SL",
+                                        "disclosed_quantity": 0,
+                                        "trigger_price": float(target_mod_trig),
+                                    }
+                                    m_ok, _, m_data = engine._call_upstox_broker_api(
+                                        "PUT", "/order/modify", payload=mod_payload, is_emergency=True
+                                    )
+                                    if m_ok and isinstance(m_data, dict) and m_data.get("status") == "success":
+                                        cur_sl_trig = target_mod_trig
+                                        cur_sl_lim = target_mod_lim
+                                        self._last_sl_modify_epoch[intent_id] = mono_now
+                                except Exception:
+                                    pass
+
                         with self._get_rw_conn() as conn:
                             conn.execute(
                                 """
@@ -1658,10 +1867,12 @@ class AdvanceLiveBridge:
                                     average_fill_price = ?,
                                     filled_quantity = ?,
                                     broker_sl_order_id = ?,
+                                    stop_loss_trigger = ?,
+                                    stop_loss_limit = ?,
                                     updated_at = ?
                                 WHERE order_intent_id = ?;
                                 """,
-                                (new_state, eff_avg, eff_qty, new_sl_oid, now_iso, intent_id),
+                                (new_state, eff_avg, eff_qty, new_sl_oid, cur_sl_trig, cur_sl_lim, now_iso, intent_id),
                             )
                             conn.commit()
         except Exception as rec_err:
@@ -2131,6 +2342,14 @@ class AdvanceLiveBridge:
                 )
                 if res.get("exited"):
                     flattened.append(pos["order_intent_id"])
+                    exit_px = pos.get("current_bid") if pos.get("action") == "BUY" else pos.get("current_ask")
+                    self._sync_parent_paper_trade_closed(
+                        advance_trade_id=str(pos.get("advance_trade_id") or ""),
+                        exit_price=float(exit_px or pos.get("average_fill_price") or 0.0),
+                        exit_reason="SOS_PANIC_EXIT",
+                        net_pnl=float(res.get("realized_pnl") or 0.0),
+                        now_dt=now_dt,
+                    )
 
             self.generate_new_pin()
             return {
@@ -2471,6 +2690,10 @@ if _PREV_BRIDGE_INSTANCE is not None:
         _PREV_BRIDGE_INSTANCE._partial_exit_accum = {}
     if not hasattr(_PREV_BRIDGE_INSTANCE, "_last_priority_quote_refresh_ts"):
         _PREV_BRIDGE_INSTANCE._last_priority_quote_refresh_ts = -999999.0
+    if not hasattr(_PREV_BRIDGE_INSTANCE, "_sl_reanchored_intent_ids"):
+        _PREV_BRIDGE_INSTANCE._sl_reanchored_intent_ids = set()
+    if not hasattr(_PREV_BRIDGE_INSTANCE, "_last_sl_modify_epoch"):
+        _PREV_BRIDGE_INSTANCE._last_sl_modify_epoch = {}
     _BRIDGE_INSTANCE = _PREV_BRIDGE_INSTANCE
 
 

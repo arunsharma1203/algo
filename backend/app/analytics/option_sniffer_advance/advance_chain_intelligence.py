@@ -70,12 +70,23 @@ class AdvanceChainIntelligence:
         u_sym = str(underlying or "NIFTY").upper().strip()
 
         bars: List[Dict[str, Any]] = []
+        has_quality_flags = False
         try:
             with sqlite3.connect(get_db_path(), timeout=5.0) as conn:
                 conn.row_factory = sqlite3.Row
+                col_names = {
+                    str(r["name"])
+                    for r in conn.execute("PRAGMA table_info(continuous_index_ohlcv)").fetchall()
+                }
+                has_quality_flags = {"is_complete", "is_synthetic", "is_gap"}.issubset(col_names)
+                sel_cols = (
+                    "timestamp, open, high, low, close, volume, is_complete, is_synthetic, is_gap"
+                    if has_quality_flags
+                    else "timestamp, open, high, low, close, volume"
+                )
                 rows = conn.execute(
-                    """
-                    SELECT timestamp, open, high, low, close, volume
+                    f"""
+                    SELECT {sel_cols}
                     FROM continuous_index_ohlcv
                     WHERE ticker = ?
                       AND timestamp >= ?
@@ -178,10 +189,38 @@ class AdvanceChainIntelligence:
             rv_15m_ann = 12.5
             atr_14_pts = 15.0
 
+        is_index_feed_healthy = True
+        index_feed_issue = ""
+        mins_of_day = now_dt.hour * 60 + now_dt.minute
+        if n_bars >= 28 and not is_historical_display and now_dt.weekday() < 5 and (9 * 60 + 43) <= mins_of_day <= (15 * 60 + 15):
+            try:
+                last_bar_ts = str(bars[-1].get("timestamp") or "").replace("T", " ")[:19]
+                last_bar_dt = datetime.fromisoformat(last_bar_ts)
+                staleness_sec = (now_dt - last_bar_dt).total_seconds()
+                if staleness_sec > 180.0:
+                    is_index_feed_healthy = False
+                    index_feed_issue = f"Stale 1m index candle ({staleness_sec:.0f}s > 180s max)"
+                elif has_quality_flags:
+                    recent_28 = bars[-28:]
+                    bad_bars = [
+                        b
+                        for b in recent_28
+                        if int(b.get("is_synthetic") or 0) == 1
+                        or int(b.get("is_gap") or 0) == 1
+                        or (b.get("is_complete") is not None and int(b.get("is_complete")) == 0)
+                    ]
+                    if bad_bars:
+                        is_index_feed_healthy = False
+                        index_feed_issue = f"Synthetic/gap 1m index bars in 28-bar window ({len(bad_bars)}/28)"
+            except Exception:
+                pass
+
         return {
             "underlying": u_sym,
             "completed_bars_count": 0 if is_historical_display else n_bars,
             "display_bars_count": n_bars,
+            "is_index_feed_healthy": is_index_feed_healthy,
+            "index_feed_issue": index_feed_issue,
             "spot_price": round(spot, 2),
             "session_tpb": tpb,
             "orb_high": orb_high,
@@ -269,14 +308,22 @@ class AdvanceChainIntelligence:
 
         # 2. Net Dealer Gamma Exposure (GEX in ₹ Crores per 0.1% spot move)
         # Upstox V3 reports OI in total shares/units (lots * lot_size); normalize so we never double-multiply by lot_size
-        net_gex_raw = 0.0
+        ce_gex_raw = 0.0
+        pe_gex_raw = 0.0
         for q in u_quotes:
             gamma = float(q.get("gamma") or 0.0012)
             oi = float(q.get("oi") or 0.0)
             oi_units = oi if oi >= 5000.0 else (oi * lot_size)
-            sign = 1.0 if str(q.get("option_type") or "").upper() == "CE" else -1.0
-            net_gex_raw += sign * gamma * oi_units * (spot ** 2) * 0.001 / 1e7
+            gex_cr = gamma * oi_units * (spot ** 2) * 0.001 / 1e7
+            if str(q.get("option_type") or "").upper() == "CE":
+                ce_gex_raw += gex_cr
+            else:
+                pe_gex_raw += gex_cr
+        net_gex_raw = ce_gex_raw - pe_gex_raw
         net_gex = round(net_gex_raw, 2)
+        gex_imbalance_ratio = round(
+            (ce_gex_raw - pe_gex_raw) / (ce_gex_raw + pe_gex_raw + 1e-6), 4
+        )
         if net_gex > 5.0:
             gex_regime = "LONG_GAMMA_PINNING"
         elif net_gex < -5.0:
@@ -395,6 +442,8 @@ class AdvanceChainIntelligence:
             "range_10m_pct": idx_tech.get("range_10m_pct", 0.0),
             "completed_bars_count": idx_tech["completed_bars_count"],
             "display_bars_count": idx_tech["display_bars_count"],
+            "is_index_feed_healthy": idx_tech.get("is_index_feed_healthy", True),
+            "index_feed_issue": idx_tech.get("index_feed_issue", ""),
             "synthetic_future": synthetic_future,
             "synthetic_basis_bps": synthetic_basis_bps,
             "atm_iv": atm_iv,
@@ -402,6 +451,7 @@ class AdvanceChainIntelligence:
             "vrp": vrp,
             "iv_skew_25d": iv_skew_25d,
             "net_gex": net_gex,
+            "gex_imbalance_ratio": gex_imbalance_ratio,
             "gex_regime": gex_regime,
             "pcr_oi": pcr_oi,
             "pcr_volume": pcr_volume,

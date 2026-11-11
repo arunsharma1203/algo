@@ -2229,6 +2229,213 @@ class TestAdvanceLiveBridgeIsolation(unittest.TestCase):
         cal_live = self.bridge.get_calendar_performance(book_filter="LIVE_BROKER")
         self.assertEqual(len(cal_live["days"]), 0)
 
+    def test_36_sos_panic_exit_syncs_parent_paper_trade_closed_eliminating_split_brain(self):
+        """
+        v2.1 Fix #5 Verification:
+        When `execute_sos_panic_exit()` flattens an active live broker position, it must also
+        close the parent `option_sniffer_advance_trades` row (`status = 'CLOSED'`, `exit_reason = 'SOS_PANIC_EXIT'`)
+        so Paper and Live never enter a split-brain state on anti-clustering locks or circuit breakers.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_SOS_3601",
+            book_type="SHORT_BOOK_SELL",
+            action="SELL",
+            status="OPEN",
+            entry_price=200.0,
+            entry_time="2026-11-09 11:20:00",
+        )
+
+        def fake_sos_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            if method == "POST" and endpoint == "/order/place":
+                if payload and payload.get("order_type") == "SL":
+                    return True, 200, {"status": "success", "data": {"order_id": "SL_3601"}}
+                if payload and payload.get("transaction_type") == "SELL":
+                    return True, 200, {"status": "success", "data": {"order_id": "ENT_3601"}}
+                return True, 200, {"status": "success", "data": {"order_id": "EXIT_SOS_3601"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                return (
+                    True,
+                    200,
+                    {
+                        "status": "success",
+                        "data": [
+                            {
+                                "order_id": "ENT_3601",
+                                "status": "complete",
+                                "filled_quantity": 65,
+                                "quantity": 65,
+                                "average_price": 200.0,
+                            },
+                            {
+                                "order_id": "SL_3601",
+                                "status": "trigger pending",
+                                "filled_quantity": 0,
+                                "quantity": 65,
+                            },
+                        ],
+                    },
+                )
+            if method == "DELETE" and endpoint == "/order/cancel":
+                return True, 200, {"status": "success"}
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_sos_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 200000.0},
+        ), patch("app.analytics.option_sniffer_advance.advance_db.get_db_path", return_value=self.db_path):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_DUAL_BOOK_NAKED,
+                now_dt=datetime(2026, 11, 9, 11, 19, 0),
+            )
+            sync_entry = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 20, 5))
+            self.assertEqual(len(sync_entry["entries_mirrored"]), 1)
+
+            sos_res = self.bridge.execute_sos_panic_exit()
+            self.assertEqual(sos_res["status"], "SOS_EXECUTED_AND_DISARMED")
+            self.assertEqual(sos_res["positions_flattened"], 1)
+
+        with self.bridge._get_ro_conn() as conn:
+            live_row = dict(
+                conn.execute(
+                    "SELECT * FROM option_advance_live_order_intents WHERE advance_trade_id = 'ADV_SOS_3601';"
+                ).fetchone()
+            )
+            paper_row = dict(
+                conn.execute(
+                    "SELECT * FROM option_sniffer_advance_trades WHERE trade_id = 'ADV_SOS_3601';"
+                ).fetchone()
+            )
+        self.assertEqual(live_row["exit_state"], "CONFIRMED_FLAT")
+        self.assertEqual(live_row["exit_reason"], "SOS_PANIC_EXIT")
+        self.assertEqual(paper_row["status"], "CLOSED")
+        self.assertEqual(paper_row["exit_reason"], "SOS_PANIC_EXIT")
+
+    def test_37_reconcile_reanchors_sl_to_eff_avg_and_throttles_trailing_sl_modify(self):
+        """
+        v2.1 Fix #6A & #6B Verification:
+          1. On first fill reconciliation when actual exchange `average_price` differs from `paper_entry_price`
+             by >= ₹0.50, the resting exchange SL-L trigger is re-anchored to `eff_avg` via `PUT /order/modify`.
+          2. When the parent paper trade's `trailing_stop` ratchets protectively by >= ₹2.00 (with >= ₹1.00 live
+             quote buffer), `PUT /order/modify` updates the exchange SL-L trigger, while sub-5.0s repeats are throttled.
+        """
+        self._insert_advance_paper_trade(
+            "ADV_SL_MOD_3701",
+            book_type="SHORT_BOOK_SELL",
+            action="SELL",
+            status="OPEN",
+            entry_price=100.0,
+            entry_time="2026-11-09 11:20:00",
+        )
+        with self.bridge._get_rw_conn() as conn:
+            conn.execute(
+                "UPDATE option_sniffer_advance_trades SET stop_loss_pct = 16.0, trailing_stop = 116.0 WHERE trade_id = 'ADV_SL_MOD_3701';"
+            )
+            conn.commit()
+
+        modify_payloads = []
+        entry_filled_on_exch = {"ready": False}
+
+        def fake_sl_mod_broker(method, endpoint, payload=None, params=None, is_emergency=False):
+            if method == "POST" and endpoint == "/order/place":
+                if payload and payload.get("order_type") == "SL":
+                    return True, 200, {"status": "success", "data": {"order_id": "SL_3701"}}
+                return True, 200, {"status": "success", "data": {"order_id": "ENT_3701"}}
+            if method == "PUT" and endpoint == "/order/modify":
+                modify_payloads.append(dict(payload or {}))
+                return True, 200, {"status": "success", "data": {"order_id": "SL_3701"}}
+            if method == "GET" and endpoint == "/order/retrieve-all":
+                if not entry_filled_on_exch["ready"]:
+                    return True, 200, {"status": "success", "data": []}
+                return (
+                    True,
+                    200,
+                    {
+                        "status": "success",
+                        "data": [
+                            {
+                                "order_id": "ENT_3701",
+                                "status": "complete",
+                                "filled_quantity": 65,
+                                "quantity": 65,
+                                "average_price": 105.0,
+                            },
+                            {
+                                "order_id": "SL_3701",
+                                "status": "trigger pending",
+                                "filled_quantity": 0,
+                                "quantity": 65,
+                            },
+                        ],
+                    },
+                )
+            return True, 200, {"status": "success", "data": {}}
+
+        self.mock_broker_api.side_effect = fake_sl_mod_broker
+        with patch.object(
+            self.bridge._live_adapter,
+            "fetch_account_readiness",
+            return_value={"ready_for_live": True, "available_margin": 200000.0},
+        ), patch(
+            "app.analytics.option_sniffer_advance_live.advance_live_bridge.OptionStreamManager.get_option_quote",
+            return_value={"bid": 89.5, "ask": 90.0, "ltp": 89.8, "spread_pct": 0.55, "is_valid": True},
+        ):
+            self.bridge.arm_live_trading(
+                pin=self.bridge.current_pin,
+                execution_mode=MODE_DUAL_BOOK_NAKED,
+                now_dt=datetime(2026, 11, 9, 11, 19, 0),
+            )
+            sync_res = self.bridge.sync_once_with_advance_paper_table(now_dt=datetime(2026, 11, 9, 11, 20, 2))
+            self.assertEqual(len(sync_res["entries_mirrored"]), 1)
+            intent_id = sync_res["entries_mirrored"][0]
+
+            # Pass 1: Exchange fills entry at 105.0 (+5.0 vs paper 100.0) -> SL re-anchors from 116.0 to 121.80
+            entry_filled_on_exch["ready"] = True
+            self.bridge._reconcile_open_live_intents_with_broker(
+                self.bridge.get_active_live_positions(),
+                now_dt=datetime(2026, 11, 9, 11, 20, 6),
+            )
+            self.assertEqual(len(modify_payloads), 1)
+            self.assertAlmostEqual(float(modify_payloads[0]["trigger_price"]), 121.80, places=2)
+
+            # Pass 2: Simulate >= 5.0s elapsed and paper trailing_stop ratcheting down to 96.0 (ask=90.0 -> >= ₹1 buffer)
+            self.bridge._last_sl_modify_epoch[intent_id] = -9999.0
+            with self.bridge._get_rw_conn() as conn:
+                conn.execute(
+                    "UPDATE option_sniffer_advance_trades SET trailing_stop = 96.0 WHERE trade_id = 'ADV_SL_MOD_3701';"
+                )
+                conn.commit()
+            self.bridge._reconcile_open_live_intents_with_broker(
+                self.bridge.get_active_live_positions(),
+                now_dt=datetime(2026, 11, 9, 11, 20, 12),
+            )
+            self.assertEqual(len(modify_payloads), 2)
+            self.assertAlmostEqual(float(modify_payloads[1]["trigger_price"]), 96.0, places=2)
+
+            with self.bridge._get_ro_conn() as conn:
+                live_row = dict(
+                    conn.execute(
+                        "SELECT average_fill_price, stop_loss_trigger FROM option_advance_live_order_intents WHERE order_intent_id = ?;",
+                        (intent_id,),
+                    ).fetchone()
+                )
+            self.assertAlmostEqual(float(live_row["average_fill_price"]), 105.0, places=2)
+            self.assertAlmostEqual(float(live_row["stop_loss_trigger"]), 96.0, places=2)
+
+            # Pass 3: Immediate sub-5.0s tightening to 92.0 must be throttled (0 extra PUT /order/modify calls)
+            with self.bridge._get_rw_conn() as conn:
+                conn.execute(
+                    "UPDATE option_sniffer_advance_trades SET trailing_stop = 92.0 WHERE trade_id = 'ADV_SL_MOD_3701';"
+                )
+                conn.commit()
+            self.bridge._reconcile_open_live_intents_with_broker(
+                self.bridge.get_active_live_positions(),
+                now_dt=datetime(2026, 11, 9, 11, 20, 13),
+            )
+            self.assertEqual(len(modify_payloads), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

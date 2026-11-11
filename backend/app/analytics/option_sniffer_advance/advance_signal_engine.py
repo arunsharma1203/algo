@@ -62,6 +62,7 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     SHORT_MAX_OTM_STRIKES,
     SHORT_MIN_ENTRY_BID_PRICE,
     SHORT_MIN_OTM_STRIKES,
+    SHORT_SWEET_SPOT_OTM_STRIKES,
     STRATEGY_CONTRACTION_THETA_SELLER,
     STRATEGY_DIAGONAL_OTM_WING_SELLER,
     STRATEGY_WAVE1_GAMMA_SNIPER,
@@ -117,6 +118,7 @@ class AdvanceSignalEngine:
         upstream_signals: Optional[Dict[str, Any]] = None,
         as_of_time: Optional[datetime] = None,
         enforce_cutoff: bool = True,
+        defer_open: bool = False,
     ) -> Dict[str, Any]:
         """
         Evaluates a single candidate option contract and routes it to either:
@@ -318,10 +320,26 @@ class AdvanceSignalEngine:
             and (dte_days >= SUPER_TREND_AFTERNOON_MIN_DTE_DAYS)
         )
 
-        # 4. Derive Causal Intraday Directional Alignment when upstream_signals is absent/neutral
+        # 4. Derive Causal Intraday Directional Alignment (with Seller Polarity Inversion for Short Book)
         effective_upstream = dict(upstream_signals or {})
         c_dir = str(effective_upstream.get("consensus_direction") or "").upper().strip()
-        if not c_dir or c_dir == "NEUTRAL":
+        apply_seller_directional_mirror = False
+        if is_short_regime and not is_diagonal_otm_short:
+            # OptionFeatureExtractor & OptionAlphaModel use Buyer polarity (CE+BULLISH=1.0, PE+BEARISH=1.0).
+            # For standalone Option Selling: BULLISH consensus favors SELL_PE ('BEARISH' key);
+            # BEARISH consensus favors SELL_CE ('BULLISH' key).
+            if c_dir in ("BUY", "BULL", "BULLISH"):
+                effective_upstream["consensus_direction"] = "BEARISH"
+                if not is_wave2_exhaustion_short:
+                    apply_seller_directional_mirror = True
+            elif c_dir in ("SELL", "BEAR", "BEARISH"):
+                effective_upstream["consensus_direction"] = "BULLISH"
+                if not is_wave2_exhaustion_short:
+                    apply_seller_directional_mirror = True
+            else:
+                effective_upstream["consensus_direction"] = "BULLISH" if opt_type == "CE" else "BEARISH"
+                effective_upstream.setdefault("consensus_confidence", 65.0)
+        elif not c_dir or c_dir == "NEUTRAL":
             u_open = float(underlying_quote.get("open") or spot_ltp)
             u_vwap = float(underlying_quote.get("vwap") or u_open or spot_ltp)
             if is_short_regime:
@@ -359,6 +377,17 @@ class AdvanceSignalEngine:
             upstream_signals=effective_upstream,
             as_of_time=now_dt,
         )
+        if apply_seller_directional_mirror:
+            features = {
+                **features,
+                "spot_rsi": round(100.0 - float(features.get("spot_rsi", 50.0)), 2),
+                "spot_vwap_dist_pct": round(-float(features.get("spot_vwap_dist_pct", 0.0)), 3),
+                "spot_ret_1": round(-float(features.get("spot_ret_1", 0.0)), 3),
+                "spot_ret_3": round(-float(features.get("spot_ret_3", 0.0)), 3),
+                "spot_ret_6": round(-float(features.get("spot_ret_6", 0.0)), 3),
+                "macro_bullish": float(features.get("macro_bearish", 0.0)),
+                "macro_bearish": float(features.get("macro_bullish", 0.0)),
+            }
         pred = self.model.predict_contract(features)
         cal_prob = float(pred.get("calibrated_prob") or 0.50)
         exp_net_ret = float(pred.get("expected_net_return_pct") or 0.0)
@@ -380,6 +409,10 @@ class AdvanceSignalEngine:
             rejection_reasons.append("Outside intraday option entry window (09:30-13:15 IST)")
         if now_dt.hour == 9 and now_dt.minute < 43:
             rejection_reasons.append(f"Causal 28-bar Wilder ADX(14) warm-up incomplete before 09:43 IST ({completed_bars}/28 bars)")
+        if chain_intel.get("is_index_feed_healthy", True) is False:
+            rejection_reasons.append(
+                f"Index 1m feed unhealthy: {chain_intel.get('index_feed_issue') or 'stale or synthetic bars'}"
+            )
         if age_ms > MAX_QUOTE_AGE_MS:
             rejection_reasons.append(f"Stale option quote ({age_ms}ms > {MAX_QUOTE_AGE_MS}ms)")
         if bid < MIN_BID_PRICE or ask < bid or spread_pct > MAX_SPREAD_PCT:
@@ -441,20 +474,35 @@ class AdvanceSignalEngine:
                         f"Contraction Short VRP Guard: VRP ({vrp:+.2f}% < 0.0%) indicates underpriced IV relative to 15m RV ({rv_15m_ann:.1f}%)"
                     )
                 if opt_type == "CE":
+                    orb_edge_pts = 55.0 if "BANK" in u_sym else 22.0
                     if has_orb and spot_ltp > orb_high:
                         rejection_reasons.append(
                             f"Contraction Short ORB Breakout Guard: Spot ({spot_ltp:.1f}) > ORB High ({orb_high:.1f}); naked SELL_CE blocked"
                         )
-                    elif (plus_di - minus_di) > 4.0 or kaufman_er > 0.20:
+                    elif has_orb and (orb_high - spot_ltp) <= orb_edge_pts and syn_basis >= 4.0 and plus_di > minus_di:
+                        rejection_reasons.append(
+                            f"Contraction Short Bullish Basis Near ORB High: Spot ({spot_ltp:.1f}) within {orb_high - spot_ltp:.1f} pts of ORB High ({orb_high:.1f}) with Synthetic Basis {syn_basis:+.2f} bps"
+                        )
+                    elif (plus_di - minus_di) > 4.0 or kaufman_er >= 0.20:
                         rejection_reasons.append(
                             f"Contraction Short Trend Conflict: +DI ({plus_di:.1f}) vs -DI ({minus_di:.1f}) with ER {kaufman_er:.2f}; naked SELL_CE blocked"
                         )
                 elif opt_type == "PE":
+                    orb_edge_pts = 55.0 if "BANK" in u_sym else 22.0
                     if has_orb and spot_ltp < orb_low:
                         rejection_reasons.append(
                             f"Contraction Short ORB Breakdown Guard: Spot ({spot_ltp:.1f}) < ORB Low ({orb_low:.1f}); naked SELL_PE blocked"
                         )
-                    elif (minus_di - plus_di) > 4.0 or kaufman_er > 0.20:
+                    elif (
+                        has_orb
+                        and ((spot_ltp - orb_low) <= orb_edge_pts or strike > orb_low)
+                        and syn_basis <= -2.0
+                        and minus_di > plus_di
+                    ):
+                        rejection_reasons.append(
+                            f"Contraction Short Bearish Basis Near ORB Low: Strike {strike:.0f} / Spot {spot_ltp:.1f} vs ORB Low {orb_low:.1f} with Synthetic Basis {syn_basis:+.2f} bps"
+                        )
+                    elif (minus_di - plus_di) > 4.0 or kaufman_er >= 0.20:
                         rejection_reasons.append(
                             f"Contraction Short Trend Conflict: -DI ({minus_di:.1f}) vs +DI ({plus_di:.1f}) with ER {kaufman_er:.2f}; naked SELL_PE blocked"
                         )
@@ -587,6 +635,14 @@ class AdvanceSignalEngine:
                 rejection_reasons.append(
                     f"Low-RV Gamma Pinning Trap blocked for Long Buying (RV_15m={rv_15m_ann:.1f}% < 8.5%, VRP=+{vrp:.1f}% > +6.0%)"
                 )
+            if atr_ratio < 0.88 and not (is_extrema_break and kaufman_er >= 0.40):
+                rejection_reasons.append(
+                    f"Volatility Contraction Guard for Long Buying: ATR_Ratio {atr_ratio:.3f} < 0.88 without extrema breakout"
+                )
+            if vrp > 14.0 and net_gex > 50.0 and not (is_extrema_break and kaufman_er >= 0.38):
+                rejection_reasons.append(
+                    f"Extreme VRP Long-Gamma Pinning Guard: VRP +{vrp:.2f}% > +14.0% with Net GEX +{net_gex:.1f} Cr"
+                )
             if cal_prob < 0.48 or exp_net_ret < 1.5:
                 rejection_reasons.append(f"Model conviction below Long Sniper hurdle (P={cal_prob:.2f}, E[R]={exp_net_ret:.1f}%)")
             if kaufman_er < 0.28 or adx_14 < 18.0:
@@ -652,17 +708,78 @@ class AdvanceSignalEngine:
             "regime_telemetry": chain_intel,
             "is_super_trend_afternoon_breakout": is_super_trend_afternoon_breakout,
         }
+        sig_payload["candidate_rank_score"] = self.compute_candidate_rank_score(sig_payload)
 
         if status in (STATE_ACTIVE, STATE_QUALIFIED):
             AdvanceDB.save_signal(sig_payload)
 
-        if is_active:
-            self._COOLDOWNS[cd_key] = now_epoch
-            self._ACTIVE_UNDERLYING_LOCKS[u_lock_key] = now_epoch
-            trade_id = AdvancePaperExecution.open_trade(
+        if is_active and not defer_open:
+            self.execute_deferred_signal(
                 sig_payload, as_of_time=now_dt, enforce_cutoff=enforce_cutoff
             )
-            sig_payload["opened_trade_id"] = trade_id
 
         return sig_payload
+
+    @staticmethod
+    def compute_candidate_rank_score(sig_payload: Dict[str, Any]) -> float:
+        """
+        Computes a deterministic cross-chain candidate rank score so full-chain surveillance sweeps
+        evaluate all competing CE and PE strikes before executing the single highest-edge setup.
+        """
+        cal_prob = float(sig_payload.get("calibrated_prob") or 0.0)
+        exp_ret = float(sig_payload.get("expected_net_return") or 0.0)
+        otm_strikes = float(sig_payload.get("otm_strikes") or 0.0)
+        spread_pct = float(sig_payload.get("spread_pct") or 0.0)
+        syn_basis = float(sig_payload.get("synthetic_basis_bps") or 0.0)
+        opt_type = str(sig_payload.get("option_type") or "CE").upper()
+        u_sym = str(sig_payload.get("underlying") or "NIFTY").upper()
+        spot = float(sig_payload.get("spot_price") or 0.0)
+        strike_int = float(STRIKE_INTERVALS.get(u_sym, 50.0))
+        telem = sig_payload.get("regime_telemetry") or {}
+
+        if sig_payload.get("book_type") == BOOK_SHORT_SELL:
+            # Positive synthetic basis aligns with SELL_PE (+Δ); negative basis aligns with SELL_CE (-Δ)
+            basis_align = syn_basis if opt_type == "PE" else -syn_basis
+            basis_bonus = max(-3.0, min(3.0, basis_align * 0.25))
+
+            orb_h = float(telem.get("orb_high") or 0.0)
+            orb_l = float(telem.get("orb_low") or 0.0)
+            orb_bonus = 0.0
+            if orb_h > 0 and orb_l > 0 and spot > 0:
+                buf_strikes = (
+                    ((orb_h - spot) / strike_int) if opt_type == "CE" else ((spot - orb_l) / strike_int)
+                )
+                orb_bonus = max(-2.0, min(3.0, buf_strikes * 0.50))
+
+            sweet_spot_pen = abs(otm_strikes - SHORT_SWEET_SPOT_OTM_STRIKES) * 1.5
+            spread_pen = max(0.0, spread_pct) * 0.4
+            return round((cal_prob * 100.0) + basis_bonus + orb_bonus - sweet_spot_pen - spread_pen, 4)
+
+        atm_pen = abs(otm_strikes - 0.15) * 1.2
+        spread_pen = max(0.0, spread_pct) * 0.4
+        return round((cal_prob * 100.0) + (exp_ret * 0.25) - atm_pen - spread_pen, 4)
+
+    def execute_deferred_signal(
+        self,
+        sig_payload: Dict[str, Any],
+        as_of_time: Optional[datetime] = None,
+        enforce_cutoff: bool = True,
+    ) -> Optional[str]:
+        """Stamps anti-clustering cooldowns and opens the winning candidate paper trade."""
+        now_dt = to_ist_naive(as_of_time)
+        now_epoch = now_dt.timestamp()
+        book_type = str(sig_payload.get("book_type") or BOOK_LONG_BUY)
+        u_sym = str(sig_payload.get("underlying") or "NIFTY").upper().strip()
+        ikey = str(sig_payload.get("instrument_key") or "")
+
+        cd_key = f"{book_type}_{ikey}"
+        u_lock_key = f"{book_type}_{u_sym}"
+        self._COOLDOWNS[cd_key] = now_epoch
+        self._ACTIVE_UNDERLYING_LOCKS[u_lock_key] = now_epoch
+
+        trade_id = AdvancePaperExecution.open_trade(
+            sig_payload, as_of_time=now_dt, enforce_cutoff=enforce_cutoff
+        )
+        sig_payload["opened_trade_id"] = trade_id
+        return trade_id
 

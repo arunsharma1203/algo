@@ -304,6 +304,7 @@ class AdvancePaperExecution:
         underlying_quotes_map: Optional[Dict[str, Dict[str, Any]]] = None,
         as_of_time: Optional[datetime] = None,
         enforce_cutoff: bool = False,
+        chain_intel_map: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Surveils all open Long Book and Short Book paper trades against live quotes.
@@ -372,6 +373,11 @@ class AdvancePaperExecution:
                     else hard_sl_ceiling
                 )
 
+                u_sym_upper = str(trade.get("underlying") or "NIFTY").upper().strip()
+                u_intel = (chain_intel_map or {}).get(u_sym_upper) or (underlying_quotes_map or {}).get(u_sym_upper) or {}
+                curr_er = float(u_intel.get("kaufman_er") or 0.0)
+                curr_atr_ratio = float(u_intel.get("atr_ratio") or 1.0)
+
                 exit_reason = None
                 if is_cb_halted:
                     exit_reason = "CIRCUIT_BREAKER_HALT"
@@ -383,13 +389,20 @@ class AdvancePaperExecution:
                     str(trade.get("strategy_mode") or "") == STRATEGY_DIAGONAL_OTM_WING_SELLER
                     and not any(
                         t.get("book_type") == BOOK_LONG_BUY
-                        and str(t.get("underlying") or "").upper() == str(trade.get("underlying") or "").upper()
+                        and str(t.get("underlying") or "").upper() == u_sym_upper
                         for t in AdvanceDB.get_open_trades()
                     )
                 ):
                     exit_reason = "PARENT_LONG_EXITED_RECONCILE"
                 elif duration_min >= 15.0 and short_mfe_pct < 3.5 and curr_decay_pct < -3.0:
                     exit_reason = "SHORT_STAGNATION_EXIT"
+                elif (
+                    duration_min >= 20.0
+                    and short_mfe_pct < SHORT_EARLY_COST_LOCK_TRIGGER_PCT
+                    and curr_decay_pct <= -4.5
+                    and (curr_er >= 0.28 or curr_atr_ratio >= 1.10)
+                ):
+                    exit_reason = "SHORT_REGIME_BREAK_STAGNATION_EXIT"
                 elif duration_min >= MAX_HOLDING_MINUTES:
                     exit_reason = "TIME_DECAY_EXPIRY"
                 elif (enforce_cutoff or as_of_time is not None) and (

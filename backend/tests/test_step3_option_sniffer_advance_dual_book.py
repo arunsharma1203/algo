@@ -1089,6 +1089,223 @@ class TestStep3OptionSnifferAdvanceDualBook(unittest.TestCase):
             self.assertTrue(res_aft["is_super_trend_afternoon_breakout"])
             self.assertIsNotNone(res_aft.get("opened_trade_id"))
 
+    def test_12_v21_seven_bug_hardening_polarity_atr_defer_stagnation_and_feed_health(self):
+        """
+        Verifies Option Sniffer Advance v2.1 7-Bug Hardening Suite:
+          1. Bug #1 (Seller Consensus Polarity + ORB/Basis Guard): BULLISH consensus in CONTRACTION_THETA_SELLER
+             boosts SELL_PE (`ACTIVE`) while rejecting counter-flow SELL_CE near ORB High (`syn_basis=+5.61 bps`).
+          2. Bug #2 (Long ATR_Ratio >= 0.88 & Extreme VRP Pin Guard): Blocks shrinking-ATR non-breakout Long
+             (`atr_ratio=0.801`, Nov 11 Trade #48) and extreme VRP Long-Gamma pin (`vrp=19.19%`, Nov 9 Trade #44),
+             while preserving session-extrema breakouts (`Trade #32: atr_ratio=0.787, ER=0.412`).
+          3. Bug #3 (`defer_open=True` Cross-Chain Ranking): Evaluates multiple strikes/sides without first-in-loop
+             lockout and opens only the #1 ranked setup via `execute_deferred_signal()`.
+          4. Bug #4 (`20m` `SHORT_REGIME_BREAK_STAGNATION_EXIT`): Bridges the `[3.5%, 10.0%)` MFE dead-zone when
+             contraction breaks (`ER >= 0.28` or `ATR_Ratio >= 1.10`), while leaving quiet theta decay untouched.
+          5. Bug #7 (`is_index_feed_healthy=False`): Fails closed on stale/synthetic 1m index candles.
+        """
+        engine = AdvanceSignalEngine()
+        AdvanceSignalEngine.reset_state()
+        t_nov11_1110 = datetime(2026, 11, 11, 11, 10, 3)
+
+        # --- 1 & 3. Real OptionAlphaModel (unmocked) + BULLISH Consensus + defer_open=True ---
+        u_nov11 = {"spot_ltp": 25378.85, "open": 25320.0, "high": 25424.35, "low": 25263.8, "vwap": 25352.0}
+        intel_nov11_1110 = {
+            "spot_price": 25378.85,
+            "session_tpb": 25355.0,
+            "orb_high": 25399.10,
+            "orb_low": 25263.80,
+            "day_high": 25424.35,
+            "day_low": 25263.80,
+            "completed_bars_count": 115,
+            "is_index_feed_healthy": True,
+            "adx_14": 18.98,
+            "plus_di": 18.68,
+            "minus_di": 14.93,
+            "kaufman_er": 0.163,
+            "atr_ratio": 0.739,
+            "vrp": 12.73,
+            "rv_15m_ann": 5.08,
+            "net_gex": 642.18,
+            "synthetic_basis_bps": 5.61,
+            "call_wall_strike": 25500.0,
+            "put_wall_strike": 25300.0,
+        }
+        bull_upstream = {"consensus_direction": "BULLISH", "consensus_confidence": 78.0}
+
+        ce_25450 = {
+            "instrument_key": "NSE_FO|T50_25450CE",
+            "trading_symbol": "NIFTY 25450 CE 17 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 25450.0,
+            "option_type": "CE",
+            "lot_size": 65,
+            "expiry": "2026-11-17",
+        }
+        q_ce_25450 = {
+            **ce_25450,
+            "ltp": 208.1,
+            "bid": 207.9,
+            "ask": 208.35,
+            "spread_pct": 0.22,
+            "volume": 350000,
+            "oi": 2741440,
+            "iv": 17.8,
+            "delta": 0.42,
+            "quote_age_ms": 80,
+        }
+        pe_25300 = {
+            "instrument_key": "NSE_FO|T50_25300PE",
+            "trading_symbol": "NIFTY 25300 PE 17 NOV 26",
+            "underlying": "NIFTY",
+            "strike": 25300.0,
+            "option_type": "PE",
+            "lot_size": 65,
+            "expiry": "2026-11-17",
+        }
+        q_pe_25300 = {
+            **pe_25300,
+            "ltp": 190.3,
+            "bid": 190.1,
+            "ask": 190.5,
+            "spread_pct": 0.21,
+            "volume": 380000,
+            "oi": 3100000,
+            "iv": 18.1,
+            "delta": -0.40,
+            "quote_age_ms": 80,
+        }
+
+        res_ce = engine.evaluate_contract(
+            contract=ce_25450,
+            quote=q_ce_25450,
+            underlying_quote=u_nov11,
+            chain_intel=intel_nov11_1110,
+            upstream_signals=bull_upstream,
+            as_of_time=t_nov11_1110,
+            enforce_cutoff=True,
+            defer_open=True,
+        )
+        res_pe = engine.evaluate_contract(
+            contract=pe_25300,
+            quote=q_pe_25300,
+            underlying_quote=u_nov11,
+            chain_intel=intel_nov11_1110,
+            upstream_signals=bull_upstream,
+            as_of_time=t_nov11_1110,
+            enforce_cutoff=True,
+            defer_open=True,
+        )
+        self.assertNotEqual(res_ce["status"], "ACTIVE")
+        self.assertTrue(
+            any("Bullish Basis Near ORB High" in r or "Activity conviction below hurdle" in r for r in res_ce["rejection_reasons"])
+        )
+        self.assertEqual(res_pe["status"], "ACTIVE")
+        self.assertEqual(res_pe["direction"], "SELL_PE")
+        # Because defer_open=True, no trade was opened prematurely before ranking
+        self.assertIsNone(res_pe.get("opened_trade_id"))
+        opened_tid = engine.execute_deferred_signal(res_pe, as_of_time=t_nov11_1110, enforce_cutoff=True)
+        self.assertIsNotNone(opened_tid)
+
+        # --- 4. Bug #4: 20m Short Regime-Break Stagnation Rung vs Quiet Theta Preservation ---
+        # First verify quiet theta (ER=0.10, ATR_R=0.82) at +5.26% MFE and -4.8% bounce does NOT exit prematurely at 25m
+        t_plus_10m = datetime(2026, 11, 11, 11, 20, 3)
+        AdvancePaperExecution.update_open_trades(
+            {"NSE_FO|T50_25300PE": {**q_pe_25300, "bid": 179.8, "ask": 180.1}},  # +5.26% MFE (< 10%, >= 3.5%)
+            {"NIFTY": u_nov11},
+            as_of_time=t_plus_10m,
+            chain_intel_map={"NIFTY": {"kaufman_er": 0.10, "atr_ratio": 0.82}},
+        )
+        t_plus_25m = datetime(2026, 11, 11, 11, 35, 3)
+        closed_quiet = AdvancePaperExecution.update_open_trades(
+            {"NSE_FO|T50_25300PE": {**q_pe_25300, "bid": 199.1, "ask": 199.5}},  # -4.94% adverse, but quiet regime
+            {"NIFTY": u_nov11},
+            as_of_time=t_plus_25m,
+            chain_intel_map={"NIFTY": {"kaufman_er": 0.10, "atr_ratio": 0.82}},
+        )
+        self.assertEqual(len(closed_quiet), 0, "Quiet contraction regime must NOT clip short theta trade!")
+
+        # Now contraction breaks (ER=0.303 >= 0.28, ATR_R=1.178 >= 1.10) at 27m -> SHORT_REGIME_BREAK_STAGNATION_EXIT!
+        t_plus_27m = datetime(2026, 11, 11, 11, 37, 3)
+        closed_break = AdvancePaperExecution.update_open_trades(
+            {"NSE_FO|T50_25300PE": {**q_pe_25300, "bid": 199.1, "ask": 199.5}},
+            {"NIFTY": u_nov11},
+            as_of_time=t_plus_27m,
+            chain_intel_map={"NIFTY": {"kaufman_er": 0.303, "atr_ratio": 1.178}},
+        )
+        self.assertEqual(len(closed_break), 1)
+        self.assertEqual(closed_break[0]["exit_reason"], "SHORT_REGIME_BREAK_STAGNATION_EXIT")
+
+        # --- 2 & 5. Bug #2 (Long ATR_Ratio / Extreme VRP) & Bug #7 (Unhealthy 1m Feed) ---
+        AdvanceSignalEngine.reset_state()
+        with patch.object(
+            engine.model,
+            "predict_contract",
+            return_value={"calibrated_prob": 0.56, "expected_net_return_pct": 12.0},
+        ):
+            t_0943 = datetime(2026, 11, 11, 9, 43, 22)
+            c_25400ce = {
+                "instrument_key": "NSE_FO|T48_25400CE",
+                "trading_symbol": "NIFTY 25400 CE 17 NOV 26",
+                "underlying": "NIFTY",
+                "strike": 25400.0,
+                "option_type": "CE",
+                "lot_size": 65,
+                "expiry": "2026-11-17",
+            }
+            q_25400ce = {
+                **c_25400ce,
+                "ltp": 251.3,
+                "bid": 251.0,
+                "ask": 251.55,
+                "spread_pct": 0.22,
+                "volume": 400000,
+                "oi": 5682690,
+                "iv": 17.8,
+                "delta": 0.51,
+                "quote_age_ms": 60,
+            }
+            # Shrinking ATR (0.801 < 0.88) below Session High (25400.8 < 25409.25 - 4.5) -> BLOCKED (Trade #48)
+            intel_t48 = {
+                "spot_price": 25400.8,
+                "orb_high": 25399.1,
+                "orb_low": 25263.8,
+                "day_high": 25409.25,
+                "day_low": 25263.8,
+                "completed_bars_count": 28,
+                "is_index_feed_healthy": True,
+                "adx_14": 29.23,
+                "plus_di": 32.42,
+                "minus_di": 16.69,
+                "kaufman_er": 0.403,
+                "atr_ratio": 0.801,
+                "vrp": 4.74,
+                "rv_15m_ann": 13.04,
+                "net_gex": 476.18,
+            }
+            res_t48 = engine.evaluate_contract(
+                contract=c_25400ce,
+                quote=q_25400ce,
+                underlying_quote={"spot_ltp": 25400.8, "open": 25320.0, "vwap": 25360.0},
+                chain_intel=intel_t48,
+                as_of_time=t_0943,
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(res_t48["status"], "ACTIVE")
+            self.assertTrue(any("Volatility Contraction Guard for Long Buying" in r for r in res_t48["rejection_reasons"]))
+
+            # Unhealthy 1m index feed fails closed (Bug #7)
+            intel_stale = {**intel_t48, "atr_ratio": 1.15, "day_high": 25401.0, "is_index_feed_healthy": False, "index_feed_issue": "Stale 1m index candle (240s > 180s max)"}
+            res_stale = engine.evaluate_contract(
+                contract=c_25400ce,
+                quote=q_25400ce,
+                underlying_quote={"spot_ltp": 25400.8, "open": 25320.0, "vwap": 25360.0},
+                chain_intel=intel_stale,
+                as_of_time=t_0943,
+                enforce_cutoff=True,
+            )
+            self.assertNotEqual(res_stale["status"], "ACTIVE")
+            self.assertTrue(any("Index 1m feed unhealthy" in r for r in res_stale["rejection_reasons"]))
+
 
 if __name__ == "__main__":
     unittest.main()
