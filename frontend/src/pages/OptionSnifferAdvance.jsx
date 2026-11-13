@@ -54,6 +54,7 @@ const EXEC_MODES = [
 
 export default function OptionSnifferAdvance() {
   const [statusData, setStatusData] = useState(null);
+  const [backendReadiness, setBackendReadiness] = useState(null);
   const [liveStatus, setLiveStatus] = useState(null);
   const [chainData, setChainData] = useState(null);
   const [tradesData, setTradesData] = useState({ open_trades: [], closed_trades: [], pnl_summary: {} });
@@ -82,15 +83,16 @@ export default function OptionSnifferAdvance() {
     showArmModalRef.current = showArmModal;
   }, [showArmModal]);
 
-  // Tier 1 Fast Poll (1,000 ms): Real-time RAM quotes & MTM for Open Positions + Live Broker Bridge (0 Upstox API calls)
+  // Tier 1 Fast Poll (1,000 ms): Real-time RAM quotes, MTM, :00 countdown & S2_05 order readiness (0 Upstox API calls)
   const fetchFastLiveTicks = useCallback(async () => {
     if (fastPollInFlightRef.current) return;
     if (typeof document !== 'undefined' && document.hidden) return;
     fastPollInFlightRef.current = true;
     try {
-      const [lvRes, trRes] = await Promise.all([
+      const [lvRes, trRes, brRes] = await Promise.all([
         fetch(`${API_BASE}/option-sniffer-advance/live/status`),
         fetch(`${API_BASE}/option-sniffer-advance/trades`),
+        fetch(`${API_BASE}/option-sniffer-advance/backend-readiness`),
       ]);
       if (lvRes.ok) {
         const lvJson = await lvRes.json();
@@ -101,6 +103,9 @@ export default function OptionSnifferAdvance() {
       }
       if (trRes.ok) {
         setTradesData(await trRes.json());
+      }
+      if (brRes.ok) {
+        setBackendReadiness(await brRes.json());
       }
     } catch {
       // Silent background tick error; Tier 2 full poll handles diagnostics
@@ -124,6 +129,9 @@ export default function OptionSnifferAdvance() {
       if (stRes.ok) {
         stJson = await stRes.json();
         setStatusData(stJson);
+        if (stJson?.backend_readiness) {
+          setBackendReadiness(stJson.backend_readiness);
+        }
       }
       if (chRes.ok) setChainData(await chRes.json());
       if (trRes.ok) setTradesData(await trRes.json());
@@ -256,6 +264,7 @@ export default function OptionSnifferAdvance() {
   const reqMargin = Number(liveStatus?.required_margin_for_mode ?? 18000);
   const liveActivePositions = liveStatus?.active_live_positions || [];
   const liveRecentIntents = liveStatus?.recent_order_intents || [];
+  const activeReadiness = backendReadiness || statusData?.backend_readiness || null;
 
   // Build interactive Monthly P&L Calendar model from backend calendarData + client-side tradesData fallback
   const computedCalendar = useMemo(() => {
@@ -526,7 +535,7 @@ export default function OptionSnifferAdvance() {
               <Layers className="text-indigo-400" size={28} />
               <span>Option Sniffer Advance</span>
               <span className="text-sm font-mono font-semibold text-indigo-300 bg-indigo-900/60 px-2.5 py-1 rounded-lg border border-indigo-700/60">
-                v1.0 Dual-Book Regime Router
+                S2_05 • Upstox V3 + Causal Meta-Learner
               </span>
             </h1>
           </div>
@@ -687,21 +696,249 @@ export default function OptionSnifferAdvance() {
             </div>
             <div className="text-sm font-bold text-white mt-2 space-y-1 font-mono">
               <div className="flex justify-between">
-                <span className="text-slate-400">Long Trail:</span>
-                <span className="text-emerald-300">4-Tier Uncapped Chandelier</span>
+                <span className="text-slate-400">Ratchet Mode:</span>
+                <span className="text-emerald-300">:00 Close-Only (0 Intrabar Bias)</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Short Trail:</span>
-                <span className="text-cyan-300">4-Tier Reverse-Chandelier</span>
+                <span className="text-slate-400">Tail Wing:</span>
+                <span className="text-cyan-300">Daily ±450pt Catastrophe Shield</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-400">Daily Loss Cap:</span>
-                <span className="text-rose-300">-₹2,800 / 2 Losses</span>
+                <span className="text-slate-400">Daily MTM Kill:</span>
+                <span className="text-rose-300">-₹3,500 Sub-Second Flatten</span>
               </div>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Live S2_05 Backend Activity, Upstox V3 Microstructure & Order Trigger Readiness */}
+      {activeReadiness && (
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          {/* Strip A: Live Backend Heartbeat, :00 Candle Countdown & Session Safeguards */}
+          <div className="bg-slate-900 text-white px-5 py-3.5 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="flex items-center gap-1.5 text-xs font-black uppercase tracking-wider text-indigo-300">
+                <Activity size={15} className="text-emerald-400 animate-pulse" />
+                Live Backend &amp; Order Readiness
+              </span>
+              <span
+                className={`px-2.5 py-0.5 rounded-md text-[11px] font-black font-mono uppercase border ${
+                  activeReadiness.timing?.session_phase === 'HALTED_DAILY_KILL'
+                    ? 'bg-rose-950 text-rose-300 border-rose-500/50'
+                    : activeReadiness.timing?.session_phase?.startsWith('ACTIVE_')
+                    ? 'bg-emerald-950 text-emerald-300 border-emerald-500/50'
+                    : activeReadiness.timing?.session_phase === 'ORB30_WARMUP'
+                    ? 'bg-cyan-950 text-cyan-300 border-cyan-500/50'
+                    : 'bg-slate-800 text-slate-300 border-slate-600'
+                }`}
+              >
+                {activeReadiness.timing?.session_phase_label || 'INITIALIZING'}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+              <span className="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-cyan-300">
+                Next :00 Eval: <strong>{activeReadiness.timing?.seconds_to_next_bar_eval ?? 0}s</strong>
+              </span>
+              <span className="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-300">
+                1m Bars: <strong>{activeReadiness.timing?.bars_collected_today ?? 0}</strong> ({activeReadiness.timing?.last_eval_latency_ms ?? 0}ms)
+              </span>
+              <span className="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-indigo-200">
+                Slots: <strong>{activeReadiness.session_risk?.trades_today ?? 0}/{activeReadiness.session_risk?.max_trades_day ?? 3}</strong> (B:{activeReadiness.session_risk?.long_slots_used ?? 0}/1 • S:{activeReadiness.session_risk?.short_slots_used ?? 0}/2)
+              </span>
+              {(activeReadiness.timing?.cooldown_remaining_sec || 0) > 0 && (
+                <span className="px-2.5 py-1 rounded-lg bg-amber-950 border border-amber-500/50 text-amber-300">
+                  Cooldown: {Math.floor(activeReadiness.timing.cooldown_remaining_sec / 60)}m {activeReadiness.timing.cooldown_remaining_sec % 60}s
+                </span>
+              )}
+              <span
+                className={`px-2.5 py-1 rounded-lg border ${
+                  (activeReadiness.session_risk?.net_session_mtm_today ?? 0) >= 0
+                    ? 'bg-emerald-950/60 border-emerald-700/50 text-emerald-300'
+                    : 'bg-rose-950/60 border-rose-700/50 text-rose-300'
+                }`}
+              >
+                Today MTM: <strong>{formatINR(activeReadiness.session_risk?.net_session_mtm_today ?? 0)}</strong> (Kill Buffer: ₹{Number(activeReadiness.session_risk?.distance_to_kill_inr ?? 3500).toLocaleString('en-IN', { maximumFractionDigits: 0 })})
+              </span>
+              <span className="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-amber-300">
+                ±450pt Wing:{' '}
+                <strong>
+                  {activeReadiness.session_risk?.catastrophe_wing?.status === 'ACTIVE_PROTECTING'
+                    ? 'ACTIVE'
+                    : 'STANDBY'}
+                </strong>
+                {activeReadiness.session_risk?.catastrophe_wing?.ce_wing_strike
+                  ? ` (${activeReadiness.session_risk.catastrophe_wing.pe_wing_strike}P / ${activeReadiness.session_risk.catastrophe_wing.ce_wing_strike}C)`
+                  : ''}
+              </span>
+            </div>
+          </div>
+
+          {/* Strip B: Upstox V3 Live Futures & L5 Order-Book Microstructure */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 p-4 bg-slate-50/80 border-b border-slate-200 text-xs font-mono">
+            <div className="bg-white rounded-xl px-3 py-2 border border-slate-200/80">
+              <div className="text-[10px] font-sans font-bold uppercase text-slate-500 flex items-center justify-between">
+                <span>NIFTY Spot</span>
+                <Wifi size={11} className={activeReadiness.upstox_v3_feed?.websocket_connected ? 'text-emerald-500' : 'text-amber-500'} />
+              </div>
+              <div className="text-sm font-black text-slate-900 mt-0.5">
+                {Number(activeReadiness.upstox_v3_feed?.spot_ltp || 0).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+              </div>
+              <div className="text-[10px] text-slate-500">
+                TPB VWAP: {Number(activeReadiness.upstox_v3_feed?.spot_tpb_vwap || 0).toFixed(1)}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl px-3 py-2 border border-slate-200/80">
+              <div className="text-[10px] font-sans font-bold uppercase text-slate-500 truncate">
+                {activeReadiness.upstox_v3_feed?.fut_symbol || 'NIFTY Front Fut'}
+              </div>
+              <div className="text-sm font-black text-indigo-700 mt-0.5">
+                {activeReadiness.upstox_v3_feed?.fut_ltp > 0
+                  ? Number(activeReadiness.upstox_v3_feed.fut_ltp).toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+                  : 'Syncing...'}
+              </div>
+              <div className="text-[10px] text-slate-500">
+                Fut ATP: {activeReadiness.upstox_v3_feed?.fut_atp_vwap > 0 ? Number(activeReadiness.upstox_v3_feed.fut_atp_vwap).toFixed(1) : '—'}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl px-3 py-2 border border-slate-200/80">
+              <div className="text-[10px] font-sans font-bold uppercase text-slate-500">Live Basis</div>
+              <div className={`text-sm font-black mt-0.5 ${(activeReadiness.upstox_v3_feed?.real_basis_pts || 0) >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                {(activeReadiness.upstox_v3_feed?.real_basis_pts || 0) >= 0 ? '+' : ''}
+                {Number(activeReadiness.upstox_v3_feed?.real_basis_pts || 0).toFixed(1)} pts
+              </div>
+              <div className="text-[10px] text-slate-500 truncate">
+                {activeReadiness.upstox_v3_feed?.basis_source === 'UPSTOX_V3_FUTURES' ? 'Upstox V3 Fut' : 'Parity SynBasis'}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl px-3 py-2 border border-slate-200/80">
+              <div className="text-[10px] font-sans font-bold uppercase text-slate-500">Futures OI &amp; OBI</div>
+              <div className="text-sm font-black text-slate-900 mt-0.5">
+                {activeReadiness.upstox_v3_feed?.fut_oi > 0
+                  ? `${(Number(activeReadiness.upstox_v3_feed.fut_oi) / 1e5).toFixed(2)}L`
+                  : '—'}
+              </div>
+              <div className="text-[10px] text-slate-500">
+                OBI: {Number(activeReadiness.upstox_v3_feed?.fut_obi || 0).toFixed(2)} • VIX {Number(activeReadiness.upstox_v3_feed?.india_vix || 0).toFixed(2)}
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl px-3 py-2 border border-slate-200/80">
+              <div className="text-[10px] font-sans font-bold uppercase text-slate-500">Option L5 Depth</div>
+              <div className="text-sm font-black text-slate-900 mt-0.5">
+                Spread {Number(activeReadiness.upstox_v3_feed?.avg_opt_spread_pct || 0).toFixed(2)}%
+              </div>
+              <div className="text-[10px] text-slate-500">
+                L5 OBI: {Number(activeReadiness.upstox_v3_feed?.avg_l5_obi || 0).toFixed(2)} ({activeReadiness.upstox_v3_feed?.active_nifty_contracts || 0} strikes)
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl px-3 py-2 border border-slate-200/80">
+              <div className="text-[10px] font-sans font-bold uppercase text-slate-500">ORB-30 &amp; Meta Gate</div>
+              <div className="text-xs font-black text-indigo-700 mt-0.5 truncate">
+                {activeReadiness.upstox_v3_feed?.indicators?.orb30_high
+                  ? `${activeReadiness.upstox_v3_feed.indicators.orb30_low} – ${activeReadiness.upstox_v3_feed.indicators.orb30_high}`
+                  : 'Warming 09:15–09:45'}
+              </div>
+              <div className="text-[10px] text-slate-500 truncate">
+                {activeReadiness.upstox_v3_feed?.indicators?.regime_tag || 'CALIBRATING'} • p≥{activeReadiness.meta_model?.p_min ?? 0.56}
+              </div>
+            </div>
+          </div>
+
+          {/* Strip C: 4-Engine Order Trigger Readiness Table ("When to Expect an Order") */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-slate-100/80 text-[11px] font-black uppercase tracking-wider text-slate-600 border-b border-slate-200">
+                  <th className="py-2.5 px-4">Engine &amp; Window</th>
+                  <th className="py-2.5 px-3">Order Status</th>
+                  <th className="py-2.5 px-3">Candidate Contract</th>
+                  <th className="py-2.5 px-3">Live Gate Checklist (Current vs Target)</th>
+                  <th className="py-2.5 px-4">When Order Executes</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-xs">
+                {(activeReadiness.engine_readiness || []).map((row) => {
+                  const isReady = row.state === 'READY_FIRE';
+                  const isVeto = row.state === 'ML_VETOED';
+                  const isWarmup = row.state === 'WARMUP_0945' || row.state === 'WARMING_UP';
+                  const isClosed = row.state === 'WINDOW_CLOSED' || row.state === 'RISK_PAUSED';
+                  return (
+                    <tr key={row.engine_id} className={isReady ? 'bg-emerald-50/60' : 'hover:bg-slate-50/70'}>
+                      <td className="py-2.5 px-4 whitespace-nowrap">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-black ${
+                              row.book_type === 'LONG_BOOK_BUY'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-cyan-100 text-cyan-800'
+                            }`}
+                          >
+                            {row.action_badge}
+                          </span>
+                          <span className="font-bold text-slate-900">{row.label}</span>
+                        </div>
+                        <div className="text-[10px] font-mono text-slate-500 mt-0.5">
+                          {row.engine_id} • {row.window_ist} IST
+                        </div>
+                      </td>
+
+                      <td className="py-2.5 px-3 whitespace-nowrap">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-mono font-black ${
+                            isReady
+                              ? 'bg-emerald-600 text-white animate-pulse'
+                              : isVeto
+                              ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                              : isWarmup
+                              ? 'bg-cyan-50 text-cyan-800 border border-cyan-200'
+                              : isClosed
+                              ? 'bg-slate-100 text-slate-500 border border-slate-200'
+                              : 'bg-indigo-50 text-indigo-800 border border-indigo-200'
+                          }`}
+                        >
+                          {row.state} ({row.gates_passed}/{row.gates_total})
+                        </span>
+                      </td>
+
+                      <td className="py-2.5 px-3 font-mono font-bold text-slate-800 whitespace-nowrap">
+                        {row.candidate_contract || '—'}
+                      </td>
+
+                      <td className="py-2.5 px-3">
+                        <div className="flex flex-wrap gap-1.5">
+                          {(row.gates || []).map((g) => (
+                            <span
+                              key={g.name}
+                              className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                                g.passed
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300 font-bold'
+                                  : 'bg-slate-50 text-slate-600 border-slate-200'
+                              }`}
+                              title={`Target: ${g.target}`}
+                            >
+                              {g.passed ? '✓' : '○'} {g.name}: {g.current} <span className="text-slate-400">({g.target})</span>
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+
+                      <td className="py-2.5 px-4 text-xs text-slate-700 font-medium">
+                        {row.when_order_fires}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Cross-Sectional Option Chain Intelligence Cards (NIFTY & BANKNIFTY) */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

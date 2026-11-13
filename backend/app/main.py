@@ -335,13 +335,13 @@ def on_startup():
     except Exception as e:
         logger.warning(f"Option Sniffer startup warning: {e}")
 
-    # Start Option Sniffer Advance Dual-Book Daemon (100% Sandboxed Paper Mode)
+    # Start Option Sniffer Advance S2_05 + Upstox V3 Dual-Book Daemon (100% Sandboxed Paper Mode)
     try:
-        from app.analytics.option_sniffer_advance.advance_orchestrator import get_option_sniffer_advance_orchestrator
-        get_option_sniffer_advance_orchestrator().start()
-        logger.info("✅ Option Sniffer Advance Dual-Book surveillance daemon started (PAPER SANDBOX ONLY).")
+        from app.analytics.option_sniffer_advance_s205.s205_upstox_engine import get_s205_orchestrator
+        get_s205_orchestrator().start()
+        logger.info("✅ Option Sniffer Advance S2_05 + Upstox V3 surveillance daemon started (PAPER SANDBOX ONLY).")
     except Exception as e:
-        logger.warning(f"Option Sniffer Advance startup warning: {e}")
+        logger.warning(f"Option Sniffer Advance S2_05 startup warning: {e}")
 
     # Reconcile Upstox Broker State & Active Live Order Intents on Startup
     try:
@@ -365,9 +365,14 @@ def on_shutdown():
         logger.warning(f"Option Sniffer shutdown warning: {e}")
 
     try:
-        from app.analytics.option_sniffer_advance.advance_orchestrator import get_option_sniffer_advance_orchestrator
-        get_option_sniffer_advance_orchestrator().stop()
-        logger.info("🛑 Option Sniffer Advance surveillance daemon stopped.")
+        from app.analytics.option_sniffer_advance_s205.s205_upstox_engine import get_s205_orchestrator_if_loaded
+        from app.analytics.option_sniffer_advance.advance_orchestrator import OptionSnifferAdvanceOrchestrator
+        s205_orch = get_s205_orchestrator_if_loaded()
+        if s205_orch is not None:
+            s205_orch.stop()
+        if OptionSnifferAdvanceOrchestrator._instance is not None:
+            OptionSnifferAdvanceOrchestrator._instance.stop()
+        logger.info("🛑 Option Sniffer Advance S2_05 surveillance daemon stopped.")
     except Exception as e:
         logger.warning(f"Option Sniffer Advance shutdown warning: {e}")
 

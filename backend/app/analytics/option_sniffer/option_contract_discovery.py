@@ -41,7 +41,9 @@ class OptionContractDiscovery:
     """
 
     _CONTRACTS_CACHE: Dict[str, Dict[str, Any]] = {}  # underlying -> {data, timestamp}
+    _FUTURES_CACHE: Dict[str, Any] = {"data": {}, "timestamp": 0.0, "session_date": ""}
     _CACHE_TTL_SECONDS: float = 3600.0  # 1 hour cache TTL for static contract lists
+    _FUTURES_TTL_SECONDS: float = 43200.0  # 12 hour cache TTL for static futures master
     _LAST_ATM_STRIKES: Dict[str, float] = {}  # underlying -> last known ATM strike
 
     @classmethod
@@ -325,3 +327,199 @@ class OptionContractDiscovery:
         interval = STRIKE_INTERVALS.get(underlying.upper(), 50.0)
         new_atm = cls.calculate_atm_strike(underlying, current_spot)
         return abs(new_atm - last_atm) >= interval
+
+    @classmethod
+    def find_option_contract(
+        cls,
+        underlying: str,
+        expiry: Optional[str],
+        strike: float,
+        option_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Resolves any specific option strike (including far-OTM ±450pt catastrophe wings
+        or ±200pt spread wings) from the cached Upstox `/v2/option/contract` catalog
+        without consuming extra REST calls.
+        """
+        u_upper = str(underlying or "NIFTY").upper().strip()
+        opt_t = str(option_type or "CE").upper().strip()
+        raw_contracts = cls.fetch_raw_contracts(u_upper, force_refresh=False)
+        if not raw_contracts:
+            return None
+
+        target_exp = str(expiry or "").strip()[:10]
+        if not target_exp:
+            exps = cls.get_available_expiries(u_upper, force_refresh=False)
+            if not exps:
+                return None
+            target_exp = exps[0]
+
+        best_match: Optional[Dict[str, Any]] = None
+        best_dist = 1e9
+        for c in raw_contracts:
+            c_exp = str(c.get("expiry") or "")[:10]
+            c_type = str(c.get("instrument_type") or "").upper()
+            if c_exp != target_exp or c_type != opt_t:
+                continue
+            c_strike = float(c.get("strike_price") or 0.0)
+            dist = abs(c_strike - float(strike))
+            if dist < best_dist:
+                best_dist = dist
+                best_match = c
+
+        max_tol = 100.0 if "BANK" in u_upper else 50.0
+        if not best_match or best_dist > max_tol:
+            return None
+
+        ikey = best_match.get("instrument_key")
+        if not ikey:
+            return None
+        c_strike = float(best_match.get("strike_price") or strike)
+        lot = int(best_match.get("lot_size") or DEFAULT_LOT_SIZES.get(u_upper, 65))
+        return {
+            "instrument_key": ikey,
+            "trading_symbol": best_match.get("trading_symbol", f"{u_upper} {int(c_strike)} {opt_t}"),
+            "underlying": u_upper,
+            "expiry": target_exp,
+            "strike": c_strike,
+            "option_type": opt_t,
+            "lot_size": lot,
+            "underlying_key": UNDERLYING_INSTRUMENTS.get(u_upper),
+            "is_active": True,
+            "is_wing": True,
+        }
+
+    @classmethod
+    def discover_front_futures(
+        cls,
+        underlyings: Tuple[str, ...] = ("NIFTY", "BANKNIFTY"),
+        force_refresh: bool = False,
+        allow_network: bool = True,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Resolves active Front-Month and Next-Month NSE_FO Futures (`FUT`) contracts for NIFTY and BANKNIFTY.
+        Uses 12h RAM cache + SQLite `app_settings` persistence (`upstox_front_futures_cache_v1`) so live restarts
+        take <1ms and 0 network calls, refreshing once from Upstox's public `NSE.json.gz` master when needed.
+        """
+        import gzip
+        import json as _json
+
+        now = time.time()
+        today_str = to_ist_naive().date().strftime("%Y-%m-%d")
+
+        cached_data = cls._FUTURES_CACHE.get("data") or {}
+        if (
+            not force_refresh
+            and cached_data
+            and cls._FUTURES_CACHE.get("session_date") == today_str
+            and (now - float(cls._FUTURES_CACHE.get("timestamp") or 0.0)) < cls._FUTURES_TTL_SECONDS
+        ):
+            return cached_data
+
+        def _is_valid_fut_map(fmap: Dict[str, Any]) -> bool:
+            if not isinstance(fmap, dict) or not fmap:
+                return False
+            for u in underlyings:
+                front = (fmap.get(u) or {}).get("front")
+                if not isinstance(front, dict) or str(front.get("expiry") or "") < today_str:
+                    return False
+            return True
+
+        # 1. Check SQLite `app_settings` cache first (fast & offline-safe)
+        if not force_refresh:
+            try:
+                conn = OptionDB.get_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT value FROM app_settings WHERE key = 'upstox_front_futures_cache_v1'")
+                row = cur.fetchone()
+                conn.close()
+                if row and row[0]:
+                    parsed = _json.loads(row[0])
+                    if _is_valid_fut_map(parsed):
+                        cls._FUTURES_CACHE = {"data": parsed, "timestamp": now, "session_date": today_str}
+                        return parsed
+            except Exception:
+                pass
+
+        if not allow_network:
+            return cached_data
+
+        # 2. Fetch Upstox public NSE exchange master (`NSE.json.gz`) once per day
+        try:
+            import requests
+
+            url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+            resp = requests.get(url, timeout=6.0)
+            if resp.status_code == 200 and resp.content:
+                raw_items = _json.loads(gzip.decompress(resp.content).decode("utf-8"))
+                by_u: Dict[str, List[Dict[str, Any]]] = {u.upper(): [] for u in underlyings}
+                target_set = {u.upper() for u in underlyings}
+
+                for item in raw_items:
+                    if str(item.get("segment") or "") != "NSE_FO":
+                        continue
+                    itype = str(item.get("instrument_type") or "").upper()
+                    if itype not in ("FUT", "FUTIDX"):
+                        continue
+                    usym = str(item.get("underlying_symbol") or item.get("name") or "").upper().strip()
+                    if usym not in target_set:
+                        continue
+                    ikey = item.get("instrument_key")
+                    if not ikey:
+                        continue
+                    raw_exp = item.get("expiry")
+                    exp_s = ""
+                    if isinstance(raw_exp, (int, float)) and raw_exp > 1e10:
+                        # Upstox master stores expiry in IST epoch ms
+                        exp_dt = datetime.utcfromtimestamp((float(raw_exp) / 1000.0) + 19800.0).date()
+                        exp_s = exp_dt.strftime("%Y-%m-%d")
+                    elif raw_exp:
+                        exp_s = str(raw_exp)[:10]
+                    if not exp_s or exp_s < today_str:
+                        continue
+                    by_u[usym].append(
+                        {
+                            "instrument_key": ikey,
+                            "trading_symbol": item.get("trading_symbol") or f"{usym} {exp_s} FUT",
+                            "underlying": usym,
+                            "expiry": exp_s,
+                            "lot_size": int(item.get("lot_size") or DEFAULT_LOT_SIZES.get(usym, 65)),
+                            "is_futures": True,
+                        }
+                    )
+
+                resolved: Dict[str, Dict[str, Any]] = {}
+                for u_k, flist in by_u.items():
+                    if not flist:
+                        continue
+                    flist.sort(key=lambda x: x["expiry"])
+                    front_c = dict(flist[0])
+                    front_c["futures_slot"] = "FRONT"
+                    next_c = dict(flist[1]) if len(flist) > 1 else dict(flist[0])
+                    next_c["futures_slot"] = "NEXT"
+                    resolved[u_k] = {"front": front_c, "next": next_c}
+
+                if resolved:
+                    cls._FUTURES_CACHE = {"data": resolved, "timestamp": now, "session_date": today_str}
+                    try:
+                        conn = OptionDB.get_connection()
+                        with conn:
+                            conn.execute(
+                                "CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)"
+                            )
+                            conn.execute(
+                                "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('upstox_front_futures_cache_v1', ?)",
+                                (_json.dumps(resolved),),
+                            )
+                        conn.close()
+                    except Exception:
+                        pass
+                    logger.info(
+                        f"[OptionDiscovery] Resolved Front-Month Futures: "
+                        f"{ {k: v['front']['trading_symbol'] + ' (' + v['front']['instrument_key'] + ')' for k, v in resolved.items()} }"
+                    )
+                    return resolved
+        except Exception as fe:
+            logger.debug(f"[OptionDiscovery] Front-Month Futures discovery fallback note: {fe}")
+
+        return cached_data

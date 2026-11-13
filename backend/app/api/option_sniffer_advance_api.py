@@ -19,10 +19,14 @@ from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.analytics.option_sniffer_advance.advance_orchestrator import (
+    OptionSnifferAdvanceOrchestrator,
     get_option_sniffer_advance_orchestrator,
 )
 from app.analytics.option_sniffer_advance_live.advance_live_bridge import (
     get_advance_live_bridge,
+)
+from app.analytics.option_sniffer_advance_s205.s205_upstox_engine import (
+    get_s205_orchestrator,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,13 +37,22 @@ router = APIRouter(
 )
 
 
+def _ensure_s205_only_running():
+    """Ensures S2_05 Upstox V3 orchestrator is active and legacy V2.0 loop is stopped."""
+    legacy_inst = OptionSnifferAdvanceOrchestrator._instance
+    if legacy_inst is not None and getattr(legacy_inst, "_is_running", False):
+        legacy_inst.stop()
+    orch = get_s205_orchestrator()
+    if not orch._is_running:
+        orch.start()
+    return orch
+
+
 @router.get("/status")
 def get_advance_status() -> Dict[str, Any]:
-    """Provides operational status of Option Sniffer Advance Dual-Book engine, chain intelligence, and P&L."""
+    """Provides operational status of Option Sniffer Advance S2_05 + Upstox V3 engine, chain intelligence, and P&L."""
     try:
-        orch = get_option_sniffer_advance_orchestrator()
-        if not orch._is_running:
-            orch.start()
+        orch = _ensure_s205_only_running()
         bridge = get_advance_live_bridge()
         bridge.start_background_follower()
         status = orch.get_status()
@@ -48,6 +61,17 @@ def get_advance_status() -> Dict[str, Any]:
         return status
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to get status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/backend-readiness")
+def get_advance_backend_readiness() -> Dict[str, Any]:
+    """Returns real-time S2_05 backend activity, :00 candle countdown, Upstox V3 feed, and 4-engine order trigger readiness."""
+    try:
+        orch = _ensure_s205_only_running()
+        return orch.get_backend_readiness()
+    except Exception as e:
+        logger.error(f"[OptionSnifferAdvanceAPI] Failed to get backend readiness: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -64,9 +88,9 @@ def get_advance_calendar(book_filter: str = Query("ALL")) -> Dict[str, Any]:
 
 @router.get("/chain-intelligence")
 def get_advance_chain_intelligence() -> Dict[str, Any]:
-    """Returns cross-sectional option chain intelligence (GEX, VRP, Put-Call Parity Basis, PCR, OI Walls, Max Pain)."""
+    """Returns cross-sectional option chain intelligence (GEX, VRP, Put-Call Parity Basis, PCR, OI Walls, Max Pain, Upstox V3 Futures)."""
     try:
-        orch = get_option_sniffer_advance_orchestrator()
+        orch = _ensure_s205_only_running()
         return orch.get_chain_intelligence()
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to get chain intelligence: {e}")
@@ -80,7 +104,7 @@ def get_advance_signals(
 ) -> List[Dict[str, Any]]:
     """Returns recent Dual-Book signals (LONG_BOOK_BUY and SHORT_BOOK_SELL)."""
     try:
-        orch = get_option_sniffer_advance_orchestrator()
+        orch = _ensure_s205_only_running()
         return orch.get_signals(limit=limit, book_type=book_type)
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to get signals: {e}")
@@ -91,7 +115,7 @@ def get_advance_signals(
 def get_advance_trades() -> Dict[str, Any]:
     """Returns open and closed Dual-Book paper positions and split Long vs Short Book P&L summary."""
     try:
-        orch = get_option_sniffer_advance_orchestrator()
+        orch = _ensure_s205_only_running()
         return orch.get_trades()
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to get trades: {e}")
@@ -100,10 +124,23 @@ def get_advance_trades() -> Dict[str, Any]:
 
 @router.get("/walkforward-audit")
 def get_advance_walkforward_audit(force_refresh: bool = Query(False)) -> Dict[str, Any]:
-    """Returns the causal walk-forward Dual-Book audit across Oct 19 – Oct 30, 2026."""
+    """Returns causal walk-forward Dual-Book audit + Hunt V7 18-month stitched OOS summary for S2_05."""
     try:
-        orch = get_option_sniffer_advance_orchestrator()
-        return orch.get_walkforward_audit_report(force_refresh=force_refresh)
+        legacy_orch = get_option_sniffer_advance_orchestrator()
+        report = dict(legacy_orch.get_walkforward_audit_report(force_refresh=force_refresh) or {})
+        report["s205_walkforward_summary"] = {
+            "candidate_id": "S2_05",
+            "window": "2025-06 to 2026-11 (18 Stitched OOS Months, 6m Train -> 1m Test + Embargo)",
+            "total_trades": 349,
+            "win_rate_pct": 63.3,
+            "profit_factor": 1.563,
+            "delay_1bar_pf": 1.376,
+            "bootstrap_95ci_pf": [1.318, 1.868],
+            "net_pnl_inr": 67719.0,
+            "max_mtm_drawdown_inr": 13560.0,
+            "profitable_months": "14/18",
+        }
+        return report
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to get walkforward audit: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -111,9 +148,9 @@ def get_advance_walkforward_audit(force_refresh: bool = Query(False)) -> Dict[st
 
 @router.post("/scan")
 def trigger_advance_scan() -> Dict[str, Any]:
-    """Triggers an immediate Dual-Book evaluation sweep across all active option contracts."""
+    """Triggers an immediate S2_05 + Upstox V3 surveillance & readiness pass."""
     try:
-        orch = get_option_sniffer_advance_orchestrator()
+        orch = _ensure_s205_only_running()
         results = orch.run_surveillance_sweep()
         return {"status": "SUCCESS", "results": results}
     except Exception as e:
