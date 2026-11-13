@@ -394,6 +394,26 @@ def get_stream_status():
     from app.data.upstox_stream_service import get_stream_service
     return get_stream_service().get_status()
 
+@app.get("/api/stream/s1-ingress-probe")
+def get_s1_ingress_probe_summary(include_rings: bool = Query(False)):
+    """Read-only compact measurement summary for Phase 1 S1 ingress feasibility."""
+    from app.data.upstox_stream_service import get_stream_service
+    return get_stream_service()._get_s1_probe().get_summary(include_recent_rings=include_rings)
+
+@app.post("/api/stream/s1-ingress-probe/control")
+def control_s1_ingress_probe(
+    action: str = Query(..., enum=["enable", "disable", "reset"]),
+    reset_counters: bool = Query(False),
+):
+    """Runtime toggle for the default-OFF S1 ingress measurement probe (no stream restart)."""
+    from app.data.upstox_stream_service import get_stream_service
+    probe = get_stream_service()._get_s1_probe()
+    if action == "enable":
+        return probe.enable(reset_counters=reset_counters)
+    if action == "disable":
+        return probe.disable()
+    return probe.reset()
+
 @app.get("/api/scheduler/status")
 def get_scheduler_status():
     """Operational status of the autonomous background scheduler."""

@@ -36,6 +36,12 @@ from app.analytics.universe_config import (
     resolve_all_database_stocks,
     normalize_ticker,
 )
+from app.data.s1_ingress_probe import (
+    S1IngressMeasurementProbe,
+    attach_probe_lifecycle_listeners,
+    build_instrumented_streamer_class,
+    get_s1_ingress_probe,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +111,8 @@ class UpstoxStreamService:
         self._feed_listeners: List[Any] = []
         self._additional_keys: Set[str] = {"NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"}
         self._subscribed_ws_keys: Set[str] = set()
+        self._s1_ingress_probe: S1IngressMeasurementProbe = get_s1_ingress_probe()
+        self._s1_ingress_probe.set_universe_supplier(self._supply_s1_probe_universe)
 
         # Wire continuous index candle ingestion service (for NIFTY and BANKNIFTY continuous_index_ohlcv)
         try:
@@ -154,6 +162,33 @@ class UpstoxStreamService:
             f"with authoritative Upstox V3 keys ({len(self._key_to_symbol)} unique keys)."
         )
         return valid_symbols
+
+    def _get_s1_probe(self) -> S1IngressMeasurementProbe:
+        probe = getattr(self, "_s1_ingress_probe", None)
+        if probe is None:
+            probe = get_s1_ingress_probe()
+            probe.set_universe_supplier(self._supply_s1_probe_universe)
+            self._s1_ingress_probe = probe
+        return probe
+
+    def _supply_s1_probe_universe(self) -> Tuple[Set[str], Dict[str, Dict[str, Any]]]:
+        subscribed = set(getattr(self, "_subscribed_ws_keys", ()) or ())
+        if not subscribed:
+            subscribed = set(self._key_to_symbol.keys()) | set(getattr(self, "_additional_keys", ()) or ())
+        key_to_contract: Dict[str, Dict[str, Any]] = {}
+        try:
+            import sys
+            osm_mod = sys.modules.get("app.analytics.option_sniffer.option_stream_manager")
+            if osm_mod is not None:
+                osm_cls = getattr(osm_mod, "OptionStreamManager", None)
+                osm_inst = getattr(osm_cls, "_instance", None) if osm_cls is not None else None
+                if osm_inst is not None:
+                    raw_map = getattr(osm_inst, "_key_to_contract", None)
+                    if isinstance(raw_map, dict):
+                        key_to_contract = dict(raw_map)
+        except Exception:
+            pass
+        return subscribed, key_to_contract
 
     def register_feed_listener(self, listener: Any) -> None:
         """Registers a callback receiving raw feeds dict: listener(feeds)."""
@@ -263,7 +298,11 @@ class UpstoxStreamService:
                     f"({len(additional)} additional/options) (mode=full)..."
                 )
 
-                streamer = upstox_client.MarketDataStreamerV3(client, instrument_keys, mode="full")
+                probe = self._get_s1_probe()
+                streamer_cls = build_instrumented_streamer_class(
+                    upstox_client.MarketDataStreamerV3, probe
+                )
+                streamer = streamer_cls(client, instrument_keys, mode="full")
 
                 def _on_open(*args, **kwargs):
                     pending_to_sub: List[str] = []
@@ -311,6 +350,7 @@ class UpstoxStreamService:
                 streamer.on("message", _on_message)
                 streamer.on("error", _on_error)
                 streamer.on("close", _on_close)
+                attach_probe_lifecycle_listeners(streamer, probe)
 
                 self._streamer = streamer
                 streamer.connect()
@@ -353,6 +393,10 @@ class UpstoxStreamService:
         if not feeds or not isinstance(feeds, dict):
             return
 
+        probe = getattr(self, "_s1_ingress_probe", None)
+        probe_on = bool(probe is not None and probe._enabled)
+        t_list_start = time.perf_counter_ns() if probe_on else 0
+
         # Native broadcast to registered external listeners (e.g. Option Sniffer)
         if self._feed_listeners:
             with self._lock:
@@ -363,6 +407,7 @@ class UpstoxStreamService:
                 except Exception as l_err:
                     logger.debug(f"[UpstoxStreamService] Listener error: {l_err}")
 
+        t_list_end = time.perf_counter_ns() if probe_on else 0
         now_dt = datetime.now()
 
         for ikey, feed_obj in feeds.items():
@@ -465,6 +510,10 @@ class UpstoxStreamService:
                         m_bar["close"] = ltp
                         m_bar["ts_ms"] = now_ms
 
+        if probe_on and probe is not None:
+            t_eq_end = time.perf_counter_ns()
+            probe.record_downstream_segments(t_list_end - t_list_start, t_eq_end - t_list_end)
+
     # ──────────────────────────────────────────────────────────────────────────
     # DETERMINISTIC 15-MINUTE BAR AGGREGATION & FLUSHING
     # ──────────────────────────────────────────────────────────────────────────
@@ -516,6 +565,15 @@ class UpstoxStreamService:
         A bar is ONLY completed when now >= slot_end. Incomplete bars are NEVER finalized.
         Returns count of new 15m bars persisted.
         """
+        probe = getattr(self, "_s1_ingress_probe", None)
+        t_stage_ns = time.perf_counter_ns() if (probe is not None and probe._enabled) else -1
+        try:
+            return self._aggregate_and_flush_completed_bars_impl(force_as_of=force_as_of)
+        finally:
+            if t_stage_ns >= 0 and probe is not None:
+                probe.record_periodic_decision_stage("bar_flush_15m", time.perf_counter_ns() - t_stage_ns)
+
+    def _aggregate_and_flush_completed_bars_impl(self, force_as_of: Optional[datetime] = None) -> int:
         now_dt = force_as_of or datetime.now()
         session_slots = self.get_market_session_15m_slots(now_dt)
 
@@ -634,6 +692,19 @@ class UpstoxStreamService:
           4. Symbols with missing bar -> flagged DATA_INCOMPLETE / NOT_ACTIONABLE.
           5. Pre-caches fresh executable LTPs from WebSocket stream.
         """
+        probe = getattr(self, "_s1_ingress_probe", None)
+        t_stage_ns = time.perf_counter_ns() if (probe is not None and probe._enabled) else -1
+        try:
+            return self._freeze_decision_snapshot_impl(universe=universe, as_of_dt=as_of_dt)
+        finally:
+            if t_stage_ns >= 0 and probe is not None:
+                probe.record_periodic_decision_stage("freeze_snapshot", time.perf_counter_ns() - t_stage_ns)
+
+    def _freeze_decision_snapshot_impl(
+        self,
+        universe: Optional[List[str]] = None,
+        as_of_dt: Optional[datetime] = None
+    ) -> Dict[str, Any]:
         now_dt = as_of_dt or datetime.now()
         session_slots = self.get_market_session_15m_slots(now_dt)
 
@@ -816,7 +887,8 @@ class UpstoxStreamService:
                     self._latest_frozen_snapshot.get("decision_bar")
                     if self._latest_frozen_snapshot else None
                 ),
-                "rate_governor": get_upstox_limiter().get_stats()
+                "rate_governor": get_upstox_limiter().get_stats(),
+                "s1_ingress_probe": self._get_s1_probe().get_compact_status(),
             }
 
 
