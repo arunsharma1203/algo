@@ -397,10 +397,13 @@ def get_stream_status():
 @app.get("/api/stream/s1-ingress-probe")
 def get_s1_ingress_probe_summary(request: Request, include_rings: bool = Query(False)):
     """Authenticated, loopback-restricted read-only summary for Phase 1 S1 ingress feasibility."""
-    from app.data.s1_ingress_probe import ProbeControlError, get_s1_probe_management_guard
+    from app.data.s1_ingress_probe import (
+        ProbeControlError,
+        get_s1_probe_management_guard,
+        peek_s1_ingress_probe,
+    )
     from app.data.upstox_stream_service import get_stream_service
 
-    probe = get_stream_service()._get_s1_probe()
     peer = request.client.host if request.client else "unknown"
     try:
         role = get_s1_probe_management_guard().authorize_request(
@@ -409,15 +412,18 @@ def get_s1_ingress_probe_summary(request: Request, include_rings: bool = Query(F
             require_write=False,
         )
     except ProbeControlError as err:
-        probe.record_control_audit(
-            action="summary_read",
-            actor_role="UNAUTH",
-            peer=peer,
-            outcome=f"DENIED:{err.code}",
-            detail=err.message,
-        )
+        existing_probe = peek_s1_ingress_probe()
+        if existing_probe is not None:
+            existing_probe.record_control_audit(
+                action="summary_read",
+                actor_role="UNAUTH",
+                peer=peer,
+                outcome=f"DENIED:{err.code}",
+                detail=err.message,
+            )
         raise HTTPException(status_code=err.status_code, detail={"code": err.code, "message": err.message})
 
+    probe = get_stream_service()._get_s1_probe()
     probe.record_control_audit(action="summary_read", actor_role=role, peer=peer, outcome="ALLOWED")
     return probe.get_summary(include_recent_rings=include_rings)
 
@@ -432,36 +438,45 @@ def control_s1_ingress_probe(
         ProbeControlAction,
         ProbeControlError,
         get_s1_probe_management_guard,
+        peek_s1_ingress_probe,
     )
     from app.data.upstox_stream_service import get_stream_service
 
-    probe = get_stream_service()._get_s1_probe()
     peer = request.client.host if request.client else "unknown"
+    norm_action = str(action).strip()
+    valid_action_values = {a.value for a in ProbeControlAction}
+    # Never rate-limit emergency disable OR unparsed invalid actions (so typos cannot lock out disable/valid writes)
+    bypass_write_rl = (norm_action == ProbeControlAction.DISABLE.value) or (norm_action not in valid_action_values)
     try:
         role = get_s1_probe_management_guard().authorize_request(
             client_host=request.client.host if request.client else None,
             headers=dict(request.headers),
             require_write=True,
+            is_emergency_disable=bypass_write_rl,
         )
     except ProbeControlError as err:
-        probe.record_control_audit(
-            action=f"control:{str(action)[:24]}",
-            actor_role="UNAUTH",
-            peer=peer,
-            outcome=f"DENIED:{err.code}",
-            detail=err.message,
-        )
+        existing_probe = peek_s1_ingress_probe()
+        if existing_probe is not None:
+            existing_probe.record_control_audit(
+                action=f"control:{norm_action[:24]}",
+                actor_role="UNAUTH",
+                peer=peer,
+                outcome=f"DENIED:{err.code}",
+                detail=err.message,
+            )
         raise HTTPException(status_code=err.status_code, detail={"code": err.code, "message": err.message})
 
     try:
-        parsed_action = ProbeControlAction(action)
+        parsed_action = ProbeControlAction(norm_action)
     except ValueError:
-        probe.record_control_audit(
-            action=f"invalid:{str(action)[:24]}",
-            actor_role=role,
-            peer=peer,
-            outcome="REJECTED_INVALID_ACTION",
-        )
+        existing_probe = peek_s1_ingress_probe()
+        if existing_probe is not None:
+            existing_probe.record_control_audit(
+                action=f"invalid:{norm_action[:24]}",
+                actor_role=role,
+                peer=peer,
+                outcome="REJECTED_INVALID_ACTION",
+            )
         raise HTTPException(
             status_code=422,
             detail={
@@ -470,6 +485,7 @@ def control_s1_ingress_probe(
             },
         )
 
+    probe = get_stream_service()._get_s1_probe()
     try:
         if parsed_action == ProbeControlAction.ENABLE:
             return probe.enable(actor_role=role, peer=peer)
@@ -561,7 +577,10 @@ def get_market_universes():
         }
     return {"status": "success", "universes": presets, "all_db_symbols": db_tickers}
 
-from app.data.s1_ingress_probe import DEFAULT_ALLOWED_LOCAL_ORIGINS as _S1_LOCAL_ORIGINS
+from app.data.s1_ingress_probe import (
+    DEFAULT_ALLOWED_LOCAL_ORIGINS as _S1_LOCAL_ORIGINS,
+    TAILSCALE_CORS_ORIGIN_REGEX as _S1_TAILSCALE_CORS_REGEX,
+)
 
 _EXTRA_CORS_ORIGINS = [
     o.strip()
@@ -573,6 +592,7 @@ _RESOLVED_CORS_ORIGINS = sorted(set(_S1_LOCAL_ORIGINS) | set(_EXTRA_CORS_ORIGINS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_RESOLVED_CORS_ORIGINS,
+    allow_origin_regex=_S1_TAILSCALE_CORS_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],

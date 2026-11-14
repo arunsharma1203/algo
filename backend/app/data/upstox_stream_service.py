@@ -943,9 +943,9 @@ class UpstoxStreamService:
         """Returns comprehensive real-time telemetry on the streaming engine."""
         now = time.time()
         try:
-            probe_compact = self._get_s1_probe().get_compact_status()
+            probe_compact = self._get_s1_probe().get_public_minimal_status()
         except Exception:
-            probe_compact = {"enabled": False, "observer_status": "DEGRADED"}
+            probe_compact = {"enabled": False, "auto_disabled_on_fault": False}
         with self._lock:
             return {
                 "is_running": self._is_running,
