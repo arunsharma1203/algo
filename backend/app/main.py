@@ -494,11 +494,17 @@ def control_s1_ingress_probe(
         elif parsed_action == ProbeControlAction.RESET:
             return probe.reset(actor_role=role, peer=peer)
         elif parsed_action == ProbeControlAction.EXPORT_FLUSH:
-            flushed = probe.flush_for_test_or_export(timeout_s=1.0, force_export=True)
-            probe.record_control_audit(
-                action="export_flush", actor_role=role, peer=peer, outcome="FLUSHED" if flushed else "TIMEOUT"
-            )
-            return {"flushed": flushed, "enabled": probe.enabled, "epoch_seq": probe._active_epoch_seq}
+            res = probe.export_summary(actor_role=role, peer=peer)
+            if not res.get("export_succeeded", False):
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "code": "EXPORT_FLUSH_FAILED",
+                        "message": "Durable summary export failed; inspect exporter status",
+                        "barrier_completed": bool(res.get("barrier_completed", False)),
+                    },
+                )
+            return res
         else:
             raise HTTPException(status_code=422, detail={"code": "INVALID_PROBE_ACTION", "message": "Unhandled action"})
     except ProbeControlError as err:
@@ -577,22 +583,13 @@ def get_market_universes():
         }
     return {"status": "success", "universes": presets, "all_db_symbols": db_tickers}
 
-from app.data.s1_ingress_probe import (
-    DEFAULT_ALLOWED_LOCAL_ORIGINS as _S1_LOCAL_ORIGINS,
-    TAILSCALE_CORS_ORIGIN_REGEX as _S1_TAILSCALE_CORS_REGEX,
-)
+from app.data.s1_ingress_probe import resolve_cors_allowed_origins as _resolve_s1_cors_origins
 
-_EXTRA_CORS_ORIGINS = [
-    o.strip()
-    for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",")
-    if o.strip() and o.strip() != "*" and (o.strip().startswith("http://") or o.strip().startswith("https://"))
-]
-_RESOLVED_CORS_ORIGINS = sorted(set(_S1_LOCAL_ORIGINS) | set(_EXTRA_CORS_ORIGINS))
+_RESOLVED_CORS_ORIGINS = _resolve_s1_cors_origins(os.environ.get("CORS_ALLOWED_ORIGINS", ""))
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_RESOLVED_CORS_ORIGINS,
-    allow_origin_regex=_S1_TAILSCALE_CORS_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],

@@ -113,7 +113,6 @@ class UpstoxStreamService:
         self._additional_keys: Set[str] = {"NSE_INDEX|Nifty 50", "NSE_INDEX|Nifty Bank"}
         self._subscribed_ws_keys: Set[str] = set()
         self._s1_ingress_probe: S1IngressMeasurementProbe = get_s1_ingress_probe()
-        self._s1_ingress_probe.set_universe_supplier(self._supply_s1_probe_universe)
         self._s1_ingress_probe.set_attachment_verifier(self._inspect_s1_streamer_attachment)
 
         # Wire continuous index candle ingestion service (for NIFTY and BANKNIFTY continuous_index_ohlcv)
@@ -170,7 +169,6 @@ class UpstoxStreamService:
         if probe is None:
             probe = get_s1_ingress_probe()
             self._s1_ingress_probe = probe
-        probe.set_universe_supplier(self._supply_s1_probe_universe)
         probe.set_attachment_verifier(self._inspect_s1_streamer_attachment)
         return probe
 
@@ -189,26 +187,8 @@ class UpstoxStreamService:
             "is_connected": bool(getattr(self, "_is_connected", False)),
             "wrapper_attached": attached,
             "wrapper_version_actual": getattr(st, "_s1_probe_wrapper_version", None) if st is not None else None,
+            "subscribed_keys_count": len(getattr(self, "_subscribed_ws_keys", ()) or ()),
         }
-
-    def _supply_s1_probe_universe(self) -> Tuple[Set[str], Dict[str, Dict[str, Any]]]:
-        subscribed = set(getattr(self, "_subscribed_ws_keys", ()) or ())
-        if not subscribed:
-            subscribed = set(self._key_to_symbol.keys()) | set(getattr(self, "_additional_keys", ()) or ())
-        key_to_contract: Dict[str, Dict[str, Any]] = {}
-        try:
-            import sys
-            osm_mod = sys.modules.get("app.analytics.option_sniffer.option_stream_manager")
-            if osm_mod is not None:
-                osm_cls = getattr(osm_mod, "OptionStreamManager", None)
-                osm_inst = getattr(osm_cls, "_instance", None) if osm_cls is not None else None
-                if osm_inst is not None:
-                    raw_map = getattr(osm_inst, "_key_to_contract", None)
-                    if isinstance(raw_map, dict):
-                        key_to_contract = dict(raw_map)
-        except Exception:
-            pass
-        return subscribed, key_to_contract
 
     def register_feed_listener(self, listener: Any) -> None:
         """Registers a callback receiving raw feeds dict: listener(feeds)."""
