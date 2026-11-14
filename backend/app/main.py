@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from apscheduler.schedulers.background import BackgroundScheduler
 import logging
 from datetime import datetime
@@ -395,24 +395,98 @@ def get_stream_status():
     return get_stream_service().get_status()
 
 @app.get("/api/stream/s1-ingress-probe")
-def get_s1_ingress_probe_summary(include_rings: bool = Query(False)):
-    """Read-only compact measurement summary for Phase 1 S1 ingress feasibility."""
+def get_s1_ingress_probe_summary(request: Request, include_rings: bool = Query(False)):
+    """Authenticated, loopback-restricted read-only summary for Phase 1 S1 ingress feasibility."""
+    from app.data.s1_ingress_probe import ProbeControlError, get_s1_probe_management_guard
     from app.data.upstox_stream_service import get_stream_service
-    return get_stream_service()._get_s1_probe().get_summary(include_recent_rings=include_rings)
+
+    probe = get_stream_service()._get_s1_probe()
+    peer = request.client.host if request.client else "unknown"
+    try:
+        role = get_s1_probe_management_guard().authorize_request(
+            client_host=request.client.host if request.client else None,
+            headers=dict(request.headers),
+            require_write=False,
+        )
+    except ProbeControlError as err:
+        probe.record_control_audit(
+            action="summary_read",
+            actor_role="UNAUTH",
+            peer=peer,
+            outcome=f"DENIED:{err.code}",
+            detail=err.message,
+        )
+        raise HTTPException(status_code=err.status_code, detail={"code": err.code, "message": err.message})
+
+    probe.record_control_audit(action="summary_read", actor_role=role, peer=peer, outcome="ALLOWED")
+    return probe.get_summary(include_recent_rings=include_rings)
+
 
 @app.post("/api/stream/s1-ingress-probe/control")
 def control_s1_ingress_probe(
-    action: str = Query(..., enum=["enable", "disable", "reset"]),
-    reset_counters: bool = Query(False),
+    request: Request,
+    action: str = Query(..., description="Explicit control action: enable | disable | reset | export_flush"),
 ):
-    """Runtime toggle for the default-OFF S1 ingress measurement probe (no stream restart)."""
+    """Authenticated, loopback-restricted ADMIN control for the default-OFF S1 ingress probe."""
+    from app.data.s1_ingress_probe import (
+        ProbeControlAction,
+        ProbeControlError,
+        get_s1_probe_management_guard,
+    )
     from app.data.upstox_stream_service import get_stream_service
+
     probe = get_stream_service()._get_s1_probe()
-    if action == "enable":
-        return probe.enable(reset_counters=reset_counters)
-    if action == "disable":
-        return probe.disable()
-    return probe.reset()
+    peer = request.client.host if request.client else "unknown"
+    try:
+        role = get_s1_probe_management_guard().authorize_request(
+            client_host=request.client.host if request.client else None,
+            headers=dict(request.headers),
+            require_write=True,
+        )
+    except ProbeControlError as err:
+        probe.record_control_audit(
+            action=f"control:{str(action)[:24]}",
+            actor_role="UNAUTH",
+            peer=peer,
+            outcome=f"DENIED:{err.code}",
+            detail=err.message,
+        )
+        raise HTTPException(status_code=err.status_code, detail={"code": err.code, "message": err.message})
+
+    try:
+        parsed_action = ProbeControlAction(action)
+    except ValueError:
+        probe.record_control_audit(
+            action=f"invalid:{str(action)[:24]}",
+            actor_role=role,
+            peer=peer,
+            outcome="REJECTED_INVALID_ACTION",
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_PROBE_ACTION",
+                "message": f"Unsupported action '{action}'; valid actions: {[a.value for a in ProbeControlAction]}",
+            },
+        )
+
+    try:
+        if parsed_action == ProbeControlAction.ENABLE:
+            return probe.enable(actor_role=role, peer=peer)
+        elif parsed_action == ProbeControlAction.DISABLE:
+            return probe.disable(actor_role=role, peer=peer)
+        elif parsed_action == ProbeControlAction.RESET:
+            return probe.reset(actor_role=role, peer=peer)
+        elif parsed_action == ProbeControlAction.EXPORT_FLUSH:
+            flushed = probe.flush_for_test_or_export(timeout_s=1.0, force_export=True)
+            probe.record_control_audit(
+                action="export_flush", actor_role=role, peer=peer, outcome="FLUSHED" if flushed else "TIMEOUT"
+            )
+            return {"flushed": flushed, "enabled": probe.enabled, "epoch_seq": probe._active_epoch_seq}
+        else:
+            raise HTTPException(status_code=422, detail={"code": "INVALID_PROBE_ACTION", "message": "Unhandled action"})
+    except ProbeControlError as err:
+        raise HTTPException(status_code=err.status_code, detail={"code": err.code, "message": err.message})
 
 @app.get("/api/scheduler/status")
 def get_scheduler_status():
@@ -487,11 +561,20 @@ def get_market_universes():
         }
     return {"status": "success", "universes": presets, "all_db_symbols": db_tickers}
 
+from app.data.s1_ingress_probe import DEFAULT_ALLOWED_LOCAL_ORIGINS as _S1_LOCAL_ORIGINS
+
+_EXTRA_CORS_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",")
+    if o.strip() and o.strip() != "*" and (o.strip().startswith("http://") or o.strip().startswith("https://"))
+]
+_RESOLVED_CORS_ORIGINS = sorted(set(_S1_LOCAL_ORIGINS) | set(_EXTRA_CORS_ORIGINS))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_RESOLVED_CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
 

@@ -37,6 +37,7 @@ from app.analytics.universe_config import (
     normalize_ticker,
 )
 from app.data.s1_ingress_probe import (
+    PROBE_WRAPPER_VERSION,
     S1IngressMeasurementProbe,
     attach_probe_lifecycle_listeners,
     build_instrumented_streamer_class,
@@ -113,6 +114,7 @@ class UpstoxStreamService:
         self._subscribed_ws_keys: Set[str] = set()
         self._s1_ingress_probe: S1IngressMeasurementProbe = get_s1_ingress_probe()
         self._s1_ingress_probe.set_universe_supplier(self._supply_s1_probe_universe)
+        self._s1_ingress_probe.set_attachment_verifier(self._inspect_s1_streamer_attachment)
 
         # Wire continuous index candle ingestion service (for NIFTY and BANKNIFTY continuous_index_ohlcv)
         try:
@@ -167,9 +169,27 @@ class UpstoxStreamService:
         probe = getattr(self, "_s1_ingress_probe", None)
         if probe is None:
             probe = get_s1_ingress_probe()
-            probe.set_universe_supplier(self._supply_s1_probe_universe)
             self._s1_ingress_probe = probe
+        probe.set_universe_supplier(self._supply_s1_probe_universe)
+        probe.set_attachment_verifier(self._inspect_s1_streamer_attachment)
         return probe
+
+    def _inspect_s1_streamer_attachment(self) -> Dict[str, Any]:
+        st = getattr(self, "_streamer", None)
+        probe = getattr(self, "_s1_ingress_probe", None)
+        attached = bool(
+            st is not None
+            and probe is not None
+            and getattr(st, "_s1_probe", None) is probe
+            and getattr(st, "_s1_probe_wrapper_version", None) == PROBE_WRAPPER_VERSION
+        )
+        return {
+            "streamer_present": st is not None,
+            "streamer_class": type(st).__name__ if st is not None else None,
+            "is_connected": bool(getattr(self, "_is_connected", False)),
+            "wrapper_attached": attached,
+            "wrapper_version_actual": getattr(st, "_s1_probe_wrapper_version", None) if st is not None else None,
+        }
 
     def _supply_s1_probe_universe(self) -> Tuple[Set[str], Dict[str, Dict[str, Any]]]:
         subscribed = set(getattr(self, "_subscribed_ws_keys", ()) or ())
@@ -394,8 +414,22 @@ class UpstoxStreamService:
             return
 
         probe = getattr(self, "_s1_ingress_probe", None)
-        probe_on = bool(probe is not None and probe._enabled)
-        t_list_start = time.perf_counter_ns() if probe_on else 0
+        probe_on = False
+        t_list_start = 0
+        hk_pre_ns = 0
+        try:
+            if probe is not None and probe._capture_enabled:
+                t_hk0 = time.perf_counter_ns()
+                probe_on = True
+                t_list_start = time.perf_counter_ns()
+                hk_pre_ns = max(0, t_list_start - t_hk0)
+        except Exception as p_exc:
+            probe_on = False
+            try:
+                if probe is not None:
+                    probe.note_observer_fault("feed_msg_pre_hook", p_exc)
+            except Exception:
+                pass
 
         # Native broadcast to registered external listeners (e.g. Option Sniffer)
         if self._feed_listeners:
@@ -407,7 +441,15 @@ class UpstoxStreamService:
                 except Exception as l_err:
                     logger.debug(f"[UpstoxStreamService] Listener error: {l_err}")
 
-        t_list_end = time.perf_counter_ns() if probe_on else 0
+        t_list_end = 0
+        t_eq_start = 0
+        if probe_on:
+            try:
+                t_list_end = time.perf_counter_ns()
+                t_eq_start = time.perf_counter_ns()
+                hk_pre_ns += max(0, t_eq_start - t_list_end)
+            except Exception:
+                probe_on = False
         now_dt = datetime.now()
 
         for ikey, feed_obj in feeds.items():
@@ -511,8 +553,18 @@ class UpstoxStreamService:
                         m_bar["ts_ms"] = now_ms
 
         if probe_on and probe is not None:
-            t_eq_end = time.perf_counter_ns()
-            probe.record_downstream_segments(t_list_end - t_list_start, t_eq_end - t_list_end)
+            try:
+                t_eq_end = time.perf_counter_ns()
+                probe.record_downstream_segments(
+                    t_list_end - t_list_start,
+                    t_eq_end - t_eq_start,
+                    hook_overhead_ns=hk_pre_ns,
+                )
+            except Exception as p_exc:
+                try:
+                    probe.note_observer_fault("feed_msg_post_hook", p_exc)
+                except Exception:
+                    pass
 
     # ──────────────────────────────────────────────────────────────────────────
     # DETERMINISTIC 15-MINUTE BAR AGGREGATION & FLUSHING
@@ -566,12 +618,23 @@ class UpstoxStreamService:
         Returns count of new 15m bars persisted.
         """
         probe = getattr(self, "_s1_ingress_probe", None)
-        t_stage_ns = time.perf_counter_ns() if (probe is not None and probe._enabled) else -1
+        t_stage_ns = -1
+        try:
+            if probe is not None and probe._capture_enabled:
+                t_stage_ns = time.perf_counter_ns()
+        except Exception:
+            t_stage_ns = -1
         try:
             return self._aggregate_and_flush_completed_bars_impl(force_as_of=force_as_of)
         finally:
             if t_stage_ns >= 0 and probe is not None:
-                probe.record_periodic_decision_stage("bar_flush_15m", time.perf_counter_ns() - t_stage_ns)
+                try:
+                    probe.record_periodic_decision_stage("bar_flush_15m", time.perf_counter_ns() - t_stage_ns)
+                except Exception as p_exc:
+                    try:
+                        probe.note_observer_fault("bar_flush_15m_hook", p_exc)
+                    except Exception:
+                        pass
 
     def _aggregate_and_flush_completed_bars_impl(self, force_as_of: Optional[datetime] = None) -> int:
         now_dt = force_as_of or datetime.now()
@@ -693,12 +756,23 @@ class UpstoxStreamService:
           5. Pre-caches fresh executable LTPs from WebSocket stream.
         """
         probe = getattr(self, "_s1_ingress_probe", None)
-        t_stage_ns = time.perf_counter_ns() if (probe is not None and probe._enabled) else -1
+        t_stage_ns = -1
+        try:
+            if probe is not None and probe._capture_enabled:
+                t_stage_ns = time.perf_counter_ns()
+        except Exception:
+            t_stage_ns = -1
         try:
             return self._freeze_decision_snapshot_impl(universe=universe, as_of_dt=as_of_dt)
         finally:
             if t_stage_ns >= 0 and probe is not None:
-                probe.record_periodic_decision_stage("freeze_snapshot", time.perf_counter_ns() - t_stage_ns)
+                try:
+                    probe.record_periodic_decision_stage("freeze_snapshot", time.perf_counter_ns() - t_stage_ns)
+                except Exception as p_exc:
+                    try:
+                        probe.note_observer_fault("freeze_snapshot_hook", p_exc)
+                    except Exception:
+                        pass
 
     def _freeze_decision_snapshot_impl(
         self,
@@ -868,6 +942,10 @@ class UpstoxStreamService:
     def get_status(self) -> Dict[str, Any]:
         """Returns comprehensive real-time telemetry on the streaming engine."""
         now = time.time()
+        try:
+            probe_compact = self._get_s1_probe().get_compact_status()
+        except Exception:
+            probe_compact = {"enabled": False, "observer_status": "DEGRADED"}
         with self._lock:
             return {
                 "is_running": self._is_running,
@@ -888,7 +966,7 @@ class UpstoxStreamService:
                     if self._latest_frozen_snapshot else None
                 ),
                 "rate_governor": get_upstox_limiter().get_stats(),
-                "s1_ingress_probe": self._get_s1_probe().get_compact_status(),
+                "s1_ingress_probe": probe_compact,
             }
 
 
