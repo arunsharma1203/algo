@@ -24,6 +24,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from app.analytics.common.options_accounting import OptionLeg, compute_package_accounting
 from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
 from app.analytics.option_sniffer_advance.advance_constants import BOOK_LONG_BUY, BOOK_SHORT_SELL
 from app.analytics.option_sniffer_advance.advance_db import AdvanceDB, init_option_sniffer_advance_tables
@@ -383,6 +384,76 @@ class TestOptionSnifferAdvanceS205Upstox(unittest.TestCase):
         for row in br["engine_readiness"]:
             self.assertGreaterEqual(row["gates_total"], 5)
             self.assertTrue(bool(row["when_order_fires"]))
+
+    def test_06_open_spread_2leg_mtm_and_labels_in_get_trades(self):
+        AdvanceDB.create_trade(
+            {
+                "trade_id": "sh_pkg_test_2leg",
+                "signal_id": "sh_sig_2leg",
+                "book_type": BOOK_SHORT_SELL,
+                "strategy_mode": "SHADOW_BOOK_A_SPREAD_150",
+                "direction": "SELL_PE",
+                "instrument_key": "NSE_FO|SHORT_23500_PE",
+                "trading_symbol": "NIFTY 23500 PE / +23350 PE",
+                "underlying": "NIFTY",
+                "option_type": "PE",
+                "strike": 23500.0,
+                "expiry": "2026-11-19",
+                "lot_size": 65,
+                "quantity": 65,
+                "entry_time": "2026-11-13T10:05:00",
+                "entry_bid": 42.00,
+                "entry_ask": 42.00,
+                "entry_price_used": 42.00,
+                "entry_spot_price": 23520.0,
+                "peak_price": 42.00,
+                "trough_price": 42.00,
+                "trailing_stop": 0.0,
+                "stop_loss_pct": 120.0,
+                "target_pct": 0.0,
+                "estimated_margin": 45000.0,
+                "regime_context": {
+                    "protocol_id": "S205_SHADOW_FORWARD_V1",
+                    "hedge_wing_ikey": "NSE_FO|WING_23350_PE",
+                    "hedge_wing_strike": 23350.0,
+                    "hedge_wing_option_type": "PE",
+                    "hedge_wing_entry_price": 12.00,
+                    "short_leg_entry_price": 54.00,
+                    "spread_legs_label": "+23350 PE / -23500 PE",
+                },
+            }
+        )
+
+        class _StubStream:
+            def get_option_quote(self, ikey):
+                if ikey == "NSE_FO|SHORT_23500_PE":
+                    return {"bid": 30.00, "ask": 30.50, "ltp": 30.25}
+                if ikey == "NSE_FO|WING_23350_PE":
+                    return {"bid": 7.50, "ask": 8.00, "ltp": 7.75}
+                return None
+
+        with patch(
+            "app.analytics.option_sniffer_advance_s205.s205_upstox_engine.OptionStreamManager",
+            return_value=_StubStream(),
+        ):
+            payload = self.orch.get_trades()
+
+        self.assertEqual(len(payload["open_trades"]), 1)
+        row = payload["open_trades"][0]
+        # Net debit to exit = short_ask (30.50) - wing_bid (7.50) = 23.00
+        # Net credit bid = short_bid (30.00) - wing_ask (8.00) = 22.00
+        self.assertAlmostEqual(row["current_ask"], 23.00, places=2)
+        self.assertAlmostEqual(row["current_bid"], 22.00, places=2)
+        self.assertEqual(row["spread_legs_label"], "+23350 PE / -23500 PE")
+
+        expected_acc = compute_package_accounting(
+            legs=[
+                OptionLeg(option_type="PE", strike=23350.0, qty=65, entry_price=12.00, exit_price=7.50),
+                OptionLeg(option_type="PE", strike=23500.0, qty=-65, entry_price=54.00, exit_price=30.50),
+            ],
+            trade_date="2026-11-13",
+        )
+        self.assertAlmostEqual(row["unrealized_net_pnl"], expected_acc["net_pnl"], places=2)
 
 
 if __name__ == "__main__":

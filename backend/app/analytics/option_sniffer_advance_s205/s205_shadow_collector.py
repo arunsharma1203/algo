@@ -1593,8 +1593,12 @@ class S205ShadowCollector:
                 "prereg_sha256": self.prereg_sha256,
                 "book_id": cfg_a["book_id"],
                 "entry_bar_ts": pending["entry_bar_ts"],
+                "hedge_wing_ikey": str(wing_leg["instrument_key"]),
                 "hedge_wing_strike": float(wing_leg["strike"]),
                 "hedge_wing_option_type": wing_leg["option_type"],
+                "hedge_wing_entry_price": float(wing_leg["entry_price"]),
+                "short_leg_entry_price": float(short_px),
+                "spread_legs_label": f"+{int(wing_leg['strike'])}{wing_leg['option_type']} / -{int(short_t['strike'])}{short_t['option_type']}",
                 "net_entry_credit_pts": net_credit_pts,
                 "structural_max_loss_inr": struct_loss,
                 "margin_status": pending["margin_info"]["margin_status"],
@@ -2441,20 +2445,56 @@ class S205ShadowCollector:
             fsp_rows = int(
                 (conn.execute("SELECT COUNT(*) FROM option_sniffer_advance_s205_expiry_fsp_windows;").fetchone() or [0])[0]
             )
-            pkg_rows = [
-                dict(r)
-                for r in conn.execute(
-                    """
-                    SELECT package_id, book_id, ui_book_type, state, direction_label,
-                           expiry, entry_bar_ts, exit_bar_ts, structural_max_loss_inr,
-                           upstox_final_margin_inr, margin_status, cash_reserved_inr,
-                           gross_pnl_inr, total_charges_inr, stt_inr, brokerage_inr,
-                           net_pnl_inr, exit_reason
-                    FROM option_sniffer_advance_s205_shadow_packages
-                    ORDER BY entry_time DESC LIMIT 100;
-                    """
-                ).fetchall()
-            ]
+            pkg_rows_raw = conn.execute(
+                """
+                SELECT package_id, book_id, ui_book_type, state, direction_label,
+                       expiry, entry_bar_ts, exit_bar_ts, legs_state_json,
+                       structural_max_loss_inr, upstox_final_margin_inr, margin_status,
+                       cash_reserved_inr, gross_pnl_inr, total_charges_inr, stt_inr,
+                       brokerage_inr, net_pnl_inr, exit_reason
+                FROM option_sniffer_advance_s205_shadow_packages
+                ORDER BY entry_time DESC LIMIT 100;
+                """
+            ).fetchall()
+            pkg_rows = []
+            for r in pkg_rows_raw:
+                d = dict(r)
+                ls_j = {}
+                try:
+                    ls_j = json.loads(d.pop("legs_state_json", None) or "{}")
+                except Exception:
+                    d.pop("legs_state_json", None)
+                if ls_j.get("mode") == "DEFINED_RISK_CREDIT_SPREAD_150":
+                    wl = ls_j.get("wing_leg") or {}
+                    sl = ls_j.get("short_leg") or {}
+                    d["legs_summary"] = f"+{int(float(wl.get('strike') or 0))}{wl.get('option_type', '')} / -{int(float(sl.get('strike') or 0))}{sl.get('option_type', '')}"
+                elif ls_j.get("mode") == "SINGLE_PAID_LONG":
+                    ll = ls_j.get("long_leg") or {}
+                    d["legs_summary"] = f"+{int(float(ll.get('strike') or 0))}{ll.get('option_type', '')} (1L Paid)"
+                elif "wing_leg" in ls_j:
+                    wl = ls_j.get("wing_leg") or {}
+                    d["legs_summary"] = f"Unwound +{int(float(wl.get('strike') or 0))}{wl.get('option_type', '')} Wing"
+                else:
+                    d["legs_summary"] = d.get("direction_label") or "—"
+                pkg_rows.append(d)
+
+            latest_margin_row = conn.execute(
+                """
+                SELECT timestamp, book_id, margin_verified, margin_status,
+                       span_margin_inr, exposure_margin_inr, final_margin_inr,
+                       hedge_benefit_inr, structural_max_loss_inr
+                FROM option_sniffer_advance_s205_margin_telemetry
+                ORDER BY id DESC LIMIT 1;
+                """
+            ).fetchone()
+            latest_fsp_row = conn.execute(
+                """
+                SELECT expiry_date, samples_count, spot_1500_1530_twap,
+                       spot_1529_close, fsp_minus_1529_pts
+                FROM option_sniffer_advance_s205_expiry_fsp_windows
+                ORDER BY expiry_date DESC LIMIT 1;
+                """
+            ).fetchone()
             totals = conn.execute(
                 """
                 SELECT
@@ -2502,6 +2542,7 @@ class S205ShadowCollector:
                 "active_cash_or_margin_reserved_inr": active_res,
                 "free_unreserved_capital_inr": round(curr_eq - active_res, 2),
                 "open_packages_count": int((totals["open_cnt"] if totals else 0) or 0),
+                "pending_leg2_count": len(self._pending_leg2),
                 "incomplete_leg_unwinds_count": int((totals["unwound_cnt"] if totals else 0) or 0),
                 "daily_kill_triggered": self._daily_kill_triggered,
             },
@@ -2511,5 +2552,7 @@ class S205ShadowCollector:
                 "upstox_margin_probe_rows": margin_rows,
                 "expiry_fsp_window_rows": fsp_rows,
             },
+            "latest_margin_probe": dict(latest_margin_row) if latest_margin_row else None,
+            "latest_fsp_window": dict(latest_fsp_row) if latest_fsp_row else None,
             "recent_packages": pkg_rows[:25],
         }

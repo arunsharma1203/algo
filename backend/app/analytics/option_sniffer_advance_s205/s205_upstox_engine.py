@@ -1492,6 +1492,16 @@ class S205UpstoxOrchestrator:
             ot_leg = str(t.get("option_type") or "CE").upper()
             stk_leg = max(50.0, float(t.get("strike") or 24000.0))
             t_date = str(t.get("entry_time") or now_dt.isoformat())[:10]
+            rctx_open: Dict[str, Any] = {}
+            try:
+                raw_rc = t.get("regime_context") or t.get("regime_context_json")
+                if isinstance(raw_rc, dict):
+                    rctx_open = raw_rc
+                elif raw_rc:
+                    rctx_open = json.loads(str(raw_rc))
+            except Exception:
+                rctx_open = {}
+            spread_label = rctx_open.get("spread_legs_label")
 
             if btype == BOOK_LONG_BUY:
                 peak_price = max(float(t.get("peak_price") or entry_price), current_bid)
@@ -1509,6 +1519,44 @@ class S205UpstoxOrchestrator:
                 unrealized_charges = acc_mtm["total_friction"]
                 unrealized_net = acc_mtm["net_pnl"]
                 unrealized_pct = round(((current_bid - entry_price) / max(0.05, entry_price)) * 100.0, 2)
+            elif str(t.get("strategy_mode") or "") == "SHADOW_BOOK_A_SPREAD_150" and rctx_open.get("hedge_wing_ikey"):
+                wing_q = sm.get_option_quote(str(rctx_open["hedge_wing_ikey"]))
+                wing_ent = max(0.05, float(rctx_open.get("hedge_wing_entry_price") or 5.0))
+                short_ent = max(0.05, float(rctx_open.get("short_leg_entry_price") or (entry_price + wing_ent)))
+                wing_stk = max(50.0, float(rctx_open.get("hedge_wing_strike") or stk_leg))
+                wing_ot = str(rctx_open.get("hedge_wing_option_type") or ot_leg).upper()
+
+                short_ask = current_ask if (quote and float(quote.get("bid") or 0.0) > 0) else short_ent
+                short_bid = current_bid if (quote and float(quote.get("bid") or 0.0) > 0) else short_ent
+                wing_bid = float(wing_q.get("bid")) if (wing_q and float(wing_q.get("bid") or 0.0) > 0) else wing_ent
+                wing_ask = float(wing_q.get("ask") or wing_bid) if (wing_q and float(wing_q.get("bid") or 0.0) > 0) else wing_ent
+
+                # Live 2-leg net spread debit to buy back short @ ask and sell wing @ bid
+                net_debit_ask = max(0.05, round(short_ask - wing_bid, 2))
+                net_credit_bid = max(0.05, round(short_bid - wing_ask, 2))
+                current_bid = net_credit_bid
+                current_ask = net_debit_ask
+                current_ltp = round(0.5 * (net_credit_bid + net_debit_ask), 2)
+
+                peak_price = max(float(t.get("peak_price") or entry_price), net_debit_ask)
+                trough_price = min(float(t.get("trough_price") or entry_price), net_debit_ask)
+                mfe_pct = round(((entry_price - trough_price) / max(0.05, entry_price)) * 100.0, 2)
+                mae_pct = round(((entry_price - peak_price) / max(0.05, entry_price)) * 100.0, 2)
+                stop_price = round(entry_price * (1.0 + sl_pct / 100.0), 2)
+                active_trail = float(t.get("trailing_stop") or 0.0)
+                effective_stop = min(stop_price, active_trail) if active_trail > 0 else stop_price
+                acc_mtm = compute_package_accounting(
+                    legs=[
+                        OptionLeg(option_type=wing_ot, strike=wing_stk, qty=quantity, entry_price=wing_ent, exit_price=max(0.05, wing_bid)),
+                        OptionLeg(option_type=ot_leg, strike=stk_leg, qty=-quantity, entry_price=short_ent, exit_price=max(0.05, short_ask)),
+                    ],
+                    trade_date=t_date,
+                )
+                unrealized_gross = acc_mtm["gross_pnl"]
+                unrealized_charges = acc_mtm["total_friction"]
+                unrealized_net = acc_mtm["net_pnl"]
+                cash_base = max(1.0, float(t.get("estimated_margin") or (entry_price * quantity)))
+                unrealized_pct = round((unrealized_net / cash_base) * 100.0, 2)
             else:
                 peak_price = max(float(t.get("peak_price") or entry_price), current_ask)
                 trough_price = min(float(t.get("trough_price") or entry_price), current_ask)
@@ -1530,6 +1578,7 @@ class S205UpstoxOrchestrator:
                 {
                     "entry_price": entry_price,
                     "strike_price": t.get("strike"),
+                    "spread_legs_label": spread_label,
                     "current_bid": current_bid,
                     "current_ask": current_ask,
                     "current_ltp": current_ltp,
@@ -1551,6 +1600,12 @@ class S205UpstoxOrchestrator:
             c["entry_price"] = c.get("entry_price_used")
             c["exit_price"] = c.get("exit_price_used")
             c["strike_price"] = c.get("strike")
+            try:
+                rc_c = c.get("regime_context") or json.loads(str(c.get("regime_context_json") or "{}") or "{}")
+                if isinstance(rc_c, dict) and rc_c.get("spread_legs_label"):
+                    c["spread_legs_label"] = rc_c["spread_legs_label"]
+            except Exception:
+                pass
 
         return {
             "open_trades": decorated_open,

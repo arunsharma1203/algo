@@ -265,6 +265,7 @@ export default function OptionSnifferAdvance() {
   const liveActivePositions = liveStatus?.active_live_positions || [];
   const liveRecentIntents = liveStatus?.recent_order_intents || [];
   const activeReadiness = backendReadiness || statusData?.backend_readiness || null;
+  const shadowTelemetry = activeReadiness?.shadow_telemetry || statusData?.shadow_telemetry || null;
 
   // Build interactive Monthly P&L Calendar model from backend calendarData + client-side tradesData fallback
   const computedCalendar = useMemo(() => {
@@ -867,14 +868,26 @@ export default function OptionSnifferAdvance() {
                   const isReady = row.state === 'READY_FIRE';
                   const isVeto = row.state === 'ML_VETOED';
                   const isWarmup = row.state === 'WARMUP_0945' || row.state === 'WARMING_UP';
+                  const isSurveillance = row.state === 'SURVEILLANCE_ONLY';
                   const isClosed = row.state === 'WINDOW_CLOSED' || row.state === 'RISK_PAUSED';
                   return (
-                    <tr key={row.engine_id} className={isReady ? 'bg-emerald-50/60' : 'hover:bg-slate-50/70'}>
+                    <tr
+                      key={row.engine_id}
+                      className={
+                        isReady
+                          ? 'bg-emerald-50/60'
+                          : isSurveillance
+                          ? 'bg-slate-50/40 opacity-85'
+                          : 'hover:bg-slate-50/70'
+                      }
+                    >
                       <td className="py-2.5 px-4 whitespace-nowrap">
                         <div className="flex items-center gap-2">
                           <span
                             className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-black ${
-                              row.book_type === 'LONG_BOOK_BUY'
+                              isSurveillance
+                                ? 'bg-slate-200 text-slate-700'
+                                : row.book_type === 'LONG_BOOK_BUY'
                                 ? 'bg-emerald-100 text-emerald-800'
                                 : 'bg-cyan-100 text-cyan-800'
                             }`}
@@ -897,6 +910,8 @@ export default function OptionSnifferAdvance() {
                               ? 'bg-amber-100 text-amber-800 border border-amber-300'
                               : isWarmup
                               ? 'bg-cyan-50 text-cyan-800 border border-cyan-200'
+                              : isSurveillance
+                              ? 'bg-slate-100 text-slate-600 border border-slate-300'
                               : isClosed
                               ? 'bg-slate-100 text-slate-500 border border-slate-200'
                               : 'bg-indigo-50 text-indigo-800 border border-indigo-200'
@@ -937,6 +952,139 @@ export default function OptionSnifferAdvance() {
               </tbody>
             </table>
           </div>
+
+          {/* Strip D: ₹2,00,000 Paper Execution Envelope & L5/SPAN/FSP Telemetry */}
+          {shadowTelemetry && (
+            <div className="border-t border-slate-200 bg-slate-50/90 p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2 py-0.5 rounded-md bg-indigo-600 text-white text-[10px] font-mono font-black uppercase">
+                    PAPER ENVELOPE • {shadowTelemetry.protocol_id}
+                  </span>
+                  <span className="text-xs font-black text-slate-900">
+                    ₹2,00,000 Defined-Risk Paper Ledger &amp; Live L5/SPAN Microstructure Collector
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200 text-[10px] font-mono font-bold">
+                    Naked Shorts: BLOCKED • SHA256 {String(shadowTelemetry.prereg_sha256 || '').slice(0, 10)}
+                  </span>
+                </div>
+                <div className="text-[11px] font-mono text-slate-600">
+                  Forward Horizon:{' '}
+                  <strong>
+                    {shadowTelemetry.certification_progress?.sessions_collected ?? 0}/
+                    {shadowTelemetry.certification_progress?.min_sessions_required ?? 60}
+                  </strong>{' '}
+                  sessions •{' '}
+                  <strong>
+                    {shadowTelemetry.certification_progress?.closed_shadow_packages ?? 0}/
+                    {shadowTelemetry.certification_progress?.min_trades_required ?? 60}
+                  </strong>{' '}
+                  paper packages
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
+                <div className="bg-white rounded-xl p-2.5 border border-slate-200/80">
+                  <div className="text-[10px] font-sans font-bold uppercase text-slate-500">Paper Account Equity</div>
+                  <div className="text-sm font-black text-slate-900 mt-0.5">
+                    ₹{Number(shadowTelemetry.shadow_account_ledger?.current_realized_equity_inr ?? 200000).toLocaleString('en-IN', { maximumFractionDigits: 2 })}
+                  </div>
+                  <div className="text-[10px] text-slate-500">
+                    Realized Net: {formatINR(shadowTelemetry.shadow_account_ledger?.realized_net_pnl_inr ?? 0)} (Fees ₹{Number(shadowTelemetry.shadow_account_ledger?.total_canonical_charges_inr ?? 0).toFixed(0)})
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl p-2.5 border border-slate-200/80">
+                  <div className="text-[10px] font-sans font-bold uppercase text-slate-500">Reserved vs Free Cash</div>
+                  <div className="text-sm font-black text-indigo-700 mt-0.5">
+                    ₹{Number(shadowTelemetry.shadow_account_ledger?.active_cash_or_margin_reserved_inr ?? 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })} / ₹1.60L
+                  </div>
+                  <div className="text-[10px] text-slate-500">
+                    Open: {shadowTelemetry.shadow_account_ledger?.open_packages_count ?? 0} • Leg2 Wait: {shadowTelemetry.shadow_account_ledger?.pending_leg2_count ?? 0} • Wing Unwinds: {shadowTelemetry.shadow_account_ledger?.incomplete_leg_unwinds_count ?? 0}
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl p-2.5 border border-slate-200/80">
+                  <div className="text-[10px] font-sans font-bold uppercase text-slate-500">Upstox SPAN Margin Probe</div>
+                  <div className="text-sm font-black text-slate-900 mt-0.5">
+                    {shadowTelemetry.latest_margin_probe?.final_margin_inr
+                      ? `₹${Number(shadowTelemetry.latest_margin_probe.final_margin_inr).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+                      : 'Standby (0 Probes)'}
+                  </div>
+                  <div className="text-[10px] text-slate-500 truncate">
+                    {shadowTelemetry.latest_margin_probe
+                      ? `Hedge Save ₹${Number(shadowTelemetry.latest_margin_probe.hedge_benefit_inr || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })} • ${shadowTelemetry.telemetry_row_counts?.upstox_margin_probe_rows ?? 0} logged`
+                      : 'Queries /v2/charges/margin on spread entry'}
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl p-2.5 border border-slate-200/80">
+                  <div className="text-[10px] font-sans font-bold uppercase text-slate-500">L5 Depth, Fade &amp; NCL FSP</div>
+                  <div className="text-sm font-black text-slate-900 mt-0.5">
+                    {(shadowTelemetry.telemetry_row_counts?.l5_chain_1m_rows ?? 0).toLocaleString('en-IN')} L5 rows
+                  </div>
+                  <div className="text-[10px] text-slate-500 truncate">
+                    Fade: {shadowTelemetry.telemetry_row_counts?.quote_fade_event_rows ?? 0} • FSP Windows: {shadowTelemetry.telemetry_row_counts?.expiry_fsp_window_rows ?? 0}
+                  </div>
+                </div>
+              </div>
+
+              {(shadowTelemetry.recent_packages || []).length > 0 && (
+                <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-[11px] font-mono">
+                    <thead>
+                      <tr className="bg-slate-100/80 text-slate-600 uppercase text-[10px] border-b border-slate-200">
+                        <th className="py-1.5 px-3">Bar Time</th>
+                        <th className="py-1.5 px-2">Paper Book</th>
+                        <th className="py-1.5 px-2">Package Legs</th>
+                        <th className="py-1.5 px-2">State</th>
+                        <th className="py-1.5 px-2 text-right">Struct Max Loss</th>
+                        <th className="py-1.5 px-2 text-right">Canonical Net</th>
+                        <th className="py-1.5 px-3">Exit / Unwind Reason</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {shadowTelemetry.recent_packages.slice(0, 6).map((pkg) => (
+                        <tr key={pkg.package_id} className="hover:bg-slate-50">
+                          <td className="py-1.5 px-3 text-slate-600">{pkg.entry_bar_ts}</td>
+                          <td className="py-1.5 px-2 font-bold text-slate-800">{pkg.book_id}</td>
+                          <td className="py-1.5 px-2 font-bold text-indigo-700">{pkg.legs_summary}</td>
+                          <td className="py-1.5 px-2">
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                pkg.state === 'OPEN'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : pkg.state === 'INCOMPLETE_LEG_UNWOUND'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-slate-100 text-slate-700'
+                              }`}
+                            >
+                              {pkg.state}
+                            </span>
+                          </td>
+                          <td className="py-1.5 px-2 text-right text-slate-700">
+                            ₹{Number(pkg.structural_max_loss_inr || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+                          </td>
+                          <td
+                            className={`py-1.5 px-2 text-right font-black ${
+                              pkg.state === 'OPEN'
+                                ? 'text-slate-500'
+                                : Number(pkg.net_pnl_inr || 0) >= 0
+                                ? 'text-emerald-600'
+                                : 'text-rose-600'
+                            }`}
+                          >
+                            {pkg.state === 'OPEN' ? 'OPEN' : formatINR(pkg.net_pnl_inr)}
+                          </td>
+                          <td className="py-1.5 px-3 text-slate-600 truncate max-w-xs">{pkg.exit_reason || 'Active L5 Monitoring'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -1517,7 +1665,14 @@ export default function OptionSnifferAdvance() {
                           </td>
                           <td className="py-2.5 px-3 font-semibold text-slate-700">{t.strategy_mode}</td>
                           <td className="py-2.5 px-3 font-bold text-slate-900">
-                            {t.trading_symbol || `${t.underlying} ${Number(t.strike_price || 0).toFixed(0)} ${t.option_type}`}
+                            <div>
+                              {t.trading_symbol || `${t.underlying} ${Number(t.strike_price || 0).toFixed(0)} ${t.option_type}`}
+                            </div>
+                            {t.spread_legs_label && (
+                              <div className="text-[10px] font-mono text-indigo-600 mt-0.5">
+                                150pt Spread: {t.spread_legs_label}
+                              </div>
+                            )}
                           </td>
                           <td className="py-2.5 px-3 text-right text-slate-600">{t.quantity}</td>
                           <td className="py-2.5 px-3 text-right text-slate-700">
@@ -1703,7 +1858,14 @@ export default function OptionSnifferAdvance() {
                       <tr key={t.trade_id}>
                         <td className="py-2.5 px-2 font-bold">{t.book_type}</td>
                         <td className="py-2.5 px-2">{t.strategy_mode}</td>
-                        <td className="py-2.5 px-2 font-bold">{t.trading_symbol}</td>
+                        <td className="py-2.5 px-2 font-bold">
+                          <div>{t.trading_symbol}</div>
+                          {t.spread_legs_label && (
+                            <div className="text-[10px] text-indigo-600 font-semibold mt-0.5">
+                              150pt Spread: {t.spread_legs_label}
+                            </div>
+                          )}
+                        </td>
                         <td className="py-2.5 px-2 text-right">₹{Number(t.entry_price || 0).toFixed(2)}</td>
                         <td className="py-2.5 px-2 text-right">
                           ₹{Number(t.current_bid || 0).toFixed(2)} / ₹{Number(t.current_ask || 0).toFixed(2)}
@@ -1753,7 +1915,14 @@ export default function OptionSnifferAdvance() {
                         <td className="py-2.5 px-2">{String(t.entry_time || '').slice(0, 19)}</td>
                         <td className="py-2.5 px-2 font-bold">{t.book_type}</td>
                         <td className="py-2.5 px-2">{t.strategy_mode}</td>
-                        <td className="py-2.5 px-2 font-bold">{t.trading_symbol}</td>
+                        <td className="py-2.5 px-2 font-bold">
+                          <div>{t.trading_symbol}</div>
+                          {t.spread_legs_label && (
+                            <div className="text-[10px] text-indigo-600 font-semibold mt-0.5">
+                              150pt Spread: {t.spread_legs_label}
+                            </div>
+                          )}
+                        </td>
                         <td className="py-2.5 px-2 text-right">
                           ₹{Number(t.entry_price || 0).toFixed(2)} → ₹{Number(t.exit_price || 0).toFixed(2)}
                         </td>
@@ -1773,11 +1942,48 @@ export default function OptionSnifferAdvance() {
 
       {/* TAB 3: DUAL-BOOK QUANT ARCHITECTURE */}
       {activeTab === 'architecture' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="bg-white rounded-2xl shadow-sm border-2 border-emerald-300 p-6">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-base font-black text-emerald-800 flex items-center gap-2">
+                  <ArrowUpRight size={18} />
+                  <span>Active Paper Book B: 1-Lot Cash-Paid Convexity Flow (SHADOW_BOOK_B_PAID_FLOW)</span>
+                </h3>
+                <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-mono font-bold">
+                  ACTIVE PAPER
+                </span>
+              </div>
+              <ul className="mt-3 space-y-2 text-xs text-slate-700 leading-relaxed">
+                <li><strong>Causal Entry Gate (09:45–12:45 IST):</strong> NIFTY Spot ORB-30 + VWAP breakout aligned with Upstox V3 Futures Basis (`|Basis| ≥ 5 pts`), `Wilder ADX(14) ≥ 22`, `Kaufman ER(20) ≥ 0.28`, and observed 5-level L5 depth (`≥ 65` qty, `L5 OBI ≥ +0.05`).</li>
+                <li><strong>₹2,00,000 Cash-Paid Sizing:</strong> Strictly `1` NIFTY lot (`65` qty, `2–12 DTE`), max cash outlay `≤ ₹11,500` (`0` leverage, `0` margin-call risk), filled via live L5 ask VWAP + `₹0.05` adverse tick.</li>
+                <li><strong>Risk &amp; Exit Discipline:</strong> Hard SL `-22%` / `₹2,200` cap, `45m` stagnation stop (`&lt; +3%`), `target_pct = 0%` (uncapped right-tail runner), and strictly <strong>Close-Only</strong> 5-stage ratchet updated only at `:00` completed 1m candle close.</li>
+              </ul>
+            </div>
+
+            <div className="bg-white rounded-2xl shadow-sm border-2 border-cyan-300 p-6">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-base font-black text-cyan-800 flex items-center gap-2">
+                  <ArrowDownRight size={18} />
+                  <span>Active Paper Book A: 150pt Buy-First Credit Spread (SHADOW_BOOK_A_SPREAD_150)</span>
+                </h3>
+                <span className="px-2 py-0.5 rounded bg-cyan-100 text-cyan-800 text-[10px] font-mono font-bold">
+                  ACTIVE PAPER
+                </span>
+              </div>
+              <ul className="mt-3 space-y-2 text-xs text-slate-700 leading-relaxed">
+                <li><strong>Physical Buy-First Execution (09:45–13:15 IST):</strong> Buys the `150pt` OTM protective wing FIRST on observed L5 ask depth, then sells the `100pt` OTM short leg on the next observed L5 bid (`≤ 3,000ms` window, `Net Credit ≥ 14 pts`). If Leg 2 degrades, immediately unwinds the wing (`INCOMPLETE_LEG_UNWOUND`) — <strong>zero naked short exposure</strong>.</li>
+                <li><strong>Bounded ₹2,00,000 Risk &amp; Canonical Fees:</strong> Structural pin/gap max loss strictly `≤ ₹10,000` (`&lt; ₹9,000` typical after `₹80` 4-order brokerage &amp; Apr-2026 `0.15%` STT), planned debit stop `≤ ₹3,200`, and live Upstox `POST /v2/charges/margin` SPAN telemetry.</li>
+                <li><strong>Close-Only Spread Decay Trail:</strong> `70%` net credit capture target, 2-stage `:00` completed-bar decay ratchet (`35% → 15%`, `55% → 35%`), `18pt` Spot VWAP flip exit, and mandatory `15:15 IST` square-off.</li>
+              </ul>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 opacity-80">
           <div className="bg-white rounded-2xl shadow-sm border border-emerald-200 p-6">
             <h3 className="text-base font-black text-emerald-800 flex items-center gap-2">
               <ArrowUpRight size={18} />
-              <span>Book 1: Long Option Buying (1 Lot — Wave-1 Gamma Sniper)</span>
+              <span>Reference V2.0 Spec — Book 1: Long Option Buying (Wave-1 Gamma Sniper)</span>
             </h3>
             <ul className="mt-3 space-y-2 text-xs text-slate-700 leading-relaxed">
               <li><strong>Regime Gate:</strong> Active strictly on fresh Wave-1 directional impulses (`Kaufman ER ≥ 0.28`, VWAP alignment, no same-direction harvest in the prior 60 minutes).</li>
@@ -1790,7 +1996,7 @@ export default function OptionSnifferAdvance() {
           <div className="bg-white rounded-2xl shadow-sm border border-cyan-200 p-6">
             <h3 className="text-base font-black text-cyan-800 flex items-center gap-2">
               <ArrowDownRight size={18} />
-              <span>Book 2: Short Option Selling (1 Lot — Theta &amp; Exhaustion Harvester)</span>
+              <span>Reference V2.0 Spec — Book 2: Short Option Selling (Passive Surveillance Only)</span>
             </h3>
             <ul className="mt-3 space-y-2 text-xs text-slate-700 leading-relaxed">
               <li><strong>Mode 2A — Contraction Theta Seller:</strong> Fires when `ATR_5m / ATR_20m ≤ 0.86`, `Wilder ADX(14) &lt; 36`, and `|VWAP Drift| ≤ 0.42%` (sells fading OTM/Near-ATM resistance/support).</li>
@@ -1798,6 +2004,7 @@ export default function OptionSnifferAdvance() {
               <li><strong>Mode 2C — Diagonal OTM Wing Seller:</strong> When Book 1 holds an active Long position for `≥ 10m`, Book 2 sells 1 lot of a further-OTM wing (`OTM ≥ 1.2` strikes), converting the position into a positive-theta Diagonal Spread.</li>
               <li><strong>Capped Loss &amp; Reverse-Chandelier Trail:</strong> Hard buy-back stop at `+16%` spike or `₹1,800` max loss; 4-Tier Reverse-Chandelier locks `+2.5%` at `+10%` decay and trails tightly up to `+50%` decay.</li>
             </ul>
+          </div>
           </div>
         </div>
       )}
