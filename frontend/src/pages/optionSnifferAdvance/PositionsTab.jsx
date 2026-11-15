@@ -6,6 +6,7 @@ import {
   classifyStrategyEra,
   formatClockIST,
   formatINRValue,
+  formatQuoteFreshness,
   formatSignedINR,
   formatTimestampLabel,
   hasPositiveNumber,
@@ -37,6 +38,9 @@ export default function PositionsTab({
   tradesData,
   shadowTelemetry,
   sliceMeta,
+  extraBrokerIntents = [],
+  loadingMoreIntents = false,
+  onLoadMoreBrokerIntents = null,
 }) {
   const [expandedPackages, setExpandedPackages] = useState({});
   const [showLegacyClosed, setShowLegacyClosed] = useState(false);
@@ -48,9 +52,24 @@ export default function PositionsTab({
   const brokerPositions = Array.isArray(liveStatus?.active_live_positions)
     ? liveStatus.active_live_positions
     : [];
-  const brokerIntents = Array.isArray(liveStatus?.recent_order_intents)
-    ? liveStatus.recent_order_intents
-    : [];
+  const mergedBrokerIntents = (() => {
+    const recent = Array.isArray(liveStatus?.recent_order_intents)
+      ? liveStatus.recent_order_intents
+      : [];
+    const extra = Array.isArray(extraBrokerIntents) ? extraBrokerIntents : [];
+    const seen = new Set();
+    const out = [];
+    [...recent, ...extra].forEach((row) => {
+      const id = row?.order_intent_id;
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      out.push(row);
+    });
+    return out;
+  })();
+  const totalBrokerIntentsCount = hasValidNumber(liveStatus?.total_order_intents_count)
+    ? Math.max(mergedBrokerIntents.length, Number(liveStatus.total_order_intents_count))
+    : mergedBrokerIntents.length;
 
   const allOpenTrades = Array.isArray(tradesData?.open_trades) ? tradesData.open_trades : [];
   const allClosedTrades = Array.isArray(tradesData?.closed_trades) ? tradesData.closed_trades : [];
@@ -77,8 +96,8 @@ export default function PositionsTab({
         <strong className="text-slate-900">Risk &amp; Quote Disclosure:</strong> Software stop-loss
         levels are order triggers evaluated on observed quotes—not guaranteed maximum losses under
         intrabar gaps or illiquidity. Only long-option paid outlay or a completed long protective
-        wing bounds structural expiry payoff. Quote freshness reflects client retrieval time where
-        provider tick timestamps are not supplied by the endpoint.
+        wing bounds structural expiry payoff. Provider quote observation timestamps and ages are
+        shown alongside client retrieval times (<code>Unavailable</code> when disconnected).
       </div>
 
       {/* SECTION 1: Broker-Reported Live Positions & Order Intents */}
@@ -102,8 +121,8 @@ export default function PositionsTab({
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Isolated Upstox broker intents from <code>GET /live/status</code> (limited to 25 most
-              recent rows).
+              Isolated Upstox broker intents (showing {mergedBrokerIntents.length} of{' '}
+              {totalBrokerIntentsCount} total SQLite records).
             </p>
           </div>
           <span className="text-xs font-mono text-slate-500">
@@ -122,7 +141,7 @@ export default function PositionsTab({
               Active broker exposure cannot be confirmed.
             </span>
           </div>
-        ) : brokerPositions.length === 0 && brokerIntents.length === 0 ? (
+        ) : brokerPositions.length === 0 && mergedBrokerIntents.length === 0 ? (
           <div className="p-5 text-xs font-mono text-slate-500">
             0 active broker positions and 0 recent broker order intents.
           </div>
@@ -143,7 +162,7 @@ export default function PositionsTab({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 tabular-nums">
-                {brokerIntents.map((intent) => {
+                {mergedBrokerIntents.map((intent) => {
                   const activeMatch = brokerPositions.find(
                     (p) => p.order_intent_id === intent.order_intent_id
                   );
@@ -237,6 +256,21 @@ export default function PositionsTab({
                 })}
               </tbody>
             </table>
+            {onLoadMoreBrokerIntents && totalBrokerIntentsCount > mergedBrokerIntents.length && (
+              <div className="px-4 py-3 border-t border-slate-100 bg-slate-50/60 flex items-center justify-between gap-2 text-xs">
+                <span className="font-mono text-slate-500">
+                  Showing {mergedBrokerIntents.length} of {totalBrokerIntentsCount} broker intents
+                </span>
+                <button
+                  type="button"
+                  disabled={loadingMoreIntents}
+                  onClick={() => onLoadMoreBrokerIntents(mergedBrokerIntents.length)}
+                  className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 font-semibold disabled:opacity-50 cursor-pointer"
+                >
+                  {loadingMoreIntents ? 'Loading older intents…' : 'Load Older Broker Intents'}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -249,16 +283,15 @@ export default function PositionsTab({
               2. Forward Paper Packages (<code>S205_SHADOW_FORWARD_V1</code> — Open &amp; Recent)
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Expand any open package to inspect individual legs, paid outlay vs. payoff bound vs.
-              stop trigger vs. reserved margin.
+              Expand any open package to inspect individual legs, live L1 quotes &amp; tick age,
+              paid outlay vs. payoff bound vs. stop trigger vs. reserved margin.
             </p>
           </div>
           <span className="text-xs font-mono text-slate-500">
             Retrieved:{' '}
             {sliceMeta?.trades?.lastSuccessMs
               ? formatClockIST(sliceMeta.trades.lastSuccessMs)
-              : UNAVAILABLE_LABEL}{' '}
-            (Quote tick ts: Unavailable)
+              : UNAVAILABLE_LABEL}
           </span>
         </div>
 
@@ -341,9 +374,14 @@ export default function PositionsTab({
                             </span>
                           </td>
                           <td className="py-2.5 px-3 text-right whitespace-nowrap">
-                            {hasValidNumber(t.current_bid) && hasValidNumber(t.current_ask)
-                              ? `${formatINRValue(t.current_bid)} / ${formatINRValue(t.current_ask)}`
-                              : UNAVAILABLE_LABEL}
+                            <div>
+                              {hasValidNumber(t.current_bid) && hasValidNumber(t.current_ask)
+                                ? `${formatINRValue(t.current_bid)} / ${formatINRValue(t.current_ask)}`
+                                : UNAVAILABLE_LABEL}
+                            </div>
+                            <div className="text-[10px] text-slate-500">
+                              Quote: {formatQuoteFreshness(t)}
+                            </div>
                           </td>
                           <td className="py-2.5 px-3 text-right text-amber-800 font-semibold">
                             {formatINRValue(t.effective_stop_price)}

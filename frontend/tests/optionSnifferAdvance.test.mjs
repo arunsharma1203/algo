@@ -15,6 +15,7 @@ import {
   formatINRValue,
   formatNumber,
   formatPercent,
+  formatQuoteFreshness,
   formatSignedINR,
   hasValidNumber,
 } from '../src/pages/optionSnifferAdvance/formatters.js';
@@ -186,6 +187,56 @@ test('Market closed empty ledger and incomplete-leg spread unwinds render honest
   assert.equal(legs.length, 2);
   assert.equal(legs[0].side, 'BUY');
   assert.equal(legs[1].side, 'SELL');
+  assert.match(legs[0].liveOrExitQuote, /₹7\.45 \/ ₹7\.65/);
+  assert.match(legs[0].liveOrExitQuote, /155ms age/);
+  assert.match(legs[1].liveOrExitQuote, /₹19\.75 \/ ₹20\.30/);
+  assert.match(legs[1].liveOrExitQuote, /180ms age/);
+
+  // Quote freshness preserves genuine 0ms age and renders Unavailable when missing
+  assert.equal(formatQuoteFreshness({ quote_age_ms: 0 }), '0ms age');
+  assert.equal(formatQuoteFreshness({ quote_observed_at_iso: null, quote_age_ms: null }), UNAVAILABLE_LABEL);
+  assert.equal(
+    buildPackageLegRows({ ...openSpread, wing_leg_live_quote: null, short_leg_live_quote: null })[0]
+      .liveOrExitQuote,
+    UNAVAILABLE_LABEL
+  );
+
+  // Authoritative uncapped SQLite calendars_by_era removes 25-row broker limitation
+  const fullBrokerPerf = computeScopedPerformance({
+    closedTrades: [],
+    shadowPackages: [],
+    liveIntents: [],
+    calendarsByEra: {
+      LIVE_BROKER: {
+        days: [
+          {
+            date: '2026-10-15',
+            trades: Array.from({ length: 30 }, (_, idx) => ({
+              trade_id: `brk_full_${idx}`,
+              book_type: 'LONG_BOOK_BUY',
+              strategy_mode: 'LONG_BOOK_ONLY',
+              trading_symbol: 'NIFTY 25000 CE',
+              quantity: 65,
+              entry_time: '2026-10-15 10:00:00',
+              exit_time: '2026-10-15 10:15:00',
+              entry_price: 100,
+              exit_price: 102,
+              gross_pnl: 130,
+              charges: 65,
+              net_pnl: 65,
+              exit_reason: 'CONFIRMED_FLAT',
+            })),
+          },
+        ],
+      },
+    },
+    sourceFilter: 'LIVE_BROKER_RECENT',
+    selectedMonth: '2026-10',
+    defaultMonth: '2026-11',
+  });
+  assert.equal(fullBrokerPerf.monthSummary.total_trades, 30);
+  assert.equal(fullBrokerPerf.monthSummary.total_net_pnl, 1950);
+  assert.match(fullBrokerPerf.scopeLimitations, /Full SQLite broker ledger/i);
 
   const unwindBundle = getFixtureBundle('spread_unwind', now);
   const unwindPerf = computeScopedPerformance({

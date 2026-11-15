@@ -58,6 +58,23 @@ def get_advance_status() -> Dict[str, Any]:
         status = orch.get_status()
         status["live_bridge"] = bridge.get_live_status()
         status["calendar"] = bridge.get_calendar_performance(book_filter="ALL")
+        status["calendars_by_era"] = {
+            "SHADOW_FORWARD_V1": bridge.get_calendar_performance(
+                book_filter="ALL", era_filter="SHADOW_FORWARD_V1"
+            ),
+            "PAPER_BOOK_B": bridge.get_calendar_performance(
+                book_filter="LONG_BOOK_BUY", era_filter="PAPER_BOOK_B"
+            ),
+            "PAPER_BOOK_A": bridge.get_calendar_performance(
+                book_filter="SHORT_BOOK_SELL", era_filter="PAPER_BOOK_A"
+            ),
+            "LEGACY_PAPER": bridge.get_calendar_performance(
+                book_filter="ALL", era_filter="LEGACY_PAPER"
+            ),
+            "LIVE_BROKER": bridge.get_calendar_performance(
+                book_filter="LIVE_BROKER", era_filter="LIVE_BROKER"
+            ),
+        }
         return status
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to get status: {e}")
@@ -76,11 +93,14 @@ def get_advance_backend_readiness() -> Dict[str, Any]:
 
 
 @router.get("/calendar")
-def get_advance_calendar(book_filter: str = Query("ALL")) -> Dict[str, Any]:
-    """Returns read-only Day-by-Day and Month-by-Month P&L Calendar data across all months (`Oct 2026`, `Nov 2026`, etc.)."""
+def get_advance_calendar(
+    book_filter: str = Query("ALL"),
+    era_filter: str = Query("ALL"),
+) -> Dict[str, Any]:
+    """Returns read-only Day-by-Day and Month-by-Month P&L Calendar data with optional era isolation."""
     try:
         bridge = get_advance_live_bridge()
-        return bridge.get_calendar_performance(book_filter=book_filter)
+        return bridge.get_calendar_performance(book_filter=book_filter, era_filter=era_filter)
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to get calendar performance: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -188,11 +208,14 @@ def get_advance_live_status() -> Dict[str, Any]:
 
 
 @router.get("/live/order-intents")
-def get_advance_live_order_intents(limit: int = Query(30, ge=1, le=200)) -> List[Dict[str, Any]]:
-    """Returns recent isolated Advance Live order intents (`option_advance_live_order_intents`)."""
+def get_advance_live_order_intents(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> List[Dict[str, Any]]:
+    """Returns paginated isolated Advance Live order intents (`option_advance_live_order_intents`)."""
     try:
         bridge = get_advance_live_bridge()
-        return bridge.get_recent_order_intents(limit=limit)
+        return bridge.get_recent_order_intents(limit=limit, offset=offset)
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to get live order intents: {e}")
         raise HTTPException(status_code=500, detail=str(e))

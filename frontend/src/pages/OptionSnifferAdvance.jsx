@@ -84,6 +84,8 @@ export default function OptionSnifferAdvance() {
 
   const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
   const [sweeping, setSweeping] = useState(false);
+  const [extraBrokerIntents, setExtraBrokerIntents] = useState([]);
+  const [loadingMoreIntents, setLoadingMoreIntents] = useState(false);
   const [armModalOpen, setArmModalOpen] = useState(false);
   const [armPinInput, setArmPinInput] = useState('');
   const [armActionBusy, setArmActionBusy] = useState(false);
@@ -270,6 +272,33 @@ export default function OptionSnifferAdvance() {
   );
 
   // Explicit human-initiated actions ONLY
+  const handleLoadMoreBrokerIntents = async (offset = 25) => {
+    if (blockIfFixture('Broker order-intent pagination')) return;
+    setLoadingMoreIntents(true);
+    try {
+      const res = await fetch(`${ADV_BASE}/live/order-intents?limit=50&offset=${Math.max(0, Number(offset) || 0)}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.detail || `HTTP ${res.status}`);
+      }
+      const rows = await res.json();
+      if (Array.isArray(rows) && rows.length > 0) {
+        setExtraBrokerIntents((prev) => {
+          const seen = new Set(prev.map((r) => r?.order_intent_id));
+          const additions = rows.filter((r) => r?.order_intent_id && !seen.has(r.order_intent_id));
+          return [...prev, ...additions];
+        });
+      }
+    } catch (err) {
+      setArmActionMsg({
+        type: 'error',
+        text: `Failed to load older broker intents: ${err?.message || 'Error'}`,
+      });
+    } finally {
+      setLoadingMoreIntents(false);
+    }
+  };
+
   const handleManualSweep = async () => {
     if (blockIfFixture('Surveillance sweep')) return;
     setSweeping(true);
@@ -531,6 +560,9 @@ export default function OptionSnifferAdvance() {
             tradesData={tradesData}
             shadowTelemetry={shadowTelemetry}
             sliceMeta={sliceMeta}
+            extraBrokerIntents={extraBrokerIntents}
+            loadingMoreIntents={loadingMoreIntents}
+            onLoadMoreBrokerIntents={handleLoadMoreBrokerIntents}
           />
         )}
 
@@ -539,6 +571,7 @@ export default function OptionSnifferAdvance() {
             tradesData={tradesData}
             shadowTelemetry={shadowTelemetry}
             liveStatus={liveStatus}
+            calendarsByEra={statusData?.calendars_by_era || null}
             sliceMeta={sliceMeta}
             defaultCurrentMonth={defaultCurrentMonth}
           />

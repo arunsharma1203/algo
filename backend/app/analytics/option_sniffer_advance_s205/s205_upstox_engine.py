@@ -1346,9 +1346,13 @@ class S205UpstoxOrchestrator:
                 "websocket_connected": bool(sm.get_health_status().get("websocket_connected")),
                 "spot_ltp": spot_ltp,
                 "spot_tpb_vwap": self._latest_context_summary.get("spot_tpb_vwap", 0.0),
+                "spot_quote_timestamp": uq.get("quote_timestamp") or uq.get("timestamp") or None,
+                "spot_quote_age_ms": int(uq["quote_age_ms"]) if uq.get("quote_age_ms") is not None else None,
                 "fut_symbol": fq.get("trading_symbol") or "NIFTY FRONT FUT",
                 "fut_ltp": fut_ltp,
                 "fut_atp_vwap": fut_atp,
+                "fut_quote_timestamp": fq.get("quote_timestamp") or fq.get("timestamp") or None,
+                "fut_quote_age_ms": int(fq["quote_age_ms"]) if fq.get("quote_age_ms") is not None else None,
                 "real_basis_pts": real_basis,
                 "basis_source": "UPSTOX_V3_FUTURES" if fut_ltp > 0 else "PUT_CALL_PARITY",
                 "fut_oi": fq.get("fut_oi", 0.0),
@@ -1473,14 +1477,26 @@ class S205UpstoxOrchestrator:
             entry_price = float(t.get("entry_price_used") or t.get("entry_ask") or t.get("entry_bid") or 0.0)
             quantity = int(t.get("quantity") or 65)
 
-            if quote and float(quote.get("bid") or 0.0) > 0:
+            has_primary_quote = bool(quote and float(quote.get("bid") or 0.0) > 0)
+            if has_primary_quote:
                 current_bid = float(quote.get("bid"))
                 current_ask = float(quote.get("ask") or current_bid)
                 current_ltp = float(quote.get("ltp") or current_bid)
+                quote_observed_at_iso = quote.get("quote_timestamp") or None
+                exchange_ltt_ms = int(quote["exchange_ltt_ms"]) if quote.get("exchange_ltt_ms") else None
+                quote_age_ms = int(quote["quote_age_ms"]) if quote.get("quote_age_ms") is not None else None
+                is_observed_l1_book = bool(quote.get("is_observed_l1_book"))
             else:
                 current_bid = entry_price
                 current_ask = entry_price
                 current_ltp = entry_price
+                quote_observed_at_iso = None
+                exchange_ltt_ms = None
+                quote_age_ms = None
+                is_observed_l1_book = False
+
+            short_leg_live_quote: Optional[Dict[str, Any]] = None
+            wing_leg_live_quote: Optional[Dict[str, Any]] = None
 
             try:
                 entry_dt = datetime.fromisoformat(str(t["entry_time"]).replace("T", " ")[:19])
@@ -1520,16 +1536,57 @@ class S205UpstoxOrchestrator:
                 unrealized_net = acc_mtm["net_pnl"]
                 unrealized_pct = round(((current_bid - entry_price) / max(0.05, entry_price)) * 100.0, 2)
             elif str(t.get("strategy_mode") or "") == "SHADOW_BOOK_A_SPREAD_150" and rctx_open.get("hedge_wing_ikey"):
-                wing_q = sm.get_option_quote(str(rctx_open["hedge_wing_ikey"]))
+                wing_ikey = str(rctx_open["hedge_wing_ikey"])
+                wing_q = sm.get_option_quote(wing_ikey)
+                has_wing_quote = bool(wing_q and float(wing_q.get("bid") or 0.0) > 0)
                 wing_ent = max(0.05, float(rctx_open.get("hedge_wing_entry_price") or 5.0))
                 short_ent = max(0.05, float(rctx_open.get("short_leg_entry_price") or (entry_price + wing_ent)))
                 wing_stk = max(50.0, float(rctx_open.get("hedge_wing_strike") or stk_leg))
                 wing_ot = str(rctx_open.get("hedge_wing_option_type") or ot_leg).upper()
 
-                short_ask = current_ask if (quote and float(quote.get("bid") or 0.0) > 0) else short_ent
-                short_bid = current_bid if (quote and float(quote.get("bid") or 0.0) > 0) else short_ent
-                wing_bid = float(wing_q.get("bid")) if (wing_q and float(wing_q.get("bid") or 0.0) > 0) else wing_ent
-                wing_ask = float(wing_q.get("ask") or wing_bid) if (wing_q and float(wing_q.get("bid") or 0.0) > 0) else wing_ent
+                short_ask = current_ask if has_primary_quote else short_ent
+                short_bid = current_bid if has_primary_quote else short_ent
+                wing_bid = float(wing_q.get("bid")) if has_wing_quote else wing_ent
+                wing_ask = float(wing_q.get("ask") or wing_bid) if has_wing_quote else wing_ent
+
+                wing_leg_live_quote = {
+                    "instrument_key": wing_ikey,
+                    "bid": wing_bid if has_wing_quote else None,
+                    "ask": wing_ask if has_wing_quote else None,
+                    "ltp": float(wing_q.get("ltp") or wing_bid) if has_wing_quote else None,
+                    "quote_observed_at_iso": wing_q.get("quote_timestamp") if has_wing_quote else None,
+                    "exchange_ltt_ms": int(wing_q["exchange_ltt_ms"]) if (has_wing_quote and wing_q.get("exchange_ltt_ms")) else None,
+                    "quote_age_ms": int(wing_q["quote_age_ms"]) if (has_wing_quote and wing_q.get("quote_age_ms") is not None) else None,
+                    "is_observed_l1_book": bool(wing_q.get("is_observed_l1_book")) if has_wing_quote else False,
+                }
+                short_leg_live_quote = {
+                    "instrument_key": str(ikey or ""),
+                    "bid": short_bid if has_primary_quote else None,
+                    "ask": short_ask if has_primary_quote else None,
+                    "ltp": float(quote.get("ltp") or short_bid) if has_primary_quote else None,
+                    "quote_observed_at_iso": quote.get("quote_timestamp") if has_primary_quote else None,
+                    "exchange_ltt_ms": int(quote["exchange_ltt_ms"]) if (has_primary_quote and quote.get("exchange_ltt_ms")) else None,
+                    "quote_age_ms": int(quote["quote_age_ms"]) if (has_primary_quote and quote.get("quote_age_ms") is not None) else None,
+                    "is_observed_l1_book": bool(quote.get("is_observed_l1_book")) if has_primary_quote else False,
+                }
+                if has_primary_quote and has_wing_quote:
+                    s_age = short_leg_live_quote["quote_age_ms"]
+                    w_age = wing_leg_live_quote["quote_age_ms"]
+                    if s_age is not None and w_age is not None:
+                        quote_age_ms = max(s_age, w_age)
+                        quote_observed_at_iso = (
+                            short_leg_live_quote["quote_observed_at_iso"]
+                            if s_age >= w_age
+                            else wing_leg_live_quote["quote_observed_at_iso"]
+                        )
+                    is_observed_l1_book = bool(
+                        short_leg_live_quote["is_observed_l1_book"] and wing_leg_live_quote["is_observed_l1_book"]
+                    )
+                else:
+                    quote_observed_at_iso = None
+                    exchange_ltt_ms = None
+                    quote_age_ms = None
+                    is_observed_l1_book = False
 
                 # Live 2-leg net spread debit to buy back short @ ask and sell wing @ bid
                 net_debit_ask = max(0.05, round(short_ask - wing_bid, 2))
@@ -1582,6 +1639,12 @@ class S205UpstoxOrchestrator:
                     "current_bid": current_bid,
                     "current_ask": current_ask,
                     "current_ltp": current_ltp,
+                    "quote_observed_at_iso": quote_observed_at_iso,
+                    "exchange_ltt_ms": exchange_ltt_ms,
+                    "quote_age_ms": quote_age_ms,
+                    "is_observed_l1_book": is_observed_l1_book,
+                    "wing_leg_live_quote": wing_leg_live_quote,
+                    "short_leg_live_quote": short_leg_live_quote,
                     "mfe_pct": mfe_pct,
                     "mae_pct": mae_pct,
                     "holding_duration_seconds": duration_sec,

@@ -46,6 +46,7 @@ export default function PerformanceTab({
   tradesData,
   shadowTelemetry,
   liveStatus,
+  calendarsByEra = null,
   sliceMeta,
   defaultCurrentMonth,
 }) {
@@ -56,12 +57,23 @@ export default function PerformanceTab({
   const [selectedDayDate, setSelectedDayDate] = useState(null);
   const closeBtnRef = useRef(null);
 
+  const sourceOptions = useMemo(
+    () =>
+      SOURCE_OPTIONS.map((opt) =>
+        opt.id === 'LIVE_BROKER_RECENT' && calendarsByEra?.LIVE_BROKER
+          ? { ...opt, label: 'Broker Realized Ledger (Full SQLite)' }
+          : opt
+      ),
+    [calendarsByEra]
+  );
+
   const scoped = useMemo(
     () =>
       computeScopedPerformance({
         closedTrades: tradesData?.closed_trades || [],
         shadowPackages: shadowTelemetry?.recent_packages || [],
         liveIntents: liveStatus?.recent_order_intents || [],
+        calendarsByEra,
         sourceFilter,
         fromDate,
         toDate,
@@ -72,6 +84,7 @@ export default function PerformanceTab({
       tradesData,
       shadowTelemetry,
       liveStatus,
+      calendarsByEra,
       sourceFilter,
       fromDate,
       toDate,
@@ -129,7 +142,7 @@ export default function PerformanceTab({
                 }}
                 className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-900 font-medium text-xs"
               >
-                {SOURCE_OPTIONS.map((opt) => (
+                {sourceOptions.map((opt) => (
                   <option key={opt.id} value={opt.id}>
                     {opt.label}
                   </option>

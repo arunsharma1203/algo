@@ -454,6 +454,242 @@ class TestOptionSnifferAdvanceS205Upstox(unittest.TestCase):
             trade_date="2026-11-13",
         )
         self.assertAlmostEqual(row["unrealized_net_pnl"], expected_acc["net_pnl"], places=2)
+        self.assertAlmostEqual(row["wing_leg_live_quote"]["bid"], 7.50, places=2)
+        self.assertAlmostEqual(row["wing_leg_live_quote"]["ask"], 8.00, places=2)
+        self.assertAlmostEqual(row["short_leg_live_quote"]["bid"], 30.00, places=2)
+        self.assertAlmostEqual(row["short_leg_live_quote"]["ask"], 30.50, places=2)
+
+    def test_07_contract_gaps_closed_quote_timestamps_era_calendars_and_intent_pagination(self):
+        # 1. Per-leg live quotes & conservative max quote_age_ms on open spread + None when disconnected
+        AdvanceDB.create_trade(
+            {
+                "trade_id": "sh_pkg_gap_check_1",
+                "signal_id": "sh_sig_gap_1",
+                "book_type": BOOK_SHORT_SELL,
+                "strategy_mode": "SHADOW_BOOK_A_SPREAD_150",
+                "direction": "SELL_PE",
+                "instrument_key": "NSE_FO|SHORT_25050_PE",
+                "trading_symbol": "NIFTY 25050 PE / +24900 PE",
+                "underlying": "NIFTY",
+                "option_type": "PE",
+                "strike": 25050.0,
+                "expiry": "2026-11-19",
+                "lot_size": 65,
+                "quantity": 65,
+                "entry_time": "2026-11-15T10:05:00",
+                "entry_bid": 18.45,
+                "entry_ask": 18.45,
+                "entry_price_used": 18.45,
+                "entry_spot_price": 25140.0,
+                "peak_price": 18.45,
+                "trough_price": 18.45,
+                "trailing_stop": 0.0,
+                "stop_loss_pct": 65.0,
+                "target_pct": 0.0,
+                "estimated_margin": 44415.0,
+                "regime_context": {
+                    "protocol_id": "S205_SHADOW_FORWARD_V1",
+                    "shadow_only": True,
+                    "hedge_wing_ikey": "NSE_FO|WING_24900_PE",
+                    "hedge_wing_strike": 24900.0,
+                    "hedge_wing_option_type": "PE",
+                    "hedge_wing_entry_price": 11.20,
+                    "short_leg_entry_price": 29.65,
+                    "spread_legs_label": "+24900 PE / -25050 PE",
+                },
+            }
+        )
+
+        class _TimedStubStream:
+            def get_option_quote(self, ikey):
+                if ikey == "NSE_FO|SHORT_25050_PE":
+                    return {
+                        "bid": 19.75,
+                        "ask": 20.30,
+                        "ltp": 20.00,
+                        "quote_timestamp": "2026-11-15T11:14:04",
+                        "exchange_ltt_ms": 1794721444100,
+                        "quote_age_ms": 190,
+                        "is_observed_l1_book": True,
+                    }
+                if ikey == "NSE_FO|WING_24900_PE":
+                    return {
+                        "bid": 7.45,
+                        "ask": 7.65,
+                        "ltp": 7.55,
+                        "quote_timestamp": "2026-11-15T11:14:04",
+                        "exchange_ltt_ms": 1794721444050,
+                        "quote_age_ms": 120,
+                        "is_observed_l1_book": True,
+                    }
+                return None
+
+        with patch(
+            "app.analytics.option_sniffer_advance_s205.s205_upstox_engine.OptionStreamManager",
+            return_value=_TimedStubStream(),
+        ):
+            tr_live = self.orch.get_trades()["open_trades"][0]
+        self.assertEqual(tr_live["quote_age_ms"], 190)
+        self.assertEqual(tr_live["quote_observed_at_iso"], "2026-11-15T11:14:04")
+        self.assertTrue(tr_live["is_observed_l1_book"])
+        self.assertEqual(tr_live["wing_leg_live_quote"]["quote_age_ms"], 120)
+        self.assertEqual(tr_live["short_leg_live_quote"]["quote_age_ms"], 190)
+
+        class _OfflineStubStream:
+            def get_option_quote(self, _ikey):
+                return None
+
+        with patch(
+            "app.analytics.option_sniffer_advance_s205.s205_upstox_engine.OptionStreamManager",
+            return_value=_OfflineStubStream(),
+        ):
+            tr_off = self.orch.get_trades()["open_trades"][0]
+        self.assertIsNone(tr_off["quote_age_ms"])
+        self.assertIsNone(tr_off["quote_observed_at_iso"])
+        self.assertIsNone(tr_off["wing_leg_live_quote"]["bid"])
+        self.assertIsNone(tr_off["short_leg_live_quote"]["bid"])
+
+        # 2. Era-isolated SQLite calendar + 30-row order-intent pagination beyond 25-row cap
+        AdvanceDB.create_trade(
+            {
+                "trade_id": "adv_shdw_closed_b1",
+                "signal_id": "sig_b1",
+                "book_type": BOOK_LONG_BUY,
+                "strategy_mode": "SHADOW_BOOK_B_PAID_FLOW",
+                "direction": "BUY_CE",
+                "instrument_key": "NSE_FO|25100CE",
+                "trading_symbol": "NIFTY 25100 CE",
+                "underlying": "NIFTY",
+                "option_type": "CE",
+                "strike": 25100.0,
+                "expiry": "2026-11-19",
+                "lot_size": 65,
+                "quantity": 65,
+                "entry_time": "2026-11-14T10:05:00",
+                "entry_bid": 145.0,
+                "entry_ask": 145.0,
+                "entry_price_used": 145.0,
+                "entry_spot_price": 25110.0,
+                "peak_price": 148.0,
+                "trough_price": 137.0,
+                "trailing_stop": 113.0,
+                "stop_loss_pct": 22.0,
+                "target_pct": 0.0,
+                "estimated_margin": 9425.0,
+                "regime_context": {"shadow_only": True, "protocol_id": "S205_SHADOW_FORWARD_V1"},
+            }
+        )
+        AdvanceDB.close_trade(
+            "adv_shdw_closed_b1",
+            {
+                "exit_time": "2026-11-14T10:51:00",
+                "exit_bid": 137.25,
+                "exit_ask": 137.5,
+                "exit_price_used": 137.25,
+                "holding_duration_seconds": 2760,
+                "peak_price": 148.0,
+                "trough_price": 137.25,
+                "mfe_pct": 2.07,
+                "mae_pct": -5.34,
+                "gross_pnl": -503.75,
+                "charges": 83.65,
+                "slippage": 0.0,
+                "net_pnl": -587.40,
+                "net_pnl_pct": -6.23,
+                "exit_reason": "STAGNATION_TIME_STOP",
+            },
+        )
+        AdvanceDB.create_trade(
+            {
+                "trade_id": "adv_legacy_v6b_99",
+                "signal_id": "sig_leg99",
+                "book_type": BOOK_SHORT_SELL,
+                "strategy_mode": "V6B_S1_OI",
+                "direction": "SELL_PE",
+                "instrument_key": "NSE_FO|25300PE",
+                "trading_symbol": "NIFTY 25300 PE",
+                "underlying": "NIFTY",
+                "option_type": "PE",
+                "strike": 25300.0,
+                "expiry": "2026-11-17",
+                "lot_size": 65,
+                "quantity": 65,
+                "entry_time": "2026-11-13T10:53:00",
+                "entry_bid": 192.75,
+                "entry_ask": 193.0,
+                "entry_price_used": 192.75,
+                "entry_spot_price": 25280.0,
+                "peak_price": 220.5,
+                "trough_price": 191.0,
+                "trailing_stop": 227.4,
+                "stop_loss_pct": 18.0,
+                "target_pct": 0.0,
+                "estimated_margin": 55000.0,
+                "regime_context": {"engine_version": "S2_05_UPSTOX_V3"},
+            }
+        )
+        AdvanceDB.close_trade(
+            "adv_legacy_v6b_99",
+            {
+                "exit_time": "2026-11-13T11:06:00",
+                "exit_bid": 220.0,
+                "exit_ask": 220.5,
+                "exit_price_used": 220.5,
+                "holding_duration_seconds": 780,
+                "peak_price": 220.5,
+                "trough_price": 191.0,
+                "mfe_pct": 0.91,
+                "mae_pct": -14.4,
+                "gross_pnl": -1803.75,
+                "charges": 77.71,
+                "slippage": 0.0,
+                "net_pnl": -1881.46,
+                "net_pnl_pct": -3.42,
+                "exit_reason": "OPT_VWAP_RECLAIM_EXIT",
+            },
+        )
+
+        bridge = AdvanceLiveBridge(db_path=self.db_path, auto_start_daemon=False)
+        import sqlite3
+
+        conn = sqlite3.connect(self.db_path)
+        for idx in range(30):
+            conn.execute(
+                """
+                INSERT INTO option_advance_live_order_intents (
+                    order_intent_id, advance_trade_id, signal_id, execution_mode, book_type,
+                    strategy_mode, direction, action, instrument_key, trading_symbol,
+                    underlying, option_type, strike, expiry, lot_size, target_quantity,
+                    filled_quantity, limit_price, average_fill_price, state, exit_state,
+                    exit_fill_price, gross_pnl, statutory_charges, realized_pnl,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, 'LONG_BOOK_ONLY', 'LONG_BOOK_BUY', 'SHADOW_BOOK_B_PAID_FLOW',
+                          'BUY_CE', 'BUY', 'NSE_FO|25100CE', 'NIFTY 25100 CE', 'NIFTY', 'CE',
+                          25100.0, '2026-11-19', 65, 65, 65, 100.0, 100.0, 'FILLED',
+                          'CONFIRMED_FLAT', 102.0, 130.0, 65.0, 65.0,
+                          '2026-11-14 10:10:00', '2026-11-14 10:25:00');
+                """,
+                (f"ord_pag_{idx:02d}", f"adv_pag_{idx:02d}", f"sig_pag_{idx:02d}"),
+            )
+        conn.commit()
+        conn.close()
+
+        self.assertEqual(bridge.count_order_intents(), 30)
+        page1 = bridge.get_recent_order_intents(limit=25, offset=0)
+        page2 = bridge.get_recent_order_intents(limit=25, offset=25)
+        self.assertEqual(len(page1), 25)
+        self.assertEqual(len(page2), 5)
+
+        cal_fwd = bridge.get_calendar_performance(book_filter="ALL", era_filter="SHADOW_FORWARD_V1")
+        cal_leg = bridge.get_calendar_performance(book_filter="ALL", era_filter="LEGACY_PAPER")
+        cal_brk = bridge.get_calendar_performance(book_filter="LIVE_BROKER", era_filter="LIVE_BROKER")
+
+        self.assertEqual(cal_fwd["months_summary"]["2026-11"]["total_trades"], 1)
+        self.assertAlmostEqual(cal_fwd["months_summary"]["2026-11"]["total_net_pnl"], -587.40, places=2)
+        self.assertEqual(cal_leg["months_summary"]["2026-11"]["total_trades"], 1)
+        self.assertAlmostEqual(cal_leg["months_summary"]["2026-11"]["total_net_pnl"], -1881.46, places=2)
+        self.assertEqual(cal_brk["months_summary"]["2026-11"]["total_trades"], 30)
+        self.assertAlmostEqual(cal_brk["months_summary"]["2026-11"]["total_net_pnl"], 1950.0, places=2)
 
 
 if __name__ == "__main__":

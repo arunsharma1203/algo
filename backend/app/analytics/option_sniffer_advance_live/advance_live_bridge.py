@@ -443,7 +443,8 @@ class AdvanceLiveBridge:
         req_margin = self.get_mode_margin_requirement(self._execution_mode)
         mode_margin_ok = avail_margin >= req_margin
 
-        order_intents = self.get_recent_order_intents(limit=25)
+        order_intents = self.get_recent_order_intents(limit=25, offset=0)
+        total_intents_count = self.count_order_intents()
         pnl_summary = self.get_live_pnl_summary(active_positions=active_positions)
 
         return {
@@ -466,6 +467,7 @@ class AdvanceLiveBridge:
             "active_positions_count": len(active_positions),
             "order_intents": order_intents,
             "recent_order_intents": order_intents,
+            "total_order_intents_count": total_intents_count,
             "pnl_summary": pnl_summary,
             "available_modes": [
                 {
@@ -2443,16 +2445,44 @@ class AdvanceLiveBridge:
             logger.debug(f"[AdvanceLiveBridge] Active positions query note: {e}")
             return []
 
-    def get_recent_order_intents(self, limit: int = 25) -> List[Dict[str, Any]]:
+    def count_order_intents(self) -> int:
+        try:
+            with self._get_ro_conn() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM option_advance_live_order_intents;"
+                ).fetchone()
+                return int(row[0]) if row else 0
+        except Exception:
+            return 0
+
+    def get_recent_order_intents(self, limit: int = 25, offset: int = 0) -> List[Dict[str, Any]]:
         try:
             with self._get_ro_conn() as conn:
                 rows = conn.execute(
-                    "SELECT * FROM option_advance_live_order_intents ORDER BY id DESC LIMIT ?;",
-                    (int(limit),),
+                    "SELECT * FROM option_advance_live_order_intents ORDER BY id DESC LIMIT ? OFFSET ?;",
+                    (int(limit), max(0, int(offset))),
                 ).fetchall()
                 return [dict(r) for r in rows]
         except Exception:
             return []
+
+    @staticmethod
+    def _is_shadow_forward_row(strategy_mode: Any, regime_context_raw: Any) -> bool:
+        mode_s = str(strategy_mode or "").strip().upper()
+        if mode_s.startswith("SHADOW_BOOK_"):
+            return True
+        if isinstance(regime_context_raw, dict):
+            rctx = regime_context_raw
+        elif regime_context_raw:
+            try:
+                rctx = json.loads(str(regime_context_raw))
+            except Exception:
+                rctx = {}
+        else:
+            rctx = {}
+        if not isinstance(rctx, dict):
+            return False
+        return bool(rctx.get("shadow_only") is True or rctx.get("protocol_id") == "S205_SHADOW_FORWARD_V1")
 
     def get_live_pnl_summary(
         self,
@@ -2509,20 +2539,28 @@ class AdvanceLiveBridge:
             "active_positions_count": len(active),
         }
 
-    def get_calendar_performance(self, book_filter: str = "ALL") -> Dict[str, Any]:
+    def get_calendar_performance(
+        self,
+        book_filter: str = "ALL",
+        era_filter: str = "ALL",
+    ) -> Dict[str, Any]:
         """
         Read-only Day-by-Day & Month-by-Month P&L Calendar aggregation from `option_sniffer_advance_trades`
         (or `option_advance_live_order_intents` when `book_filter == 'LIVE_BROKER'`).
+        Supports `era_filter` (`ALL`, `SHADOW_FORWARD_V1`, `PAPER_BOOK_B`, `PAPER_BOOK_A`, `LEGACY_PAPER`)
+        so forward shadow/paper packages, historical retired paper rows, and live broker intents never mix.
         Touches 0 bytes of core Option Sniffer Advance files (`mode=ro`).
         """
         flt = str(book_filter or "ALL").upper().strip()
+        era_flt = str(era_filter or "ALL").upper().strip()
         cur_month = to_ist_naive().strftime("%Y-%m")
         months_set = {cur_month}
         days_map: Dict[str, Dict[str, Any]] = {}
+        extra_unmirrored_rows: List[Dict[str, Any]] = []
 
         try:
             with self._get_ro_conn() as conn:
-                if flt == "LIVE_BROKER":
+                if flt == "LIVE_BROKER" or era_flt == "LIVE_BROKER":
                     rows = conn.execute(
                         """
                         SELECT
@@ -2566,15 +2604,95 @@ class AdvanceLiveBridge:
                         ORDER BY entry_time ASC;
                         """
                     ).fetchall()
+                    if era_flt in ("SHADOW_FORWARD_V1", "PAPER_BOOK_B", "PAPER_BOOK_A"):
+                        try:
+                            pkg_rows = conn.execute(
+                                """
+                                SELECT *
+                                FROM option_sniffer_advance_s205_shadow_packages
+                                WHERE state != 'OPEN'
+                                ORDER BY entry_bar_ts ASC;
+                                """
+                            ).fetchall()
+                            extra_unmirrored_rows = [dict(pr) for pr in pkg_rows]
+                        except Exception:
+                            extra_unmirrored_rows = []
         except Exception as e:
             logger.debug(f"[AdvanceLiveBridge] Calendar query note: {e}")
             rows = []
 
+        seen_trade_ids = set()
+        normalized_trades: List[Dict[str, Any]] = []
         for r in rows:
             t = dict(r)
+            if flt != "LIVE_BROKER" and era_flt != "LIVE_BROKER" and era_flt != "ALL":
+                rctx_raw = t.get("regime_context") or t.get("regime_context_json")
+                is_fwd = self._is_shadow_forward_row(t.get("strategy_mode"), rctx_raw)
+                if era_flt == "LEGACY_PAPER" and is_fwd:
+                    continue
+                if era_flt in ("SHADOW_FORWARD_V1", "PAPER_BOOK_B", "PAPER_BOOK_A") and not is_fwd:
+                    continue
+                if era_flt == "PAPER_BOOK_B" and str(t.get("strategy_mode") or "").upper() != "SHADOW_BOOK_B_PAID_FLOW":
+                    continue
+                if era_flt == "PAPER_BOOK_A" and str(t.get("strategy_mode") or "").upper() != "SHADOW_BOOK_A_SPREAD_150":
+                    continue
+            tid_s = str(t.get("trade_id") or "")
+            if tid_s:
+                seen_trade_ids.add(tid_s)
+            normalized_trades.append(t)
+
+        for pkg in extra_unmirrored_rows:
+            pkg_id = str(pkg.get("package_id") or "")
+            adv_id = str(pkg.get("advance_trade_id") or f"adv_shdw_{pkg_id[-10:]}")
+            if pkg_id in seen_trade_ids or adv_id in seen_trade_ids:
+                continue
+            book_id = str(pkg.get("book_id") or "")
+            if era_flt == "PAPER_BOOK_B" and book_id != "SHADOW_BOOK_B_PAID_FLOW":
+                continue
+            if era_flt == "PAPER_BOOK_A" and book_id != "SHADOW_BOOK_A_SPREAD_150":
+                continue
+            ui_bt = str(
+                pkg.get("ui_book_type")
+                or (BOOK_LONG_BUY if book_id == "SHADOW_BOOK_B_PAID_FLOW" else BOOK_SHORT_SELL)
+            )
+            legs_label = None
+            try:
+                ls = json.loads(str(pkg.get("legs_state_json") or "{}"))
+                if ls.get("mode") == "DEFINED_RISK_CREDIT_SPREAD":
+                    wl = ls.get("wing_leg") or {}
+                    sl = ls.get("short_leg") or {}
+                    legs_label = f"+{int(float(wl.get('strike', 0)))}{wl.get('option_type', '')} / -{int(float(sl.get('strike', 0)))}{sl.get('option_type', '')}"
+            except Exception:
+                legs_label = None
+            normalized_trades.append(
+                {
+                    "trade_id": pkg_id,
+                    "book_type": ui_bt,
+                    "strategy_mode": book_id,
+                    "trading_symbol": legs_label or pkg.get("direction_label") or pkg_id,
+                    "spread_legs_label": legs_label,
+                    "expiry": pkg.get("expiry"),
+                    "quantity": 65,
+                    "entry_time": pkg.get("entry_bar_ts") or pkg.get("entry_time"),
+                    "exit_time": pkg.get("exit_bar_ts") or pkg.get("exit_time"),
+                    "entry_price_used": None,
+                    "exit_price_used": None,
+                    "gross_pnl": float(pkg.get("gross_pnl_inr") or 0.0),
+                    "charges": float(pkg.get("total_charges_inr") or 0.0),
+                    "slippage": 0.0,
+                    "net_pnl": float(pkg.get("net_pnl_inr") or 0.0),
+                    "exit_reason": pkg.get("exit_reason") or pkg.get("state"),
+                }
+            )
+
+        for t in normalized_trades:
             btype = str(t.get("book_type") or BOOK_LONG_BUY)
             entry_t = str(t.get("entry_time") or "")
-            day_str = entry_t[:10]
+            day_str = (
+                str(t.get("exit_time") or entry_t)[:10]
+                if era_flt != "ALL"
+                else entry_t[:10]
+            )
             if len(day_str) != 10:
                 continue
             month_str = day_str[:7]
@@ -2583,9 +2701,26 @@ class AdvanceLiveBridge:
             if flt in (BOOK_LONG_BUY, BOOK_SHORT_SELL) and btype != flt:
                 continue
 
-            t["entry_price"] = float(t.get("entry_price_used") or 0.0)
-            t["exit_price"] = float(t.get("exit_price_used") or 0.0)
+            raw_ep = t.get("entry_price_used")
+            raw_xp = t.get("exit_price_used")
+            t["entry_price"] = (
+                float(raw_ep)
+                if raw_ep not in (None, "")
+                else (0.0 if era_flt == "ALL" else None)
+            )
+            t["exit_price"] = (
+                float(raw_xp)
+                if raw_xp not in (None, "")
+                else (0.0 if era_flt == "ALL" else None)
+            )
             t["strike_price"] = float(t.get("strike") or 0.0)
+            if not t.get("spread_legs_label"):
+                try:
+                    rc_obj = t.get("regime_context") or json.loads(str(t.get("regime_context_json") or "{}") or "{}")
+                    if isinstance(rc_obj, dict) and rc_obj.get("spread_legs_label"):
+                        t["spread_legs_label"] = rc_obj["spread_legs_label"]
+                except Exception:
+                    pass
             net = float(t.get("net_pnl") or 0.0)
             gross = float(t.get("gross_pnl") or 0.0)
             charges = float(t.get("charges") or 0.0) + float(t.get("slippage") or 0.0)
@@ -2631,6 +2766,8 @@ class AdvanceLiveBridge:
             months_summary[m_str] = {
                 "month": m_str,
                 "total_net_pnl": 0.0,
+                "total_gross_pnl": 0.0,
+                "total_charges": 0.0,
                 "long_book_net_pnl": 0.0,
                 "short_book_net_pnl": 0.0,
                 "total_trades": 0,
@@ -2654,6 +2791,8 @@ class AdvanceLiveBridge:
             m_str = d_rec["month"]
             ms = months_summary[m_str]
             ms["total_net_pnl"] = round(ms["total_net_pnl"] + d_rec["net_pnl_rupees"], 2)
+            ms["total_gross_pnl"] = round(ms["total_gross_pnl"] + d_rec["gross_pnl_rupees"], 2)
+            ms["total_charges"] = round(ms["total_charges"] + d_rec["charges_rupees"], 2)
             ms["long_book_net_pnl"] = round(ms["long_book_net_pnl"] + d_rec["long_book_net_pnl"], 2)
             ms["short_book_net_pnl"] = round(ms["short_book_net_pnl"] + d_rec["short_book_net_pnl"], 2)
             ms["total_trades"] += tc
@@ -2680,6 +2819,7 @@ class AdvanceLiveBridge:
 
         return {
             "book_filter": flt,
+            "era_filter": era_flt,
             "available_months": sorted(months_set, reverse=True),
             "default_month": cur_month,
             "months_summary": months_summary,

@@ -93,6 +93,27 @@ export function formatTimestampLabel(rawTs) {
   return cleaned ? `${cleaned} IST` : UNAVAILABLE_LABEL;
 }
 
+/**
+ * Formats provider/stream quote observation timestamp and age without inventing freshness
+ * when quote timestamps are missing (`Unavailable`) while preserving genuine `0ms` age.
+ */
+export function formatQuoteFreshness(quoteObj) {
+  if (!quoteObj || typeof quoteObj !== 'object') return UNAVAILABLE_LABEL;
+  const rawIso = quoteObj.quote_observed_at_iso || quoteObj.quote_timestamp || null;
+  const isoLabel = rawIso ? formatTimestampLabel(rawIso) : UNAVAILABLE_LABEL;
+  const hasIso = isoLabel !== UNAVAILABLE_LABEL;
+  const ageMs = hasValidNumber(quoteObj.quote_age_ms)
+    ? Math.max(0, Math.round(Number(quoteObj.quote_age_ms)))
+    : null;
+
+  if (hasIso && ageMs !== null) {
+    return `${isoLabel} (${ageMs}ms age)`;
+  }
+  if (hasIso) return isoLabel;
+  if (ageMs !== null) return `${ageMs}ms age`;
+  return UNAVAILABLE_LABEL;
+}
+
 export function parseRegimeContext(row) {
   if (!row || typeof row !== 'object') return {};
   if (row.regime_context && typeof row.regime_context === 'object') {
@@ -296,6 +317,22 @@ export function buildPackageLegRows(trade) {
     const wingOpt = rctx.hedge_wing_option_type || trade.option_type || '';
     const shortStrike = hasValidNumber(trade.strike ?? trade.strike_price) ? Number(trade.strike ?? trade.strike_price) : null;
     const shortOpt = trade.option_type || wingOpt;
+    const wq = trade.wing_leg_live_quote;
+    const sq = trade.short_leg_live_quote;
+
+    const formatSpreadLegLiveQuote = (legQuote) => {
+      if (trade.status === 'CLOSED') {
+        return 'Bundled in Net Spread Exit';
+      }
+      if (legQuote && hasValidNumber(legQuote.bid) && hasValidNumber(legQuote.ask)) {
+        const fresh = formatQuoteFreshness(legQuote);
+        return fresh !== UNAVAILABLE_LABEL
+          ? `${formatINRValue(legQuote.bid)} / ${formatINRValue(legQuote.ask)} (${fresh})`
+          : `${formatINRValue(legQuote.bid)} / ${formatINRValue(legQuote.ask)}`;
+      }
+      return UNAVAILABLE_LABEL;
+    };
+
     return [
       {
         legId: `${trade.trade_id || trade.package_id}-wing`,
@@ -305,7 +342,7 @@ export function buildPackageLegRows(trade) {
         expiry,
         quantity: qty !== null ? `+${Math.abs(qty)}` : UNAVAILABLE_LABEL,
         entryPrice: hasValidNumber(rctx.hedge_wing_entry_price) ? formatINRValue(rctx.hedge_wing_entry_price) : UNAVAILABLE_LABEL,
-        liveOrExitQuote: 'Bundled in Net Spread Quote (Per-leg quote unavailable)',
+        liveOrExitQuote: formatSpreadLegLiveQuote(wq),
         hedgeState: 'HEDGE_WING_ACTIVE',
       },
       {
@@ -316,12 +353,13 @@ export function buildPackageLegRows(trade) {
         expiry,
         quantity: qty !== null ? `-${Math.abs(qty)}` : UNAVAILABLE_LABEL,
         entryPrice: hasValidNumber(rctx.short_leg_entry_price) ? formatINRValue(rctx.short_leg_entry_price) : UNAVAILABLE_LABEL,
-        liveOrExitQuote: 'Bundled in Net Spread Quote (Per-leg quote unavailable)',
+        liveOrExitQuote: formatSpreadLegLiveQuote(sq),
         hedgeState: 'COVERED_BY_150PT_WING',
       },
     ];
   }
 
+  const singleFreshness = formatQuoteFreshness(trade);
   return [
     {
       legId: `${trade.trade_id || trade.package_id}-single`,
@@ -337,7 +375,9 @@ export function buildPackageLegRows(trade) {
         trade.status === 'CLOSED'
           ? formatINRValue(trade.exit_price ?? trade.exit_price_used)
           : hasValidNumber(trade.current_bid) && hasValidNumber(trade.current_ask)
-          ? `${formatINRValue(trade.current_bid)} / ${formatINRValue(trade.current_ask)}`
+          ? singleFreshness !== UNAVAILABLE_LABEL
+            ? `${formatINRValue(trade.current_bid)} / ${formatINRValue(trade.current_ask)} (${singleFreshness})`
+            : `${formatINRValue(trade.current_bid)} / ${formatINRValue(trade.current_ask)}`
           : UNAVAILABLE_LABEL,
       hedgeState:
         trade.book_type === 'LONG_BOOK_BUY'
@@ -358,6 +398,7 @@ export function computeScopedPerformance({
   closedTrades = [],
   shadowPackages = [],
   liveIntents = [],
+  calendarsByEra = null,
   sourceFilter = 'SHADOW_FORWARD_V1',
   fromDate = '',
   toDate = '',
@@ -368,11 +409,58 @@ export function computeScopedPerformance({
   let feeLabel = 'Unavailable';
   let scopeLimitations = null;
 
+  const eraKey = sourceFilter === 'LIVE_BROKER_RECENT' ? 'LIVE_BROKER' : sourceFilter;
+  const eraCal =
+    calendarsByEra && typeof calendarsByEra === 'object' ? calendarsByEra[eraKey] : null;
+  const hasAuthoritativeEraCalendar = Boolean(eraCal && Array.isArray(eraCal.days));
+
+  const flattenEraDays = (cal, scopeTag) => {
+    if (!cal || !Array.isArray(cal.days)) return [];
+    const out = [];
+    cal.days.forEach((d) => {
+      if (!d || !Array.isArray(d.trades)) return;
+      d.trades.forEach((tr) => {
+        if (!tr) return;
+        out.push({
+          trade_id: tr.trade_id,
+          trading_date: String(d.date || tr.trading_date || tr.exit_time || tr.entry_time || '').slice(0, 10),
+          book_type: tr.book_type,
+          strategy_mode: tr.strategy_mode,
+          trading_symbol: tr.trading_symbol || UNAVAILABLE_LABEL,
+          spread_legs_label: tr.spread_legs_label || null,
+          quantity: tr.quantity ?? null,
+          entry_time: tr.entry_time,
+          exit_time: tr.exit_time,
+          entry_price: tr.entry_price ?? tr.entry_price_used,
+          exit_price: tr.exit_price ?? tr.exit_price_used,
+          gross_pnl: hasValidNumber(tr.gross_pnl) ? Number(tr.gross_pnl) : null,
+          charges: hasValidNumber(tr.charges) ? Number(tr.charges) : null,
+          net_pnl: hasValidNumber(tr.net_pnl) ? Number(tr.net_pnl) : null,
+          mfe_pct: hasValidNumber(tr.mfe_pct) ? Number(tr.mfe_pct) : null,
+          mae_pct: hasValidNumber(tr.mae_pct) ? Number(tr.mae_pct) : null,
+          exit_reason: tr.exit_reason || 'CLOSED',
+          source_scope: scopeTag,
+        });
+      });
+    });
+    return out;
+  };
+
   if (sourceFilter === 'LIVE_BROKER_RECENT') {
     feeLabel = 'Estimated Broker Statutory Charges';
-    scopeLimitations =
-      'Derived from recent_order_intents (capped at 25 recent rows by /live/status). Not an authoritative full-history broker ledger.';
-    normalizedRows = (Array.isArray(liveIntents) ? liveIntents : [])
+    const byBrokerKey = new Map();
+    if (hasAuthoritativeEraCalendar) {
+      flattenEraDays(eraCal, 'LIVE_BROKER').forEach((row) => {
+        byBrokerKey.set(String(row.trade_id), row);
+      });
+      scopeLimitations =
+        'Full SQLite broker ledger (option_advance_live_order_intents, CONFIRMED_FLAT realized rows; strictly isolated from paper and shadow books).';
+    } else {
+      scopeLimitations =
+        'Derived from recent_order_intents (capped at 25 recent rows by /live/status). Not an authoritative full-history broker ledger.';
+    }
+
+    (Array.isArray(liveIntents) ? liveIntents : [])
       .filter(
         (i) =>
           i &&
@@ -380,40 +468,52 @@ export function computeScopedPerformance({
           i.state !== 'CANCELLED' &&
           Number(i.filled_quantity || 0) > 0
       )
-      .map((i) => ({
-        trade_id: i.order_intent_id,
-        trading_date: String(i.trading_date || i.updated_at || i.created_at || '').slice(0, 10),
-        book_type: i.action === 'BUY' ? 'LONG_BOOK_BUY' : 'SHORT_BOOK_SELL',
-        strategy_mode: i.execution_mode || 'LIVE_BROKER',
-        trading_symbol: i.trading_symbol || UNAVAILABLE_LABEL,
-        spread_legs_label: i.hedge_wing_strike ? `Wing ${i.hedge_wing_strike}` : null,
-        quantity: i.filled_quantity ?? i.target_quantity ?? null,
-        entry_time: i.created_at,
-        exit_time: i.updated_at,
-        entry_price: hasValidNumber(i.average_fill_price) ? Number(i.average_fill_price) : i.limit_price,
-        exit_price: i.exit_fill_price,
-        gross_pnl: hasValidNumber(i.gross_pnl) ? Number(i.gross_pnl) : null,
-        charges: hasValidNumber(i.statutory_charges) ? Number(i.statutory_charges) : null,
-        net_pnl: hasValidNumber(i.realized_pnl) ? Number(i.realized_pnl) : null,
-        mfe_pct: null,
-        mae_pct: null,
-        exit_reason: i.exit_reason || 'CONFIRMED_FLAT',
-        source_scope: 'LIVE_BROKER_RECENT',
-      }));
+      .forEach((i) => {
+        const key = String(i.order_intent_id || '');
+        if (!key || byBrokerKey.has(key)) return;
+        byBrokerKey.set(key, {
+          trade_id: i.order_intent_id,
+          trading_date: String(i.trading_date || i.updated_at || i.created_at || '').slice(0, 10),
+          book_type: i.action === 'BUY' ? 'LONG_BOOK_BUY' : 'SHORT_BOOK_SELL',
+          strategy_mode: i.execution_mode || 'LIVE_BROKER',
+          trading_symbol: i.trading_symbol || UNAVAILABLE_LABEL,
+          spread_legs_label: i.hedge_wing_strike ? `Wing ${i.hedge_wing_strike}` : null,
+          quantity: i.filled_quantity ?? i.target_quantity ?? null,
+          entry_time: i.created_at,
+          exit_time: i.updated_at,
+          entry_price: hasValidNumber(i.average_fill_price) ? Number(i.average_fill_price) : i.limit_price,
+          exit_price: i.exit_fill_price,
+          gross_pnl: hasValidNumber(i.gross_pnl) ? Number(i.gross_pnl) : null,
+          charges: hasValidNumber(i.statutory_charges) ? Number(i.statutory_charges) : null,
+          net_pnl: hasValidNumber(i.realized_pnl) ? Number(i.realized_pnl) : null,
+          mfe_pct: null,
+          mae_pct: null,
+          exit_reason: i.exit_reason || 'CONFIRMED_FLAT',
+          source_scope: 'LIVE_BROKER_RECENT',
+        });
+      });
+    normalizedRows = Array.from(byBrokerKey.values());
   } else if (
     sourceFilter === 'SHADOW_FORWARD_V1' ||
     sourceFilter === 'PAPER_BOOK_B' ||
     sourceFilter === 'PAPER_BOOK_A'
   ) {
     feeLabel = 'Estimated Statutory (Canonical NSE/Upstox)';
-    // Combine closed mirrored forward rows in closedTrades + unwound/closed packages in shadowPackages without double counting
+    // Combine full SQLite era calendar (when supplied) + closed mirrored forward rows + unwound/closed collector packages without double counting
     const byKey = new Map();
+    if (hasAuthoritativeEraCalendar) {
+      flattenEraDays(eraCal, 'SHADOW_FORWARD_V1').forEach((row) => {
+        byKey.set(String(row.trade_id), row);
+      });
+    }
     (Array.isArray(closedTrades) ? closedTrades : []).forEach((t) => {
       const rctx = parseRegimeContext(t);
       if (classifyStrategyEra(t.strategy_mode, rctx) !== 'SHADOW_FORWARD_V1') return;
       if (sourceFilter === 'PAPER_BOOK_B' && t.strategy_mode !== 'SHADOW_BOOK_B_PAID_FLOW') return;
       if (sourceFilter === 'PAPER_BOOK_A' && t.strategy_mode !== 'SHADOW_BOOK_A_SPREAD_150') return;
-      byKey.set(String(t.trade_id), {
+      const tid = String(t.trade_id);
+      if (byKey.has(tid)) return;
+      byKey.set(tid, {
         trade_id: t.trade_id,
         trading_date: String(t.trading_date || t.exit_time || t.entry_time || '').slice(0, 10),
         book_type: t.book_type,
@@ -474,34 +574,49 @@ export function computeScopedPerformance({
     });
 
     normalizedRows = Array.from(byKey.values());
-    scopeLimitations =
-      'Scoped strictly to S205_SHADOW_FORWARD_V1 forward paper packages (including any INCOMPLETE_LEG_UNWOUND friction). Pre-registered historical V6B/V2.0 rows are excluded.';
+    scopeLimitations = hasAuthoritativeEraCalendar
+      ? 'Full SQLite S205_SHADOW_FORWARD_V1 forward paper ledger (including any INCOMPLETE_LEG_UNWOUND friction). Pre-registered historical V6B/V2.0 rows are strictly excluded.'
+      : 'Scoped strictly to S205_SHADOW_FORWARD_V1 forward paper packages (including any INCOMPLETE_LEG_UNWOUND friction). Pre-registered historical V6B/V2.0 rows are excluded.';
   } else if (sourceFilter === 'LEGACY_PAPER') {
     feeLabel = 'Estimated Legacy Paper Charges';
-    scopeLimitations =
-      'Historical retired V6B_* / V2.0 paper sandbox trades (up to 200 recent closed rows from /trades). Excluded from S205_SHADOW_FORWARD_V1 forward evaluation.';
-    normalizedRows = (Array.isArray(closedTrades) ? closedTrades : [])
+    const byLegacyKey = new Map();
+    if (hasAuthoritativeEraCalendar) {
+      flattenEraDays(eraCal, 'LEGACY_PAPER').forEach((row) => {
+        byLegacyKey.set(String(row.trade_id), row);
+      });
+      scopeLimitations =
+        'Full historical SQLite ledger of retired V6B_* / V2.0 paper sandbox trades. Strictly excluded from S205_SHADOW_FORWARD_V1 forward evaluation.';
+    } else {
+      scopeLimitations =
+        'Historical retired V6B_* / V2.0 paper sandbox trades (up to 200 recent closed rows from /trades). Excluded from S205_SHADOW_FORWARD_V1 forward evaluation.';
+    }
+    (Array.isArray(closedTrades) ? closedTrades : [])
       .filter((t) => classifyStrategyEra(t.strategy_mode, parseRegimeContext(t)) !== 'SHADOW_FORWARD_V1')
-      .map((t) => ({
-        trade_id: t.trade_id,
-        trading_date: String(t.trading_date || t.exit_time || t.entry_time || '').slice(0, 10),
-        book_type: t.book_type,
-        strategy_mode: t.strategy_mode,
-        trading_symbol: t.trading_symbol || UNAVAILABLE_LABEL,
-        spread_legs_label: t.spread_legs_label || null,
-        quantity: t.quantity ?? null,
-        entry_time: t.entry_time,
-        exit_time: t.exit_time,
-        entry_price: t.entry_price ?? t.entry_price_used,
-        exit_price: t.exit_price ?? t.exit_price_used,
-        gross_pnl: hasValidNumber(t.gross_pnl) ? Number(t.gross_pnl) : null,
-        charges: hasValidNumber(t.charges) ? Number(t.charges) : null,
-        net_pnl: hasValidNumber(t.net_pnl) ? Number(t.net_pnl) : null,
-        mfe_pct: hasValidNumber(t.mfe_pct) ? Number(t.mfe_pct) : null,
-        mae_pct: hasValidNumber(t.mae_pct) ? Number(t.mae_pct) : null,
-        exit_reason: t.exit_reason || 'CLOSED',
-        source_scope: 'LEGACY_PAPER',
-      }));
+      .forEach((t) => {
+        const tid = String(t.trade_id);
+        if (byLegacyKey.has(tid)) return;
+        byLegacyKey.set(tid, {
+          trade_id: t.trade_id,
+          trading_date: String(t.trading_date || t.exit_time || t.entry_time || '').slice(0, 10),
+          book_type: t.book_type,
+          strategy_mode: t.strategy_mode,
+          trading_symbol: t.trading_symbol || UNAVAILABLE_LABEL,
+          spread_legs_label: t.spread_legs_label || null,
+          quantity: t.quantity ?? null,
+          entry_time: t.entry_time,
+          exit_time: t.exit_time,
+          entry_price: t.entry_price ?? t.entry_price_used,
+          exit_price: t.exit_price ?? t.exit_price_used,
+          gross_pnl: hasValidNumber(t.gross_pnl) ? Number(t.gross_pnl) : null,
+          charges: hasValidNumber(t.charges) ? Number(t.charges) : null,
+          net_pnl: hasValidNumber(t.net_pnl) ? Number(t.net_pnl) : null,
+          mfe_pct: hasValidNumber(t.mfe_pct) ? Number(t.mfe_pct) : null,
+          mae_pct: hasValidNumber(t.mae_pct) ? Number(t.mae_pct) : null,
+          exit_reason: t.exit_reason || 'CLOSED',
+          source_scope: 'LEGACY_PAPER',
+        });
+      });
+    normalizedRows = Array.from(byLegacyKey.values());
   }
 
   // Apply explicit date-range filter (`fromDate` .. `toDate`)

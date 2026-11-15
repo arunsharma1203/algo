@@ -349,6 +349,22 @@ export default function DiagnosticsTab({
                   : UNAVAILABLE_LABEL
               }
             />
+            <MetricRow
+              label="Spot / Fut Tick Age"
+              value={
+                hasValidNumber(v3.spot_quote_age_ms) || hasValidNumber(v3.fut_quote_age_ms)
+                  ? `${
+                      hasValidNumber(v3.spot_quote_age_ms)
+                        ? `${Math.max(0, Math.round(Number(v3.spot_quote_age_ms)))}ms`
+                        : UNAVAILABLE_LABEL
+                    } / ${
+                      hasValidNumber(v3.fut_quote_age_ms)
+                        ? `${Math.max(0, Math.round(Number(v3.fut_quote_age_ms)))}ms`
+                        : UNAVAILABLE_LABEL
+                    }`
+                  : UNAVAILABLE_LABEL
+              }
+            />
           </div>
 
           <div className="rounded-lg border border-slate-200 p-3.5 bg-slate-50/40">
