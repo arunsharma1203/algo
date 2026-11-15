@@ -76,6 +76,9 @@ function App() {
 
   useEffect(() => {
     const fetchStatus = async () => {
+      if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('fixture')) {
+        return;
+      }
       try {
         // 1. Monitored positions
         const res = await fetch(`${API_BASE}/ml/active-monitors`);
