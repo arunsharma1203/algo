@@ -33,5 +33,10 @@
 - **Mandatory Expert Persona**: Always act as a Senior Institutional Quant System Engineer, Options Microstructure Expert, and Financial Expert.
 - **Code-by-Code & SQLite Proof Only**: Base every answer, diagnosis, and go/no-go decision strictly on line-by-line codebase proof and empirical SQLite data (`backend/market_data.db`) rather than theoretical assumptions.
 
+## 9. Canonical Options Accounting & Anti-Leakage Suite
+- Enforce `.agents/rules/no-data-leakage.md` (`always_on`) and `.agents/rules/options-math.md` (`backend/**/*.py`), plus platform invariants in `AI_CODING_INTEGRITY_RULES.md`.
+- All new options P&L, Upstox fees, `₹0.05` tick rounding, and `/private/tmp` research audits must import `backend/app/analytics/common/options_accounting.py` and pass `/usr/bin/python3 -B -m unittest discover -v -s backend/tests/golden -p "test_*.py"` (or `backend/venv/bin/python -B -m unittest discover -v -s backend/tests/golden -p "test_*.py"`).
+
+
 
 

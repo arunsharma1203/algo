@@ -1,0 +1,239 @@
+{
+  "schema_version": "1.0.0",
+  "description": "Hand-verified NSE/Upstox option accounting & structural risk golden fixtures.",
+  "cases": [
+    {
+      "case_id": "WINNING_CREDIT_VERTICAL_2LEG_APR2026",
+      "description": "2-leg NIFTY bull put credit vertical closed via market orders (4 orders = ₹80 brokerage, Apr-2026 0.15% STT & Mar-2026 0.03553% NSE+IPFT).",
+      "trade_date": "2026-11-10",
+      "reference_spot": 25050.0,
+      "legs": [
+        {
+          "option_type": "PE",
+          "strike": 25000.0,
+          "qty": -65,
+          "entry_price": 120.0,
+          "exit_price": 30.0,
+          "exit_mode": "MARKET_ORDER",
+          "lot_size": 65
+        },
+        {
+          "option_type": "PE",
+          "strike": 24800.0,
+          "qty": 65,
+          "entry_price": 40.0,
+          "exit_price": 8.0,
+          "exit_mode": "MARKET_ORDER",
+          "lot_size": 65
+        }
+      ],
+      "expected": {
+        "executed_orders": 4,
+        "entry_cashflow": 5200.00,
+        "exit_cashflow": -1430.00,
+        "gross_pnl": 3770.00,
+        "brokerage": 80.00,
+        "stt_sell": 12.48,
+        "stt_exercise": 0.00,
+        "stt": 12.48,
+        "exchange_fee": 4.57,
+        "sebi_fee": 0.01,
+        "gst": 15.22,
+        "stamp_duty": 0.14,
+        "statutory_charges": 112.42,
+        "net_pnl": 3657.58,
+        "is_defined_risk": true,
+        "unbounded_upside_risk": false,
+        "final_package_max_loss_inr": 7800.00,
+        "buy_first_incomplete_leg_exposure_inr": 2600.00
+      }
+    },
+    {
+      "case_id": "STOPPED_OUT_DEBIT_VERTICAL_ADVERSE_TICK_SLIPPAGE",
+      "description": "2-leg NIFTY bull call debit spread stopped out with 25 bps adverse slippage + ₹0.05 adverse tick rounding; catches incomplete-leg exposure > ₹8,000.",
+      "trade_date": "2026-11-10",
+      "reference_spot": 25020.0,
+      "slippage_bps_applied_to_raw_quotes": 25.0,
+      "raw_quotes": [
+        {
+          "option_type": "CE",
+          "strike": 25000.0,
+          "qty": 65,
+          "raw_entry": 150.00,
+          "raw_exit": 112.00,
+          "expected_slipped_entry": 150.40,
+          "expected_slipped_exit": 111.70
+        },
+        {
+          "option_type": "CE",
+          "strike": 25200.0,
+          "qty": -65,
+          "raw_entry": 65.00,
+          "raw_exit": 44.00,
+          "expected_slipped_entry": 64.80,
+          "expected_slipped_exit": 44.15
+        }
+      ],
+      "legs": [
+        {
+          "option_type": "CE",
+          "strike": 25000.0,
+          "qty": 65,
+          "entry_price": 150.40,
+          "exit_price": 111.70,
+          "exit_mode": "MARKET_ORDER",
+          "lot_size": 65
+        },
+        {
+          "option_type": "CE",
+          "strike": 25200.0,
+          "qty": -65,
+          "entry_price": 64.80,
+          "exit_price": 44.15,
+          "exit_mode": "MARKET_ORDER",
+          "lot_size": 65
+        }
+      ],
+      "expected": {
+        "executed_orders": 4,
+        "entry_cashflow": -5564.00,
+        "exit_cashflow": 4390.75,
+        "gross_pnl": -1173.25,
+        "brokerage": 80.00,
+        "stt_sell": 17.21,
+        "stt_exercise": 0.00,
+        "stt": 17.21,
+        "exchange_fee": 8.57,
+        "sebi_fee": 0.03,
+        "gst": 15.94,
+        "stamp_duty": 0.38,
+        "statutory_charges": 122.13,
+        "net_pnl": -1295.38,
+        "is_defined_risk": true,
+        "unbounded_upside_risk": false,
+        "final_package_max_loss_inr": 5564.00,
+        "buy_first_incomplete_leg_exposure_inr": 9776.00
+      }
+    },
+    {
+      "case_id": "NSE_EXPIRY_ITM_CASH_SETTLED_EXERCISE_STT_PRE_APR2026",
+      "description": "Long ITM NIFTY 24800 CE held into European cash-settled expiry at 25000.0 on 2025-11-27: incurs 0.125% exercise STT on ₹13,000 intrinsic value (₹16.25) with 1 market order.",
+      "trade_date": "2025-11-27",
+      "reference_spot": 25000.0,
+      "legs": [
+        {
+          "option_type": "CE",
+          "strike": 24800.0,
+          "qty": 65,
+          "entry_price": 50.0,
+          "exit_mode": "CASH_SETTLED_EXPIRY",
+          "settlement_spot": 25000.0,
+          "lot_size": 65
+        }
+      ],
+      "expected": {
+        "executed_orders": 1,
+        "entry_cashflow": -3250.00,
+        "exit_cashflow": 13000.00,
+        "gross_pnl": 9750.00,
+        "brokerage": 20.00,
+        "stt_sell": 0.00,
+        "stt_exercise": 16.25,
+        "stt": 16.25,
+        "exchange_fee": 1.15,
+        "sebi_fee": 0.00,
+        "gst": 3.81,
+        "stamp_duty": 0.10,
+        "statutory_charges": 41.31,
+        "net_pnl": 9708.69,
+        "is_defined_risk": true,
+        "unbounded_upside_risk": false,
+        "final_package_max_loss_inr": 3250.00,
+        "buy_first_incomplete_leg_exposure_inr": 3250.00
+      }
+    },
+    {
+      "case_id": "EXPIRY_PIN_CREDIT_SPREAD_SHORT_ITM_WING_OTM_APR2026",
+      "description": "Bear call credit vertical pinned at 25040 expiry: short 25000 CE cash-settles ITM (0 exercise STT for writer), long 25200 CE expires OTM worthless at ₹0.00 with 0 closing orders.",
+      "trade_date": "2026-11-12",
+      "reference_spot": 25040.0,
+      "legs": [
+        {
+          "option_type": "CE",
+          "strike": 25000.0,
+          "qty": -65,
+          "entry_price": 90.0,
+          "exit_mode": "CASH_SETTLED_EXPIRY",
+          "settlement_spot": 25040.0,
+          "lot_size": 65
+        },
+        {
+          "option_type": "CE",
+          "strike": 25200.0,
+          "qty": 65,
+          "entry_price": 22.0,
+          "exit_mode": "CASH_SETTLED_EXPIRY",
+          "settlement_spot": 25040.0,
+          "lot_size": 65
+        }
+      ],
+      "expected": {
+        "executed_orders": 2,
+        "entry_cashflow": 4420.00,
+        "exit_cashflow": -2600.00,
+        "gross_pnl": 1820.00,
+        "brokerage": 40.00,
+        "stt_sell": 8.78,
+        "stt_exercise": 0.00,
+        "stt": 8.78,
+        "exchange_fee": 2.59,
+        "sebi_fee": 0.01,
+        "gst": 7.66,
+        "stamp_duty": 0.04,
+        "statutory_charges": 59.08,
+        "net_pnl": 1760.92,
+        "is_defined_risk": true,
+        "unbounded_upside_risk": false,
+        "final_package_max_loss_inr": 8580.00,
+        "buy_first_incomplete_leg_exposure_inr": 1430.00
+      }
+    },
+    {
+      "case_id": "FEE_HEAVY_SMALL_GAIN_FLIPS_NEGATIVE_NET",
+      "description": "1-lot paid NIFTY option (+0.65 pts = +₹42.25 gross) flipped to -₹11.50 net loss by ₹53.75 Upstox round-trip statutory charges.",
+      "trade_date": "2026-11-10",
+      "reference_spot": 25000.0,
+      "legs": [
+        {
+          "option_type": "CE",
+          "strike": 25000.0,
+          "qty": 65,
+          "entry_price": 42.00,
+          "exit_price": 42.65,
+          "exit_mode": "MARKET_ORDER",
+          "lot_size": 65
+        }
+      ],
+      "expected": {
+        "executed_orders": 2,
+        "entry_cashflow": -2730.00,
+        "exit_cashflow": 2772.25,
+        "gross_pnl": 42.25,
+        "brokerage": 40.00,
+        "stt_sell": 4.16,
+        "stt_exercise": 0.00,
+        "stt": 4.16,
+        "exchange_fee": 1.95,
+        "sebi_fee": 0.01,
+        "gst": 7.55,
+        "stamp_duty": 0.08,
+        "statutory_charges": 53.75,
+        "net_pnl": -11.50,
+        "is_defined_risk": true,
+        "unbounded_upside_risk": false,
+        "final_package_max_loss_inr": 2730.00,
+        "buy_first_incomplete_leg_exposure_inr": 2730.00
+      }
+    }
+  ]
+}
