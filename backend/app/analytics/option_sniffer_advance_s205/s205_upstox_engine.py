@@ -25,10 +25,13 @@ import uuid
 from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.analytics.common.options_accounting import (
+    OptionLeg,
+    compute_package_accounting,
+)
 from app.analytics.option_sniffer.option_constants import (
     DEFAULT_LOT_SIZES,
     MAX_SPREAD_PCT,
-    calculate_option_trade_costs,
     to_ist_naive,
 )
 from app.analytics.option_sniffer.option_contract_discovery import OptionContractDiscovery
@@ -38,7 +41,6 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     BOOK_LONG_BUY,
     BOOK_SHORT_SELL,
     SHORT_AUTO_HEDGE_WING_PTS_NIFTY,
-    calculate_short_option_trade_costs,
 )
 from app.analytics.option_sniffer_advance.advance_db import (
     AdvanceDB,
@@ -47,6 +49,10 @@ from app.analytics.option_sniffer_advance.advance_db import (
 from app.analytics.option_sniffer_advance_s205.s205_meta_model import (
     S205CausalMetaModel,
     get_s205_meta_model,
+)
+from app.analytics.option_sniffer_advance_s205.s205_shadow_collector import (
+    S205ShadowCollector,
+    init_shadow_telemetry_tables,
 )
 from app.analytics.option_sniffer_advance_s205.s205_signal_evaluator import (
     build_causal_intraday_context,
@@ -76,8 +82,10 @@ _HW_INSTRUMENT_KEYS: Dict[str, str] = {
 
 _S205_MODULE_FILES: Tuple[str, ...] = (
     "__init__.py",
+    "SHADOW_PREREGISTRATION.json",
     "s205_meta_model.py",
     "s205_meta_weights.json",
+    "s205_shadow_collector.py",
     "s205_signal_evaluator.py",
     "s205_upstox_engine.py",
 )
@@ -145,6 +153,7 @@ def init_s205_tables() -> None:
                 """
             )
         conn.close()
+        init_shadow_telemetry_tables()
     except Exception as e:
         logger.error(f"[S205Engine] Table init error: {e}")
 
@@ -207,6 +216,7 @@ class S205UpstoxOrchestrator:
         self._catastrophe_wing_state: Dict[str, Any] = {}
         self._latest_engine_readiness: List[Dict[str, Any]] = []
         self._latest_context_summary: Dict[str, Any] = {}
+        self._shadow_collector: S205ShadowCollector = S205ShadowCollector(sync_advance_db=True)
 
         self._install_tick_guard_router()
         try:
@@ -242,7 +252,7 @@ class S205UpstoxOrchestrator:
                 try:
                     non_v6b = [
                         t for t in (AdvanceDB.get_open_trades() or [])
-                        if not str(t.get("strategy_mode") or "").startswith("V6B_")
+                        if not str(t.get("strategy_mode") or "").startswith(("V6B_", "SHADOW_"))
                     ]
                     if non_v6b:
                         legacy_closed = orig_fn(ikey, quote_payload) or []
@@ -558,45 +568,36 @@ class S205UpstoxOrchestrator:
         except Exception:
             dur_s = 0
 
+        ot_leg = str(trade.get("option_type") or "CE").upper()
+        stk_leg = max(50.0, float(trade.get("strike") or 24000.0))
+        t_date = str(trade.get("entry_time") or now_dt.isoformat())[:10]
+
         if btype == BOOK_SHORT_SELL:
-            exit_px = exit_ask
-            pk = max(float(trade.get("peak_price") or entry_bid), exit_ask)
-            tr = min(float(trade.get("trough_price") or entry_bid), exit_ask)
-            mfe = round(((entry_bid - tr) / max(0.05, entry_bid)) * 100.0, 2)
-            mae = round(((entry_bid - pk) / max(0.05, entry_bid)) * 100.0, 2)
-            res = calculate_short_option_trade_costs(
-                sell_entry_bid=entry_bid,
-                buy_exit_ask=exit_ask,
-                quantity=qty,
-                apply_slippage=True,
-                trade_date=trade.get("entry_time"),
-                entry_bid=entry_bid,
-                entry_ask=entry_ask,
-                exit_bid=exit_bid,
-                exit_ask=exit_ask,
+            exit_px = max(0.05, exit_ask)
+            ent_eff = max(0.05, entry_bid)
+            pk = max(float(trade.get("peak_price") or ent_eff), exit_px)
+            tr = min(float(trade.get("trough_price") or ent_eff), exit_px)
+            mfe = round(((ent_eff - tr) / max(0.05, ent_eff)) * 100.0, 2)
+            mae = round(((ent_eff - pk) / max(0.05, ent_eff)) * 100.0, 2)
+            acc = compute_package_accounting(
+                legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=-qty, entry_price=ent_eff, exit_price=exit_px)],
+                trade_date=t_date,
             )
-            gross, chg, slip, net, net_pct = res["gross_pnl"], res["statutory_charges"], res["slippage"], res["net_pnl"], res["return_on_premium_pct"]
+            gross, chg, slip, net = acc["gross_pnl"], acc["statutory_charges"], acc["additional_slippage"], acc["net_pnl"]
+            net_pct = round((net / max(1.0, ent_eff * qty)) * 100.0, 2)
         else:
-            exit_px = exit_bid
-            pk = max(float(trade.get("peak_price") or entry_ask), exit_bid)
-            tr = min(float(trade.get("trough_price") or entry_ask), exit_bid)
-            mfe = round(((pk - entry_ask) / max(0.05, entry_ask)) * 100.0, 2)
-            mae = round(((tr - entry_ask) / max(0.05, entry_ask)) * 100.0, 2)
-            costs = calculate_option_trade_costs(
-                buy_price=entry_ask,
-                sell_price=exit_bid,
-                quantity=qty,
-                apply_slippage=True,
-                trade_date=trade.get("entry_time"),
-                buy_bid=entry_bid,
-                buy_ask=entry_ask,
-                sell_bid=exit_bid,
-                sell_ask=exit_ask,
+            exit_px = max(0.05, exit_bid)
+            ent_eff = max(0.05, entry_ask)
+            pk = max(float(trade.get("peak_price") or ent_eff), exit_px)
+            tr = min(float(trade.get("trough_price") or ent_eff), exit_px)
+            mfe = round(((pk - ent_eff) / max(0.05, ent_eff)) * 100.0, 2)
+            mae = round(((tr - ent_eff) / max(0.05, ent_eff)) * 100.0, 2)
+            acc = compute_package_accounting(
+                legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=qty, entry_price=ent_eff, exit_price=exit_px)],
+                trade_date=t_date,
             )
-            gross = round((exit_bid - entry_ask) * qty, 2)
-            chg, slip = costs["statutory_charges"], costs["slippage"]
-            net = round(gross - costs["total_friction"], 2)
-            net_pct = round((net / max(1.0, entry_ask * qty)) * 100.0, 2)
+            gross, chg, slip, net = acc["gross_pnl"], acc["statutory_charges"], acc["additional_slippage"], acc["net_pnl"]
+            net_pct = round((net / max(1.0, ent_eff * qty)) * 100.0, 2)
 
         close_data = {
             "status": "CLOSED",
@@ -641,7 +642,15 @@ class S205UpstoxOrchestrator:
             `15:15 IST` EOD cutoff, and `-₹3,500` Portfolio MTM Daily Kill.
           - NEVER arms a new ratchet from intrabar highs/lows (preserves 100% close-only ratchet integrity).
         """
-        closed_out: List[Dict[str, Any]] = []
+        now_dt = to_ist_naive(now_dt)
+        sm_guard = OptionStreamManager()
+        shadow_closed = self._shadow_collector.on_observed_tick(
+            ikey,
+            quote_payload,
+            quote_lookup_by_ikey=sm_guard.get_option_quote,
+            now_dt=now_dt,
+        )
+        closed_out: List[Dict[str, Any]] = list(shadow_closed)
         open_trades = [
             t for t in (AdvanceDB.get_open_trades() or [])
             if str(t.get("strategy_mode") or "").startswith("V6B_")
@@ -654,7 +663,6 @@ class S205UpstoxOrchestrator:
         if curr_bid <= 0 or curr_ask <= 0:
             return closed_out
 
-        now_dt = to_ist_naive(now_dt)
         today_s = now_dt.strftime("%Y-%m-%d")
         is_eod = now_dt.time() >= dt_time(15, 15)
 
@@ -666,9 +674,12 @@ class S205UpstoxOrchestrator:
             qty = int(trade.get("quantity") or trade.get("lot_size") or 65)
             active_stop = float(trade.get("trailing_stop") or 0.0)
             tgt_pct = float(trade.get("target_pct") or 0.0)
+            ot_leg = str(trade.get("option_type") or "CE").upper()
+            stk_leg = max(50.0, float(trade.get("strike") or 24000.0))
+            t_date = str(trade.get("entry_time") or today_s)[:10]
 
             if btype == BOOK_SHORT_SELL:
-                entry_px = float(trade["entry_bid"])
+                entry_px = max(0.05, float(trade["entry_bid"]))
                 hard_sl_px = round(entry_px * (1.0 + float(trade.get("stop_loss_pct") or 18.0) / 100.0), 2)
                 eff_stop = active_stop if active_stop > 0 else hard_sl_px
                 pk = max(float(trade.get("peak_price") or entry_px), curr_ask)
@@ -690,11 +701,15 @@ class S205UpstoxOrchestrator:
                     if c_res:
                         closed_out.append(c_res)
                 else:
-                    est = calculate_short_option_trade_costs(sell_entry_bid=entry_px, buy_exit_ask=curr_ask, quantity=qty, trade_date=trade.get("entry_time"))
-                    AdvanceDB.update_open_trade(tid, pk, tr, mfe, mae, eff_stop, est["gross_pnl"], est["net_pnl"], est["return_on_premium_pct"])
+                    est = compute_package_accounting(
+                        legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=-qty, entry_price=entry_px, exit_price=max(0.05, curr_ask))],
+                        trade_date=t_date,
+                    )
+                    ret_pct = round((est["net_pnl"] / max(1.0, entry_px * qty)) * 100.0, 2)
+                    AdvanceDB.update_open_trade(tid, pk, tr, mfe, mae, eff_stop, est["gross_pnl"], est["net_pnl"], ret_pct)
                     trade["net_pnl"] = est["net_pnl"]
             else:
-                entry_px = float(trade["entry_ask"])
+                entry_px = max(0.05, float(trade["entry_ask"]))
                 hard_sl_px = round(entry_px * (1.0 - float(trade.get("stop_loss_pct") or 22.0) / 100.0), 2)
                 eff_stop = active_stop if active_stop > 0 else hard_sl_px
                 pk = max(float(trade.get("peak_price") or entry_px), curr_bid)
@@ -714,12 +729,13 @@ class S205UpstoxOrchestrator:
                     if c_res:
                         closed_out.append(c_res)
                 else:
-                    costs = calculate_option_trade_costs(buy_price=entry_px, sell_price=curr_bid, quantity=qty, apply_slippage=True, trade_date=trade.get("entry_time"))
-                    gross = round((curr_bid - entry_px) * qty, 2)
-                    net = round(gross - costs["total_friction"], 2)
-                    net_pct = round((net / max(1.0, entry_px * qty)) * 100.0, 2)
-                    AdvanceDB.update_open_trade(tid, pk, tr, mfe, mae, eff_stop, gross, net, net_pct)
-                    trade["net_pnl"] = net
+                    est = compute_package_accounting(
+                        legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=qty, entry_price=entry_px, exit_price=max(0.05, curr_bid))],
+                        trade_date=t_date,
+                    )
+                    net_pct = round((est["net_pnl"] / max(1.0, entry_px * qty)) * 100.0, 2)
+                    AdvanceDB.update_open_trade(tid, pk, tr, mfe, mae, eff_stop, est["gross_pnl"], est["net_pnl"], net_pct)
+                    trade["net_pnl"] = est["net_pnl"]
 
         # Portfolio-wide sub-second -₹3,500 MTM Daily Kill check
         rem_open = [t for t in (AdvanceDB.get_open_trades() or []) if str(t.get("strategy_mode") or "").startswith("V6B_")]
@@ -853,9 +869,9 @@ class S205UpstoxOrchestrator:
                 "atr_ratio": ctx["atrr"][-1],
                 "synthetic_basis_bps": round((ctx["syn_basis"][-1] / max(1.0, spot_price)) * 10000.0, 2),
                 "calibrated_prob": ml_prob,
-                "expected_net_return": round((ml_prob - 0.45) * 35.0, 2),
+                "expected_net_return": 0.0,
                 "hurdles_passed": 1,
-                "regime_telemetry": regime_ctx,
+                "regime_telemetry": {**regime_ctx, "expectancy_status": "UNVALIDATED_SHADOW_COLLECTION"},
             }
         )
 
@@ -890,6 +906,14 @@ class S205UpstoxOrchestrator:
         )
         if not saved:
             return None
+        if float(cand["tp_pct"] or 0.0) == 0.0:
+            try:
+                conn_tp = sqlite3.connect(get_db_path(), timeout=10.0)
+                with conn_tp:
+                    conn_tp.execute("UPDATE option_sniffer_advance_trades SET target_pct = 0.0 WHERE trade_id = ?;", (tid,))
+                conn_tp.close()
+            except Exception:
+                pass
 
         with self._op_lock:
             self._open_trade_runtime[tid] = {
@@ -966,21 +990,31 @@ class S205UpstoxOrchestrator:
             opt_copy = {eso: dict(bm) for eso, bm in self._opt_bars.items()}
             pd_copy = dict(self._prior_day_stats)
 
-        # Also seed `opt_copy` at latest bar from live quotes if any strike had no tick in `self._opt_bars` yet
+        # Build quote_lookup strictly from live quotes (NEVER seed 1m option bars with cumulative `vtt`!)
         quote_lookup: Dict[Tuple[str, float, str], Dict[str, Any]] = {}
-        latest_bar_key = max(eval_spot.keys()) if eval_spot else cur_min_ts
+        nifty_quotes: List[Dict[str, Any]] = []
         for q in all_quotes:
             if str(q.get("underlying") or "").upper() != "NIFTY":
                 continue
+            nifty_quotes.append(q)
             eso_q = (str(q.get("expiry") or "")[:10], float(q.get("strike") or 0.0), str(q.get("option_type") or "").upper())
             quote_lookup[eso_q] = q
-            if latest_bar_key and float(q.get("ltp") or 0.0) > 0:
-                bm = opt_copy.setdefault(eso_q, {})
-                if latest_bar_key not in bm:
-                    px_q = float(q["ltp"])
-                    bm[latest_bar_key] = (px_q, px_q, px_q, px_q, max(1.0, float(q.get("volume") or 1.0)), float(q.get("oi") or 0.0))
 
-        ctx = build_causal_intraday_context("NIFTY" if False else today_s, eval_spot, vix_copy, hw_copy, opt_copy, front_exp, next_exp, pd_copy)
+        uq_nifty = sm.get_underlying_quote("NIFTY") or {}
+        vq_india = sm.get_underlying_quote("INDIA_VIX") or sm.get_underlying_quote("INDIAVIX") or {}
+        spot_live_px = float(uq_nifty.get("spot_ltp") or 0.0)
+        vix_live_px = float(vq_india.get("spot_ltp") or 0.0)
+        fut_live_px = float((fut_nifty or {}).get("fut_ltp") or 0.0)
+
+        if spot_live_px > 0 and front_exp:
+            self._shadow_collector.record_expiry_fsp_sample(
+                now_dt=now_dt,
+                front_exp=front_exp,
+                spot_ltp=spot_live_px,
+                fut_ltp=fut_live_px,
+            )
+
+        ctx = build_causal_intraday_context(today_s, eval_spot, vix_copy, hw_copy, opt_copy, front_exp, next_exp, pd_copy)
 
         # Determine session risk & cooldown block status
         open_all = [t for t in (AdvanceDB.get_open_trades() or []) if str(t.get("strategy_mode") or "").startswith("V6B_")]
@@ -1001,12 +1035,22 @@ class S205UpstoxOrchestrator:
 
         ist_hhmm = now_dt.hour * 100 + now_dt.minute
         bar_idx = (len(ctx["ts"]) - 1) if ctx else -1
-        exec_cands, readiness_rows = evaluate_s205_bar_and_readiness(
+        _, legacy_readiness_rows = evaluate_s205_bar_and_readiness(
             ctx, bar_idx, self._meta_model, quote_lookup, fut_nifty, lot_size=65, ist_hhmm=ist_hhmm, session_blocked_reason=block_reason
         )
+        # Option A: Retire naked-short / overfitted V6B_* paper execution; preserve 100% of readiness cards as passive diagnostics
+        passive_legacy_rows: List[Dict[str, Any]] = []
+        for lrow in legacy_readiness_rows:
+            rcopy = dict(lrow)
+            if rcopy.get("state") in ("READY_FIRE", "WATCHING"):
+                rcopy["state"] = "SURVEILLANCE_ONLY"
+            rcopy["when_order_fires"] = f"PASSIVE DIAGNOSTIC ONLY (Retired from Paper Ledger) — {rcopy.get('when_order_fires', '')}"
+            passive_legacy_rows.append(rcopy)
 
         opened_ids: List[str] = []
         closed_on_bar: List[Dict[str, Any]] = []
+        is_new_completed_bar = False
+        bar_ts = ""
 
         # 3. Execute ONLY once per newly completed 1m candle (`completed_spot` non-empty & new `bar_ts`)
         if ctx is not None and completed_spot and bar_idx >= 0:
@@ -1015,7 +1059,7 @@ class S205UpstoxOrchestrator:
             if is_new_completed_bar:
                 self._last_evaluated_bar_ts = bar_ts
 
-                # 3A. Manage open `V6B_*` positions at `:00` bar close (invalidation + close-only ratchet update!)
+                # 3A. Manage any historical open `V6B_*` positions at `:00` bar close (with flattened `elif` fix!)
                 for tr in list(open_all):
                     tid = str(tr["trade_id"])
                     eso_t = (str(tr["expiry"])[:10], float(tr["strike"]), str(tr["option_type"]).upper())
@@ -1040,6 +1084,7 @@ class S205UpstoxOrchestrator:
                     is_cred = tr["book_type"] == BOOK_SHORT_SELL
                     ent_px = float(tr["entry_bid"] if is_cred else tr["entry_ask"])
                     fav_now = (((ent_px - close_pts) if is_cred else (close_pts - ent_px)) / max(0.05, ent_px)) * 100.0
+                    ost_t = ctx["opt_stats"].get(eso_t)
 
                     inv_reason = ""
                     ts_m = int(rctx.get("time_stop_mins") or 0)
@@ -1049,10 +1094,15 @@ class S205UpstoxOrchestrator:
                         inv_reason = "MAX_HOLD_TIME_EXIT"
                     elif ts_m > 0 and held_mins >= ts_m and fav_now < float(rctx.get("time_min_gain_pct") or 3.0):
                         inv_reason = "STAGNATION_TIME_STOP"
-                    elif is_cred and float(rctx.get("opt_vwap_mult") or 0.0) > 0 and held_mins >= 5:
-                        ost_t = ctx["opt_stats"].get(eso_t)
-                        if ost_t and ost_t[0][bar_idx] > 0 and close_pts >= ost_t[0][bar_idx] * float(rctx["opt_vwap_mult"]):
-                            inv_reason = "OPT_VWAP_RECLAIM_EXIT"
+                    elif (
+                        is_cred
+                        and float(rctx.get("opt_vwap_mult") or 0.0) > 0
+                        and held_mins >= 5
+                        and ost_t is not None
+                        and ost_t[0][bar_idx] > 0
+                        and close_pts >= ost_t[0][bar_idx] * float(rctx["opt_vwap_mult"])
+                    ):
+                        inv_reason = "OPT_VWAP_RECLAIM_EXIT"
                     elif float(rctx.get("vflip_pts") or 0.0) > 0 and held_mins >= 4 and bar_idx >= 1:
                         vf = float(rctx["vflip_pts"])
                         b_dir = bool(rctx.get("is_bull", True))
@@ -1096,29 +1146,35 @@ class S205UpstoxOrchestrator:
                                 float(tr.get("net_pnl_pct") or 0.0),
                             )
 
-                # 3B. Open new `:00` verified S2_05 entries (respecting book limits & 15m cooldown)
-                if not block_reason and 945 <= ist_hhmm <= 1345:
-                    now_ep = time.time()
-                    open_now = [t for t in (AdvanceDB.get_open_trades() or []) if str(t.get("strategy_mode") or "").startswith("V6B_")]
-                    for cand in exec_cands:
-                        btype = cand["book_type"]
-                        max_b_open, max_b_day = S205_BOOK_LIMITS.get(btype, (1, 1))
-                        b_open_cnt = sum(1 for t in open_now if t.get("book_type") == btype)
-                        b_day_cnt = b_open_cnt + sum(1 for t in closed_today if t.get("book_type") == btype)
-                        if len(open_now) + len(opened_ids) >= S205_MAX_TOTAL_OPEN:
-                            break
-                        if trades_today_cnt + len(opened_ids) >= S205_MAX_TOTAL_TRADES_DAY:
-                            break
-                        if b_open_cnt >= max_b_open or b_day_cnt >= max_b_day:
-                            continue
-                        if now_ep < self._book_cooldown_until.get(btype, 0.0):
-                            continue
-                        q_cand = quote_lookup.get(cand["eso"])
-                        if not q_cand or not q_cand.get("is_valid", True):
-                            continue
-                        new_tid = self._open_s205_paper_trade(cand, q_cand, ctx["c"][bar_idx], fut_nifty, ctx, bar_ts, now_dt)
-                        if new_tid:
-                            opened_ids.append(new_tid)
+        # 3B. Evaluate Canonical `₹2,00,000` Pre-Registered Shadow Books & Persist L5 Chain Telemetry
+        eff_spot_ref = float(ctx["c"][bar_idx]) if (ctx is not None and bar_idx >= 0) else spot_live_px
+        eff_vix_ref = vix_live_px if vix_live_px > 0 else float((self._prior_day_stats or {}).get("last_vix_close") or 14.0)
+        shadow_readiness_rows, shadow_opened, shadow_closed = self._shadow_collector.evaluate_completed_bar(
+            ctx=ctx,
+            bar_idx=bar_idx,
+            quote_lookup=quote_lookup,
+            fut_quote=fut_nifty,
+            india_vix=eff_vix_ref,
+            now_dt=now_dt,
+            execute_new_entries=is_new_completed_bar,
+            allow_network=allow_network,
+        )
+        opened_ids.extend(shadow_opened)
+        closed_on_bar.extend(shadow_closed)
+        readiness_rows = list(shadow_readiness_rows) + passive_legacy_rows
+
+        if is_new_completed_bar and bar_ts and eff_spot_ref > 0:
+            self._shadow_collector.record_1m_chain_and_snapshot(
+                bar_ts=bar_ts,
+                now_dt=now_dt,
+                nifty_quotes=nifty_quotes,
+                spot_ltp=eff_spot_ref,
+                fut_quote=fut_nifty,
+                india_vix=eff_vix_ref,
+                front_exp=front_exp,
+                next_exp=next_exp,
+                readiness_rows=readiness_rows,
+            )
 
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         with self._op_lock:
@@ -1178,7 +1234,7 @@ class S205UpstoxOrchestrator:
         while self._is_running:
             try:
                 now_dt = to_ist_naive()
-                if dt_time(9, 14) <= now_dt.time() <= dt_time(15, 20):
+                if dt_time(9, 14) <= now_dt.time() <= dt_time(15, 31):
                     self.run_surveillance_sweep(now_dt=now_dt, allow_network=True)
                     wait_s = max(0.25, min(2.0, 60.05 - (now_dt.second + now_dt.microsecond / 1e6)))
                 else:
@@ -1305,6 +1361,7 @@ class S205UpstoxOrchestrator:
                 "indicators": self._latest_context_summary,
             },
             "engine_readiness": list(self._latest_engine_readiness),
+            "shadow_telemetry": self._shadow_collector.get_summary(),
         }
 
     @staticmethod
@@ -1373,23 +1430,24 @@ class S205UpstoxOrchestrator:
                 "long_book": {
                     "book_type": BOOK_LONG_BUY,
                     "lots": 1,
-                    "strategy": "V6B_LBASIS_ATM (ORB-30 + Basis >= +6pts + ADX14 >= 22 + Conformal Meta >= 0.56)",
-                    "strike_zone": "ATM Next/Front NIFTY (09:45–12:45 IST, Max 1/day)",
-                    "max_loss_cap": "-22% / ₹2,200 + Sub-Second -₹3,500 Portfolio MTM Kill",
-                    "trailing_engine": "Strictly Close-Only 5-Stage Ratchet (+10% -> +2% Floor up to +65% -> +48% Floor)",
+                    "strategy": "SHADOW_BOOK_B_PAID_FLOW (ORB-30 + V3 Fut Basis >= +5pts + ADX14 >= 22 + Observed L5 Sweep)",
+                    "strike_zone": "ATM Next/Front NIFTY (09:45–12:45 IST, Cash-Paid <= ₹11.5k, Max 1/day)",
+                    "max_loss_cap": "-22% / ₹2,200 + Sub-Second -₹3,500 Portfolio MTM Kill (0 Margin Leverage)",
+                    "trailing_engine": "Strictly Close-Only 5-Stage Ratchet (+12% -> +2% Floor up to +70% -> +52% Floor)",
                 },
                 "short_book": {
                     "book_type": BOOK_SHORT_SELL,
                     "lots": 1,
                     "strategies": [
-                        "V6B_S1_OI (Institutional OI Writer + OptVWAP <= 0.94 + Conformal Meta >= 0.56)",
-                        "V6B_S3_SPIKE (09:15 Spike Exhaustion Trap + Opt <= 0.86*Peak + Conformal Meta >= 0.56)",
-                        "V6B_S4_Z2 (2.1σ VWAP Exhaustion Mean-Reversion + Fixed +20% Decay TP)",
+                        "SHADOW_BOOK_A_SPREAD_150 (Buy-First 150pt Defined-Risk Credit Spread, Net Credit >= 14pts)",
+                        "Physical Wing Bought First on Observed L5 Ask; Emergency Unwind if Short Leg Degrades",
+                        "Legacy V6B_* Naked Shorts Retired to Passive Diagnostic Surveillance Only (Option A)",
                     ],
-                    "max_loss_cap": "+14%..+20% / ₹1,800..₹2,100 + Daily ±450pt Catastrophe Wing",
-                    "trailing_engine": "Strictly Close-Only Decay Ratchet (Updated Exclusively on :00 Completed 1m Candle Close)",
+                    "max_loss_cap": "Structural Max Loss <= ₹10,000 (150pt Wing) + Planned Debit Stop <= ₹3,200",
+                    "trailing_engine": "Strictly Close-Only Spread Decay Ratchet (Updated Exclusively on :00 Completed 1m Candle Close)",
                 },
             },
+            "shadow_telemetry": self._shadow_collector.get_summary(),
             "backend_readiness": self.get_backend_readiness(now_dt=now_dt),
         }
 
@@ -1431,6 +1489,10 @@ class S205UpstoxOrchestrator:
                 duration_sec = int(t.get("holding_duration_seconds") or 0)
 
             sl_pct = float(t.get("stop_loss_pct") or (18.0 if btype == BOOK_SHORT_SELL else 22.0))
+            ot_leg = str(t.get("option_type") or "CE").upper()
+            stk_leg = max(50.0, float(t.get("strike") or 24000.0))
+            t_date = str(t.get("entry_time") or now_dt.isoformat())[:10]
+
             if btype == BOOK_LONG_BUY:
                 peak_price = max(float(t.get("peak_price") or entry_price), current_bid)
                 trough_price = min(float(t.get("trough_price") or entry_price), current_bid)
@@ -1439,11 +1501,13 @@ class S205UpstoxOrchestrator:
                 stop_price = round(entry_price * (1.0 - sl_pct / 100.0), 2)
                 active_trail = float(t.get("trailing_stop") or 0.0)
                 effective_stop = max(stop_price, active_trail) if active_trail > 0 else stop_price
-                cost_info = calculate_option_trade_costs(
-                    buy_price=entry_price, sell_price=current_bid, quantity=quantity, apply_slippage=True
+                acc_mtm = compute_package_accounting(
+                    legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=quantity, entry_price=max(0.05, entry_price), exit_price=max(0.05, current_bid))],
+                    trade_date=t_date,
                 )
-                unrealized_gross = round((current_bid - entry_price) * quantity, 2)
-                unrealized_net = round(unrealized_gross - cost_info["total_friction"], 2)
+                unrealized_gross = acc_mtm["gross_pnl"]
+                unrealized_charges = acc_mtm["total_friction"]
+                unrealized_net = acc_mtm["net_pnl"]
                 unrealized_pct = round(((current_bid - entry_price) / max(0.05, entry_price)) * 100.0, 2)
             else:
                 peak_price = max(float(t.get("peak_price") or entry_price), current_ask)
@@ -1453,12 +1517,14 @@ class S205UpstoxOrchestrator:
                 stop_price = round(entry_price * (1.0 + sl_pct / 100.0), 2)
                 active_trail = float(t.get("trailing_stop") or 0.0)
                 effective_stop = min(stop_price, active_trail) if active_trail > 0 else stop_price
-                cost_info = calculate_short_option_trade_costs(
-                    sell_entry_bid=entry_price, buy_exit_ask=current_ask, quantity=quantity
+                acc_mtm = compute_package_accounting(
+                    legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=-quantity, entry_price=max(0.05, entry_price), exit_price=max(0.05, current_ask))],
+                    trade_date=t_date,
                 )
-                unrealized_gross = cost_info["gross_pnl"]
-                unrealized_net = cost_info["net_pnl"]
-                unrealized_pct = cost_info["return_on_premium_pct"]
+                unrealized_gross = acc_mtm["gross_pnl"]
+                unrealized_charges = acc_mtm["total_friction"]
+                unrealized_net = acc_mtm["net_pnl"]
+                unrealized_pct = round((unrealized_net / max(1.0, entry_price * quantity)) * 100.0, 2)
 
             t.update(
                 {
@@ -1473,7 +1539,7 @@ class S205UpstoxOrchestrator:
                     "stop_loss_price": stop_price,
                     "effective_stop_price": effective_stop,
                     "unrealized_gross_pnl": unrealized_gross,
-                    "unrealized_charges": round(cost_info["total_friction"], 2),
+                    "unrealized_charges": round(unrealized_charges, 2),
                     "unrealized_net_pnl": unrealized_net,
                     "unrealized_pnl_pct": unrealized_pct,
                 }

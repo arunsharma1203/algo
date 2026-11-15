@@ -9,6 +9,12 @@ from app.analytics.option_sniffer_advance_s205.s205_meta_model import (
     S205CausalMetaModel,
     get_s205_meta_model,
 )
+from app.analytics.option_sniffer_advance_s205.s205_shadow_collector import (
+    S205ShadowCollector,
+    init_shadow_telemetry_tables,
+    load_shadow_preregistration,
+    sweep_l5_book_for_qty,
+)
 from app.analytics.option_sniffer_advance_s205.s205_upstox_engine import (
     S205UpstoxOrchestrator,
     get_s205_orchestrator,
@@ -19,6 +25,10 @@ from app.analytics.option_sniffer_advance_s205.s205_upstox_engine import (
 __all__ = [
     "S205CausalMetaModel",
     "get_s205_meta_model",
+    "S205ShadowCollector",
+    "init_shadow_telemetry_tables",
+    "load_shadow_preregistration",
+    "sweep_l5_book_for_qty",
     "S205UpstoxOrchestrator",
     "get_s205_orchestrator",
     "get_s205_orchestrator_if_loaded",

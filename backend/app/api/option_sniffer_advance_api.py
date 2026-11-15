@@ -139,10 +139,27 @@ def get_advance_walkforward_audit(force_refresh: bool = Query(False)) -> Dict[st
             "net_pnl_inr": 67719.0,
             "max_mtm_drawdown_inr": 13560.0,
             "profitable_months": "14/18",
+            "validation_status": "HISTORICAL_EXPOSED_BACKTEST_UNVERIFIED_NO_L1_QUOTES",
+            "active_forward_protocol": "S205_SHADOW_FORWARD_V1",
         }
         return report
     except Exception as e:
         logger.error(f"[OptionSnifferAdvanceAPI] Failed to get walkforward audit: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/shadow-telemetry")
+def get_advance_shadow_telemetry() -> Dict[str, Any]:
+    """
+    Returns read-only telemetry for the pre-registered ₹2,00,000 canonical shadow books
+    (`SHADOW_BOOK_A_SPREAD_150` & `SHADOW_BOOK_B_PAID_FLOW`), L5 chain persistence,
+    post-signal quote-fade horizons, Upstox SPAN margin observations, and expiry FSP windows.
+    """
+    try:
+        orch = _ensure_s205_only_running()
+        return orch._shadow_collector.get_summary()
+    except Exception as e:
+        logger.error(f"[OptionSnifferAdvanceAPI] Failed to get shadow telemetry: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

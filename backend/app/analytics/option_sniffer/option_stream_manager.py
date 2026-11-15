@@ -421,8 +421,10 @@ class OptionStreamManager:
                 quotes = market_level.get("bidAskQuote") or []
                 top_quote = quotes[0] if quotes else {}
 
-                bid_price = float(top_quote.get("bidP") or top_quote.get("bid_price") or 0.0)
-                ask_price = float(top_quote.get("askP") or top_quote.get("ask_price") or 0.0)
+                raw_bid = float(top_quote.get("bidP") or top_quote.get("bid_price") or 0.0)
+                raw_ask = float(top_quote.get("askP") or top_quote.get("ask_price") or 0.0)
+                bid_price = raw_bid
+                ask_price = raw_ask
                 bid_qty = int(top_quote.get("bidQ") or top_quote.get("bid_qty") or 0)
                 ask_qty = int(top_quote.get("askQ") or top_quote.get("ask_qty") or 0)
 
@@ -438,19 +440,54 @@ class OptionStreamManager:
                     l5_ask_qty += aq
                     depth_levels.append({"bid_p": bp, "bid_q": bq, "ask_p": ap, "ask_q": aq})
 
-                # Preserve real order book depth or exact exchange LTP if partial tick omits top-of-book
+                has_raw_top_book = bool(
+                    quotes
+                    and raw_bid > 0.0
+                    and raw_ask >= raw_bid
+                    and bid_qty > 0
+                    and ask_qty > 0
+                )
+                depth_observed_on_tick = bool(
+                    has_raw_top_book and depth_levels and (l5_bid_qty > 0 or l5_ask_qty > 0)
+                )
+
+                # Preserve real order book depth or exact exchange LTP if partial tick omits top-of-book,
+                # while strictly tagging book provenance so shadow execution fails closed on synthetic/carried books.
                 prev_q = self._option_quotes.get(ikey) or {}
+                used_carried = False
+                used_synthetic_ltp = False
                 if bid_price <= 0 and ltp > 0:
                     prev_bid = float(prev_q.get("bid") or 0.0)
-                    bid_price = prev_bid if (prev_bid > 0 and abs(prev_bid - ltp) / ltp <= 0.03) else ltp
+                    if prev_bid > 0 and abs(prev_bid - ltp) / ltp <= 0.03:
+                        bid_price = prev_bid
+                        used_carried = True
+                    else:
+                        bid_price = ltp
+                        used_synthetic_ltp = True
                 if ask_price <= 0 and ltp > 0:
                     prev_ask = float(prev_q.get("ask") or 0.0)
-                    ask_price = prev_ask if (prev_ask >= bid_price and abs(prev_ask - ltp) / ltp <= 0.03) else max(ltp, bid_price)
+                    if prev_ask >= bid_price and abs(prev_ask - ltp) / ltp <= 0.03:
+                        ask_price = prev_ask
+                        used_carried = True
+                    else:
+                        ask_price = max(ltp, bid_price)
+                        used_synthetic_ltp = True
 
                 if not depth_levels and prev_q.get("depth_levels"):
                     depth_levels = list(prev_q["depth_levels"])
                     l5_bid_qty = int(prev_q.get("l5_bid_qty") or bid_qty)
                     l5_ask_qty = int(prev_q.get("l5_ask_qty") or ask_qty)
+                    used_carried = True
+
+                if has_raw_top_book:
+                    book_provenance = "OBSERVED_V3_L5"
+                    l1_book_timestamp_ms = now_ms
+                elif used_carried and not used_synthetic_ltp and int(prev_q.get("l1_book_timestamp_ms") or 0) > 0:
+                    book_provenance = "CARRIED_PREV_TICK"
+                    l1_book_timestamp_ms = int(prev_q.get("l1_book_timestamp_ms") or 0)
+                else:
+                    book_provenance = "SYNTHETIC_LTP_FALLBACK"
+                    l1_book_timestamp_ms = int(prev_q.get("l1_book_timestamp_ms") or 0)
 
                 book_obi_l5 = round((l5_bid_qty - l5_ask_qty) / max(1, l5_bid_qty + l5_ask_qty), 4) if (l5_bid_qty + l5_ask_qty) > 0 else 0.0
                 book_obi_total = round((tbq - tsq) / max(1.0, tbq + tsq), 4) if (tbq + tsq) > 0 else book_obi_l5
@@ -466,6 +503,7 @@ class OptionStreamManager:
                 spread_pct = round((spread / ltp * 100.0), 2) if ltp > 0 else 999.0
 
                 age_ms = 0
+                l1_book_age_ms = max(0, now_ms - l1_book_timestamp_ms) if l1_book_timestamp_ms > 0 else 999999
                 is_fresh = True
 
                 quote_payload = {
@@ -479,6 +517,8 @@ class OptionStreamManager:
                     "ltp": ltp,
                     "bid": bid_price,
                     "ask": ask_price,
+                    "raw_bid": raw_bid,
+                    "raw_ask": raw_ask,
                     "bid_qty": bid_qty,
                     "ask_qty": ask_qty,
                     "spread": spread,
@@ -493,6 +533,12 @@ class OptionStreamManager:
                     "book_obi_l5": book_obi_l5,
                     "book_obi_total": book_obi_total,
                     "depth_levels": depth_levels,
+                    "is_observed_l1_book": has_raw_top_book,
+                    "depth_observed_on_tick": depth_observed_on_tick,
+                    "book_provenance": book_provenance,
+                    "l1_book_timestamp_ms": l1_book_timestamp_ms,
+                    "l1_book_age_ms": l1_book_age_ms,
+                    "local_receipt_ts_ms": now_ms,
                     "iv": iv if iv > 0 else float(prev_q.get("iv") or 0.0),
                     "delta": delta,
                     "gamma": gamma,
@@ -548,7 +594,7 @@ class OptionStreamManager:
             from app.analytics.option_sniffer_advance.advance_db import AdvanceDB as _AdvDBGuard
             legacy_open = [
                 t for t in (_AdvDBGuard.get_open_trades() or [])
-                if not str(t.get("strategy_mode") or "").startswith("V6B_")
+                if not str(t.get("strategy_mode") or "").startswith(("V6B_", "SHADOW_"))
             ]
             if legacy_open:
                 from app.analytics.option_sniffer_advance.advance_paper_execution import AdvancePaperExecution
@@ -827,6 +873,8 @@ class OptionStreamManager:
                 return None
             now_ms = int(time.time() * 1000)
             quote["quote_age_ms"] = max(0, now_ms - quote["timestamp_ms"])
+            l1_ts = int(quote.get("l1_book_timestamp_ms") or 0)
+            quote["l1_book_age_ms"] = max(0, now_ms - l1_ts) if l1_ts > 0 else 999999
             quote["is_valid"] = bool(
                 quote["ltp"] > 0
                 and quote["bid"] > 0

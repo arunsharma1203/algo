@@ -992,6 +992,19 @@ class AdvanceLiveBridge:
                 if self._has_intent_for_advance_trade(adv_tid):
                     continue
 
+                strat_m = str(pdict.get("strategy_mode") or "").strip().upper()
+                rc_raw = str(pdict.get("regime_context_json") or "")
+                if strat_m.startswith("SHADOW_") or '"shadow_only": true' in rc_raw.lower():
+                    # Hard Airgap: Uncertified shadow telemetry rows can NEVER mirror into Upstox live broker orders
+                    skipped_by_mode.append(
+                        {
+                            "trade_id": adv_tid,
+                            "book_type": str(pdict.get("book_type") or BOOK_LONG_BUY),
+                            "reason": "SHADOW_TELEMETRY_AIRGAP_SKIP",
+                        }
+                    )
+                    continue
+
                 book_type = str(pdict.get("book_type") or BOOK_LONG_BUY)
                 entry_ts_norm = str(pdict.get("entry_time") or "").strip().replace("T", " ")[:19]
                 if armed_ts_norm and entry_ts_norm and entry_ts_norm < armed_ts_norm:

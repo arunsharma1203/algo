@@ -233,21 +233,25 @@ class TestOptionSnifferAdvanceS205Upstox(unittest.TestCase):
         )
 
         # 1. Intrabar flash wick down to ₹82.0 (+18% intrabar decay) via AdvancePaperExecution router -> MUST NOT tighten trailing_stop!
-        closed_wick = AdvancePaperExecution.evaluate_subsecond_tick_guard(
-            "NSE_FO|RATCHET_PE",
-            {"bid": 81.8, "ask": 82.0, "ltp": 82.0},
-        )
-        self.assertEqual(len(closed_wick), 0)
-        open_after_wick = AdvanceDB.get_open_trades()[0]
-        self.assertAlmostEqual(float(open_after_wick["trailing_stop"]), 118.0, places=2)
+        with patch(
+            "app.analytics.option_sniffer_advance_s205.s205_upstox_engine.to_ist_naive",
+            side_effect=lambda dt=None: dt if dt is not None else datetime(2026, 11, 13, 10, 2, 10),
+        ):
+            closed_wick = AdvancePaperExecution.evaluate_subsecond_tick_guard(
+                "NSE_FO|RATCHET_PE",
+                {"bid": 81.8, "ask": 82.0, "ltp": 82.0},
+            )
+            self.assertEqual(len(closed_wick), 0)
+            open_after_wick = AdvanceDB.get_open_trades()[0]
+            self.assertAlmostEqual(float(open_after_wick["trailing_stop"]), 118.0, places=2)
 
-        # 2. Intrabar bounce back to ₹98.0 -> STILL NOT stopped out because ratchet was NOT armed intrabar!
-        closed_bounce = AdvancePaperExecution.evaluate_subsecond_tick_guard(
-            "NSE_FO|RATCHET_PE",
-            {"bid": 97.8, "ask": 98.0, "ltp": 98.0},
-        )
-        self.assertEqual(len(closed_bounce), 0)
-        self.assertEqual(len(AdvanceDB.get_open_trades()), 1)
+            # 2. Intrabar bounce back to ₹98.0 -> STILL NOT stopped out because ratchet was NOT armed intrabar!
+            closed_bounce = AdvancePaperExecution.evaluate_subsecond_tick_guard(
+                "NSE_FO|RATCHET_PE",
+                {"bid": 97.8, "ask": 98.0, "ltp": 98.0},
+            )
+            self.assertEqual(len(closed_bounce), 0)
+            self.assertEqual(len(AdvanceDB.get_open_trades()), 1)
 
         # 3. Now simulate a completed `:00` 1m bar closing at ₹85.0 (+15% closed decay >= 12% Stage-1 -> locks +3.5% floor = ₹96.50)!
         new_stop = compute_close_only_ratchet(
@@ -362,9 +366,20 @@ class TestOptionSnifferAdvanceS205Upstox(unittest.TestCase):
         self.assertTrue(st["runtime_parity"]["in_sync"])
 
         br = st["backend_readiness"]
-        self.assertEqual(len(br["engine_readiness"]), 4)
+        self.assertEqual(len(br["engine_readiness"]), 6)
         engine_ids = [r["engine_id"] for r in br["engine_readiness"]]
-        self.assertEqual(engine_ids, ["V6B_S1_OI", "V6B_S3_SPIKE", "V6B_S4_Z2", "V6B_LBASIS_ATM"])
+        self.assertEqual(
+            engine_ids,
+            [
+                "SHADOW_BOOK_B_PAID_FLOW",
+                "SHADOW_BOOK_A_SPREAD_150",
+                "V6B_S1_OI",
+                "V6B_S3_SPIKE",
+                "V6B_S4_Z2",
+                "V6B_LBASIS_ATM",
+            ],
+        )
+        self.assertIn("shadow_telemetry", br)
         for row in br["engine_readiness"]:
             self.assertGreaterEqual(row["gates_total"], 5)
             self.assertTrue(bool(row["when_order_fires"]))

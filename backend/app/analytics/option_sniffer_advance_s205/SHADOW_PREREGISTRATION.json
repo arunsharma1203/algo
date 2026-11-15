@@ -1,0 +1,99 @@
+{
+  "protocol_id": "S205_SHADOW_FORWARD_V1",
+  "protocol_version": "1.0.0",
+  "registered_date": "2026-11-15",
+  "simulation_only": true,
+  "allow_live_bridge_mirroring": false,
+  "naked_short_allowed": false,
+  "legacy_v6b_paper_execution_retired": true,
+  "legacy_meta_model_role": "PASSIVE_DIAGNOSTIC_TELEMETRY_ONLY",
+  "certification_horizon": {
+    "min_forward_trading_sessions": 60,
+    "target_forward_trading_sessions": 90,
+    "min_forward_trades_for_review": 60
+  },
+  "account_envelope": {
+    "initial_capital_inr": 200000.0,
+    "lot_size_nifty": 65,
+    "max_structural_loss_per_package_inr": 10000.0,
+    "max_daily_mtm_kill_inr": -3500.0,
+    "max_open_packages_total": 2,
+    "max_total_trades_per_day": 2,
+    "max_capital_reserved_inr": 160000.0,
+    "cooldown_seconds_after_exit": 900
+  },
+  "quote_hygiene": {
+    "require_observed_l1_book": true,
+    "require_depth_observed_on_tick": true,
+    "max_l1_book_age_ms": 1500,
+    "max_primary_spread_pct": 2.5,
+    "max_wing_spread_pct": 6.0,
+    "max_wing_spread_pts": 2.5,
+    "min_l5_side_qty": 65,
+    "adverse_latency_ticks": 1,
+    "buy_first_leg2_timeout_ms": 3000
+  },
+  "shadow_books": {
+    "SHADOW_BOOK_A_SPREAD_150": {
+      "book_id": "SHADOW_BOOK_A_SPREAD_150",
+      "ui_book_type": "SHORT_BOOK_SELL",
+      "label": "Shadow Book A: 150pt Buy-First Credit Spread",
+      "action_badge": "150PT SPREAD",
+      "window_start_hhmm": 945,
+      "window_end_hhmm": 1315,
+      "window_label": "09:45–13:15",
+      "min_dte": 1,
+      "max_dte": 10,
+      "short_otm_offset_pts": 100.0,
+      "spread_width_pts": 150.0,
+      "min_net_credit_pts": 14.0,
+      "min_adx14": 18.0,
+      "max_atr_ratio": 1.35,
+      "max_upstox_margin_inr": 110000.0,
+      "fallback_unverified_margin_reserve_inr": 55000.0,
+      "stop_debit_mult": 1.65,
+      "max_planned_stop_loss_inr": 3200.0,
+      "decay_target_capture_pct": 70.0,
+      "ratchet_stages": [
+        [35.0, 15.0],
+        [55.0, 35.0]
+      ],
+      "vflip_pts": 18.0,
+      "eod_squareoff_hhmm": 1515,
+      "max_open": 1,
+      "max_trades_day": 1
+    },
+    "SHADOW_BOOK_B_PAID_FLOW": {
+      "book_id": "SHADOW_BOOK_B_PAID_FLOW",
+      "ui_book_type": "LONG_BOOK_BUY",
+      "label": "Shadow Book B: Paid Convexity Flow (1-Lot)",
+      "action_badge": "1L PAID BUY",
+      "window_start_hhmm": 945,
+      "window_end_hhmm": 1245,
+      "window_label": "09:45–12:45",
+      "min_dte": 2,
+      "max_dte": 12,
+      "strike_offset_pts": 0.0,
+      "max_entry_outlay_inr": 11500.0,
+      "min_real_basis_abs_pts": 5.0,
+      "min_adx14": 22.0,
+      "min_er20": 0.28,
+      "min_l5_obi": 0.05,
+      "hard_sl_pct": 22.0,
+      "max_planned_stop_loss_inr": 2200.0,
+      "stagnation_mins": 45,
+      "stagnation_min_gain_pct": 3.0,
+      "ratchet_stages": [
+        [12.0, 2.0],
+        [22.0, 10.0],
+        [35.0, 22.0],
+        [50.0, 35.0],
+        [70.0, 52.0]
+      ],
+      "vflip_pts": 18.0,
+      "eod_squareoff_hhmm": 1515,
+      "max_open": 1,
+      "max_trades_day": 1
+    }
+  }
+}
