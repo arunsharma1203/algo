@@ -187,6 +187,11 @@ def get_or_create_scheduler() -> BackgroundScheduler:
                         ConsensusGameEngine.sync_and_dispatch_arena_alerts(session_id="default_arena_session")
                     except Exception as alert_err:
                         logger.warning(f"[ConsensusDaemon] Game alert dispatch note: {alert_err}")
+                    try:
+                        from app.analytics.consensus_v3.orchestrator import get_consensus_v3_orchestrator
+                        get_consensus_v3_orchestrator().bridge.reconcile_orders_and_positions()
+                    except Exception as v3_rec_err:
+                        logger.debug(f"[ConsensusDaemon] V3 pending/position reconcile note: {v3_rec_err}")
 
                 _SCHEDULER_INSTANCE.add_job(
                     _reconcile_consensus_trades_daemon,
@@ -620,6 +625,9 @@ app.include_router(consensus_router, prefix="/api", tags=["consensus"])
 
 from app.api.consensus_game import router as consensus_game_router
 app.include_router(consensus_game_router, prefix="/api", tags=["consensus_game"])
+
+from app.api.consensus_v3_api import router as consensus_v3_router
+app.include_router(consensus_v3_router)
 
 from app.api.option_sniffer_api import router as option_sniffer_router
 app.include_router(option_sniffer_router)

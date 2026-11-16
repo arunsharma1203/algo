@@ -89,23 +89,31 @@ def check_and_recover_missed_anchors(force_run: bool = False, db_path: str = Non
                         f"[MarketDaemon] MISSED ANCHOR DETECTED: {anchor_name} was missed ({elapsed_m}m ago). "
                         f"Executing single safe recovery scan."
                     )
-                    from app.analytics.consensus_scanner import ConsensusScanner
-                    from app.analytics.consensus_tracker import ConsensusTracker
-                    import asyncio
+                    import os as _os
+                    from app.analytics.consensus_v3.orchestrator import get_consensus_v3_orchestrator
 
                     recov_scan_id = f"recovery_{anchor_name.replace(':', '')}_{today_str}_{int(time.time())}"
-                    c_scan_res = asyncio.run(
-                        ConsensusScanner.run_consensus_scan(strategy="INTRADAY", universe="ALL_DATABASE_STOCKS", top_k=10)
-                    )
-                    c_trades = c_scan_res.get("unanimous_trades") or c_scan_res.get("consensus_trades", [])
-                    saved_count = 0
-                    for tr in c_trades:
-                        tr_ts = tr.get("decision_timestamp") or tr.get("timestamp")
-                        saved, _ = ConsensusTracker.save_consensus_trade(
-                            tr, strategy="INTRADAY", source="ANCHOR_RECOVERY", decision_timestamp=tr_ts
+                    v3_recov = get_consensus_v3_orchestrator().run_15m_sniffer_sweep(reserve_arena_orders=True)
+                    c_trades = list(v3_recov.get("book2_intraday_sniffer", {}).get("approved_signals", []))
+                    saved_count = len(v3_recov.get("reserved_orders_created", []))
+
+                    if _os.environ.get("LEGACY_ALPHA158_DAEMON_ENABLED") == "1":
+                        from app.analytics.consensus_scanner import ConsensusScanner
+                        from app.analytics.consensus_tracker import ConsensusTracker
+                        import asyncio
+
+                        c_scan_res = asyncio.run(
+                            ConsensusScanner.run_consensus_scan(strategy="INTRADAY", universe="ALL_DATABASE_STOCKS", top_k=10)
                         )
-                        if saved:
-                            saved_count += 1
+                        leg_trades = c_scan_res.get("unanimous_trades") or c_scan_res.get("consensus_trades", [])
+                        c_trades.extend(leg_trades)
+                        for tr in leg_trades:
+                            tr_ts = tr.get("decision_timestamp") or tr.get("timestamp")
+                            saved, _ = ConsensusTracker.save_consensus_trade(
+                                tr, strategy="INTRADAY", source="ANCHOR_RECOVERY", decision_timestamp=tr_ts
+                            )
+                            if saved:
+                                saved_count += 1
 
                     try:
                         from app.analytics.consensus_game_engine import ConsensusGameEngine
@@ -355,33 +363,42 @@ def run_15m_market_tick_pipeline(force_run: bool = False) -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"[MarketDaemon] Legacy trade reconciliation note: {e}")
 
-    # 7. Consensus Evaluation & Telegram Dispatch Phase
+    # 7. Consensus Evaluation & Telegram Dispatch Phase (Upgraded to <0.5s Non-Blocking Consensus V3 Sniffer)
     consensus_signals_count = 0
     telegram_alerts_sent = 0
     try:
-        from app.analytics.consensus_scanner import ConsensusScanner
-        from app.analytics.consensus_tracker import ConsensusTracker
-        import asyncio
-        import concurrent.futures
+        import os as _os
+        from app.analytics.consensus_v3.orchestrator import get_consensus_v3_orchestrator
 
-        def _run_consensus_scan():
-            return asyncio.run(
-                ConsensusScanner.run_consensus_scan(strategy="INTRADAY", universe="ALL_DATABASE_STOCKS", top_k=10)
-            )
+        v3_res = get_consensus_v3_orchestrator().run_15m_sniffer_sweep(reserve_arena_orders=True)
+        v3_approved = v3_res.get("book2_intraday_sniffer", {}).get("approved_signals", [])
+        consensus_signals_count = len(v3_approved)
 
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            c_scan_res = pool.submit(_run_consensus_scan).result()
+        # Legacy 507-stock Alpha158 in-process scan (73s GIL stall) disabled in background daemon by default;
+        # manual UI scans remain available on Classic Scanner tab, or set LEGACY_ALPHA158_DAEMON_ENABLED=1 to opt in.
+        if _os.environ.get("LEGACY_ALPHA158_DAEMON_ENABLED") == "1":
+            from app.analytics.consensus_scanner import ConsensusScanner
+            from app.analytics.consensus_tracker import ConsensusTracker
+            import asyncio
+            import concurrent.futures
 
-        consensus_trades = c_scan_res.get("unanimous_trades") or c_scan_res.get("consensus_trades", [])
-        consensus_signals_count = len(consensus_trades)
+            def _run_consensus_scan():
+                return asyncio.run(
+                    ConsensusScanner.run_consensus_scan(strategy="INTRADAY", universe="ALL_DATABASE_STOCKS", top_k=10)
+                )
 
-        for c_trade in consensus_trades:
-            c_ts = c_trade.get("decision_timestamp") or c_trade.get("timestamp")
-            saved, reason = ConsensusTracker.save_consensus_trade(
-                c_trade, strategy="INTRADAY", source="CONSENSUS_DAEMON", decision_timestamp=c_ts
-            )
-            # Raw scan trades are recorded in consensus_trade_history for live tracking.
-            # Telegram notifications are strictly handled below via Arena slot entries (so no alerts outside the 5 game slots).
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                c_scan_res = pool.submit(_run_consensus_scan).result()
+
+            consensus_trades = c_scan_res.get("unanimous_trades") or c_scan_res.get("consensus_trades", [])
+            consensus_signals_count += len(consensus_trades)
+            for c_trade in consensus_trades:
+                c_ts = c_trade.get("decision_timestamp") or c_trade.get("timestamp")
+                ConsensusTracker.save_consensus_trade(
+                    c_trade, strategy="INTRADAY", source="CONSENSUS_DAEMON", decision_timestamp=c_ts
+                )
+        else:
+            c_scan_res = {"scan_id": v3_res.get("scan_id")}
 
         # Record anchor milestone completion in ledger if this tick falls on an anchor
         try:

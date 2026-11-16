@@ -1,0 +1,27 @@
+{
+  "model_id": "qlib_v3_book1_20d_cs_ridge",
+  "declared_horizon": "20_TRADING_DAYS_OPEN_TO_OPEN",
+  "features": [
+    "INTERCEPT",
+    "Z_MOM_12_1",
+    "Z_MOM_6_1",
+    "Z_SHARPE_12_1",
+    "Z_NEAR_52W_HIGH",
+    "Z_PULLBACK_20D"
+  ],
+  "l2_penalty": 3000.0,
+  "weights": [
+    0.001827,
+    0.184975,
+    0.058569,
+    0.125757,
+    -0.249544,
+    -0.110301
+  ],
+  "ols_intercept_pct": 0.0,
+  "ols_slope": 1.077765,
+  "train_samples": 62499,
+  "max_train_date": "2026-09-23",
+  "artifact_sha256": "3d5b094d06a3877003c24b03fd45d66c1ef646b671db080f2033333afda7f20c",
+  "trained_at": "2026-11-16T18:09:56.969240"
+}

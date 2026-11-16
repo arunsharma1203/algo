@@ -45,17 +45,24 @@ import {
 } from 'recharts';
 import { API_BASE } from '../services/api';
 import ConsensusGameArena from '../components/ConsensusGameArena';
+import ConsensusV3Cockpit from './consensusArena/ConsensusV3Cockpit';
 
 export default function ConsensusScanner() {
   // Navigation
   const [mainTab, setMainTab] = useState(() => {
     if (typeof window !== 'undefined') {
-      if (window.location.hash.includes('arena') || window.location.pathname.includes('arena') || window.location.pathname.includes('game')) {
+      if (window.location.hash.includes('classic')) {
+        return 'scanner';
+      }
+      if (window.location.hash.includes('comparison')) {
+        return 'comparison';
+      }
+      if (window.location.hash.includes('arena-classic') || window.location.pathname.includes('game')) {
         return 'arena';
       }
     }
-    return 'scanner';
-  }); // 'scanner' | 'comparison' | 'arena'
+    return 'v3_cockpit';
+  }); // 'v3_cockpit' | 'scanner' | 'comparison' | 'arena'
 
   // Scanner State with LocalStorage Persistence
   const [strategy, setStrategy] = useState(() => localStorage.getItem('consensus_strategy') || 'INTRADAY');
@@ -466,11 +473,26 @@ export default function ConsensusScanner() {
       </div>
 
       {/* ── TOP VIEW NAVIGATION TABS ───────────────────────────────────────── */}
-      <div className="flex items-center space-x-2 bg-slate-100 p-1.5 rounded-2xl w-fit">
+      <div className="flex flex-wrap items-center gap-2 bg-slate-100 p-1.5 rounded-2xl w-fit">
+        <button
+          type="button"
+          onClick={() => setMainTab('v3_cockpit')}
+          className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+            mainTab === 'v3_cockpit'
+              ? 'bg-slate-900 text-emerald-300 shadow-md'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <Zap size={15} className={mainTab === 'v3_cockpit' ? 'text-emerald-400' : 'text-emerald-600'} />
+          <span>6-Layer Sniffer &amp; Funded Arena (V3)</span>
+          <span className="px-1.5 py-0.5 bg-emerald-500/20 text-emerald-700 border border-emerald-500/30 rounded-full text-[10px] font-black">
+            NEW
+          </span>
+        </button>
         <button
           type="button"
           onClick={() => setMainTab('scanner')}
-          className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all ${
+          className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
             mainTab === 'scanner'
               ? 'bg-white text-emerald-800 shadow-sm'
               : 'text-slate-600 hover:text-slate-900'
@@ -482,7 +504,7 @@ export default function ConsensusScanner() {
         <button
           type="button"
           onClick={() => setMainTab('arena')}
-          className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all ${
+          className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
             mainTab === 'arena'
               ? 'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 shadow-md font-black'
               : 'text-slate-600 hover:text-slate-900'
@@ -500,7 +522,7 @@ export default function ConsensusScanner() {
             setMainTab('comparison');
             fetchComparisonData(comparisonDays, comparisonFilterMode);
           }}
-          className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all ${
+          className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
             mainTab === 'comparison'
               ? 'bg-white text-indigo-900 shadow-sm'
               : 'text-slate-600 hover:text-slate-900'
@@ -515,6 +537,11 @@ export default function ConsensusScanner() {
           )}
         </button>
       </div>
+
+      {/* ==================================================================== */}
+      {/* ── VIEW 0: 6-LAYER SNIFFER & FUNDED-CASH ARENA COCKPIT (V3) ──────── */}
+      {/* ==================================================================== */}
+      {mainTab === 'v3_cockpit' && <ConsensusV3Cockpit />}
 
       {/* ==================================================================== */}
       {/* ── VIEW 1: LIVE SCANNER ─────────────────────────────────────────── */}

@@ -1,0 +1,33 @@
+{
+  "model_id": "qlib_v3_book2_15m_cs_ridge",
+  "declared_horizon": "ENTRY_TO_1515_IST_SQUAREOFF",
+  "features": [
+    "INTERCEPT",
+    "Z_RET_OPEN",
+    "Z_VWAP_ATR",
+    "Z_GAP_PCT",
+    "Z_RET_3D_PRIOR",
+    "Z_RET_10D_PRIOR",
+    "Z_CLV_CENTERED",
+    "Z_SIGNED_LOG_RVOL",
+    "Z_ADR"
+  ],
+  "l2_penalty": 1500.0,
+  "weights": [
+    -0.002313,
+    -0.031551,
+    0.041587,
+    -0.016501,
+    -0.022521,
+    -0.022909,
+    -0.014831,
+    0.008564,
+    -0.046115
+  ],
+  "ols_intercept_pct": 8.2e-05,
+  "ols_slope": 1.022915,
+  "train_samples": 83291,
+  "max_train_date": "2026-11-13",
+  "artifact_sha256": "f28c96865acfa8acecf1c7160fa1e632e398d23068f0e2d881ecb1207d8d7f24",
+  "trained_at": "2026-11-16T18:10:03.432123"
+}
