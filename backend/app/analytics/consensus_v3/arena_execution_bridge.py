@@ -1179,13 +1179,43 @@ class ConsensusArenaExecutionBridge:
                     quotes = {}
             quotes = quotes or {}
 
-            def _latest_px_and_bar(sym: str, after_ts: str, prod_type: str = "MIS"):
+            completed_15m_cutoff = (ts - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+
+            def _latest_px_and_bar(sym: str, after_ts: str, prod_type: str = "MIS", details_json: Optional[str] = None):
                 q = quotes.get(sym) or quotes.get(sym.replace(".NS", ""))
                 ltp = float(q["price"]) if (q and isinstance(q.get("price"), (int, float)) and q["price"] > 0) else None
-                brow = conn.execute(
-                    "SELECT open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '15m' AND date > ? AND date <= ? ORDER BY date DESC LIMIT 1",
-                    (sym, after_ts, now_s),
-                ).fetchone()
+
+                sig_bar_dt = None
+                if details_json:
+                    try:
+                        sig_bar_dt = (json.loads(details_json) or {}).get("bar_dt")
+                    except Exception:
+                        sig_bar_dt = None
+
+                brow = None
+                if sig_bar_dt:
+                    # Strictly post-signal completed 15m bar (`bar_start > signal_bar_dt` AND `bar_start + 15m <= now_dt`)
+                    brow = conn.execute(
+                        "SELECT open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '15m' AND date > ? AND date <= ? ORDER BY date DESC LIMIT 1",
+                        (sym, str(sig_bar_dt)[:19], completed_15m_cutoff),
+                    ).fetchone()
+                else:
+                    min_bar_s = str(after_ts)[:19]
+                    use_gte = False
+                    try:
+                        adt = datetime.strptime(min_bar_s, "%Y-%m-%d %H:%M:%S")
+                        slot_dt = adt.replace(minute=(adt.minute // 15) * 15, second=0, microsecond=0)
+                        if 0.0 <= (adt - slot_dt).total_seconds() <= 90.0:
+                            min_bar_s = slot_dt.strftime("%Y-%m-%d %H:%M:%S")
+                            use_gte = True
+                    except Exception:
+                        pass
+                    op = ">=" if use_gte else ">"
+                    brow = conn.execute(
+                        f"SELECT open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '15m' AND date {op} ? AND date <= ? ORDER BY date DESC LIMIT 1",
+                        (sym, min_bar_s, completed_15m_cutoff),
+                    ).fetchone()
+
                 if brow is None and prod_type == "CNC":
                     brow = conn.execute(
                         "SELECT open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '1d' AND substr(date,1,10) > ? AND substr(date,1,10) <= ? ORDER BY date DESC LIMIT 1",
@@ -1199,7 +1229,7 @@ class ConsensusArenaExecutionBridge:
                 sym = pr["ticker"]
                 lim = float(pr["limit_price"])
                 sdir = pr["direction"]
-                ltp, brow = _latest_px_and_bar(sym, pr["created_at"], pr["product_type"])
+                ltp, brow = _latest_px_and_bar(sym, pr["created_at"], pr["product_type"], pr["details_json"])
 
                 is_filled = False
                 post_only_violated = False

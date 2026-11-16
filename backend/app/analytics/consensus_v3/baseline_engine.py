@@ -351,6 +351,21 @@ class BaselineEngine:
             return {"as_of_ts": as_of_ts, "bar_hm": None, "items": [], "market_context": {}}
 
         session_date = valid_days[-1]
+        if as_of_ts is None:
+            now_live = datetime.now()
+            hm_live = now_live.strftime("%H:%M")
+            today_live = now_live.strftime("%Y-%m-%d")
+            # Fail-closed during active weekday market hours (09:15–15:30 IST) if today's 15m bars haven't reached >=60 F&O stocks yet
+            if now_live.weekday() < 5 and "09:15" <= hm_live <= "15:30" and session_date != today_live:
+                return {
+                    "as_of_ts": None,
+                    "session_date": today_live,
+                    "bar_hm": None,
+                    "is_sniffer_window": False,
+                    "items": [],
+                    "market_context": {"regime": "LIVE_FEED_WARMUP_FAIL_CLOSED", "fno_mkt_return_pct": 0.0, "fno_advance_ratio": 0.50},
+                }
+
         prior_days = [d for d in valid_days[:-1] if sum(1 for s in fno_set if len(bars_by_td.get((s, d), [])) >= 15) >= 60][-15:]
         if len(prior_days) < 8:
             prior_days = valid_days[:-1][-15:]

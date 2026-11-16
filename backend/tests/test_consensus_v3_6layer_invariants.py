@@ -266,6 +266,66 @@ class TestConsensusV3SixLayerInvariants(unittest.TestCase):
             self.assertEqual(rb2["status"], "REBALANCED")
             self.assertEqual(rb2["closed"], 2)
 
+    def test_realtime_slot_floor_wick_fill_and_uncompleted_bar_causality(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = os.path.join(tmp, "rt_slot.db")
+            conn = sqlite3.connect(db_p)
+            conn.execute("CREATE TABLE fno_universe_cache (symbol TEXT PRIMARY KEY);")
+            conn.execute("CREATE TABLE ohlcv (ticker TEXT, date TEXT, timeframe TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL);")
+            conn.execute("INSERT INTO fno_universe_cache VALUES ('WICK01'), ('GAP01');")
+            # Pre-seed the 11:00:00 (11:00–11:15) 15m bar:
+            # WICK01 opens at 498 (< 500 limit, post-only valid) and wicks to 501.0 (>= 500 * 1.0003)
+            # GAP01 opens at 502 (>= 500 limit -> post-only gap violation!)
+            conn.execute("INSERT INTO ohlcv VALUES ('WICK01.NS', '2026-10-19 11:00:00', '15m', 498.0, 501.0, 495.0, 497.0, 200000);")
+            conn.execute("INSERT INTO ohlcv VALUES ('GAP01.NS',  '2026-10-19 11:00:00', '15m', 502.0, 504.0, 496.0, 498.0, 200000);")
+            conn.commit()
+            conn.close()
+
+            bridge = ConsensusArenaExecutionBridge(db_path=db_p, session_id="rt_slot_test")
+            bridge.configure_arena_capital(400000.0, "BOOK2_INTRADAY_MIS_SNIFFER", reset_ledger=True)
+
+            sigs = [
+                {
+                    "book": "BOOK2_INTRADAY_MIS_SNIFFER",
+                    "ticker": "WICK01.NS",
+                    "symbol": "WICK01",
+                    "instrument_key": "NSE_EQ|INE000009001",
+                    "bar_dt": "2026-10-19 10:45:00",
+                    "direction": "SELL",
+                    "signal_close_px": 498.0,
+                    "limit_entry_px": 500.0,
+                    "stop_loss_px": 508.0,
+                    "scheduled_exit_hm": "15:15",
+                    "liq_1pct_bar_inr": 500000.0,
+                },
+                {
+                    "book": "BOOK2_INTRADAY_MIS_SNIFFER",
+                    "ticker": "GAP01.NS",
+                    "symbol": "GAP01",
+                    "instrument_key": "NSE_EQ|INE000009002",
+                    "bar_dt": "2026-10-19 10:45:00",
+                    "direction": "SELL",
+                    "signal_close_px": 498.0,
+                    "limit_entry_px": 500.0,
+                    "stop_loss_px": 508.0,
+                    "scheduled_exit_hm": "15:15",
+                    "liq_1pct_bar_inr": 500000.0,
+                },
+            ]
+            # Created at 11:00:02 (2s after 10:45–11:00 signal bar closed)
+            created = bridge.reserve_book2_pending_limit_orders(sigs, now_dt=datetime(2026, 10, 19, 11, 0, 2), allow_broker_probe=False)
+            self.assertEqual(len(created), 2)
+
+            # 1. At 11:05:00, the 11:00–11:15 bar is NOT completed yet -> MUST NOT leak pre-seeded 11:00 bar!
+            rec_early = bridge.reconcile_orders_and_positions(live_quotes={}, now_dt=datetime(2026, 10, 19, 11, 5, 0))
+            self.assertEqual(rec_early["filled"], 0)
+            self.assertEqual(rec_early["expired"], 0)
+
+            # 2. At 11:15:01 (bar 11:00–11:15 completed, 1s before 11:15:02 TIF), WICK01 fills and GAP01 cancels post-only!
+            rec_done = bridge.reconcile_orders_and_positions(live_quotes={}, now_dt=datetime(2026, 10, 19, 11, 15, 1))
+            self.assertEqual(rec_done["filled"], 1)
+            self.assertEqual(rec_done["expired"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

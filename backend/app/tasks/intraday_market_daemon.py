@@ -319,6 +319,20 @@ def run_15m_market_tick_pipeline(force_run: bool = False) -> Dict[str, Any]:
         "REST quota reserved for live execution quotes and gap recovery."
     )
 
+    # 3b. Priority Low-Latency Consensus V3 Sniffer & Arena Execution (~1.1s — runs BEFORE 30s Qlib Binary Sync!)
+    consensus_signals_count = 0
+    telegram_alerts_sent = 0
+    v3_scan_id = None
+    try:
+        from app.analytics.consensus_v3.orchestrator import get_consensus_v3_orchestrator
+
+        v3_res = get_consensus_v3_orchestrator().run_15m_sniffer_sweep(reserve_arena_orders=True)
+        v3_scan_id = v3_res.get("scan_id")
+        v3_approved = v3_res.get("book2_intraday_sniffer", {}).get("approved_signals", [])
+        consensus_signals_count = len(v3_approved)
+    except Exception as v3_err:
+        logger.warning(f"[MarketDaemon] Priority Consensus V3 sweep note: {v3_err}")
+
     # 4. Qlib Binary Sync Phase (sync full universe with completed 15m bars)
     qlib_synced = False
     try:
@@ -363,16 +377,9 @@ def run_15m_market_tick_pipeline(force_run: bool = False) -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"[MarketDaemon] Legacy trade reconciliation note: {e}")
 
-    # 7. Consensus Evaluation & Telegram Dispatch Phase (Upgraded to <0.5s Non-Blocking Consensus V3 Sniffer)
-    consensus_signals_count = 0
-    telegram_alerts_sent = 0
+    # 7. Anchor Ledger, Recovery & Optional Legacy Alpha158 Dispatch Phase
     try:
         import os as _os
-        from app.analytics.consensus_v3.orchestrator import get_consensus_v3_orchestrator
-
-        v3_res = get_consensus_v3_orchestrator().run_15m_sniffer_sweep(reserve_arena_orders=True)
-        v3_approved = v3_res.get("book2_intraday_sniffer", {}).get("approved_signals", [])
-        consensus_signals_count = len(v3_approved)
 
         # Legacy 507-stock Alpha158 in-process scan (73s GIL stall) disabled in background daemon by default;
         # manual UI scans remain available on Classic Scanner tab, or set LEGACY_ALPHA158_DAEMON_ENABLED=1 to opt in.
@@ -398,7 +405,7 @@ def run_15m_market_tick_pipeline(force_run: bool = False) -> Dict[str, Any]:
                     c_trade, strategy="INTRADAY", source="CONSENSUS_DAEMON", decision_timestamp=c_ts
                 )
         else:
-            c_scan_res = {"scan_id": v3_res.get("scan_id")}
+            c_scan_res = {"scan_id": v3_scan_id}
 
         # Record anchor milestone completion in ledger if this tick falls on an anchor
         try:
