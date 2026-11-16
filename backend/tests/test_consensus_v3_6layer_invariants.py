@@ -190,6 +190,82 @@ class TestConsensusV3SixLayerInvariants(unittest.TestCase):
                 c1.close()
                 c2.close()
 
+    def test_custom_wallet_capital_mis_buying_power_and_book1_swing_rebalance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = os.path.join(tmp, "wallet_b1.db")
+            _seed_synthetic_fno_db(db_p)
+            bridge = ConsensusArenaExecutionBridge(db_path=db_p, session_id="wallet_test")
+
+            # 1. Reconfigure from ₹4,00,000 down to ₹50,000 with 3.0x MIS buying power
+            acct = bridge.configure_arena_capital(
+                funded_capital_inr=50000.0,
+                execution_mode="DUAL_FUNDED_CASH_ARENA",
+                margin_mode="MIS_3X",
+                max_risk_per_trade_pct=0.50,
+                reset_ledger=True,
+            )
+            self.assertEqual(acct["funded_capital_inr"], 50000.0)
+            self.assertEqual(acct["intraday_mis_leverage"], 3.0)
+            self.assertEqual(acct["book1_slots"]["max"], 2)
+            self.assertEqual(acct["intraday_mis_buying_power_inr"], 150000.0)
+
+            # 2. Book-2 order with MIS_3X: offline margin must tag UNVERIFIED_HEURISTIC_NOT_BROKER_SPAN & cap SL risk <= ₹250 (0.50% of ₹50k)
+            sigs = [
+                {
+                    "book": "BOOK2_INTRADAY_MIS_SNIFFER",
+                    "ticker": "FNO01.NS",
+                    "symbol": "FNO01",
+                    "instrument_key": "NSE_EQ|INE000001001",
+                    "direction": "SELL",
+                    "signal_close_px": 500.0,
+                    "limit_entry_px": 500.0,
+                    "stop_loss_px": 510.0,  # ₹10/share stop distance -> ₹250 risk budget caps at 25 shares!
+                    "scheduled_exit_hm": "15:15",
+                    "liq_1pct_bar_inr": 500000.0,
+                    "telemetry": {"atr_pct": 2.0},
+                }
+            ]
+            created = bridge.reserve_book2_pending_limit_orders(
+                sigs, now_dt=datetime(2026, 10, 19, 10, 0, 0), allow_broker_probe=False
+            )
+            self.assertEqual(len(created), 1)
+            self.assertEqual(created[0]["shares"], 25)
+            self.assertEqual(created[0]["margin_source"], "UNVERIFIED_HEURISTIC_NOT_BROKER_SPAN")
+            self.assertLess(created[0]["reserved_cash_inr"], created[0]["exposure_notional_inr"])
+            acct_after = bridge.get_arena_accounting(now_dt=datetime(2026, 10, 19, 10, 1, 0))
+            self.assertTrue(acct_after["cash_conservation_invariant_ok"])
+
+            # 3. Book-1 20d Scheduled CNC Swing Rebalance: open 2 whole-share CNC slots, then step down to 0 in Bear Shield
+            snap_bull = {
+                "as_of_date": "2026-10-19",
+                "candidates": [
+                    {"ticker": "FNO02.NS", "close": 1000.0, "sma_alignment_ok": True, "qlib_pct_rank": 0.95},
+                    {"ticker": "FNO03.NS", "close": 1250.0, "sma_alignment_ok": True, "qlib_pct_rank": 0.91},
+                ],
+            }
+            arb_bull = {
+                "as_of_date": "2026-10-19",
+                "macro_shield": {"regime": "BULL_FULL_DEPLOYMENT", "target_slots": 8},
+                "approved_rebalance_leaders": [
+                    {"ticker": "FNO02.NS", "symbol": "FNO02", "instrument_key": "NSE_EQ|INE000001002", "close_px": 1000.0},
+                    {"ticker": "FNO03.NS", "symbol": "FNO03", "instrument_key": "NSE_EQ|INE000001003", "close_px": 1250.0},
+                ],
+            }
+            rb1 = bridge.execute_book1_scheduled_rebalance(snap_bull, arb_bull, force=True, now_dt=datetime(2026, 10, 19, 10, 5, 0))
+            self.assertEqual(rb1["status"], "REBALANCED")
+            self.assertEqual(rb1["opened"], 2)
+            self.assertTrue(bridge.get_arena_accounting(now_dt=datetime(2026, 10, 19, 10, 6, 0))["cash_conservation_invariant_ok"])
+
+            # Macro Bear Shield triggers immediate protective step-down to 0 CNC slots even before 20 days!
+            arb_bear = {
+                "as_of_date": "2026-10-20",
+                "macro_shield": {"regime": "BEAR_CASH_SHIELD", "target_slots": 0},
+                "approved_rebalance_leaders": [],
+            }
+            rb2 = bridge.execute_book1_scheduled_rebalance(snap_bull, arb_bear, force=False, now_dt=datetime(2026, 10, 20, 9, 20, 0))
+            self.assertEqual(rb2["status"], "REBALANCED")
+            self.assertEqual(rb2["closed"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

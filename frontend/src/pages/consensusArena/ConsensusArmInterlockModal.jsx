@@ -29,6 +29,12 @@ export default function ConsensusArmInterlockModal({
   armPinInput,
   onChangePinInput,
   armActionBusy,
+  capitalInput,
+  marginModeInput,
+  onChangeCapital,
+  onChangeMarginMode,
+  onSaveCapitalConfig,
+  configBusy,
   onSelectMode,
   onConfirmArm,
   onClose,
@@ -108,7 +114,7 @@ export default function ConsensusArmInterlockModal({
           {/* Mode Selector */}
           <div className="space-y-2">
             <label className="block font-bold uppercase tracking-wider text-slate-700">
-              1. Select Funded-Cash Execution Book Mode (0x Leverage • Whole Shares Only)
+              1. Select Funded-Cash Execution Book Mode (Whole Shares Only)
             </label>
             <div className="grid grid-cols-1 gap-2">
               {ARENA_EXECUTION_MODES.map((m) => {
@@ -135,6 +141,64 @@ export default function ConsensusArmInterlockModal({
             </div>
           </div>
 
+          {/* Inline Wallet Capital & MIS Buying Power Configurator */}
+          <div className="p-3.5 rounded-xl bg-indigo-50/60 border border-indigo-200 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-bold uppercase tracking-wider text-indigo-950">
+                2. Configure Arena Wallet Capital &amp; Intraday MIS Buying Power
+              </span>
+              {typeof availMargin === 'number' && availMargin >= 10000 && onChangeCapital && (
+                <button
+                  type="button"
+                  onClick={() => onChangeCapital(String(Math.floor(availMargin)))}
+                  className="px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold cursor-pointer"
+                >
+                  Match My Upstox Wallet ({formatINRValue(Math.floor(availMargin), { decimals: 0 })})
+                </button>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                  Wallet Capital (Min ₹10,000)
+                </label>
+                <input
+                  type="number"
+                  min="10000"
+                  step="1000"
+                  value={capitalInput ?? ''}
+                  onChange={(e) => onChangeCapital && onChangeCapital(e.target.value)}
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-900 font-mono text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                  Book-2 Intraday MIS Buying Power
+                </label>
+                <select
+                  value={marginModeInput || 'CASH_1X'}
+                  onChange={(e) => onChangeMarginMode && onChangeMarginMode(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-900 font-semibold text-xs"
+                >
+                  <option value="CASH_1X">1.0x Cash (0x Lev • Default)</option>
+                  <option value="MIS_2X">2.0x MIS (0.50% SL Risk Cap)</option>
+                  <option value="MIS_3X">3.0x MIS (0.50% SL Risk Cap)</option>
+                  <option value="UPSTOX_VAR_ELM_MAX_5X">Upstox VaR+ELM (&lt;=5.0x • SL Capped)</option>
+                </select>
+              </div>
+              <div className="flex items-end">
+                <button
+                  type="button"
+                  disabled={configBusy}
+                  onClick={() => onSaveCapitalConfig && onSaveCapitalConfig()}
+                  className="w-full py-1.5 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs cursor-pointer disabled:opacity-50"
+                >
+                  {configBusy ? 'Saving...' : 'Apply Capital & Margin'}
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Pre-Flight Readiness & Cash Reservation Summary */}
           <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 font-mono">
             <div className="flex items-center justify-between">
@@ -145,6 +209,12 @@ export default function ConsensusArmInterlockModal({
               <span className="text-slate-600">Upstox Available Wallet Cash:</span>
               <span className={`font-bold ${marginOk ? 'text-emerald-700' : 'text-rose-700'}`}>
                 {formatINRValue(availMargin)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-600">Auto-Scaled Slots (B1 CNC / B2 MIS):</span>
+              <span className="font-bold text-indigo-800">
+                {liveStatus?.accounting?.book1_slots?.max ?? '—'} CNC / {liveStatus?.accounting?.book2_slots?.max ?? '—'} MIS ({liveStatus?.intraday_mis_leverage ?? 1}x)
               </span>
             </div>
             <div className="flex items-center justify-between">
@@ -171,7 +241,7 @@ export default function ConsensusArmInterlockModal({
           <div className="p-3.5 rounded-xl bg-amber-50/80 border border-amber-200 space-y-2">
             <div className="flex items-center justify-between">
               <span className="font-bold text-amber-950">
-                2. Enter Local Confirmation Challenge PIN:
+                3. Enter Local Confirmation Challenge PIN:
               </span>
               <span className="px-2.5 py-1 rounded bg-slate-900 text-amber-300 font-mono font-bold tracking-widest text-sm">
                 {expectedPin || '----'}

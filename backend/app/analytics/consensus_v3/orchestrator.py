@@ -42,6 +42,7 @@ class ConsensusV3Orchestrator:
         )
         self._last_sweep_summary: Dict[str, Any] = {}
         self._last_book1_summary: Dict[str, Any] = {}
+        self._last_book1_snapshot: Dict[str, Any] = {}
         self._last_sweep_ms: float = 0.0
 
     def _ro_conn(self) -> sqlite3.Connection:
@@ -87,6 +88,7 @@ class ConsensusV3Orchestrator:
             if self._last_book1_summary.get("as_of_date") != today_str or as_of_ts is not None:
                 snap_b1 = BaselineEngine.build_book1_20d_snapshot(ro_conn, as_of_date=today_str)
                 self.qlib_forecaster.score_book1_snapshot(snap_b1, artifact=q_models["book1"])
+                self._last_book1_snapshot = snap_b1
                 self._last_book1_summary = ConsensusArbiter.arbitrate_book1_20d_rebalance(
                     snap_b1,
                     slot_cap_inr=acct["book1_slots"]["slot_cap_inr"],
@@ -118,8 +120,16 @@ class ConsensusV3Orchestrator:
 
         reserved_orders: List[Dict[str, Any]] = []
         reconcile_summary: Dict[str, Any] = {}
+        book1_exec_summary: Dict[str, Any] = {}
         if reserve_arena_orders and as_of_ts is None:
             reconcile_summary = self.bridge.reconcile_orders_and_positions()
+            hm_now = datetime.now().strftime("%H:%M")
+            if "09:15" <= hm_now <= "15:30" and self._last_book1_snapshot and self._last_book1_summary:
+                book1_exec_summary = self.bridge.execute_book1_scheduled_rebalance(
+                    scored_snapshot=self._last_book1_snapshot,
+                    arb_b1=self._last_book1_summary,
+                    force=False,
+                )
             if arb_b2["approved_signals"]:
                 reserved_orders = self.bridge.reserve_book2_pending_limit_orders(arb_b2["approved_signals"])
 
@@ -134,6 +144,7 @@ class ConsensusV3Orchestrator:
             "book2_latency_ms": b2_ms,
             "book2_intraday_sniffer": arb_b2,
             "book1_20d_rebalance": self._last_book1_summary,
+            "book1_execution": book1_exec_summary,
             "reserved_orders_created": reserved_orders,
             "reconcile_summary": reconcile_summary,
             "accounting": self.bridge.get_arena_accounting(),
@@ -147,6 +158,32 @@ class ConsensusV3Orchestrator:
         if as_of_ts is None:
             self._last_sweep_summary = summary
         return summary
+
+    def run_book1_rebalance(self, force: bool = True, as_of_date: Optional[str] = None) -> Dict[str, Any]:
+        """Scores Book 1 (`20d` Cash `CNC` Core) and executes scheduled/forced rebalance in the Arena."""
+        target_date = as_of_date or datetime.now().strftime("%Y-%m-%d")
+        with self._ro_conn() as ro_conn:
+            q_models = self.qlib_forecaster.ensure_models_ready(ro_conn)
+            acct = self.bridge.get_arena_accounting()
+            snap_b1 = BaselineEngine.build_book1_20d_snapshot(ro_conn, as_of_date=target_date)
+            self.qlib_forecaster.score_book1_snapshot(snap_b1, artifact=q_models["book1"])
+            arb_b1 = ConsensusArbiter.arbitrate_book1_20d_rebalance(
+                snap_b1,
+                slot_cap_inr=acct["book1_slots"]["slot_cap_inr"],
+            )
+            self._last_book1_snapshot = snap_b1
+            self._last_book1_summary = arb_b1
+
+        exec_res = self.bridge.execute_book1_scheduled_rebalance(
+            scored_snapshot=snap_b1,
+            arb_b1=arb_b1,
+            force=force,
+        )
+        return {
+            "rebalance_execution": exec_res,
+            "macro_shield": arb_b1.get("macro_shield", {}),
+            "accounting": self.bridge.get_arena_accounting(),
+        }
 
     def get_workspace_status(self) -> Dict[str, Any]:
         if not self._last_sweep_summary:

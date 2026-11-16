@@ -53,6 +53,7 @@ export default function ConsensusV3Cockpit() {
   const [sliceMeta, setSliceMeta] = useState(INITIAL_META);
 
   const [sweeping, setSweeping] = useState(false);
+  const [rebalancingBook1, setRebalancingBook1] = useState(false);
   const [armModalOpen, setArmModalOpen] = useState(false);
   const [armPinInput, setArmPinInput] = useState('');
   const [armActionBusy, setArmActionBusy] = useState(false);
@@ -60,8 +61,10 @@ export default function ConsensusV3Cockpit() {
 
   const [capitalInput, setCapitalInput] = useState('400000');
   const [modeInput, setModeInput] = useState('DUAL_FUNDED_CASH_ARENA');
+  const [marginModeInput, setMarginModeInput] = useState('CASH_1X');
   const [configBusy, setConfigBusy] = useState(false);
   const [exitingPosId, setExitingPosId] = useState(null);
+  const formDirtyRef = useRef(false);
 
   const [coordinator] = useState(() => createPollingCoordinator());
   const controllersRef = useRef(new Set());
@@ -105,11 +108,16 @@ export default function ConsensusV3Cockpit() {
     await Promise.all([
       fetchSlice('status', `${V3_BASE}/status`, (d) => {
         setStatusData(d);
-        if (d?.live_bridge?.accounting?.funded_capital_inr) {
-          setCapitalInput(String(Math.round(d.live_bridge.accounting.funded_capital_inr)));
-        }
-        if (d?.live_bridge?.execution_mode) {
-          setModeInput(d.live_bridge.execution_mode);
+        if (!formDirtyRef.current) {
+          if (d?.live_bridge?.accounting?.funded_capital_inr) {
+            setCapitalInput(String(Math.round(d.live_bridge.accounting.funded_capital_inr)));
+          }
+          if (d?.live_bridge?.execution_mode) {
+            setModeInput(d.live_bridge.execution_mode);
+          }
+          if (d?.live_bridge?.margin_mode || d?.live_bridge?.accounting?.margin_mode) {
+            setMarginModeInput(d.live_bridge.margin_mode || d.live_bridge.accounting.margin_mode);
+          }
         }
       }),
       fetchSlice('signals', `${V3_BASE}/signals?limit=60`, setSignalsData),
@@ -226,25 +234,52 @@ export default function ConsensusV3Cockpit() {
     }
   };
 
+  const handleRunBook1Rebalance = async () => {
+    setRebalancingBook1(true);
+    try {
+      const res = await fetch(`${V3_BASE}/book1-rebalance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: true }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || 'Book-1 rebalance failed');
+      const rb = body?.data?.rebalance_execution || {};
+      setArmActionMsg({
+        tone: 'ok',
+        text: `Book-1 20d Swing Rebalance (${rb.status || 'DONE'}): ${rb.opened ?? 0} opened • ${rb.retained ?? 0} retained • ${rb.closed ?? 0} closed (Target ${rb.target_slots ?? '—'} CNC slots).`,
+      });
+      await refreshAllSlices();
+    } catch (err) {
+      setArmActionMsg({ tone: 'error', text: err.message || 'Book-1 rebalance error' });
+    } finally {
+      setRebalancingBook1(false);
+    }
+  };
+
   const handleConfigureArena = async (resetFlag = false) => {
     setConfigBusy(true);
     try {
+      const parsedCap = Math.max(10000, Number(capitalInput) || 10000);
       const res = await fetch(`${V3_BASE}/arena/configure`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          funded_capital_inr: Number(capitalInput) || 400000,
+          funded_capital_inr: parsedCap,
           execution_mode: modeInput,
+          margin_mode: marginModeInput,
           reset_ledger: resetFlag,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Configuration failed');
+      formDirtyRef.current = false;
+      const acct = data.accounting || {};
       setArmActionMsg({
         tone: 'ok',
         text: resetFlag
-          ? 'Funded Arena reset cleanly in Paper Shadow mode.'
-          : 'Funded Arena capital & execution mode updated.',
+          ? `Funded Arena reset cleanly to ${formatINRValue(acct.funded_capital_inr)} in Paper Shadow mode.`
+          : `Updated Arena to ${formatINRValue(acct.funded_capital_inr)} • MIS ${acct.intraday_mis_leverage || 1}x • Auto Slots B1:${acct?.book1_slots?.max || '—'} / B2:${acct?.book2_slots?.max || '—'}.`,
       });
       await refreshAllSlices();
     } catch (err) {
@@ -293,6 +328,7 @@ export default function ConsensusV3Cockpit() {
         liveStatus={liveStatus}
         sliceMeta={sliceMeta}
         sweeping={sweeping}
+        rebalancingBook1={rebalancingBook1}
         armActionBusy={armActionBusy}
         armActionMsg={armActionMsg}
         onClearArmMsg={() => setArmActionMsg(null)}
@@ -300,6 +336,7 @@ export default function ConsensusV3Cockpit() {
         onDisarm={handleDisarm}
         onSosExit={handleSosExit}
         onManualSweep={handleManualSweep}
+        onRunBook1Rebalance={handleRunBook1Rebalance}
       />
 
       {/* OptionSnifferAdvance-Style 5-Tab Navigation Bar */}
@@ -385,25 +422,51 @@ export default function ConsensusV3Cockpit() {
               </p>
             </div>
 
-            {/* Funded Capital & Mode Control Card */}
+            {/* Funded Capital, Buying Power & Mode Control Card */}
             <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-2.5">
-              <div className="flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wider text-slate-500">
-                <Sliders size={13} />
-                <span>Funded Cash Pool Configurator (0x Leverage)</span>
+              <div className="flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-500">
+                <span className="flex items-center gap-1.5">
+                  <Sliders size={13} />
+                  <span>Wallet Capital &amp; MIS Buying Power</span>
+                </span>
+                <span className="font-mono text-[10px] text-indigo-700">
+                  Min ₹10k • SL Cap {liveStatus?.accounting?.max_risk_per_trade_pct ?? 0.5}%
+                </span>
               </div>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <input
                   type="number"
-                  min="25000"
-                  step="25000"
+                  min="10000"
+                  step="1000"
                   value={capitalInput}
-                  onChange={(e) => setCapitalInput(e.target.value)}
+                  onChange={(e) => {
+                    formDirtyRef.current = true;
+                    setCapitalInput(e.target.value);
+                  }}
+                  placeholder="Wallet ₹ (e.g. 50000)"
                   className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-mono text-slate-900"
                   aria-label="Funded capital in INR"
                 />
                 <select
+                  value={marginModeInput}
+                  onChange={(e) => {
+                    formDirtyRef.current = true;
+                    setMarginModeInput(e.target.value);
+                  }}
+                  className="px-2 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold text-slate-800"
+                  aria-label="Intraday MIS buying power"
+                >
+                  <option value="CASH_1X">1.0x Cash (0x Lev)</option>
+                  <option value="MIS_2X">2.0x MIS (SL Capped)</option>
+                  <option value="MIS_3X">3.0x MIS (SL Capped)</option>
+                  <option value="UPSTOX_VAR_ELM_MAX_5X">Upstox &lt;=5.0x VaR+ELM</option>
+                </select>
+                <select
                   value={modeInput}
-                  onChange={(e) => setModeInput(e.target.value)}
+                  onChange={(e) => {
+                    formDirtyRef.current = true;
+                    setModeInput(e.target.value);
+                  }}
                   className="px-2 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold text-slate-800"
                   aria-label="Arena execution mode"
                 >
@@ -419,7 +482,7 @@ export default function ConsensusV3Cockpit() {
                   onClick={() => handleConfigureArena(false)}
                   className="flex-1 py-1.5 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold cursor-pointer"
                 >
-                  Apply Capital / Mode
+                  {configBusy ? 'Saving...' : 'Apply Capital / Margin / Mode'}
                 </button>
                 {liveStatus?.simulation_mode !== false && (
                   <button
@@ -618,7 +681,7 @@ export default function ConsensusV3Cockpit() {
                       <th className="py-2 px-2.5">Side</th>
                       <th className="py-2 px-2.5">Whole Shares</th>
                       <th className="py-2 px-2.5">Post-Only Limit</th>
-                      <th className="py-2 px-2.5">Locked Cash Reservation</th>
+                      <th className="py-2 px-2.5">Locked Margin (Lev / Source)</th>
                       <th className="py-2 px-2.5">Expires At (15m TIF)</th>
                       <th className="py-2 px-2.5">Env</th>
                     </tr>
@@ -630,7 +693,12 @@ export default function ConsensusV3Cockpit() {
                         <td className="py-2 px-2.5 text-rose-700 font-bold">{o.direction}</td>
                         <td className="py-2 px-2.5">{o.shares}</td>
                         <td className="py-2 px-2.5">{formatINRValue(o.limit_price)}</td>
-                        <td className="py-2 px-2.5 text-amber-700 font-bold">{formatINRValue(o.reserved_cash_inr)}</td>
+                        <td className="py-2 px-2.5 text-amber-700 font-bold">
+                          {formatINRValue(o.reserved_cash_inr)}{' '}
+                          <span className="text-[10px] text-slate-500 font-normal">
+                            ({o.effective_leverage || 1}x • {o.margin_source || 'CASH_1X'})
+                          </span>
+                        </td>
                         <td className="py-2 px-2.5">{o.expires_at}</td>
                         <td className="py-2 px-2.5">{o.execution_env}</td>
                       </tr>
@@ -932,6 +1000,18 @@ export default function ConsensusV3Cockpit() {
         armPinInput={armPinInput}
         onChangePinInput={setArmPinInput}
         armActionBusy={armActionBusy}
+        capitalInput={capitalInput}
+        marginModeInput={marginModeInput}
+        onChangeCapital={(val) => {
+          formDirtyRef.current = true;
+          setCapitalInput(val);
+        }}
+        onChangeMarginMode={(val) => {
+          formDirtyRef.current = true;
+          setMarginModeInput(val);
+        }}
+        onSaveCapitalConfig={() => handleConfigureArena(false)}
+        configBusy={configBusy}
         onSelectMode={handleSelectMode}
         onConfirmArm={handleConfirmArm}
         onClose={() => {

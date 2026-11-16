@@ -22,6 +22,7 @@ export default function ConsensusWorkspaceHeader({
   liveStatus,
   sliceMeta,
   sweeping,
+  rebalancingBook1,
   armActionBusy,
   armActionMsg,
   onClearArmMsg,
@@ -29,6 +30,7 @@ export default function ConsensusWorkspaceHeader({
   onDisarm,
   onSosExit,
   onManualSweep,
+  onRunBook1Rebalance,
 }) {
   const statusOk = sliceMeta?.status?.status === 'ok' && Boolean(liveStatus);
   const isArmed = statusOk && liveStatus?.is_armed === true && liveStatus?.simulation_mode === false;
@@ -138,8 +140,21 @@ export default function ConsensusWorkspaceHeader({
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700 disabled:opacity-50 cursor-pointer"
           >
             <RefreshCw size={13} className={sweeping ? 'animate-spin text-emerald-400' : 'text-emerald-400'} />
-            <span>{sweeping ? 'Sweeping...' : 'Run Sniffer Sweep'}</span>
+            <span>{sweeping ? 'Sweeping...' : 'Run 15m Sniffer'}</span>
           </button>
+
+          {onRunBook1Rebalance && (
+            <button
+              type="button"
+              onClick={onRunBook1Rebalance}
+              disabled={rebalancingBook1}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-indigo-200 border border-indigo-500/40 disabled:opacity-50 cursor-pointer"
+              title="Evaluate and execute Book-1 20-day Cash CNC Swing Rebalance with Rank-78% Hysteresis & Macro Shield"
+            >
+              <RefreshCw size={13} className={rebalancingBook1 ? 'animate-spin text-indigo-400' : 'text-indigo-400'} />
+              <span>{rebalancingBook1 ? 'Rebalancing...' : 'Run 20d Swing Rebalance'}</span>
+            </button>
+          )}
 
           {isArmed ? (
             <button
@@ -178,29 +193,38 @@ export default function ConsensusWorkspaceHeader({
         </div>
       </div>
 
-      {/* FUNDED CASH CONSERVATION BAR (0x Leverage Invariant) */}
+      {/* FUNDED CASH CONSERVATION & MIS BUYING POWER BAR */}
       <div className="px-4 sm:px-5 py-3 bg-slate-950/70 border-t border-slate-800 grid grid-cols-2 lg:grid-cols-5 gap-3 text-xs font-mono tabular-nums">
         <div>
           <span className="text-slate-400 block text-[10px] uppercase">Total Funded Equity</span>
           <span className="text-white font-bold text-sm">{formatINRValue(acct.current_equity_inr)}</span>
         </div>
         <div>
-          <span className="text-slate-400 block text-[10px] uppercase">Free Unreserved Cash</span>
-          <span className="text-emerald-300 font-bold text-sm">{formatINRValue(acct.free_unreserved_cash_inr)}</span>
+          <span className="text-slate-400 block text-[10px] uppercase">
+            Free Cash {(acct.intraday_mis_leverage || 1) > 1 ? `• MIS ${acct.intraday_mis_leverage}x BP` : '(1.0x)'}
+          </span>
+          <span className="text-emerald-300 font-bold text-sm">
+            {formatINRValue(acct.free_unreserved_cash_inr)}
+            {(acct.intraday_mis_leverage || 1) > 1 && (
+              <span className="text-[10px] text-cyan-300 ml-1.5">
+                (BP {formatINRValue(acct.intraday_mis_buying_power_inr)})
+              </span>
+            )}
+          </span>
         </div>
         <div>
-          <span className="text-slate-400 block text-[10px] uppercase">Pending Limit Reserved</span>
+          <span className="text-slate-400 block text-[10px] uppercase">Pending Margin Reserved</span>
           <span className="text-amber-300 font-bold text-sm">
             {formatINRValue(acct.pending_reserved_cash_inr)}{' '}
             <span className="text-[10px] text-slate-400">({acct?.book2_slots?.pending || 0} resting)</span>
           </span>
         </div>
         <div>
-          <span className="text-slate-400 block text-[10px] uppercase">Active Invested Notional</span>
+          <span className="text-slate-400 block text-[10px] uppercase">Active Margin / Notional</span>
           <span className="text-sky-300 font-bold text-sm">
-            {formatINRValue(acct.invested_notional_inr)}{' '}
+            {formatINRValue(acct.invested_margin_inr ?? acct.invested_notional_inr)}{' '}
             <span className="text-[10px] text-slate-400">
-              (B1:{acct?.book1_slots?.open || 0} • B2:{acct?.book2_slots?.open || 0})
+              (B1:{acct?.book1_slots?.open || 0}/{acct?.book1_slots?.max || 8} • B2:{acct?.book2_slots?.open || 0}/{acct?.book2_slots?.max || 4})
             </span>
           </span>
         </div>

@@ -75,13 +75,30 @@ function App() {
   };
 
   useEffect(() => {
+    let inFlight = false;
+    const activeControllers = new Set();
+
+    const fetchWithTimeout = async (url, timeoutMs = 6000) => {
+      const controller = new AbortController();
+      activeControllers.add(controller);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, { signal: controller.signal });
+      } finally {
+        clearTimeout(timer);
+        activeControllers.delete(controller);
+      }
+    };
+
     const fetchStatus = async () => {
       if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('fixture')) {
         return;
       }
+      if (inFlight) return;
+      inFlight = true;
       try {
         // 1. Monitored positions
-        const res = await fetch(`${API_BASE}/ml/active-monitors`);
+        const res = await fetchWithTimeout(`${API_BASE}/ml/active-monitors`);
         if (res.ok) {
           const data = await res.json();
           setActiveMonitors(data);
@@ -89,14 +106,14 @@ function App() {
         }
         
         // 2. Active Market Data Source
-        const dsRes = await fetch(`${API_BASE}/settings/datasource`);
+        const dsRes = await fetchWithTimeout(`${API_BASE}/settings/datasource`);
         if (dsRes.ok) {
           const dsData = await dsRes.json();
           if (dsData.source) setDataSource(dsData.source);
         }
 
         // 3. Global Simulation Mode
-        const simRes = await fetch(`${API_BASE}/settings/simulation`);
+        const simRes = await fetchWithTimeout(`${API_BASE}/settings/simulation`);
         if (simRes.ok) {
           const simData = await simRes.json();
           if (typeof simData.simulation_mode === 'boolean') {
@@ -106,7 +123,7 @@ function App() {
 
         // 4. Production Model Win Rate
         try {
-          const wrRes = await fetch(`${API_BASE}/ml/production-win-rate`);
+          const wrRes = await fetchWithTimeout(`${API_BASE}/ml/production-win-rate`);
           if (wrRes.ok) {
             const wrData = await wrRes.json();
             setWinRateData(wrData);
@@ -115,7 +132,7 @@ function App() {
 
         // 5. Upstox Token Health Status Check
         try {
-          const tokRes = await fetch(`${API_BASE}/settings/upstox/token-status`);
+          const tokRes = await fetchWithTimeout(`${API_BASE}/settings/upstox/token-status`);
           if (tokRes.ok) {
             const tokData = await tokRes.json();
             if (tokData.status === 'EXPIRED' || tokData.status === 'TOKEN_EXPIRED' || tokData.is_valid === false) {
@@ -127,11 +144,18 @@ function App() {
             }
           }
         } catch (err) {}
-      } catch (err) {}
+      } catch (err) {
+      } finally {
+        inFlight = false;
+      }
     };
     fetchStatus();
     const interval = setInterval(fetchStatus, 8000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      activeControllers.forEach((c) => c.abort());
+      activeControllers.clear();
+    };
   }, []);
 
   return (

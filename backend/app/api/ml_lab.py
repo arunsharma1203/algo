@@ -557,34 +557,60 @@ def get_ml_report(ticker: str):
     except Exception as e:
         return {"status": "error", "message": str(e), "data": []}
 
+_PROD_WIN_RATE_CACHE = {"ts": 0.0, "payload": None}
+
 @router.get("/production-win-rate")
 def get_production_win_rate():
     """
-    Returns dynamically computed win rate from authoritative production closed trades in ml_trade_history.
+    Returns dynamically computed win rate from authoritative production closed trades in ml_trade_history
+    using a direct read-only SQLite aggregate (with 15s cache) so 8s UI sidebar polls never trigger
+    42k-row Python scans or wedge HTTP sockets.
     If evaluated trades = 0, returns display_rate="N/A" (never 0%).
     """
+    import time as _time
+    now_ep = _time.time()
+    cached = _PROD_WIN_RATE_CACHE.get("payload")
+    if cached is not None and (now_ep - _PROD_WIN_RATE_CACHE.get("ts", 0.0)) < 15.0:
+        return cached
+
     try:
-        from app.analytics.position_monitor import PositionMonitorService
-        evaluated_trades = PositionMonitorService.evaluate_all()
-        closed_trades = [t for t in evaluated_trades if t.get('outcome') not in ('OPEN', None)]
-        wins = [t for t in closed_trades if t.get('outcome') == 'TARGET MET' or (t.get('profit_pct') is not None and t.get('profit_pct') > 0)]
-        
-        total = len(closed_trades)
-        num_wins = len(wins)
+        import sqlite3
+        from app.data.historical_data_layer import get_db_path
+        db_file = get_db_path()
+        uri = f"file:{db_file}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=3.0) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_closed,
+                    COALESCE(SUM(CASE WHEN outcome = 'TARGET MET' OR (profit_pct IS NOT NULL AND profit_pct > 0) THEN 1 ELSE 0 END), 0) AS wins
+                FROM ml_trade_history
+                WHERE (engine = 'LEGACY' OR engine IS NULL)
+                  AND outcome IS NOT NULL
+                  AND outcome NOT IN ('OPEN', 'SWING_CASH_SHORT_DISALLOWED', 'SYSTEM_TEST_ARTIFACT')
+                  AND (status IS NULL OR status != 'INVALIDATED')
+                """
+            ).fetchone()
+
+        total = int(row[0] or 0) if row else 0
+        num_wins = int(row[1] or 0) if row else 0
         if total > 0:
-            win_rate = round((num_wins / total * 100), 1)
+            win_rate = round((num_wins / total * 100.0), 1)
             display_rate = f"{win_rate}%"
         else:
             win_rate = None
             display_rate = "N/A"
-            
-        return {
+
+        payload = {
             "status": "success",
             "win_rate": win_rate,
             "total_closed_trades": total,
             "wins": num_wins,
             "display_rate": display_rate
         }
+        _PROD_WIN_RATE_CACHE["ts"] = now_ep
+        _PROD_WIN_RATE_CACHE["payload"] = payload
+        return payload
     except Exception as e:
         return {
             "status": "error",

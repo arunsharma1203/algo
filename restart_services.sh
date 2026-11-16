@@ -19,25 +19,27 @@ echo "=========================================================="
 echo "🚀 [2/4] Starting Microsoft Qlib Engine (Port 8001)"
 echo "=========================================================="
 cd "$PROJECT_ROOT/backend"
-nohup ./venv/bin/python -m uvicorn app.qlib_server:app --host 0.0.0.0 --port 8001 < /dev/null > /tmp/qlib_server.log 2>&1 &
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die $!; exec @ARGV' ./venv/bin/python -m uvicorn app.qlib_server:app --host 0.0.0.0 --port 8001 < /dev/null > /tmp/qlib_server.log 2>&1 &
 QLIB_PID=$!
-echo "Qlib engine started (PID: $QLIB_PID) -> Logs at /tmp/qlib_server.log"
+disown $QLIB_PID 2>/dev/null || true
+echo "Qlib engine started in detached session (PID: $QLIB_PID) -> Logs at /tmp/qlib_server.log"
 
 echo "=========================================================="
 echo "🚀 [3/4] Starting FastAPI Main Backend (Port 8000)"
 echo "=========================================================="
-nohup ./venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 < /dev/null > /tmp/fastapi_backend.log 2>&1 &
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die $!; exec @ARGV' ./venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 < /dev/null > /tmp/fastapi_backend.log 2>&1 &
 BACKEND_PID=$!
-echo "FastAPI backend started (PID: $BACKEND_PID) -> Logs at /tmp/fastapi_backend.log"
+disown $BACKEND_PID 2>/dev/null || true
+echo "FastAPI backend started in detached session (PID: $BACKEND_PID) -> Logs at /tmp/fastapi_backend.log"
 
 echo "=========================================================="
 echo "🚀 [4/4] Starting Vite Frontend Dev Server (Port 5173)"
 echo "=========================================================="
 cd "$PROJECT_ROOT/frontend"
-nohup ./node_modules/.bin/vite --host 0.0.0.0 --port 5173 < /dev/null > /tmp/frontend_vite.log 2>&1 &
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() or die $!; exec @ARGV' ./node_modules/.bin/vite --host 0.0.0.0 --port 5173 < /dev/null > /tmp/frontend_vite.log 2>&1 &
 FRONTEND_PID=$!
 disown $FRONTEND_PID 2>/dev/null || true
-echo "Vite frontend started (PID: $FRONTEND_PID) -> Logs at /tmp/frontend_vite.log"
+echo "Vite frontend started in detached session (PID: $FRONTEND_PID) -> Logs at /tmp/frontend_vite.log"
 cd "$PROJECT_ROOT"
 
 echo "=========================================================="

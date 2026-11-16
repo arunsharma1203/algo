@@ -94,6 +94,18 @@ def trigger_v3_sniffer_sweep() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/book1-rebalance")
+def trigger_v3_book1_rebalance(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    try:
+        orch = get_consensus_v3_orchestrator()
+        force_flag = bool((payload or {}).get("force", True))
+        res = orch.run_book1_rebalance(force=force_flag)
+        return {"status": "SUCCESS", "data": res}
+    except Exception as e:
+        logger.error(f"[ConsensusV3API] /book1-rebalance error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/arena/configure")
 def configure_v3_arena(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     try:
@@ -101,10 +113,18 @@ def configure_v3_arena(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         cap = float(payload.get("funded_capital_inr", 400000.0))
         mode = str(payload.get("execution_mode", "DUAL_FUNDED_CASH_ARENA"))
         reset_flag = bool(payload.get("reset_ledger", False))
+        margin_mode = payload.get("margin_mode")
+        mis_lev = payload.get("intraday_mis_leverage")
+        risk_pct = payload.get("max_risk_per_trade_pct")
+        b1_slots = payload.get("book1_max_slots")
         res = orch.bridge.configure_arena_capital(
             funded_capital_inr=cap,
             execution_mode=mode,
             reset_ledger=reset_flag,
+            margin_mode=str(margin_mode) if margin_mode is not None else None,
+            intraday_mis_leverage=float(mis_lev) if mis_lev is not None else None,
+            max_risk_per_trade_pct=float(risk_pct) if risk_pct is not None else None,
+            book1_max_slots=int(b1_slots) if b1_slots is not None else None,
         )
         if res.get("status") == "ERROR":
             raise HTTPException(status_code=400, detail=res.get("message"))
