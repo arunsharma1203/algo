@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowRight,
   Clock,
+  GitCompare,
   ShieldAlert,
   Wallet,
 } from 'lucide-react';
@@ -12,10 +13,12 @@ import {
   deriveCandidateBlocker,
   formatClockIST,
   formatINRValue,
+  formatNumber,
+  formatPercent,
   formatSignedINR,
   formatTimestampLabel,
+  getRowCohort,
   hasValidNumber,
-  parseRegimeContext,
 } from './formatters';
 
 export default function OverviewTab({
@@ -24,6 +27,7 @@ export default function OverviewTab({
   tradesData,
   activeReadiness,
   shadowTelemetry,
+  cohortComparison = null,
   sliceMeta,
   onSelectTab,
 }) {
@@ -43,10 +47,10 @@ export default function OverviewTab({
 
   const allOpenPaper = Array.isArray(tradesData?.open_trades) ? tradesData.open_trades : [];
   const openForwardPackages = allOpenPaper.filter(
-    (t) => classifyStrategyEra(t.strategy_mode, parseRegimeContext(t)) === 'SHADOW_FORWARD_V1'
+    (t) => getRowCohort(t) === 'S205_SHADOW_FORWARD_V1'
   );
-  const openLegacyPaper = allOpenPaper.filter(
-    (t) => classifyStrategyEra(t.strategy_mode, parseRegimeContext(t)) !== 'SHADOW_FORWARD_V1'
+  const openV6bComparator = allOpenPaper.filter(
+    (t) => getRowCohort(t) === 'V6B_ML_LEGACY_COMPARATOR'
   );
 
   const openForwardUnrealized =
@@ -57,21 +61,43 @@ export default function OverviewTab({
         )
       : null;
 
+  const openV6bUnrealized =
+    sliceMeta?.trades?.status === 'ok'
+      ? openV6bComparator.reduce(
+          (acc, t) => acc + (hasValidNumber(t.unrealized_net_pnl) ? Number(t.unrealized_net_pnl) : 0),
+          0
+        )
+      : null;
+
   const shadowLedger = shadowTelemetry?.shadow_account_ledger || null;
   const pendingLeg2 = shadowLedger?.pending_leg2_count ?? null;
   const unwoundCount = shadowLedger?.incomplete_leg_unwinds_count ?? null;
 
+  const shCohort = cohortComparison?.S205_SHADOW_FORWARD_V1 || null;
+  const v6bCohort = cohortComparison?.V6B_ML_LEGACY_COMPARATOR || null;
+  const histCohort = cohortComparison?.HISTORICAL_LEGACY_V2 || null;
+
   const engineRows = Array.isArray(activeReadiness?.engine_readiness)
     ? activeReadiness.engine_readiness
     : [];
-  const activeCandidateRows = engineRows.filter(
-    (r) => classifyStrategyEra(r.engine_id) === 'SHADOW_FORWARD_V1'
+  const shadowCandidateRows = engineRows.filter(
+    (r) => classifyStrategyEra(r.engine_id, r) === 'SHADOW_FORWARD_V1'
+  );
+  const v6bCandidateRows = engineRows.filter(
+    (r) => classifyStrategyEra(r.engine_id, r) === 'V6B_ML_LEGACY_COMPARATOR'
   );
 
   const availMargin = liveStatus?.available_margin ?? liveStatus?.readiness?.available_margin;
   const reqMargin = liveStatus?.required_margin_for_mode;
   const providerMarginTs = liveStatus?.readiness?.timestamp;
   const marginProbe = shadowTelemetry?.latest_margin_probe || null;
+
+  const shadowRealizedNet = hasValidNumber(shCohort?.realized_net_pnl_inr)
+    ? shCohort.realized_net_pnl_inr
+    : shadowLedger?.realized_net_pnl_inr;
+  const shadowCharges = hasValidNumber(shCohort?.total_charges_inr)
+    ? shCohort.total_charges_inr
+    : shadowLedger?.total_canonical_charges_inr;
 
   return (
     <div className="space-y-5">
@@ -83,7 +109,8 @@ export default function OverviewTab({
               Open Exposure &amp; Execution Exceptions
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Broker positions, forward paper packages, and unresolved multi-leg or order states.
+              Broker positions, active forward packages (<code>S205_SHADOW_FORWARD_V1</code>), OOS
+              comparator positions (<code>V6B_ML_LEGACY_COMPARATOR</code>), and 2-leg spread states.
             </p>
           </div>
           <div className="flex items-center gap-3 text-xs font-mono text-slate-500">
@@ -115,7 +142,7 @@ export default function OverviewTab({
           </div>
         ) : null}
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 mt-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mt-3">
           {/* Broker Exposure Box */}
           <div className="rounded-lg border border-slate-200 p-3.5 bg-slate-50/60">
             <div className="flex items-center justify-between text-xs">
@@ -148,7 +175,7 @@ export default function OverviewTab({
             </div>
           </div>
 
-          {/* Forward Paper Exposure Box */}
+          {/* Forward Paper Exposure Box (S205_SHADOW_FORWARD_V1) */}
           <div className="rounded-lg border border-slate-200 p-3.5 bg-slate-50/60 min-w-0">
             <div className="flex items-start justify-between gap-2 text-xs">
               <span className="font-semibold text-slate-700 min-w-0">
@@ -157,8 +184,8 @@ export default function OverviewTab({
                   S205_SHADOW_FORWARD_V1
                 </span>
               </span>
-              <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-indigo-50 text-indigo-800 border border-indigo-200 shrink-0 whitespace-nowrap">
-                Airgapped Paper
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-indigo-50 text-indigo-800 border border-indigo-200 shrink-0 whitespace-nowrap">
+                SHADOW_V1
               </span>
             </div>
             <div className="text-lg font-bold font-mono text-slate-900 mt-1.5 tabular-nums">
@@ -171,10 +198,32 @@ export default function OverviewTab({
                 ? openForwardPackages
                     .map((p) => p.spread_legs_label || p.trading_symbol)
                     .join(' • ')
-                : 'No open forward paper packages'}
-              {openLegacyPaper.length > 0
-                ? ` (${openLegacyPaper.length} legacy paper open)`
-                : ''}
+                : 'No open S205_SHADOW_FORWARD_V1 packages'}
+            </div>
+          </div>
+
+          {/* V6B ML Comparator Exposure Box */}
+          <div className="rounded-lg border border-slate-200 p-3.5 bg-slate-50/60 min-w-0">
+            <div className="flex items-start justify-between gap-2 text-xs">
+              <span className="font-semibold text-slate-700 min-w-0">
+                OOS Paper Comparator
+                <span className="block text-[10px] font-mono font-normal text-slate-500 break-all">
+                  V6B_ML_LEGACY_COMPARATOR
+                </span>
+              </span>
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-50 text-amber-900 border border-amber-200 shrink-0 whitespace-nowrap">
+                NOT LIVE ELIGIBLE
+              </span>
+            </div>
+            <div className="text-lg font-bold font-mono text-slate-900 mt-1.5 tabular-nums">
+              {sliceMeta?.trades?.status === 'ok'
+                ? `${openV6bComparator.length} Open`
+                : UNAVAILABLE_LABEL}
+            </div>
+            <div className="text-xs text-slate-600 mt-1 tabular-nums">
+              {openV6bComparator.length > 0
+                ? openV6bComparator.map((p) => p.trading_symbol).join(' • ')
+                : 'No open V6B_ML_LEGACY_COMPARATOR positions'}
             </div>
           </div>
 
@@ -199,14 +248,192 @@ export default function OverviewTab({
         </div>
       </section>
 
-      {/* 2. Scoped P&L, Charges, Margin Provenance & Risk Controls (Never labeled "Alpha") */}
+      {/* 2. Side-by-Side Head-to-Head OOS Paper Cohort Comparison (Never Aggregated Into One Headline) */}
+      <section className="bg-white rounded-xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+              <GitCompare size={16} className="text-indigo-700" />
+              <span>
+                Head-to-Head OOS Paper Comparison (<code>S205_SHADOW_FORWARD_V1</code> vs.{' '}
+                <code>V6B_ML_LEGACY_COMPARATOR</code>)
+              </span>
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Independent slots, cooldowns, and daily MTM kills on identical Upstox V3 sessions (
+              &ge; {cohortComparison?.comparison_start_date || '2026-11-15'}). Cohort P&amp;L is
+              strictly separated and never summed.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onSelectTab('performance')}
+            className="inline-flex items-center gap-1 text-xs text-indigo-700 hover:text-indigo-900 font-semibold cursor-pointer"
+          >
+            <span>Compare Calendars</span>
+            <ArrowRight size={13} />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Cohort A: S205_SHADOW_FORWARD_V1 */}
+          <div className="rounded-xl border border-indigo-200 bg-indigo-50/20 p-4 space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-100 text-indigo-900 border border-indigo-200">
+                    SHADOW_V1
+                  </span>
+                  <h3 className="text-xs font-bold text-slate-900">
+                    Active 2-Book L5 Architecture (<code>S205_SHADOW_FORWARD_V1</code>)
+                  </h3>
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-1">
+                  SHADOW_BOOK_A_SPREAD_150 (Buy-First 150pt Spread) + SHADOW_BOOK_B_PAID_FLOW (1L Paid Buy)
+                </div>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-white border border-slate-200 text-slate-700">
+                Defined-Risk Paper
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1 font-mono tabular-nums">
+              <div className="bg-white rounded-lg border border-slate-200 p-2.5">
+                <div className="text-[10px] font-sans text-slate-500">Realized Net P&amp;L</div>
+                <div
+                  className={`text-sm font-bold mt-0.5 ${
+                    !hasValidNumber(shadowRealizedNet)
+                      ? 'text-slate-400'
+                      : Number(shadowRealizedNet) > 0
+                      ? 'text-emerald-700'
+                      : Number(shadowRealizedNet) < 0
+                      ? 'text-rose-700'
+                      : 'text-slate-900'
+                  }`}
+                >
+                  {formatSignedINR(shadowRealizedNet)}
+                </div>
+              </div>
+              <div className="bg-white rounded-lg border border-slate-200 p-2.5">
+                <div className="text-[10px] font-sans text-slate-500">Open MTM</div>
+                <div className="text-sm font-bold text-slate-900 mt-0.5">
+                  {formatSignedINR(
+                    hasValidNumber(shCohort?.unrealized_net_pnl_inr)
+                      ? shCohort.unrealized_net_pnl_inr
+                      : openForwardUnrealized
+                  )}
+                </div>
+              </div>
+              <div className="bg-white rounded-lg border border-slate-200 p-2.5">
+                <div className="text-[10px] font-sans text-slate-500">Closed / Win%</div>
+                <div className="text-sm font-bold text-slate-900 mt-0.5">
+                  {hasValidNumber(shCohort?.closed_trades_count)
+                    ? `${shCohort.closed_trades_count} (${
+                        hasValidNumber(shCohort.win_rate_pct)
+                          ? formatPercent(shCohort.win_rate_pct)
+                          : '—'
+                      })`
+                    : UNAVAILABLE_LABEL}
+                </div>
+              </div>
+              <div className="bg-white rounded-lg border border-slate-200 p-2.5">
+                <div className="text-[10px] font-sans text-slate-500">Est. Fees / Today</div>
+                <div className="text-sm font-bold text-slate-800 mt-0.5">
+                  {formatINRValue(shadowCharges, { decimals: 0 })} •{' '}
+                  {shCohort ? `${shCohort.today_trades_count}/${shCohort.max_trades_day}` : '—'}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Cohort B: V6B_ML_LEGACY_COMPARATOR */}
+          <div className="rounded-xl border border-amber-200 bg-amber-50/20 p-4 space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-100 text-amber-950 border border-amber-300">
+                    V6B_ML_COMPARATOR
+                  </span>
+                  <h3 className="text-xs font-bold text-slate-900">
+                    Retired 4-Engine + 30-Feature ML Benchmark
+                  </h3>
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-1">
+                  V6B_S1_OI • V6B_S3_SPIKE • V6B_S4_Z2 • V6B_LBASIS_ATM (p_min &ge; 0.56)
+                </div>
+              </div>
+              <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-amber-100 text-amber-950 border border-amber-300">
+                UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 pt-1 font-mono tabular-nums">
+              <div className="bg-white rounded-lg border border-slate-200 p-2.5">
+                <div className="text-[10px] font-sans text-slate-500">Realized Net P&amp;L</div>
+                <div
+                  className={`text-sm font-bold mt-0.5 ${
+                    !hasValidNumber(v6bCohort?.realized_net_pnl_inr)
+                      ? 'text-slate-400'
+                      : Number(v6bCohort.realized_net_pnl_inr) > 0
+                      ? 'text-emerald-700'
+                      : Number(v6bCohort.realized_net_pnl_inr) < 0
+                      ? 'text-rose-700'
+                      : 'text-slate-900'
+                  }`}
+                >
+                  {formatSignedINR(v6bCohort?.realized_net_pnl_inr)}
+                </div>
+              </div>
+              <div className="bg-white rounded-lg border border-slate-200 p-2.5">
+                <div className="text-[10px] font-sans text-slate-500">Open MTM</div>
+                <div className="text-sm font-bold text-slate-900 mt-0.5">
+                  {formatSignedINR(
+                    hasValidNumber(v6bCohort?.unrealized_net_pnl_inr)
+                      ? v6bCohort.unrealized_net_pnl_inr
+                      : openV6bUnrealized
+                  )}
+                </div>
+              </div>
+              <div className="bg-white rounded-lg border border-slate-200 p-2.5">
+                <div className="text-[10px] font-sans text-slate-500">Closed / Win%</div>
+                <div className="text-sm font-bold text-slate-900 mt-0.5">
+                  {hasValidNumber(v6bCohort?.closed_trades_count)
+                    ? `${v6bCohort.closed_trades_count} (${
+                        hasValidNumber(v6bCohort.win_rate_pct)
+                          ? formatPercent(v6bCohort.win_rate_pct)
+                          : '—'
+                      })`
+                    : UNAVAILABLE_LABEL}
+                </div>
+              </div>
+              <div className="bg-white rounded-lg border border-slate-200 p-2.5">
+                <div className="text-[10px] font-sans text-slate-500">Est. Fees / Today</div>
+                <div className="text-sm font-bold text-slate-800 mt-0.5">
+                  {formatINRValue(v6bCohort?.total_charges_inr, { decimals: 0 })} •{' '}
+                  {v6bCohort ? `${v6bCohort.today_trades_count}/${v6bCohort.max_trades_day}` : '—'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {histCohort && hasValidNumber(histCohort.closed_trades_count) && histCohort.closed_trades_count > 0 && (
+          <div className="text-[11px] font-mono text-slate-500 pt-1">
+            Historical Pre-Registration Archive (<code>HISTORICAL_LEGACY_V2</code>, &le; 2026-11-14):{' '}
+            {histCohort.closed_trades_count} closed trades ({formatSignedINR(histCohort.realized_net_pnl_inr)})
+            kept strictly excluded from both active OOS cohorts above.
+          </div>
+        )}
+      </section>
+
+      {/* 3. Scoped Broker, Funds & Risk Controls Cards */}
       <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        {/* Card 1: Forward Paper P&L (S205_SHADOW_FORWARD_V1 Only) */}
+        {/* Card 1: Forward Paper Envelope (S205_SHADOW_FORWARD_V1 Only) */}
         <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs flex flex-col justify-between min-w-0">
           <div>
             <div className="flex items-start justify-between gap-2">
               <span className="text-xs font-semibold text-slate-600 leading-snug min-w-0">
-                Forward Paper P&amp;L
+                Forward Paper Ledger
                 <span className="block text-[10px] font-mono font-normal text-slate-500 break-all">
                   S205_SHADOW_FORWARD_V1
                 </span>
@@ -335,7 +562,7 @@ export default function OverviewTab({
                 <span>{formatINRValue(reqMargin, { decimals: 0 })}</span>
               </div>
               <div className="flex justify-between">
-                <span>Paper Reserved:</span>
+                <span>Shadow V1 Reserved:</span>
                 <span>
                   {formatINRValue(shadowLedger?.active_cash_or_margin_reserved_inr, {
                     decimals: 0,
@@ -359,77 +586,75 @@ export default function OverviewTab({
           </div>
         </div>
 
-        {/* Card 4: Configured Risk Triggers (Honest Stop vs Structural Bound Language) */}
+        {/* Card 4: Independent Cohort Risk Envelopes */}
         <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-2xs flex flex-col justify-between min-w-0">
           <div>
             <div className="flex items-start justify-between gap-2">
               <span className="text-xs font-semibold text-slate-600 flex items-center gap-1 leading-snug">
                 <ShieldAlert size={13} className="text-slate-500 shrink-0" />
-                <span>Configured Risk Controls</span>
+                <span>Independent Risk Controls</span>
               </span>
               <span
                 className={`text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0 whitespace-nowrap ${
-                  activeReadiness?.session_risk?.daily_kill_triggered ||
+                  shCohort?.daily_kill_triggered ||
+                  v6bCohort?.daily_kill_triggered ||
                   liveStatus?.circuit_breaker?.is_session_halted
                     ? 'bg-rose-100 text-rose-800 font-bold'
                     : 'bg-slate-100 text-slate-700'
                 }`}
               >
-                {activeReadiness?.session_risk?.daily_kill_triggered ||
-                liveStatus?.circuit_breaker?.is_session_halted
+                {shCohort?.daily_kill_triggered || liveStatus?.circuit_breaker?.is_session_halted
                   ? 'HALTED'
-                  : 'ACTIVE'}
+                  : 'ISOLATED'}
               </span>
             </div>
             <div className="mt-2.5 space-y-1.5 text-xs font-mono text-slate-700 tabular-nums">
               <div className="flex justify-between">
-                <span className="text-slate-500">Daily MTM Trigger:</span>
+                <span className="text-slate-500">Per-Cohort Daily Kill:</span>
                 <span className="font-semibold">
-                  {formatSignedINR(activeReadiness?.session_risk?.daily_kill_limit_inr, {
+                  {formatSignedINR(activeReadiness?.session_risk?.daily_kill_limit_inr ?? -3500, {
                     decimals: 0,
                   })}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-500">Broker Loss Trigger:</span>
-                <span className="font-semibold">
-                  {hasValidNumber(liveStatus?.circuit_breaker?.max_daily_loss_inr)
-                    ? formatSignedINR(-Math.abs(liveStatus.circuit_breaker.max_daily_loss_inr), {
-                        decimals: 0,
-                      })
-                    : UNAVAILABLE_LABEL}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">Trail Update Rule:</span>
-                <span>:00 Completed 1m Close</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">Paper Slots Used:</span>
+                <span className="text-slate-500">Shadow V1 Slots:</span>
                 <span>
-                  {hasValidNumber(activeReadiness?.session_risk?.trades_today) &&
-                  hasValidNumber(activeReadiness?.session_risk?.max_trades_day)
-                    ? `${activeReadiness.session_risk.trades_today} / ${activeReadiness.session_risk.max_trades_day}`
+                  {shCohort
+                    ? `${shCohort.today_trades_count}/${shCohort.max_trades_day} day (${shCohort.open_trades_count}/${shCohort.max_open_positions} open)`
                     : UNAVAILABLE_LABEL}
                 </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">V6B ML Slots:</span>
+                <span>
+                  {v6bCohort
+                    ? `${v6bCohort.today_trades_count}/${v6bCohort.max_trades_day} day (${v6bCohort.open_trades_count}/${v6bCohort.max_open_positions} open)`
+                    : UNAVAILABLE_LABEL}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Post-Exit Cooldown:</span>
+                <span>900s Independent</span>
               </div>
             </div>
           </div>
           <div className="mt-3 pt-2 border-t border-slate-100 text-[11px] text-slate-500">
-            Stop/kill thresholds are software triggers, not guaranteed maximum losses under gaps.
+            Stop/kill thresholds are software triggers; cohorts never block or flatten each other.
           </div>
         </div>
       </section>
 
-      {/* 3. Current Forward Candidates & Principal Blockers */}
-      <section className="bg-white rounded-xl border border-slate-200 shadow-2xs p-4 sm:p-5">
+      {/* 4. Current Candidates & Principal Blockers (Both OOS Cohorts Separated) */}
+      <section className="bg-white rounded-xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
           <div>
             <h2 className="text-sm font-bold text-slate-900">
-              Current Forward Candidates &amp; Principal Blockers
+              Current OOS Candidates &amp; Principal Blockers (<code>SHADOW_V1</code> vs.{' '}
+              <code>V6B_ML_COMPARATOR</code>)
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Operational rule status for active forward paper books. Rule eligibility does not
+              Operational rule status for both side-by-side paper cohorts. Rule eligibility does not
               imply positive statistical expectancy.
             </p>
           </div>
@@ -451,61 +676,153 @@ export default function OverviewTab({
           </div>
         </div>
 
-        {activeCandidateRows.length === 0 ? (
-          <div className="mt-3 p-4 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600 font-mono">
+        {shadowCandidateRows.length === 0 && v6bCandidateRows.length === 0 ? (
+          <div className="p-4 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600 font-mono">
             {sliceMeta?.readiness?.status === 'loading'
               ? 'Loading candidate readiness...'
               : 'Candidate readiness unavailable.'}
           </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
-            {activeCandidateRows.map((row) => {
-              const info = deriveCandidateBlocker(row);
-              const isEligible = row.state === 'READY_FIRE';
-              return (
-                <div
-                  key={row.engine_id}
-                  className="rounded-lg border border-slate-200 p-3.5 flex flex-col justify-between gap-2 bg-slate-50/40"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <div className="text-xs font-bold text-slate-900">{row.label}</div>
-                      <div className="text-[11px] font-mono text-slate-500">
-                        {row.engine_id} • Window {row.window_ist || UNAVAILABLE_LABEL} IST
+          <div className="space-y-4">
+            {/* Group A: SHADOW_V1 */}
+            <div className="space-y-2">
+              <div className="text-xs font-bold uppercase tracking-wide text-indigo-900 flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded bg-indigo-100 border border-indigo-200 font-mono text-[10px]">
+                  SHADOW_V1
+                </span>
+                <span>Active 2-Book L5 Forward Candidates</span>
+              </div>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {shadowCandidateRows.map((row) => {
+                  const info = deriveCandidateBlocker(row);
+                  const isEligible = row.state === 'READY_FIRE';
+                  return (
+                    <div
+                      key={row.engine_id}
+                      className="rounded-lg border border-slate-200 p-3.5 flex flex-col justify-between gap-2 bg-slate-50/40"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="text-xs font-bold text-slate-900">{row.label}</div>
+                          <div className="text-[11px] font-mono text-slate-500">
+                            {row.engine_id} • Window {row.window_ist || UNAVAILABLE_LABEL} IST
+                          </div>
+                        </div>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold border ${
+                            isEligible
+                              ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                              : 'bg-slate-100 text-slate-700 border-slate-300'
+                          }`}
+                        >
+                          {row.state} ({row.gates_passed ?? 0}/{row.gates_total ?? 0} checks)
+                        </span>
+                      </div>
+
+                      <div className="text-xs font-mono text-slate-800 flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <span>
+                          Candidate:{' '}
+                          <strong>
+                            {row.candidate_contract && row.candidate_contract !== '—'
+                              ? row.candidate_contract
+                              : UNAVAILABLE_LABEL}
+                          </strong>
+                        </span>
+                        <span className="text-slate-500">Direction: {info.direction}</span>
+                      </div>
+
+                      <div className="text-xs px-2.5 py-1.5 rounded bg-white border border-slate-200 text-slate-700">
+                        <span className="font-semibold text-slate-900">
+                          {isEligible ? 'Operational Status: ' : 'Principal Blocker: '}
+                        </span>
+                        <span className="font-mono text-[11px]">{info.principalBlocker}</span>
                       </div>
                     </div>
-                    <span
-                      className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold border ${
-                        isEligible
-                          ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
-                          : 'bg-slate-100 text-slate-700 border-slate-300'
-                      }`}
-                    >
-                      {row.state} ({row.gates_passed ?? 0}/{row.gates_total ?? 0} checks)
-                    </span>
-                  </div>
+                  );
+                })}
+              </div>
+            </div>
 
-                  <div className="text-xs font-mono text-slate-800 flex flex-wrap items-center justify-between gap-2 pt-1">
-                    <span>
-                      Candidate:{' '}
-                      <strong>
-                        {row.candidate_contract && row.candidate_contract !== '—'
-                          ? row.candidate_contract
-                          : UNAVAILABLE_LABEL}
-                      </strong>
+            {/* Group B: V6B_ML_COMPARATOR */}
+            {v6bCandidateRows.length > 0 && (
+              <div className="space-y-2 pt-2 border-t border-slate-100">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-bold uppercase tracking-wide text-amber-950 flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-amber-100 border border-amber-300 font-mono text-[10px]">
+                      V6B_ML_COMPARATOR
                     </span>
-                    <span className="text-slate-500">Direction: {info.direction}</span>
+                    <span>Retired 4-Engine + 30-Feature ML OOS Paper Candidates</span>
                   </div>
-
-                  <div className="text-xs px-2.5 py-1.5 rounded bg-white border border-slate-200 text-slate-700">
-                    <span className="font-semibold text-slate-900">
-                      {isEligible ? 'Operational Status: ' : 'Principal Blocker: '}
-                    </span>
-                    <span className="font-mono text-[11px]">{info.principalBlocker}</span>
-                  </div>
+                  <span className="text-[10px] font-mono font-semibold text-amber-900 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                    UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)
+                  </span>
                 </div>
-              );
-            })}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  {v6bCandidateRows.map((row) => {
+                    const info = deriveCandidateBlocker(row);
+                    const isEligible = row.state === 'READY_FIRE';
+                    const isShort = row.book_type === 'SHORT_BOOK_SELL';
+                    const mlProbStr = hasValidNumber(row.ml_prob)
+                      ? formatNumber(row.ml_prob)
+                      : UNAVAILABLE_LABEL;
+                    const mlMinStr = hasValidNumber(row.ml_p_min)
+                      ? formatNumber(row.ml_p_min)
+                      : '0.56';
+                    return (
+                      <div
+                        key={row.engine_id}
+                        className="rounded-lg border border-slate-200 p-3.5 flex flex-col justify-between gap-2 bg-amber-50/15"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <div className="text-xs font-bold text-slate-900">{row.label}</div>
+                            <div className="text-[11px] font-mono text-slate-500">
+                              {row.engine_id} • Window {row.window_ist || UNAVAILABLE_LABEL} IST
+                            </div>
+                          </div>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[11px] font-mono font-semibold border ${
+                              isEligible
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                                : 'bg-slate-100 text-slate-700 border-slate-300'
+                            }`}
+                          >
+                            {row.state} ({row.gates_passed ?? 0}/{row.gates_total ?? 0} checks)
+                          </span>
+                        </div>
+
+                        <div className="text-xs font-mono text-slate-800 flex flex-wrap items-center justify-between gap-2 pt-1">
+                          <span>
+                            Candidate:{' '}
+                            <strong>
+                              {row.candidate_contract && row.candidate_contract !== '—'
+                                ? row.candidate_contract
+                                : UNAVAILABLE_LABEL}
+                            </strong>
+                          </span>
+                          <span className="text-slate-600">
+                            ML: <strong>{mlProbStr}</strong> / &ge; {mlMinStr}
+                          </span>
+                        </div>
+
+                        {isShort && (
+                          <div className="text-[10px] font-mono text-amber-900">
+                            UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)
+                          </div>
+                        )}
+
+                        <div className="text-xs px-2.5 py-1.5 rounded bg-white border border-slate-200 text-slate-700">
+                          <span className="font-semibold text-slate-900">
+                            {isEligible ? 'Operational Status: ' : 'Principal Blocker: '}
+                          </span>
+                          <span className="font-mono text-[11px]">{info.principalBlocker}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </section>

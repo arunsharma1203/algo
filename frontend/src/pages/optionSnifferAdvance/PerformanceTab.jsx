@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Calendar as CalendarIcon, ChevronLeft, ChevronRight, Info, X } from 'lucide-react';
+import { Calendar as CalendarIcon, ChevronLeft, ChevronRight, GitCompare, Info, X } from 'lucide-react';
 import {
   UNAVAILABLE_LABEL,
   computeScopedPerformance,
@@ -26,8 +26,12 @@ const SOURCE_OPTIONS = [
     label: 'Forward Paper • Book A Only (150pt Spread)',
   },
   {
-    id: 'LEGACY_PAPER',
-    label: 'Legacy Retired Paper (Historical V6B / V2.0)',
+    id: 'V6B_ML_LEGACY_COMPARATOR',
+    label: 'OOS Paper Comparator • Retired V6B + 30-Feature ML',
+  },
+  {
+    id: 'HISTORICAL_LEGACY_V2',
+    label: 'Historical Archive • Pre-S205 Paper (<= 2026-11-14)',
   },
   {
     id: 'LIVE_BROKER_RECENT',
@@ -46,6 +50,7 @@ export default function PerformanceTab({
   tradesData,
   shadowTelemetry,
   liveStatus,
+  cohortComparison = null,
   calendarsByEra = null,
   sliceMeta,
   defaultCurrentMonth,
@@ -108,9 +113,166 @@ export default function PerformanceTab({
   }, [activeDay]);
 
   const sum = scoped.monthSummary;
+  const shCohort = cohortComparison?.S205_SHADOW_FORWARD_V1 || null;
+  const v6bCohort = cohortComparison?.V6B_ML_LEGACY_COMPARATOR || null;
 
   return (
     <div className="space-y-5">
+      {/* Side-by-Side Head-to-Head OOS Cohort Comparison Strip (Never Combined) */}
+      <section className="bg-white rounded-xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+              <GitCompare size={16} className="text-indigo-700" />
+              <span>
+                Side-by-Side Matched-Window OOS Scoreboard (<code>S205_SHADOW_FORWARD_V1</code> vs.{' '}
+                <code>V6B_ML_LEGACY_COMPARATOR</code>)
+              </span>
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Cumulative post-registration (&ge; {cohortComparison?.comparison_start_date || '2026-11-15'})
+              realized comparison. Select either cohort card to load its isolated day-by-day calendar below.
+            </p>
+          </div>
+          <span className="text-[11px] font-mono text-slate-500">
+            Zero Cross-Cohort Aggregation
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 font-mono tabular-nums">
+          <button
+            type="button"
+            onClick={() => {
+              setSourceFilter('SHADOW_FORWARD_V1');
+              setSelectedDayDate(null);
+            }}
+            className={`text-left rounded-xl border p-4 transition cursor-pointer ${
+              sourceFilter === 'SHADOW_FORWARD_V1'
+                ? 'border-indigo-400 bg-indigo-50/40 ring-1 ring-indigo-300'
+                : 'border-slate-200 bg-slate-50/40 hover:bg-slate-50'
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 font-sans">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-100 text-indigo-900 border border-indigo-200">
+                  SHADOW_V1
+                </span>
+                <span className="text-xs font-bold text-slate-900">
+                  Current 2-Book L5 Architecture
+                </span>
+              </div>
+              <span className="text-[11px] font-mono text-slate-500">
+                {shCohort ? `${shCohort.closed_trades_count} closed` : UNAVAILABLE_LABEL}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 mt-3 text-xs">
+              <div>
+                <div className="text-[10px] font-sans text-slate-500">Realized Net</div>
+                <div
+                  className={`text-base font-bold ${
+                    !hasValidNumber(shCohort?.realized_net_pnl_inr)
+                      ? 'text-slate-400'
+                      : Number(shCohort.realized_net_pnl_inr) > 0
+                      ? 'text-emerald-700'
+                      : Number(shCohort.realized_net_pnl_inr) < 0
+                      ? 'text-rose-700'
+                      : 'text-slate-900'
+                  }`}
+                >
+                  {formatSignedINR(shCohort?.realized_net_pnl_inr)}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] font-sans text-slate-500">Win Rate / PF</div>
+                <div className="text-sm font-bold text-slate-900">
+                  {hasValidNumber(shCohort?.win_rate_pct)
+                    ? formatPercent(shCohort.win_rate_pct)
+                    : '—'}{' '}
+                  /{' '}
+                  {shCohort?.no_loss_wins_only
+                    ? 'No loss'
+                    : hasValidNumber(shCohort?.profit_factor)
+                    ? `${formatNumber(shCohort.profit_factor)}x`
+                    : '—'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] font-sans text-slate-500">Est. Fees</div>
+                <div className="text-sm font-bold text-slate-800">
+                  {formatINRValue(shCohort?.total_charges_inr)}
+                </div>
+              </div>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setSourceFilter('V6B_ML_LEGACY_COMPARATOR');
+              setSelectedDayDate(null);
+            }}
+            className={`text-left rounded-xl border p-4 transition cursor-pointer ${
+              sourceFilter === 'V6B_ML_LEGACY_COMPARATOR'
+                ? 'border-amber-400 bg-amber-50/40 ring-1 ring-amber-300'
+                : 'border-slate-200 bg-slate-50/40 hover:bg-slate-50'
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 font-sans">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-100 text-amber-950 border border-amber-300">
+                  V6B_ML_COMPARATOR
+                </span>
+                <span className="text-xs font-bold text-slate-900">
+                  Retired 4-Engine + 30-Feature ML
+                </span>
+              </div>
+              <span className="text-[10px] font-mono font-semibold text-amber-900">
+                NOT LIVE ELIGIBLE •{' '}
+                {v6bCohort ? `${v6bCohort.closed_trades_count} closed` : UNAVAILABLE_LABEL}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 mt-3 text-xs">
+              <div>
+                <div className="text-[10px] font-sans text-slate-500">Realized Net</div>
+                <div
+                  className={`text-base font-bold ${
+                    !hasValidNumber(v6bCohort?.realized_net_pnl_inr)
+                      ? 'text-slate-400'
+                      : Number(v6bCohort.realized_net_pnl_inr) > 0
+                      ? 'text-emerald-700'
+                      : Number(v6bCohort.realized_net_pnl_inr) < 0
+                      ? 'text-rose-700'
+                      : 'text-slate-900'
+                  }`}
+                >
+                  {formatSignedINR(v6bCohort?.realized_net_pnl_inr)}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] font-sans text-slate-500">Win Rate / PF</div>
+                <div className="text-sm font-bold text-slate-900">
+                  {hasValidNumber(v6bCohort?.win_rate_pct)
+                    ? formatPercent(v6bCohort.win_rate_pct)
+                    : '—'}{' '}
+                  /{' '}
+                  {v6bCohort?.no_loss_wins_only
+                    ? 'No loss'
+                    : hasValidNumber(v6bCohort?.profit_factor)
+                    ? `${formatNumber(v6bCohort.profit_factor)}x`
+                    : '—'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] font-sans text-slate-500">Est. Fees</div>
+                <div className="text-sm font-bold text-slate-800">
+                  {formatINRValue(v6bCohort?.total_charges_inr)}
+                </div>
+              </div>
+            </div>
+          </button>
+        </div>
+      </section>
+
       <section className="bg-white rounded-xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-4">
         {/* Top Controls: Explicit Source & Date Range Selectors */}
         <div className="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-4 pb-4 border-b border-slate-100">

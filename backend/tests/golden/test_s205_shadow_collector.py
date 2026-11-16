@@ -494,6 +494,142 @@ class TestS205ShadowCollectorGolden(unittest.TestCase):
             src = fh.read()
         self.assertIn("SHADOW_TELEMETRY_AIRGAP_SKIP", src)
         self.assertIn('strat_m.startswith("SHADOW_")', src)
+        self.assertIn('strat_m.startswith("V6B_")', src)
+        self.assertIn('"v6b_ml_legacy_comparator"', src)
+
+    def test_08_side_by_side_v6b_comparator_isolation_and_airgap(self) -> None:
+        from app.analytics.option_sniffer_advance.advance_db import (
+            AdvanceDB,
+            init_option_sniffer_advance_tables,
+        )
+
+        init_option_sniffer_advance_tables()
+        sc = S205ShadowCollector(db_path=self.db_path, sync_advance_db=True)
+
+        # 1. Insert a pre-2026-11-15 historical row -> must land in HISTORICAL_LEGACY_V2
+        AdvanceDB.create_trade(
+            {
+                "trade_id": "hist_v2_01",
+                "signal_id": "sig_h1",
+                "book_type": "LONG_BOOK_BUY",
+                "strategy_mode": "WAVE_1_GAMMA_SNIPER",
+                "direction": "BUY_CE",
+                "instrument_key": "NSE_FO|H1",
+                "trading_symbol": "NIFTY 24000 CE",
+                "underlying": "NIFTY",
+                "option_type": "CE",
+                "strike": 24000.0,
+                "expiry": "2026-11-12",
+                "lot_size": 65,
+                "quantity": 65,
+                "entry_time": "2026-11-10T10:15:00",
+                "entry_bid": 100.0,
+                "entry_ask": 100.5,
+                "entry_price_used": 100.5,
+                "stop_loss_pct": 20.0,
+                "target_pct": 0.0,
+                "estimated_margin": 6532.5,
+                "regime_context": {},
+            }
+        )
+        AdvanceDB.close_trade(
+            "hist_v2_01",
+            {
+                "exit_time": "2026-11-10T10:45:00",
+                "exit_bid": 90.0,
+                "exit_ask": 90.5,
+                "exit_price_used": 90.0,
+                "peak_price": 102.0,
+                "trough_price": 90.0,
+                "mfe_pct": 1.5,
+                "mae_pct": -10.4,
+                "gross_pnl": -682.5,
+                "charges": 62.1,
+                "slippage": 0.0,
+                "net_pnl": -744.6,
+                "net_pnl_pct": -11.4,
+                "holding_duration_seconds": 1800,
+                "exit_reason": "STOP_LOSS",
+            },
+        )
+
+        # 2. Insert a V6B_ML_LEGACY_COMPARATOR row with target_pct=0.0 and shadow_only=True
+        AdvanceDB.create_trade(
+            {
+                "trade_id": "adv_v6b_comp_01",
+                "signal_id": "sig_v6b_01",
+                "book_type": "SHORT_BOOK_SELL",
+                "strategy_mode": "V6B_S1_OI",
+                "direction": "SELL_PE",
+                "instrument_key": "NSE_FO|V6B1",
+                "trading_symbol": "NIFTY 2026-11-19 24050PE",
+                "underlying": "NIFTY",
+                "option_type": "PE",
+                "strike": 24050.0,
+                "expiry": "2026-11-19",
+                "lot_size": 65,
+                "quantity": 65,
+                "entry_time": "2026-11-16T10:02:00",
+                "entry_bid": 120.0,
+                "entry_ask": 120.5,
+                "entry_price_used": 120.0,
+                "stop_loss_pct": 18.0,
+                "target_pct": 0.0,
+                "estimated_margin": 55000.0,
+                "regime_context": {
+                    "shadow_only": True,
+                    "cohort": "V6B_ML_LEGACY_COMPARATOR",
+                    "execution_eligibility": "UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)",
+                    "ml_prob": 0.63,
+                    "ml_p_min": 0.56,
+                },
+            }
+        )
+        open_rows = AdvanceDB.get_open_trades()
+        self.assertEqual(len(open_rows), 1)
+        self.assertEqual(float(open_rows[0]["target_pct"]), 0.0)
+        self.assertEqual(AdvanceDB.classify_trade_cohort(open_rows[0]), "V6B_ML_LEGACY_COMPARATOR")
+
+        # 3. Open & close a Shadow Book B package (-₹4,000 loss) and verify V6B is NOT contaminated
+        day, spot_b, vix_b, opt_b = _build_trending_session(45)
+        ctx = build_causal_intraday_context(day, spot_b, vix_b, {}, opt_b, "2026-11-19", "2026-11-26", {})
+        b_idx = len(ctx["ts"]) - 1
+        atm = round(ctx["c"][b_idx] / 50.0) * 50.0
+        q_ce = _make_observed_quote("NSE_FO|SHDW1", "2026-11-19", atm, "CE", 150.0, 150.5, obi=0.22)
+        _, sh_opened, _ = sc.evaluate_completed_bar(
+            ctx=ctx,
+            bar_idx=b_idx,
+            quote_lookup={("2026-11-19", atm, "CE"): q_ce},
+            fut_quote={"fut_ltp": ctx["c"][b_idx] + 9.0},
+            india_vix=14.0,
+            now_dt=datetime(2026, 11, 16, 10, 0, 0),
+            execute_new_entries=True,
+            allow_network=False,
+        )
+        self.assertEqual(len(sh_opened), 1)
+        sh_pkg = sc._open_packages[sh_opened[0]]
+        sc._close_single_long_package(
+            sh_pkg,
+            q_ce,
+            85.0,
+            "LONG_HARD_SL_HIT",
+            datetime(2026, 11, 16, 10, 5, 0),
+            exit_bar_ts="2026-11-16 10:05:00",
+        )
+
+        comp = AdvanceDB.get_cohort_comparison_summary(shadow_summary=sc.get_summary())
+        self.assertTrue(comp["never_aggregate_cohorts"])
+        self.assertEqual(comp["S205_SHADOW_FORWARD_V1"]["closed_trades_count"], 1)
+        self.assertLess(comp["S205_SHADOW_FORWARD_V1"]["realized_net_pnl_inr"], -3500.0)
+
+        # V6B comparator has 0 closed trades and ₹0.00 realized net P&L (completely uncontaminated by Shadow V1 loss & Historical V2 loss!)
+        self.assertEqual(comp["V6B_ML_LEGACY_COMPARATOR"]["open_trades_count"], 1)
+        self.assertEqual(comp["V6B_ML_LEGACY_COMPARATOR"]["closed_trades_count"], 0)
+        self.assertEqual(comp["V6B_ML_LEGACY_COMPARATOR"]["realized_net_pnl_inr"], 0.0)
+
+        # Historical V2 archive holds the 2026-11-10 row cleanly isolated
+        self.assertEqual(comp["HISTORICAL_LEGACY_V2"]["closed_trades_count"], 1)
+        self.assertEqual(comp["HISTORICAL_LEGACY_V2"]["realized_net_pnl_inr"], -744.6)
 
 
 if __name__ == "__main__":

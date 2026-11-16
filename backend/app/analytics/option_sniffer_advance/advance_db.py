@@ -11,7 +11,7 @@ import json
 import logging
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from app.analytics.option_sniffer_advance.advance_constants import (
@@ -26,7 +26,10 @@ from app.analytics.option_sniffer_advance.advance_constants import (
     STRATEGY_WAVE2_EXHAUSTION_SELLER,
     to_ist_naive,
 )
-from app.data.historical_data_layer import get_db_path
+try:
+    from app.data.historical_data_layer import get_db_path
+except ModuleNotFoundError:
+    from app.data.database import get_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -380,8 +383,8 @@ class AdvanceDB:
                             float(trade.get("peak_price") or trade["entry_price_used"]),
                             float(trade.get("trough_price") or trade["entry_price_used"]),
                             trade.get("trailing_stop"),
-                            float(trade.get("stop_loss_pct") or 16.0),
-                            float(trade.get("target_pct") or 35.0),
+                            16.0 if trade.get("stop_loss_pct") is None else float(trade["stop_loss_pct"]),
+                            35.0 if trade.get("target_pct") is None else float(trade["target_pct"]),
                             float(trade.get("estimated_margin") or 0.0),
                             json.dumps(trade.get("regime_context") or {}),
                         ),
@@ -768,6 +771,272 @@ class AdvanceDB:
             except Exception as e:
                 logger.debug(f"[AdvanceDB] Exhaustion wave check note: {e}")
                 return False
+
+    @staticmethod
+    def classify_trade_cohort(row: Dict[str, Any]) -> str:
+        """
+        Deterministically classifies an Advance trade or signal row into one of three strictly isolated cohorts:
+          - `S205_SHADOW_FORWARD_V1` (`SHADOW_BOOK_A_SPREAD_150` + `SHADOW_BOOK_B_PAID_FLOW`)
+          - `V6B_ML_LEGACY_COMPARATOR` (`V6B_S1_OI`, `V6B_S3_SPIKE`, `V6B_S4_Z2`, `V6B_LBASIS_ATM` OOS comparator >= 2026-11-15)
+          - `HISTORICAL_LEGACY_V2` (pre-registration V2.0 and pre-2026-11-15 rows)
+        """
+        if not isinstance(row, dict):
+            return "HISTORICAL_LEGACY_V2"
+        mode_s = str(row.get("strategy_mode") or row.get("book_id") or "").strip().upper()
+        raw_rc = (
+            row.get("regime_context")
+            or row.get("regime_context_json")
+            or row.get("regime_telemetry")
+            or row.get("regime_telemetry_json")
+        )
+        rctx: Dict[str, Any] = {}
+        if isinstance(raw_rc, dict):
+            rctx = raw_rc
+        elif raw_rc:
+            try:
+                parsed = json.loads(str(raw_rc))
+                if isinstance(parsed, dict):
+                    rctx = parsed
+            except Exception:
+                rctx = {}
+
+        explicit_cohort = str(rctx.get("cohort") or "").strip().upper()
+        if explicit_cohort == "V6B_ML_LEGACY_COMPARATOR":
+            return "V6B_ML_LEGACY_COMPARATOR"
+        if explicit_cohort == "S205_SHADOW_FORWARD_V1":
+            return "S205_SHADOW_FORWARD_V1"
+        if mode_s.startswith("SHADOW_BOOK_") or rctx.get("protocol_id") == "S205_SHADOW_FORWARD_V1":
+            return "S205_SHADOW_FORWARD_V1"
+        if mode_s.startswith("V6B_"):
+            ts_ref = str(row.get("entry_time") or row.get("created_at") or "").strip()[:10]
+            if ts_ref >= "2026-11-15":
+                return "V6B_ML_LEGACY_COMPARATOR"
+            return "HISTORICAL_LEGACY_V2"
+        return "HISTORICAL_LEGACY_V2"
+
+    @classmethod
+    def get_cohort_comparison_summary(
+        cls,
+        shadow_summary: Optional[Dict[str, Any]] = None,
+        open_decorated: Optional[List[Dict[str, Any]]] = None,
+        v6b_runtime: Optional[Dict[str, Any]] = None,
+        as_of_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Computes strictly separated, zero-aggregation cohort summaries across:
+          1. `S205_SHADOW_FORWARD_V1` (`SHADOW_BOOK_A_SPREAD_150` + `SHADOW_BOOK_B_PAID_FLOW`)
+          2. `V6B_ML_LEGACY_COMPARATOR` (`V6B_S1_OI`, `V6B_S3_SPIKE`, `V6B_S4_Z2`, `V6B_LBASIS_ATM` + 30-feature ML)
+          3. `HISTORICAL_LEGACY_V2` (older pre-2026-11-15 rows)
+        """
+        if as_of_date:
+            today_str = str(as_of_date)[:10]
+        else:
+            try:
+                today_str = to_ist_naive().strftime("%Y-%m-%d")
+            except Exception:
+                today_str = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+        with _ADVANCE_DB_LOCK:
+            try:
+                conn = cls.get_connection()
+                closed_rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT * FROM option_sniffer_advance_trades WHERE status = 'CLOSED'"
+                    ).fetchall()
+                ]
+                raw_open_rows = [
+                    dict(r)
+                    for r in conn.execute(
+                        "SELECT * FROM option_sniffer_advance_trades WHERE status = 'OPEN'"
+                    ).fetchall()
+                ]
+                try:
+                    shadow_pkg_rows = [
+                        dict(r)
+                        for r in conn.execute(
+                            "SELECT * FROM option_sniffer_advance_s205_shadow_packages"
+                        ).fetchall()
+                    ]
+                except Exception:
+                    shadow_pkg_rows = []
+                conn.close()
+            except Exception as e:
+                logger.error(f"[AdvanceDB] Cohort comparison query error: {e}")
+                closed_rows = []
+                raw_open_rows = []
+                shadow_pkg_rows = []
+
+        eff_open = open_decorated if open_decorated is not None else raw_open_rows
+
+        def _summarize_closed(
+            subset: List[Dict[str, Any]],
+            net_key: str = "net_pnl",
+            gross_key: str = "gross_pnl",
+            chg_key: str = "charges",
+            slip_key: str = "slippage",
+        ) -> Dict[str, Any]:
+            cnt = len(subset)
+            wins = sum(1 for x in subset if float(x.get(net_key) or 0.0) > 0)
+            losses = sum(1 for x in subset if float(x.get(net_key) or 0.0) < 0)
+            flats = cnt - wins - losses
+            gross = round(sum(float(x.get(gross_key) or 0.0) for x in subset), 2)
+            charges = round(
+                sum(float(x.get(chg_key) or 0.0) + float(x.get(slip_key) or 0.0) for x in subset),
+                2,
+            )
+            net = round(sum(float(x.get(net_key) or 0.0) for x in subset), 2)
+            gw = sum(float(x.get(net_key) or 0.0) for x in subset if float(x.get(net_key) or 0.0) > 0)
+            gl = abs(sum(float(x.get(net_key) or 0.0) for x in subset if float(x.get(net_key) or 0.0) < 0))
+            pf: Optional[float] = round(gw / gl, 2) if gl > 0 else None
+            wr: Optional[float] = round((wins / cnt) * 100.0, 1) if cnt > 0 else None
+            return {
+                "closed_trades_count": cnt,
+                "wins": wins,
+                "losses": losses,
+                "flats": flats,
+                "win_rate_pct": wr,
+                "profit_factor": pf,
+                "no_loss_wins_only": bool(cnt > 0 and gl == 0 and gw > 0),
+                "realized_gross_pnl_inr": gross,
+                "total_charges_inr": charges,
+                "realized_net_pnl_inr": net,
+            }
+
+        def _unrealized_sum(subset: List[Dict[str, Any]]) -> float:
+            total = 0.0
+            for x in subset:
+                val = x.get("unrealized_net_pnl")
+                if val is None:
+                    val = x.get("net_pnl")
+                total += float(val or 0.0)
+            return round(total, 2)
+
+        # 1. S205_SHADOW_FORWARD_V1 (Authoritative from `option_sniffer_advance_s205_shadow_packages`, fallback to mirrored rows)
+        open_shadow_trds = [x for x in eff_open if cls.classify_trade_cohort(x) == "S205_SHADOW_FORWARD_V1"]
+        if shadow_pkg_rows:
+            closed_pkgs = [
+                p for p in shadow_pkg_rows if str(p.get("state") or "") in ("CLOSED", "INCOMPLETE_LEG_UNWOUND")
+            ]
+            open_pkgs = [p for p in shadow_pkg_rows if str(p.get("state") or "") == "OPEN"]
+            unwound_pkgs = [p for p in shadow_pkg_rows if str(p.get("state") or "") == "INCOMPLETE_LEG_UNWOUND"]
+            today_pkgs = [
+                p for p in shadow_pkg_rows if str(p.get("session_date") or p.get("entry_bar_ts") or "")[:10] == today_str
+            ]
+            sh_all = _summarize_closed(
+                closed_pkgs,
+                net_key="net_pnl_inr",
+                gross_key="gross_pnl_inr",
+                chg_key="total_charges_inr",
+                slip_key="_zero",
+            )
+            sh_long = _summarize_closed(
+                [p for p in closed_pkgs if p.get("book_id") == "SHADOW_BOOK_B_PAID_FLOW"],
+                net_key="net_pnl_inr",
+                gross_key="gross_pnl_inr",
+                chg_key="total_charges_inr",
+                slip_key="_zero",
+            )
+            sh_short = _summarize_closed(
+                [p for p in closed_pkgs if p.get("book_id") == "SHADOW_BOOK_A_SPREAD_150"],
+                net_key="net_pnl_inr",
+                gross_key="gross_pnl_inr",
+                chg_key="total_charges_inr",
+                slip_key="_zero",
+            )
+            sh_open_cnt = len(open_pkgs)
+            sh_unwound_cnt = len(unwound_pkgs)
+            sh_today_cnt = len(today_pkgs)
+        else:
+            closed_sh_trds = [x for x in closed_rows if cls.classify_trade_cohort(x) == "S205_SHADOW_FORWARD_V1"]
+            sh_all = _summarize_closed(closed_sh_trds)
+            sh_long = _summarize_closed([x for x in closed_sh_trds if x.get("book_type") == BOOK_LONG_BUY])
+            sh_short = _summarize_closed([x for x in closed_sh_trds if x.get("book_type") == BOOK_SHORT_SELL])
+            sh_open_cnt = len(open_shadow_trds)
+            sh_unwound_cnt = 0
+            sh_today_cnt = len(
+                [
+                    x
+                    for x in (open_shadow_trds + closed_sh_trds)
+                    if str(x.get("entry_time") or "")[:10] == today_str
+                ]
+            )
+
+        sh_ledger = (shadow_summary or {}).get("shadow_account_ledger") or {}
+        sh_summary = {
+            "cohort_id": "S205_SHADOW_FORWARD_V1",
+            "cohort_badge": "SHADOW_V1",
+            "label": "S205 Shadow Forward V1 (2-Book L5 Architecture)",
+            "engines": ["SHADOW_BOOK_A_SPREAD_150", "SHADOW_BOOK_B_PAID_FLOW"],
+            "live_eligible": False,
+            "risk_structure": "DEFINED_RISK_150PT_SPREAD_AND_1L_PAID_BUY",
+            "open_trades_count": int(sh_ledger.get("open_packages_count", sh_open_cnt)),
+            "pending_leg2_count": int(sh_ledger.get("pending_leg2_count", 0)),
+            "incomplete_leg_unwinds_count": int(sh_ledger.get("incomplete_leg_unwinds_count", sh_unwound_cnt)),
+            **sh_all,
+            "unrealized_net_pnl_inr": _unrealized_sum(open_shadow_trds),
+            "today_trades_count": sh_today_cnt,
+            "max_trades_day": 2,
+            "max_open_positions": 2,
+            "cooldown_seconds": 900,
+            "daily_kill_limit_inr": -3500.0,
+            "daily_kill_triggered": bool(sh_ledger.get("daily_kill_triggered", False)),
+            "long_book": sh_long,
+            "short_book": sh_short,
+        }
+
+        # 2. V6B_ML_LEGACY_COMPARATOR (Strictly post-preregistration OOS comparator >= 2026-11-15)
+        closed_v6b = [x for x in closed_rows if cls.classify_trade_cohort(x) == "V6B_ML_LEGACY_COMPARATOR"]
+        open_v6b = [x for x in eff_open if cls.classify_trade_cohort(x) == "V6B_ML_LEGACY_COMPARATOR"]
+        v6b_all = _summarize_closed(closed_v6b)
+        v6b_long = _summarize_closed([x for x in closed_v6b if x.get("book_type") == BOOK_LONG_BUY])
+        v6b_short = _summarize_closed([x for x in closed_v6b if x.get("book_type") == BOOK_SHORT_SELL])
+        v6b_today_cnt = len(
+            [x for x in (open_v6b + closed_v6b) if str(x.get("entry_time") or "")[:10] == today_str]
+        )
+        v6b_rt = v6b_runtime or {}
+        v6b_summary = {
+            "cohort_id": "V6B_ML_LEGACY_COMPARATOR",
+            "cohort_badge": "V6B_ML_COMPARATOR",
+            "label": "V6B + 30-Feature ML Comparator (Retired 4-Engine Benchmark)",
+            "engines": ["V6B_S1_OI", "V6B_S3_SPIKE", "V6B_S4_Z2", "V6B_LBASIS_ATM"],
+            "live_eligible": False,
+            "risk_structure": "UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)",
+            "open_trades_count": len(open_v6b),
+            **v6b_all,
+            "unrealized_net_pnl_inr": _unrealized_sum(open_v6b),
+            "today_trades_count": v6b_today_cnt,
+            "max_trades_day": int(v6b_rt.get("max_trades_day", 3)),
+            "max_open_positions": int(v6b_rt.get("max_open_positions", 2)),
+            "cooldown_seconds": int(v6b_rt.get("cooldown_seconds", 900)),
+            "cooldown_remaining_sec": int(v6b_rt.get("cooldown_remaining_sec", 0)),
+            "daily_kill_limit_inr": float(v6b_rt.get("daily_kill_limit_inr", -3500.0)),
+            "daily_kill_triggered": bool(v6b_rt.get("daily_kill_triggered", False)),
+            "long_book": v6b_long,
+            "short_book": v6b_short,
+        }
+
+        # 3. HISTORICAL_LEGACY_V2 (Older pre-2026-11-15 paper rows preserved strictly as archive)
+        closed_hist = [x for x in closed_rows if cls.classify_trade_cohort(x) == "HISTORICAL_LEGACY_V2"]
+        open_hist = [x for x in eff_open if cls.classify_trade_cohort(x) == "HISTORICAL_LEGACY_V2"]
+        hist_all = _summarize_closed(closed_hist)
+        hist_summary = {
+            "cohort_id": "HISTORICAL_LEGACY_V2",
+            "cohort_badge": "HISTORICAL_ARCHIVE",
+            "label": "Historical Pre-S205 Paper Archive (<= 2026-11-14)",
+            "live_eligible": False,
+            "risk_structure": "ARCHIVED_PRE_PREREGISTRATION_PAPER",
+            "open_trades_count": len(open_hist),
+            **hist_all,
+            "unrealized_net_pnl_inr": _unrealized_sum(open_hist),
+        }
+
+        return {
+            "comparison_start_date": "2026-11-15",
+            "never_aggregate_cohorts": True,
+            "S205_SHADOW_FORWARD_V1": sh_summary,
+            "V6B_ML_LEGACY_COMPARATOR": v6b_summary,
+            "HISTORICAL_LEGACY_V2": hist_summary,
+        }
 
     @classmethod
     def get_dual_book_pnl_summary(cls) -> Dict[str, Any]:

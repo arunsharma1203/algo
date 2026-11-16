@@ -131,20 +131,33 @@ export function parseRegimeContext(row) {
 }
 
 /**
- * Classifies a trade, signal, or readiness row into its truthful operational scope.
+ * Classifies a trade, signal, or readiness row into its truthful operational scope:
+ *  - 'SHADOW_FORWARD_V1': Active 2-book L5 forward architecture (`SHADOW_BOOK_A_SPREAD_150` + `SHADOW_BOOK_B_PAID_FLOW`)
+ *  - 'V6B_ML_LEGACY_COMPARATOR': Retired 4-engine + 30-feature ML OOS paper comparator (`>= 2026-11-15` or readiness/signal rows)
+ *  - 'HISTORICAL_LEGACY_V2': Archived pre-registration paper rows (`< 2026-11-15`)
+ *  - 'LIVE_BROKER': Broker execution intent scope
  */
-export function classifyStrategyEra(strategyMode, regimeContext = {}) {
+export function classifyStrategyEra(strategyMode, regimeContext = {}, entryTime = '') {
   const mode = String(strategyMode || '').trim().toUpperCase();
   const rctx = regimeContext && typeof regimeContext === 'object' ? regimeContext : {};
+  const explicitCohort = String(rctx.cohort || '').trim().toUpperCase();
+
+  if (explicitCohort === 'V6B_ML_LEGACY_COMPARATOR') {
+    return 'V6B_ML_LEGACY_COMPARATOR';
+  }
   if (
+    explicitCohort === 'S205_SHADOW_FORWARD_V1' ||
     mode.startsWith('SHADOW_BOOK_') ||
-    rctx.shadow_only === true ||
     rctx.protocol_id === 'S205_SHADOW_FORWARD_V1'
   ) {
     return 'SHADOW_FORWARD_V1';
   }
   if (mode.startsWith('V6B_')) {
-    return 'SURVEILLANCE_V6B';
+    const tsPrefix = String(entryTime || '').trim().slice(0, 10);
+    if (tsPrefix && tsPrefix < '2026-11-15') {
+      return 'HISTORICAL_LEGACY_V2';
+    }
+    return 'V6B_ML_LEGACY_COMPARATOR';
   }
   if (
     mode === 'LONG_BOOK_ONLY' ||
@@ -153,7 +166,29 @@ export function classifyStrategyEra(strategyMode, regimeContext = {}) {
   ) {
     return 'LIVE_BROKER';
   }
-  return 'LEGACY_PAPER';
+  if (rctx.shadow_only === true) {
+    return 'SHADOW_FORWARD_V1';
+  }
+  return 'HISTORICAL_LEGACY_V2';
+}
+
+export function getRowCohort(row) {
+  if (!row || typeof row !== 'object') return 'HISTORICAL_LEGACY_V2';
+  const explicit = String(row.cohort || '').trim().toUpperCase();
+  if (
+    explicit === 'S205_SHADOW_FORWARD_V1' ||
+    explicit === 'V6B_ML_LEGACY_COMPARATOR' ||
+    explicit === 'HISTORICAL_LEGACY_V2'
+  ) {
+    return explicit;
+  }
+  const era = classifyStrategyEra(
+    row.strategy_mode || row.engine_id || row.book_id,
+    parseRegimeContext(row),
+    row.entry_time || row.created_at || ''
+  );
+  if (era === 'SHADOW_FORWARD_V1') return 'S205_SHADOW_FORWARD_V1';
+  return era;
 }
 
 /**
@@ -276,13 +311,19 @@ export function deriveCandidateBlocker(row) {
   if (state === 'SURVEILLANCE_ONLY') {
     principalBlocker = 'Retired from execution (passive surveillance only)';
   } else if (state === 'HALTED_KILL' || state === 'RISK_PAUSED') {
-    principalBlocker = 'Session risk halt / daily MTM kill active';
+    principalBlocker = 'Cohort session risk halt / daily MTM kill active';
+  } else if (state === 'COOLDOWN') {
+    principalBlocker = row.when_order_fires || '900s post-exit book cooldown active';
+  } else if (state === 'BOOK_CAP_REACHED') {
+    principalBlocker = row.when_order_fires || 'Cohort book slot or daily trade cap reached';
   } else if (state === 'WARMUP_0945' || state === 'WARMING_UP') {
     principalBlocker = 'Pre-09:45 IST ORB-30 causal warmup incomplete';
   } else if (state === 'WINDOW_CLOSED') {
     principalBlocker = `Outside entry window (${row.window_ist || 'closed'} IST)`;
   } else if (state === 'ML_VETOED') {
-    principalBlocker = 'Meta-learner score below configured threshold';
+    const mlP = hasValidNumber(row.ml_prob) ? formatNumber(row.ml_prob) : UNAVAILABLE_LABEL;
+    const mlMin = hasValidNumber(row.ml_p_min) ? formatNumber(row.ml_p_min) : '0.56';
+    principalBlocker = `Causal ML veto (${mlP} < ${mlMin} threshold)`;
   } else if (failedGates.length > 0) {
     const first = failedGates[0];
     principalBlocker = `${first.name}: ${first.current ?? UNAVAILABLE_LABEL} (target ${first.target ?? UNAVAILABLE_LABEL})`;
@@ -298,7 +339,7 @@ export function deriveCandidateBlocker(row) {
     missingInputs,
     failedGates,
     direction,
-    era: classifyStrategyEra(row.engine_id),
+    era: classifyStrategyEra(row.engine_id, row),
   };
 }
 
@@ -360,10 +401,17 @@ export function buildPackageLegRows(trade) {
   }
 
   const singleFreshness = formatQuoteFreshness(trade);
+  const isV6bShort =
+    mode.startsWith('V6B_') && trade.book_type !== 'LONG_BOOK_BUY';
   return [
     {
       legId: `${trade.trade_id || trade.package_id}-single`,
-      role: trade.book_type === 'LONG_BOOK_BUY' ? 'Single Leg • Cash-Paid Long Option' : 'Single Leg • Option Position',
+      role:
+        trade.book_type === 'LONG_BOOK_BUY'
+          ? 'Single Leg • Cash-Paid Long Option'
+          : isV6bShort
+          ? 'Single Leg • Unhedged Short Comparator (Paper Only)'
+          : 'Single Leg • Option Position',
       side: trade.book_type === 'LONG_BOOK_BUY' ? 'BUY' : 'SELL',
       contract: trade.trading_symbol || `${trade.underlying || 'NIFTY'} ${trade.strike ?? ''} ${trade.option_type || ''}`.trim(),
       expiry,
@@ -382,6 +430,8 @@ export function buildPackageLegRows(trade) {
       hedgeState:
         trade.book_type === 'LONG_BOOK_BUY'
           ? 'LONG_PREMIUM_PAID (NO SHORT LIABILITY)'
+          : isV6bShort
+          ? 'UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)'
           : rctx.hedge_wing_strike
           ? `WING_REFERENCED (${rctx.hedge_wing_strike} ${rctx.hedge_wing_option_type || ''})`
           : 'UNHEDGED_SHORT',
@@ -508,7 +558,7 @@ export function computeScopedPerformance({
     }
     (Array.isArray(closedTrades) ? closedTrades : []).forEach((t) => {
       const rctx = parseRegimeContext(t);
-      if (classifyStrategyEra(t.strategy_mode, rctx) !== 'SHADOW_FORWARD_V1') return;
+      if (getRowCohort(t) !== 'S205_SHADOW_FORWARD_V1') return;
       if (sourceFilter === 'PAPER_BOOK_B' && t.strategy_mode !== 'SHADOW_BOOK_B_PAID_FLOW') return;
       if (sourceFilter === 'PAPER_BOOK_A' && t.strategy_mode !== 'SHADOW_BOOK_A_SPREAD_150') return;
       const tid = String(t.trade_id);
@@ -577,21 +627,60 @@ export function computeScopedPerformance({
     scopeLimitations = hasAuthoritativeEraCalendar
       ? 'Full SQLite S205_SHADOW_FORWARD_V1 forward paper ledger (including any INCOMPLETE_LEG_UNWOUND friction). Pre-registered historical V6B/V2.0 rows are strictly excluded.'
       : 'Scoped strictly to S205_SHADOW_FORWARD_V1 forward paper packages (including any INCOMPLETE_LEG_UNWOUND friction). Pre-registered historical V6B/V2.0 rows are excluded.';
-  } else if (sourceFilter === 'LEGACY_PAPER') {
-    feeLabel = 'Estimated Legacy Paper Charges';
-    const byLegacyKey = new Map();
+  } else if (sourceFilter === 'V6B_ML_LEGACY_COMPARATOR') {
+    feeLabel = 'Estimated Statutory (Canonical NSE/Upstox)';
+    const byV6bKey = new Map();
     if (hasAuthoritativeEraCalendar) {
-      flattenEraDays(eraCal, 'LEGACY_PAPER').forEach((row) => {
+      flattenEraDays(eraCal, 'V6B_ML_LEGACY_COMPARATOR').forEach((row) => {
+        byV6bKey.set(String(row.trade_id), row);
+      });
+    }
+    (Array.isArray(closedTrades) ? closedTrades : [])
+      .filter((t) => getRowCohort(t) === 'V6B_ML_LEGACY_COMPARATOR')
+      .forEach((t) => {
+        const tid = String(t.trade_id);
+        if (byV6bKey.has(tid)) return;
+        byV6bKey.set(tid, {
+          trade_id: t.trade_id,
+          trading_date: String(t.trading_date || t.exit_time || t.entry_time || '').slice(0, 10),
+          book_type: t.book_type,
+          strategy_mode: t.strategy_mode,
+          trading_symbol: t.trading_symbol || UNAVAILABLE_LABEL,
+          spread_legs_label: t.spread_legs_label || null,
+          quantity: t.quantity ?? null,
+          entry_time: t.entry_time,
+          exit_time: t.exit_time,
+          entry_price: t.entry_price ?? t.entry_price_used,
+          exit_price: t.exit_price ?? t.exit_price_used,
+          gross_pnl: hasValidNumber(t.gross_pnl) ? Number(t.gross_pnl) : null,
+          charges: hasValidNumber(t.charges) ? Number(t.charges) : null,
+          net_pnl: hasValidNumber(t.net_pnl) ? Number(t.net_pnl) : null,
+          mfe_pct: hasValidNumber(t.mfe_pct) ? Number(t.mfe_pct) : null,
+          mae_pct: hasValidNumber(t.mae_pct) ? Number(t.mae_pct) : null,
+          exit_reason: t.exit_reason || 'CLOSED',
+          source_scope: 'V6B_ML_LEGACY_COMPARATOR',
+        });
+      });
+    normalizedRows = Array.from(byV6bKey.values());
+    scopeLimitations =
+      'Scoped strictly to the V6B_ML_LEGACY_COMPARATOR OOS paper benchmark cohort (V6B_S1_OI, V6B_S3_SPIKE, V6B_S4_Z2, V6B_LBASIS_ATM + 30-feature ML, >= 2026-11-15). Hard-airgapped from live execution and never aggregated with S205_SHADOW_FORWARD_V1.';
+  } else if (sourceFilter === 'HISTORICAL_LEGACY_V2' || sourceFilter === 'LEGACY_PAPER') {
+    feeLabel = 'Estimated Legacy Paper Charges';
+    const histCal =
+      calendarsByEra?.HISTORICAL_LEGACY_V2 || calendarsByEra?.LEGACY_PAPER || null;
+    const byLegacyKey = new Map();
+    if (histCal && Array.isArray(histCal.days)) {
+      flattenEraDays(histCal, 'HISTORICAL_LEGACY_V2').forEach((row) => {
         byLegacyKey.set(String(row.trade_id), row);
       });
       scopeLimitations =
-        'Full historical SQLite ledger of retired V6B_* / V2.0 paper sandbox trades. Strictly excluded from S205_SHADOW_FORWARD_V1 forward evaluation.';
+        'Archived pre-2026-11-15 historical paper rows (HISTORICAL_LEGACY_V2). Strictly excluded from both S205_SHADOW_FORWARD_V1 and V6B_ML_LEGACY_COMPARATOR forward OOS cohorts.';
     } else {
       scopeLimitations =
-        'Historical retired V6B_* / V2.0 paper sandbox trades (up to 200 recent closed rows from /trades). Excluded from S205_SHADOW_FORWARD_V1 forward evaluation.';
+        'Archived pre-2026-11-15 historical paper rows (up to 200 recent closed rows from /trades). Excluded from active forward OOS cohorts.';
     }
     (Array.isArray(closedTrades) ? closedTrades : [])
-      .filter((t) => classifyStrategyEra(t.strategy_mode, parseRegimeContext(t)) !== 'SHADOW_FORWARD_V1')
+      .filter((t) => getRowCohort(t) === 'HISTORICAL_LEGACY_V2')
       .forEach((t) => {
         const tid = String(t.trade_id);
         if (byLegacyKey.has(tid)) return;
@@ -613,7 +702,7 @@ export function computeScopedPerformance({
           mfe_pct: hasValidNumber(t.mfe_pct) ? Number(t.mfe_pct) : null,
           mae_pct: hasValidNumber(t.mae_pct) ? Number(t.mae_pct) : null,
           exit_reason: t.exit_reason || 'CLOSED',
-          source_scope: 'LEGACY_PAPER',
+          source_scope: 'HISTORICAL_LEGACY_V2',
         });
       });
     normalizedRows = Array.from(byLegacyKey.values());

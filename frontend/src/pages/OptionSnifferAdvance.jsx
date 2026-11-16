@@ -241,6 +241,11 @@ export default function OptionSnifferAdvance() {
   const activeReadiness = readinessData || statusData?.backend_readiness || null;
   const shadowTelemetry =
     activeReadiness?.shadow_telemetry || statusData?.shadow_telemetry || null;
+  const cohortComparison =
+    tradesData?.cohort_comparison ||
+    activeReadiness?.cohort_comparison ||
+    statusData?.cohort_comparison ||
+    null;
 
   const executionStatus = useMemo(
     () =>
@@ -540,6 +545,7 @@ export default function OptionSnifferAdvance() {
             tradesData={tradesData}
             activeReadiness={activeReadiness}
             shadowTelemetry={shadowTelemetry}
+            cohortComparison={cohortComparison}
             sliceMeta={sliceMeta}
             onSelectTab={setActiveTab}
           />
@@ -559,6 +565,7 @@ export default function OptionSnifferAdvance() {
             liveStatus={liveStatus}
             tradesData={tradesData}
             shadowTelemetry={shadowTelemetry}
+            cohortComparison={cohortComparison}
             sliceMeta={sliceMeta}
             extraBrokerIntents={extraBrokerIntents}
             loadingMoreIntents={loadingMoreIntents}
@@ -571,6 +578,7 @@ export default function OptionSnifferAdvance() {
             tradesData={tradesData}
             shadowTelemetry={shadowTelemetry}
             liveStatus={liveStatus}
+            cohortComparison={cohortComparison}
             calendarsByEra={statusData?.calendars_by_era || null}
             sliceMeta={sliceMeta}
             defaultCurrentMonth={defaultCurrentMonth}

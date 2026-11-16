@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.analytics.common.options_accounting import (
     OptionLeg,
     compute_package_accounting,
+    round_to_nse_tick,
 )
 from app.analytics.option_sniffer.option_constants import (
     DEFAULT_LOT_SIZES,
@@ -200,6 +201,7 @@ class S205UpstoxOrchestrator:
         # Per-trade close-only ratchet state: trade_id -> {best_close_pts, ratchet_stop, entry_bar_ts, spec}
         self._open_trade_runtime: Dict[str, Dict[str, Any]] = {}
         self._book_cooldown_until: Dict[str, float] = {BOOK_LONG_BUY: 0.0, BOOK_SHORT_SELL: 0.0}
+        self._v6b_locked_until_after_bar: Dict[str, List[str]] = {}
         self._daily_kill_triggered: bool = False
         self._daily_kill_reason: str = ""
 
@@ -279,6 +281,7 @@ class S205UpstoxOrchestrator:
             self._daily_kill_reason = ""
             self._last_evaluated_bar_ts = ""
             self._book_cooldown_until = {BOOK_LONG_BUY: 0.0, BOOK_SHORT_SELL: 0.0}
+            self._v6b_locked_until_after_bar.clear()
             self._catastrophe_wing_state = {
                 "session_date": today_s,
                 "status": "STANDBY",
@@ -539,15 +542,49 @@ class S205UpstoxOrchestrator:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _compute_today_session_pnl(self, today_s: str, open_trades: List[Dict[str, Any]]) -> Tuple[float, float]:
+        """Computes isolated today realized + unrealized MTM strictly for the `V6B_ML_LEGACY_COMPARATOR` cohort."""
         realized = 0.0
-        for ct in AdvanceDB.get_closed_trades(limit=100):
-            if str(ct.get("entry_time") or "")[:10] == today_s:
+        for ct in AdvanceDB.get_closed_trades(limit=200):
+            if (
+                str(ct.get("entry_time") or "")[:10] == today_s
+                and str(ct.get("strategy_mode") or "").startswith("V6B_")
+            ):
                 realized += float(ct.get("net_pnl") or 0.0)
         unrealized = 0.0
         for ot in open_trades:
-            if str(ot.get("entry_time") or "")[:10] == today_s:
-                unrealized += float(ot.get("net_pnl") or 0.0)
+            if (
+                str(ot.get("entry_time") or "")[:10] == today_s
+                and str(ot.get("strategy_mode") or "").startswith("V6B_")
+            ):
+                u_val = ot.get("unrealized_net_pnl")
+                if u_val is None:
+                    u_val = ot.get("net_pnl")
+                unrealized += float(u_val or 0.0)
         return round(realized, 2), round(unrealized, 2)
+
+    def _active_v6b_locked_books(self, current_bar_ts: str) -> List[str]:
+        """Returns V6B book slots still locked on `current_bar_ts` (`bar[t].open` before `bar[t].close` causality)."""
+        locked: List[str] = []
+        with self._op_lock:
+            stale_keys = [k for k in self._v6b_locked_until_after_bar if current_bar_ts and k < current_bar_ts]
+            for sk in stale_keys:
+                self._v6b_locked_until_after_bar.pop(sk, None)
+            for bk_ts, b_list in self._v6b_locked_until_after_bar.items():
+                if not current_bar_ts or bk_ts >= current_bar_ts:
+                    locked.extend(b_list)
+        return locked
+
+    def _get_v6b_runtime_telemetry(self, now_ep: Optional[float] = None) -> Dict[str, Any]:
+        ep = time.time() if now_ep is None else now_ep
+        cd_rem = int(max(0.0, max(self._book_cooldown_until.values()) - ep)) if self._book_cooldown_until else 0
+        return {
+            "max_trades_day": S205_MAX_TOTAL_TRADES_DAY,
+            "max_open_positions": S205_MAX_TOTAL_OPEN,
+            "cooldown_seconds": S205_COOLDOWN_SECONDS,
+            "cooldown_remaining_sec": cd_rem,
+            "daily_kill_limit_inr": S205_DAILY_MTM_KILL_INR,
+            "daily_kill_triggered": self._daily_kill_triggered,
+        }
 
     def _close_v6b_paper_trade(
         self,
@@ -556,6 +593,7 @@ class S205UpstoxOrchestrator:
         exit_ask: float,
         exit_reason: str,
         now_dt: datetime,
+        exit_bar_ts: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         tid = str(trade["trade_id"])
         btype = str(trade.get("book_type") or BOOK_SHORT_SELL)
@@ -573,8 +611,8 @@ class S205UpstoxOrchestrator:
         t_date = str(trade.get("entry_time") or now_dt.isoformat())[:10]
 
         if btype == BOOK_SHORT_SELL:
-            exit_px = max(0.05, exit_ask)
-            ent_eff = max(0.05, entry_bid)
+            exit_px = round_to_nse_tick(max(0.05, exit_ask), mode="adverse_buy")
+            ent_eff = round_to_nse_tick(max(0.05, entry_bid), mode="adverse_sell")
             pk = max(float(trade.get("peak_price") or ent_eff), exit_px)
             tr = min(float(trade.get("trough_price") or ent_eff), exit_px)
             mfe = round(((ent_eff - tr) / max(0.05, ent_eff)) * 100.0, 2)
@@ -583,11 +621,11 @@ class S205UpstoxOrchestrator:
                 legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=-qty, entry_price=ent_eff, exit_price=exit_px)],
                 trade_date=t_date,
             )
-            gross, chg, slip, net = acc["gross_pnl"], acc["statutory_charges"], acc["additional_slippage"], acc["net_pnl"]
+            gross, chg, slip, net = acc["gross_pnl"], acc["total_friction"], 0.0, acc["net_pnl"]
             net_pct = round((net / max(1.0, ent_eff * qty)) * 100.0, 2)
         else:
-            exit_px = max(0.05, exit_bid)
-            ent_eff = max(0.05, entry_ask)
+            exit_px = round_to_nse_tick(max(0.05, exit_bid), mode="adverse_sell")
+            ent_eff = round_to_nse_tick(max(0.05, entry_ask), mode="adverse_buy")
             pk = max(float(trade.get("peak_price") or ent_eff), exit_px)
             tr = min(float(trade.get("trough_price") or ent_eff), exit_px)
             mfe = round(((pk - ent_eff) / max(0.05, ent_eff)) * 100.0, 2)
@@ -596,7 +634,7 @@ class S205UpstoxOrchestrator:
                 legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=qty, entry_price=ent_eff, exit_price=exit_px)],
                 trade_date=t_date,
             )
-            gross, chg, slip, net = acc["gross_pnl"], acc["statutory_charges"], acc["additional_slippage"], acc["net_pnl"]
+            gross, chg, slip, net = acc["gross_pnl"], acc["total_friction"], 0.0, acc["net_pnl"]
             net_pct = round((net / max(1.0, ent_eff * qty)) * 100.0, 2)
 
         close_data = {
@@ -618,9 +656,11 @@ class S205UpstoxOrchestrator:
             "exit_reason": exit_reason,
         }
         if AdvanceDB.close_trade(tid, close_data):
+            eff_exit_bar = exit_bar_ts or now_dt.strftime("%Y-%m-%d %H:%M:00")
             with self._op_lock:
                 self._open_trade_runtime.pop(tid, None)
                 self._book_cooldown_until[btype] = time.time() + S205_COOLDOWN_SECONDS
+                self._v6b_locked_until_after_bar.setdefault(eff_exit_bar, []).append(btype)
             AdvanceDB.log_event(
                 "S205_EXIT",
                 "INFO" if net >= 0 else "WARN",
@@ -679,7 +719,8 @@ class S205UpstoxOrchestrator:
             t_date = str(trade.get("entry_time") or today_s)[:10]
 
             if btype == BOOK_SHORT_SELL:
-                entry_px = max(0.05, float(trade["entry_bid"]))
+                entry_px = round_to_nse_tick(max(0.05, float(trade["entry_bid"])), mode="adverse_sell")
+                curr_ask_tick = round_to_nse_tick(max(0.05, curr_ask), mode="adverse_buy")
                 hard_sl_px = round(entry_px * (1.0 + float(trade.get("stop_loss_pct") or 18.0) / 100.0), 2)
                 eff_stop = active_stop if active_stop > 0 else hard_sl_px
                 pk = max(float(trade.get("peak_price") or entry_px), curr_ask)
@@ -702,14 +743,15 @@ class S205UpstoxOrchestrator:
                         closed_out.append(c_res)
                 else:
                     est = compute_package_accounting(
-                        legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=-qty, entry_price=entry_px, exit_price=max(0.05, curr_ask))],
+                        legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=-qty, entry_price=entry_px, exit_price=curr_ask_tick)],
                         trade_date=t_date,
                     )
                     ret_pct = round((est["net_pnl"] / max(1.0, entry_px * qty)) * 100.0, 2)
                     AdvanceDB.update_open_trade(tid, pk, tr, mfe, mae, eff_stop, est["gross_pnl"], est["net_pnl"], ret_pct)
                     trade["net_pnl"] = est["net_pnl"]
             else:
-                entry_px = max(0.05, float(trade["entry_ask"]))
+                entry_px = round_to_nse_tick(max(0.05, float(trade["entry_ask"])), mode="adverse_buy")
+                curr_bid_tick = round_to_nse_tick(max(0.05, curr_bid), mode="adverse_sell")
                 hard_sl_px = round(entry_px * (1.0 - float(trade.get("stop_loss_pct") or 22.0) / 100.0), 2)
                 eff_stop = active_stop if active_stop > 0 else hard_sl_px
                 pk = max(float(trade.get("peak_price") or entry_px), curr_bid)
@@ -730,7 +772,7 @@ class S205UpstoxOrchestrator:
                         closed_out.append(c_res)
                 else:
                     est = compute_package_accounting(
-                        legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=qty, entry_price=entry_px, exit_price=max(0.05, curr_bid))],
+                        legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=qty, entry_price=entry_px, exit_price=curr_bid_tick)],
                         trade_date=t_date,
                     )
                     net_pct = round((est["net_pnl"] / max(1.0, entry_px * qty)) * 100.0, 2)
@@ -778,25 +820,33 @@ class S205UpstoxOrchestrator:
         if bid <= 0 or ask < bid or spread_pct > MAX_SPREAD_PCT:
             return None
 
-        entry_px = bid if btype == BOOK_SHORT_SELL else ask
+        raw_entry_px = bid if btype == BOOK_SHORT_SELL else ask
+        entry_px = round_to_nse_tick(
+            max(0.05, raw_entry_px),
+            mode="adverse_sell" if btype == BOOK_SHORT_SELL else "adverse_buy",
+        )
         raw_sl_pct = float(cand["sl_pct"])
         max_loss_inr = float(cand["max_loss_inr"])
         capped_sl_pct = round(min(raw_sl_pct, (max_loss_inr / max(1.0, entry_px * lot_sz)) * 100.0), 2)
         capped_sl_pct = max(6.0, capped_sl_pct)
 
         if btype == BOOK_SHORT_SELL:
-            init_stop = round(entry_px * (1.0 + capped_sl_pct / 100.0), 2)
+            init_stop = round_to_nse_tick(entry_px * (1.0 + capped_sl_pct / 100.0), mode="adverse_buy")
             direction = f"SELL_{eso[2]}"
-            hedge_wing_strike = float(eso[1]) + (SHORT_AUTO_HEDGE_WING_PTS_NIFTY if eso[2] == "CE" else -SHORT_AUTO_HEDGE_WING_PTS_NIFTY)
+            hedge_wing_strike = None
             est_margin = 55000.0
+            exec_elig = "UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)"
+            m_status = "UNVERIFIED_HEURISTIC_NOT_BROKER_SPAN"
         else:
-            init_stop = round(entry_px * (1.0 - capped_sl_pct / 100.0), 2)
+            init_stop = round_to_nse_tick(max(0.05, entry_px * (1.0 - capped_sl_pct / 100.0)), mode="adverse_sell")
             direction = f"BUY_{eso[2]}"
-            hedge_wing_strike = 0.0
+            hedge_wing_strike = None
             est_margin = round(entry_px * lot_sz, 2)
+            exec_elig = "PAID_LONG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)"
+            m_status = "CASH_PAID_NO_MARGIN"
 
         sig_id = f"s205_sig_{uuid.uuid4().hex[:10]}"
-        tid = f"adv_trd_{uuid.uuid4().hex[:10]}"
+        tid = f"adv_v6b_{uuid.uuid4().hex[:10]}"
         ml_prob = float(cand.get("ml_prob") or self._meta_model.p_min)
 
         # Activate virtual once-per-day 450pt Catastrophe Wing telemetry on first Short of session
@@ -816,6 +866,11 @@ class S205UpstoxOrchestrator:
                 )
 
         regime_ctx = {
+            "shadow_only": True,
+            "cohort": "V6B_ML_LEGACY_COMPARATOR",
+            "execution_eligibility": exec_elig,
+            "unhedged_single_leg": bool(btype == BOOK_SHORT_SELL),
+            "margin_status": m_status,
             "engine_version": "S2_05_UPSTOX_V3",
             "signal_bar_ts": bar_ts,
             "regime_tag": ctx.get("regime_tag"),
@@ -823,7 +878,7 @@ class S205UpstoxOrchestrator:
             "ml_p_min": self._meta_model.p_min,
             "ml_components": cand.get("ml_explain"),
             "hedge_wing_strike": hedge_wing_strike,
-            "hedge_wing_option_type": eso[2],
+            "hedge_wing_option_type": None,
             "catastrophe_wing_offset_pts": S205_CATASTROPHE_WING_OFFSET_PTS,
             "fut_ltp": (fut_quote or {}).get("fut_ltp"),
             "fut_atp_vwap": (fut_quote or {}).get("fut_atp_vwap"),
@@ -1016,36 +1071,74 @@ class S205UpstoxOrchestrator:
 
         ctx = build_causal_intraday_context(today_s, eval_spot, vix_copy, hw_copy, opt_copy, front_exp, next_exp, pd_copy)
 
-        # Determine session risk & cooldown block status
+        # Determine independent V6B_ML_LEGACY_COMPARATOR session risk & cooldown block status (Zero cross-cohort contamination!)
         open_all = [t for t in (AdvanceDB.get_open_trades() or []) if str(t.get("strategy_mode") or "").startswith("V6B_")]
-        closed_today = [t for t in (AdvanceDB.get_closed_trades(limit=100) or []) if str(t.get("entry_time") or "")[:10] == today_s and str(t.get("strategy_mode") or "").startswith("V6B_")]
+        closed_today = [
+            t
+            for t in (AdvanceDB.get_closed_trades(limit=200) or [])
+            if str(t.get("entry_time") or "")[:10] == today_s and str(t.get("strategy_mode") or "").startswith("V6B_")
+        ]
+        eval_bar_ref = ctx["ts"][len(ctx["ts"]) - 1] if (ctx and ctx.get("ts")) else cur_min_ts
+        locked_books_on_bar = self._active_v6b_locked_books(eval_bar_ref)
+        eff_open_v6b_cnt = len(open_all) + len(locked_books_on_bar)
         trades_today_cnt = len(open_all) + len(closed_today)
         real_pnl, unreal_pnl = self._compute_today_session_pnl(today_s, open_all)
         if (real_pnl + unreal_pnl) <= S205_DAILY_MTM_KILL_INR:
             self._daily_kill_triggered = True
-            self._daily_kill_reason = f"Daily MTM Kill Active (₹{real_pnl + unreal_pnl:,.0f} <= -₹3,500)"
+            self._daily_kill_reason = f"V6B Comparator Daily MTM Kill Active (₹{real_pnl + unreal_pnl:,.0f} <= -₹3,500)"
 
         block_reason: Optional[str] = None
         if self._daily_kill_triggered:
             block_reason = self._daily_kill_reason
         elif trades_today_cnt >= S205_MAX_TOTAL_TRADES_DAY:
-            block_reason = f"Daily 3-trade session cap reached ({trades_today_cnt}/{S205_MAX_TOTAL_TRADES_DAY})."
-        elif len(open_all) >= S205_MAX_TOTAL_OPEN:
-            block_reason = f"Max concurrent open cap reached ({len(open_all)}/{S205_MAX_TOTAL_OPEN})."
+            block_reason = f"V6B Daily 3-trade session cap reached ({trades_today_cnt}/{S205_MAX_TOTAL_TRADES_DAY})."
+        elif eff_open_v6b_cnt >= S205_MAX_TOTAL_OPEN:
+            block_reason = f"V6B Max concurrent open cap reached ({eff_open_v6b_cnt}/{S205_MAX_TOTAL_OPEN})."
 
         ist_hhmm = now_dt.hour * 100 + now_dt.minute
         bar_idx = (len(ctx["ts"]) - 1) if ctx else -1
-        _, legacy_readiness_rows = evaluate_s205_bar_and_readiness(
+        v6b_candidates, legacy_readiness_rows = evaluate_s205_bar_and_readiness(
             ctx, bar_idx, self._meta_model, quote_lookup, fut_nifty, lot_size=65, ist_hhmm=ist_hhmm, session_blocked_reason=block_reason
         )
-        # Option A: Retire naked-short / overfitted V6B_* paper execution; preserve 100% of readiness cards as passive diagnostics
-        passive_legacy_rows: List[Dict[str, Any]] = []
+        now_ep_ready = time.time()
+        v6b_readiness_rows: List[Dict[str, Any]] = []
         for lrow in legacy_readiness_rows:
             rcopy = dict(lrow)
-            if rcopy.get("state") in ("READY_FIRE", "WATCHING"):
-                rcopy["state"] = "SURVEILLANCE_ONLY"
-            rcopy["when_order_fires"] = f"PASSIVE DIAGNOSTIC ONLY (Retired from Paper Ledger) — {rcopy.get('when_order_fires', '')}"
-            passive_legacy_rows.append(rcopy)
+            btype_r = str(rcopy.get("book_type") or BOOK_SHORT_SELL)
+            rcopy["cohort"] = "V6B_ML_LEGACY_COMPARATOR"
+            rcopy["cohort_badge"] = "V6B_ML_COMPARATOR"
+            rcopy["live_eligible"] = False
+            rcopy["execution_eligibility"] = (
+                "UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)"
+                if btype_r == BOOK_SHORT_SELL
+                else "PAID_LONG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)"
+            )
+            if rcopy.get("state") in ("READY_FIRE", "WATCHING") and not block_reason:
+                max_ob, max_db = S205_BOOK_LIMITS.get(btype_r, (1, 1))
+                open_b = sum(1 for t in open_all if t.get("book_type") == btype_r) + sum(
+                    1 for lb in locked_books_on_bar if lb == btype_r
+                )
+                day_b = sum(1 for t in (open_all + closed_today) if t.get("book_type") == btype_r)
+                cd_left_b = int(max(0.0, self._book_cooldown_until.get(btype_r, 0.0) - now_ep_ready))
+                if open_b >= max_ob or day_b >= max_db:
+                    rcopy["state"] = "BOOK_CAP_REACHED"
+                    rcopy["when_order_fires"] = (
+                        f"[V6B_ML_COMPARATOR] {btype_r} cap reached (open {open_b}/{max_ob}, today {day_b}/{max_db})."
+                    )
+                elif cd_left_b > 0:
+                    rcopy["state"] = "COOLDOWN"
+                    rcopy["when_order_fires"] = (
+                        f"[V6B_ML_COMPARATOR] 900s post-exit book cooldown active ({cd_left_b}s remaining)."
+                    )
+                else:
+                    rcopy["when_order_fires"] = (
+                        f"[V6B_ML_COMPARATOR • Paper OOS Only] {rcopy.get('when_order_fires', '')}"
+                    )
+            else:
+                rcopy["when_order_fires"] = (
+                    f"[V6B_ML_COMPARATOR • Paper OOS Only] {rcopy.get('when_order_fires', '')}"
+                )
+            v6b_readiness_rows.append(rcopy)
 
         opened_ids: List[str] = []
         closed_on_bar: List[Dict[str, Any]] = []
@@ -1059,7 +1152,7 @@ class S205UpstoxOrchestrator:
             if is_new_completed_bar:
                 self._last_evaluated_bar_ts = bar_ts
 
-                # 3A. Manage any historical open `V6B_*` positions at `:00` bar close (with flattened `elif` fix!)
+                # 3A. Manage any open `V6B_*` positions at `:00` bar close (with flattened `elif` fix!)
                 for tr in list(open_all):
                     tid = str(tr["trade_id"])
                     eso_t = (str(tr["expiry"])[:10], float(tr["strike"]), str(tr["option_type"]).upper())
@@ -1112,7 +1205,7 @@ class S205UpstoxOrchestrator:
                             inv_reason = "SPOT_VWAP_FLIP_EXIT"
 
                     if inv_reason and cbid > 0 and cask > 0:
-                        c_info = self._close_v6b_paper_trade(tr, cbid, cask, inv_reason, now_dt)
+                        c_info = self._close_v6b_paper_trade(tr, cbid, cask, inv_reason, now_dt, exit_bar_ts=bar_ts)
                         if c_info:
                             closed_on_bar.append(c_info)
                         continue
@@ -1146,6 +1239,65 @@ class S205UpstoxOrchestrator:
                                 float(tr.get("net_pnl_pct") or 0.0),
                             )
 
+                # 3A-2. Execute qualifying `V6B_ML_LEGACY_COMPARATOR` OOS paper candidates under strictly isolated envelope
+                rem_v6b_open = [t for t in (AdvanceDB.get_open_trades() or []) if str(t.get("strategy_mode") or "").startswith("V6B_")]
+                closed_v6b_now = [
+                    t
+                    for t in (AdvanceDB.get_closed_trades(limit=200) or [])
+                    if str(t.get("entry_time") or "")[:10] == today_s and str(t.get("strategy_mode") or "").startswith("V6B_")
+                ]
+                r_pnl_now, u_pnl_now = self._compute_today_session_pnl(today_s, rem_v6b_open)
+                if (r_pnl_now + u_pnl_now) <= S205_DAILY_MTM_KILL_INR:
+                    self._daily_kill_triggered = True
+                    self._daily_kill_reason = f"V6B Comparator Daily MTM Kill Active (₹{r_pnl_now + u_pnl_now:,.0f} <= -₹3,500)"
+
+                if v6b_candidates and not self._daily_kill_triggered:
+                    locked_now = self._active_v6b_locked_books(bar_ts)
+                    eff_open_total = len(rem_v6b_open) + len(locked_now)
+                    eff_day_total = len(rem_v6b_open) + len(closed_v6b_now)
+                    open_by_book = {
+                        BOOK_LONG_BUY: sum(1 for t in rem_v6b_open if t.get("book_type") == BOOK_LONG_BUY)
+                        + sum(1 for b in locked_now if b == BOOK_LONG_BUY),
+                        BOOK_SHORT_SELL: sum(1 for t in rem_v6b_open if t.get("book_type") == BOOK_SHORT_SELL)
+                        + sum(1 for b in locked_now if b == BOOK_SHORT_SELL),
+                    }
+                    day_by_book = {
+                        BOOK_LONG_BUY: sum(1 for t in (rem_v6b_open + closed_v6b_now) if t.get("book_type") == BOOK_LONG_BUY),
+                        BOOK_SHORT_SELL: sum(1 for t in (rem_v6b_open + closed_v6b_now) if t.get("book_type") == BOOK_SHORT_SELL),
+                    }
+                    now_ep_exec = time.time()
+                    sorted_v6b = sorted(
+                        v6b_candidates,
+                        key=lambda c: (-float(c.get("ml_prob") or 0.0), str(c.get("engine_id") or "")),
+                    )
+                    for cand in sorted_v6b:
+                        if eff_open_total >= S205_MAX_TOTAL_OPEN or eff_day_total >= S205_MAX_TOTAL_TRADES_DAY:
+                            break
+                        btype_c = str(cand.get("book_type") or BOOK_SHORT_SELL)
+                        max_ob_c, max_db_c = S205_BOOK_LIMITS.get(btype_c, (1, 1))
+                        if open_by_book.get(btype_c, 0) >= max_ob_c or day_by_book.get(btype_c, 0) >= max_db_c:
+                            continue
+                        if now_ep_exec < self._book_cooldown_until.get(btype_c, 0.0):
+                            continue
+                        q_cand = quote_lookup.get(cand["eso"])
+                        if not q_cand:
+                            continue
+                        new_v6b_tid = self._open_s205_paper_trade(
+                            cand=cand,
+                            quote=q_cand,
+                            spot_price=float(ctx["c"][bar_idx]),
+                            fut_quote=fut_nifty,
+                            ctx=ctx,
+                            bar_ts=bar_ts,
+                            now_dt=now_dt,
+                        )
+                        if new_v6b_tid:
+                            opened_ids.append(new_v6b_tid)
+                            eff_open_total += 1
+                            eff_day_total += 1
+                            open_by_book[btype_c] = open_by_book.get(btype_c, 0) + 1
+                            day_by_book[btype_c] = day_by_book.get(btype_c, 0) + 1
+
         # 3B. Evaluate Canonical `₹2,00,000` Pre-Registered Shadow Books & Persist L5 Chain Telemetry
         eff_spot_ref = float(ctx["c"][bar_idx]) if (ctx is not None and bar_idx >= 0) else spot_live_px
         eff_vix_ref = vix_live_px if vix_live_px > 0 else float((self._prior_day_stats or {}).get("last_vix_close") or 14.0)
@@ -1161,7 +1313,15 @@ class S205UpstoxOrchestrator:
         )
         opened_ids.extend(shadow_opened)
         closed_on_bar.extend(shadow_closed)
-        readiness_rows = list(shadow_readiness_rows) + passive_legacy_rows
+        decorated_shadow_rows: List[Dict[str, Any]] = []
+        for srow in shadow_readiness_rows:
+            scopy = dict(srow)
+            scopy["cohort"] = "S205_SHADOW_FORWARD_V1"
+            scopy["cohort_badge"] = "SHADOW_V1"
+            scopy["live_eligible"] = False
+            scopy["execution_eligibility"] = "SHADOW_FORWARD_V1_PAPER_ONLY"
+            decorated_shadow_rows.append(scopy)
+        readiness_rows = decorated_shadow_rows + v6b_readiness_rows
 
         if is_new_completed_bar and bar_ts and eff_spot_ref > 0:
             self._shadow_collector.record_1m_chain_and_snapshot(
@@ -1260,14 +1420,16 @@ class S205UpstoxOrchestrator:
             except Exception:
                 pass
 
-        if self._daily_kill_triggered:
-            phase, phase_label = "HALTED_DAILY_KILL", "DAILY -₹3,500 MTM KILL ACTIVE (FLATTENED)"
+        sh_summary = self._shadow_collector.get_summary()
+        sh_kill = bool((sh_summary.get("shadow_account_ledger") or {}).get("daily_kill_triggered"))
+        if self._daily_kill_triggered and sh_kill:
+            phase, phase_label = "HALTED_DAILY_KILL", "BOTH COHORTS DAILY -₹3,500 MTM KILL ACTIVE (FLATTENED)"
         elif hhmm < 915:
             phase, phase_label = "PRE_MARKET", "PRE-MARKET STANDBY (NSE OPENS 09:15 IST)"
         elif hhmm < 945:
             phase, phase_label = "ORB30_WARMUP", "ORB-30 WARMUP (09:15–09:45 — ENTRIES OPEN AT 09:45)"
         elif hhmm <= 1245:
-            phase, phase_label = "ACTIVE_DUAL_WINDOW", "ACTIVE ENTRY WINDOW (LONG + SHORT BOOKS ARMED)"
+            phase, phase_label = "ACTIVE_DUAL_WINDOW", "ACTIVE ENTRY WINDOW (SHADOW V1 + V6B ML COMPARATOR)"
         elif hhmm <= 1345:
             phase, phase_label = "ACTIVE_SHORT_WINDOW", "ACTIVE SHORT WINDOW (LONG CLOSED 12:45; SHORT OPEN TO 13:45)"
         elif hhmm < 1515:
@@ -1288,13 +1450,24 @@ class S205UpstoxOrchestrator:
         avg_sp = round(sum(float(q.get("spread_pct") or 0.0) for q in nifty_opts) / len(nifty_opts), 2) if nifty_opts else 0.0
         avg_obi = round(sum(float(q.get("book_obi_l5") or 0.0) for q in nifty_opts) / len(nifty_opts), 3) if nifty_opts else 0.0
 
-        open_t = AdvanceDB.get_open_trades() or []
-        closed_today = [t for t in (AdvanceDB.get_closed_trades(limit=100) or []) if str(t.get("entry_time") or "")[:10] == today_s]
-        real_pnl, unreal_pnl = self._compute_today_session_pnl(today_s, open_t)
+        open_v6b_t = [t for t in (AdvanceDB.get_open_trades() or []) if str(t.get("strategy_mode") or "").startswith("V6B_")]
+        closed_v6b_today = [
+            t
+            for t in (AdvanceDB.get_closed_trades(limit=200) or [])
+            if str(t.get("entry_time") or "")[:10] == today_s and str(t.get("strategy_mode") or "").startswith("V6B_")
+        ]
+        real_pnl, unreal_pnl = self._compute_today_session_pnl(today_s, open_v6b_t)
         net_mtm = round(real_pnl + unreal_pnl, 2)
 
         now_ep = time.time()
         cd_rem = int(max(0.0, max(self._book_cooldown_until.values()) - now_ep)) if self._book_cooldown_until else 0
+        v6b_rt = self._get_v6b_runtime_telemetry(now_ep)
+        cohort_comp = AdvanceDB.get_cohort_comparison_summary(
+            shadow_summary=sh_summary,
+            open_decorated=None,
+            v6b_runtime=v6b_rt,
+        )
+        sh_comp = cohort_comp["S205_SHADOW_FORWARD_V1"]
 
         # Refresh live wing ask prices for UI display
         wing_info = dict(self._catastrophe_wing_state)
@@ -1328,18 +1501,39 @@ class S205UpstoxOrchestrator:
                 "cooldown_remaining_sec": cd_rem,
             },
             "session_risk": {
-                "trades_today": len(open_t) + len(closed_today),
-                "max_trades_day": S205_MAX_TOTAL_TRADES_DAY,
-                "open_positions": len(open_t),
-                "max_open_positions": S205_MAX_TOTAL_OPEN,
-                "long_slots_used": sum(1 for t in open_t + closed_today if t.get("book_type") == BOOK_LONG_BUY),
-                "short_slots_used": sum(1 for t in open_t + closed_today if t.get("book_type") == BOOK_SHORT_SELL),
-                "realized_pnl_today": real_pnl,
-                "unrealized_mtm_today": unreal_pnl,
-                "net_session_mtm_today": net_mtm,
-                "daily_kill_limit_inr": S205_DAILY_MTM_KILL_INR,
-                "distance_to_kill_inr": round(net_mtm - S205_DAILY_MTM_KILL_INR, 2),
-                "daily_kill_triggered": self._daily_kill_triggered,
+                "trades_today": sh_comp["today_trades_count"],
+                "max_trades_day": sh_comp["max_trades_day"],
+                "open_positions": sh_comp["open_trades_count"],
+                "max_open_positions": sh_comp["max_open_positions"],
+                "long_slots_used": sh_comp["long_book"]["closed_trades_count"],
+                "short_slots_used": sh_comp["short_book"]["closed_trades_count"],
+                "realized_pnl_today": float((sh_summary.get("shadow_account_ledger") or {}).get("realized_net_pnl_inr") or 0.0),
+                "unrealized_mtm_today": sh_comp["unrealized_net_pnl_inr"],
+                "net_session_mtm_today": round(
+                    float((sh_summary.get("shadow_account_ledger") or {}).get("realized_net_pnl_inr") or 0.0)
+                    + sh_comp["unrealized_net_pnl_inr"],
+                    2,
+                ),
+                "daily_kill_limit_inr": -3500.0,
+                "distance_to_kill_inr": round(
+                    float((sh_summary.get("shadow_account_ledger") or {}).get("realized_net_pnl_inr") or 0.0)
+                    + sh_comp["unrealized_net_pnl_inr"]
+                    - (-3500.0),
+                    2,
+                ),
+                "daily_kill_triggered": sh_kill,
+                "v6b_comparator_risk": {
+                    "trades_today": len(open_v6b_t) + len(closed_v6b_today),
+                    "max_trades_day": S205_MAX_TOTAL_TRADES_DAY,
+                    "open_positions": len(open_v6b_t),
+                    "max_open_positions": S205_MAX_TOTAL_OPEN,
+                    "realized_pnl_today": real_pnl,
+                    "unrealized_mtm_today": unreal_pnl,
+                    "net_session_mtm_today": net_mtm,
+                    "daily_kill_limit_inr": S205_DAILY_MTM_KILL_INR,
+                    "daily_kill_triggered": self._daily_kill_triggered,
+                    "cooldown_remaining_sec": cd_rem,
+                },
                 "catastrophe_wing": wing_info,
             },
             "upstox_v3_feed": {
@@ -1365,7 +1559,8 @@ class S205UpstoxOrchestrator:
                 "indicators": self._latest_context_summary,
             },
             "engine_readiness": list(self._latest_engine_readiness),
-            "shadow_telemetry": self._shadow_collector.get_summary(),
+            "shadow_telemetry": sh_summary,
+            "cohort_comparison": cohort_comp,
         }
 
     @staticmethod
@@ -1405,6 +1600,7 @@ class S205UpstoxOrchestrator:
         disk_h = _compute_s205_hashes()
         in_sync = disk_h == _BOOT_S205_HASHES
         pnl_summary = self._flatten_pnl_summary(AdvanceDB.get_dual_book_pnl_summary())
+        backend_ready = self.get_backend_readiness(now_dt=now_dt)
         return {
             "service": "OPTION_SNIFFER_ADVANCE",
             "version": "S2_05_UPSTOX_V3",
@@ -1445,14 +1641,15 @@ class S205UpstoxOrchestrator:
                     "strategies": [
                         "SHADOW_BOOK_A_SPREAD_150 (Buy-First 150pt Defined-Risk Credit Spread, Net Credit >= 14pts)",
                         "Physical Wing Bought First on Observed L5 Ask; Emergency Unwind if Short Leg Degrades",
-                        "Legacy V6B_* Naked Shorts Retired to Passive Diagnostic Surveillance Only (Option A)",
+                        "V6B_* + 30-Feature ML Running in Isolated Paper Comparator Cohort (Hard-Airgapped from Live Bridge)",
                     ],
                     "max_loss_cap": "Structural Max Loss <= ₹10,000 (150pt Wing) + Planned Debit Stop <= ₹3,200",
                     "trailing_engine": "Strictly Close-Only Spread Decay Ratchet (Updated Exclusively on :00 Completed 1m Candle Close)",
                 },
             },
             "shadow_telemetry": self._shadow_collector.get_summary(),
-            "backend_readiness": self.get_backend_readiness(now_dt=now_dt),
+            "backend_readiness": backend_ready,
+            "cohort_comparison": backend_ready.get("cohort_comparison"),
         }
 
     def get_chain_intelligence(self) -> Dict[str, Any]:
@@ -1461,7 +1658,21 @@ class S205UpstoxOrchestrator:
         return {"underlyings": self._last_chain_intel, "timestamp": to_ist_naive().isoformat()}
 
     def get_signals(self, limit: int = 50, book_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        return AdvanceDB.get_recent_signals(limit=limit, book_type=book_type)
+        rows = AdvanceDB.get_recent_signals(limit=limit, book_type=book_type)
+        for s in rows:
+            coh = AdvanceDB.classify_trade_cohort(s)
+            s["cohort"] = coh
+            if coh == "V6B_ML_LEGACY_COMPARATOR":
+                s["execution_eligibility"] = (
+                    "UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)"
+                    if s.get("book_type") == BOOK_SHORT_SELL
+                    else "PAID_LONG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)"
+                )
+            elif coh == "S205_SHADOW_FORWARD_V1":
+                s["execution_eligibility"] = "SHADOW_FORWARD_V1_PAPER_ONLY"
+            else:
+                s["execution_eligibility"] = "HISTORICAL_LEGACY_ARCHIVE"
+        return rows
 
     def get_trades(self) -> Dict[str, Any]:
         open_raw = AdvanceDB.get_open_trades() or []
@@ -1528,7 +1739,15 @@ class S205UpstoxOrchestrator:
                 active_trail = float(t.get("trailing_stop") or 0.0)
                 effective_stop = max(stop_price, active_trail) if active_trail > 0 else stop_price
                 acc_mtm = compute_package_accounting(
-                    legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=quantity, entry_price=max(0.05, entry_price), exit_price=max(0.05, current_bid))],
+                    legs=[
+                        OptionLeg(
+                            option_type=ot_leg,
+                            strike=stk_leg,
+                            qty=quantity,
+                            entry_price=round_to_nse_tick(max(0.05, entry_price), mode="adverse_buy"),
+                            exit_price=round_to_nse_tick(max(0.05, current_bid), mode="adverse_sell"),
+                        )
+                    ],
                     trade_date=t_date,
                 )
                 unrealized_gross = acc_mtm["gross_pnl"]
@@ -1604,8 +1823,20 @@ class S205UpstoxOrchestrator:
                 effective_stop = min(stop_price, active_trail) if active_trail > 0 else stop_price
                 acc_mtm = compute_package_accounting(
                     legs=[
-                        OptionLeg(option_type=wing_ot, strike=wing_stk, qty=quantity, entry_price=wing_ent, exit_price=max(0.05, wing_bid)),
-                        OptionLeg(option_type=ot_leg, strike=stk_leg, qty=-quantity, entry_price=short_ent, exit_price=max(0.05, short_ask)),
+                        OptionLeg(
+                            option_type=wing_ot,
+                            strike=wing_stk,
+                            qty=quantity,
+                            entry_price=round_to_nse_tick(max(0.05, wing_ent), mode="adverse_buy"),
+                            exit_price=round_to_nse_tick(max(0.05, wing_bid), mode="adverse_sell"),
+                        ),
+                        OptionLeg(
+                            option_type=ot_leg,
+                            strike=stk_leg,
+                            qty=-quantity,
+                            entry_price=round_to_nse_tick(max(0.05, short_ent), mode="adverse_sell"),
+                            exit_price=round_to_nse_tick(max(0.05, short_ask), mode="adverse_buy"),
+                        ),
                     ],
                     trade_date=t_date,
                 )
@@ -1623,7 +1854,15 @@ class S205UpstoxOrchestrator:
                 active_trail = float(t.get("trailing_stop") or 0.0)
                 effective_stop = min(stop_price, active_trail) if active_trail > 0 else stop_price
                 acc_mtm = compute_package_accounting(
-                    legs=[OptionLeg(option_type=ot_leg, strike=stk_leg, qty=-quantity, entry_price=max(0.05, entry_price), exit_price=max(0.05, current_ask))],
+                    legs=[
+                        OptionLeg(
+                            option_type=ot_leg,
+                            strike=stk_leg,
+                            qty=-quantity,
+                            entry_price=round_to_nse_tick(max(0.05, entry_price), mode="adverse_sell"),
+                            exit_price=round_to_nse_tick(max(0.05, current_ask), mode="adverse_buy"),
+                        )
+                    ],
                     trade_date=t_date,
                 )
                 unrealized_gross = acc_mtm["gross_pnl"]
@@ -1631,8 +1870,24 @@ class S205UpstoxOrchestrator:
                 unrealized_net = acc_mtm["net_pnl"]
                 unrealized_pct = round((unrealized_net / max(1.0, entry_price * quantity)) * 100.0, 2)
 
+            cohort_t = AdvanceDB.classify_trade_cohort(t)
+            exec_elig_t = rctx_open.get("execution_eligibility")
+            if not exec_elig_t:
+                if cohort_t == "V6B_ML_LEGACY_COMPARATOR":
+                    exec_elig_t = (
+                        "UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)"
+                        if btype == BOOK_SHORT_SELL
+                        else "PAID_LONG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)"
+                    )
+                elif cohort_t == "S205_SHADOW_FORWARD_V1":
+                    exec_elig_t = "SHADOW_FORWARD_V1_PAPER_ONLY"
+                else:
+                    exec_elig_t = "HISTORICAL_LEGACY_ARCHIVE"
+
             t.update(
                 {
+                    "cohort": cohort_t,
+                    "execution_eligibility": exec_elig_t,
                     "entry_price": entry_price,
                     "strike_price": t.get("strike"),
                     "spread_legs_label": spread_label,
@@ -1663,17 +1918,39 @@ class S205UpstoxOrchestrator:
             c["entry_price"] = c.get("entry_price_used")
             c["exit_price"] = c.get("exit_price_used")
             c["strike_price"] = c.get("strike")
+            rc_c: Dict[str, Any] = {}
             try:
-                rc_c = c.get("regime_context") or json.loads(str(c.get("regime_context_json") or "{}") or "{}")
-                if isinstance(rc_c, dict) and rc_c.get("spread_legs_label"):
-                    c["spread_legs_label"] = rc_c["spread_legs_label"]
+                raw_rc_c = c.get("regime_context") or json.loads(str(c.get("regime_context_json") or "{}") or "{}")
+                if isinstance(raw_rc_c, dict):
+                    rc_c = raw_rc_c
+                    if rc_c.get("spread_legs_label"):
+                        c["spread_legs_label"] = rc_c["spread_legs_label"]
             except Exception:
-                pass
+                rc_c = {}
+            coh_c = AdvanceDB.classify_trade_cohort(c)
+            c["cohort"] = coh_c
+            c["execution_eligibility"] = rc_c.get("execution_eligibility") or (
+                (
+                    "UNHEDGED_SINGLE_LEG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)"
+                    if c.get("book_type") == BOOK_SHORT_SELL
+                    else "PAID_LONG_PAPER_COMPARATOR (NOT LIVE ELIGIBLE)"
+                )
+                if coh_c == "V6B_ML_LEGACY_COMPARATOR"
+                else ("SHADOW_FORWARD_V1_PAPER_ONLY" if coh_c == "S205_SHADOW_FORWARD_V1" else "HISTORICAL_LEGACY_ARCHIVE")
+            )
+
+        sh_sum_trds = self._shadow_collector.get_summary()
+        cohort_comp_trds = AdvanceDB.get_cohort_comparison_summary(
+            shadow_summary=sh_sum_trds,
+            open_decorated=decorated_open,
+            v6b_runtime=self._get_v6b_runtime_telemetry(time.time()),
+        )
 
         return {
             "open_trades": decorated_open,
             "closed_trades": closed_raw,
             "pnl_summary": self._flatten_pnl_summary(AdvanceDB.get_dual_book_pnl_summary()),
+            "cohort_comparison": cohort_comp_trds,
             "circuit_breaker": AdvanceDB.get_circuit_breaker_telemetry(as_of_time=now_dt),
         }
 

@@ -996,8 +996,14 @@ class AdvanceLiveBridge:
 
                 strat_m = str(pdict.get("strategy_mode") or "").strip().upper()
                 rc_raw = str(pdict.get("regime_context_json") or "")
-                if strat_m.startswith("SHADOW_") or '"shadow_only": true' in rc_raw.lower():
-                    # Hard Airgap: Uncertified shadow telemetry rows can NEVER mirror into Upstox live broker orders
+                rc_low = rc_raw.lower()
+                if (
+                    strat_m.startswith("SHADOW_")
+                    or strat_m.startswith("V6B_")
+                    or '"shadow_only": true' in rc_low
+                    or '"v6b_ml_legacy_comparator"' in rc_low
+                ):
+                    # Hard Airgap: Uncertified shadow telemetry & V6B OOS comparator rows can NEVER mirror into Upstox live broker orders
                     skipped_by_mode.append(
                         {
                             "trade_id": adv_tid,
@@ -2467,10 +2473,12 @@ class AdvanceLiveBridge:
             return []
 
     @staticmethod
-    def _is_shadow_forward_row(strategy_mode: Any, regime_context_raw: Any) -> bool:
+    def _classify_paper_row_cohort(
+        strategy_mode: Any,
+        regime_context_raw: Any,
+        entry_time: Any = "",
+    ) -> str:
         mode_s = str(strategy_mode or "").strip().upper()
-        if mode_s.startswith("SHADOW_BOOK_"):
-            return True
         if isinstance(regime_context_raw, dict):
             rctx = regime_context_raw
         elif regime_context_raw:
@@ -2481,8 +2489,26 @@ class AdvanceLiveBridge:
         else:
             rctx = {}
         if not isinstance(rctx, dict):
-            return False
-        return bool(rctx.get("shadow_only") is True or rctx.get("protocol_id") == "S205_SHADOW_FORWARD_V1")
+            rctx = {}
+
+        explicit_cohort = str(rctx.get("cohort") or "").strip().upper()
+        if explicit_cohort == "V6B_ML_LEGACY_COMPARATOR":
+            return "V6B_ML_LEGACY_COMPARATOR"
+        if explicit_cohort == "S205_SHADOW_FORWARD_V1":
+            return "SHADOW_FORWARD_V1"
+        if mode_s.startswith("SHADOW_BOOK_") or rctx.get("protocol_id") == "S205_SHADOW_FORWARD_V1":
+            return "SHADOW_FORWARD_V1"
+        if mode_s.startswith("V6B_"):
+            if str(entry_time or "").strip()[:10] >= "2026-11-15":
+                return "V6B_ML_LEGACY_COMPARATOR"
+            return "HISTORICAL_LEGACY_V2"
+        if rctx.get("shadow_only") is True:
+            return "SHADOW_FORWARD_V1"
+        return "HISTORICAL_LEGACY_V2"
+
+    @classmethod
+    def _is_shadow_forward_row(cls, strategy_mode: Any, regime_context_raw: Any) -> bool:
+        return cls._classify_paper_row_cohort(strategy_mode, regime_context_raw) == "SHADOW_FORWARD_V1"
 
     def get_live_pnl_summary(
         self,
@@ -2627,8 +2653,15 @@ class AdvanceLiveBridge:
             t = dict(r)
             if flt != "LIVE_BROKER" and era_flt != "LIVE_BROKER" and era_flt != "ALL":
                 rctx_raw = t.get("regime_context") or t.get("regime_context_json")
-                is_fwd = self._is_shadow_forward_row(t.get("strategy_mode"), rctx_raw)
-                if era_flt == "LEGACY_PAPER" and is_fwd:
+                row_cohort = self._classify_paper_row_cohort(
+                    t.get("strategy_mode"),
+                    rctx_raw,
+                    t.get("entry_time"),
+                )
+                is_fwd = row_cohort == "SHADOW_FORWARD_V1"
+                if era_flt == "V6B_ML_LEGACY_COMPARATOR" and row_cohort != "V6B_ML_LEGACY_COMPARATOR":
+                    continue
+                if era_flt in ("HISTORICAL_LEGACY_V2", "LEGACY_PAPER") and row_cohort != "HISTORICAL_LEGACY_V2":
                     continue
                 if era_flt in ("SHADOW_FORWARD_V1", "PAPER_BOOK_B", "PAPER_BOOK_A") and not is_fwd:
                     continue

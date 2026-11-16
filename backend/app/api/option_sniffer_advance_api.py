@@ -68,6 +68,12 @@ def get_advance_status() -> Dict[str, Any]:
             "PAPER_BOOK_A": bridge.get_calendar_performance(
                 book_filter="SHORT_BOOK_SELL", era_filter="PAPER_BOOK_A"
             ),
+            "V6B_ML_LEGACY_COMPARATOR": bridge.get_calendar_performance(
+                book_filter="ALL", era_filter="V6B_ML_LEGACY_COMPARATOR"
+            ),
+            "HISTORICAL_LEGACY_V2": bridge.get_calendar_performance(
+                book_filter="ALL", era_filter="HISTORICAL_LEGACY_V2"
+            ),
             "LEGACY_PAPER": bridge.get_calendar_performance(
                 book_filter="ALL", era_filter="LEGACY_PAPER"
             ),
