@@ -199,6 +199,9 @@ class TestConsensusV3SixLayerInvariants(unittest.TestCase):
 
                 self.assertEqual(a1["approved_signals"], a2["approved_signals"])
                 self.assertEqual(a1["abstained_signals"], a2["abstained_signals"])
+                # Also verify live path (`as_of_ts=None`) executes cleanly without missing imports
+                live_snap = BaselineEngine.build_book2_15m_snapshot(c1, as_of_ts=None)
+                self.assertIn("market_context", live_snap)
             finally:
                 c1.close()
                 c2.close()

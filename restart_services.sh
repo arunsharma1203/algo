@@ -43,9 +43,9 @@ echo "Vite frontend started in detached session (PID: $FRONTEND_PID) -> Logs at 
 cd "$PROJECT_ROOT"
 
 echo "=========================================================="
-echo "⏳ Waiting 12 seconds for services to initialize..."
+echo "⏳ Waiting 16 seconds for services to initialize..."
 echo "=========================================================="
-sleep 12
+sleep 16
 
 echo "=========================================================="
 echo "🔍 Health Checks"
