@@ -83,6 +83,16 @@ def get_v3_diagnostics() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/equity-curve")
+def get_v3_equity_curve() -> Dict[str, Any]:
+    try:
+        orch = get_consensus_v3_orchestrator()
+        return orch.bridge.get_equity_curve_and_calendar()
+    except Exception as e:
+        logger.error(f"[ConsensusV3API] /equity-curve error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/sniffer-sweep")
 def trigger_v3_sniffer_sweep() -> Dict[str, Any]:
     try:

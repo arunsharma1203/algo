@@ -147,6 +147,19 @@ class TestConsensusV3SixLayerInvariants(unittest.TestCase):
             self.assertGreater(closed_tr["fees_inr"], 0.0)
             self.assertGreater(closed_tr["net_pnl_inr"], 900.0)
 
+            # Verify V3 era-isolated equity curve & calendar reflects the closed trade and resets cleanly to 0 on reset_ledger=True
+            eq_payload = bridge.get_equity_curve_and_calendar()
+            self.assertEqual(eq_payload["closed_trades_count"], 1)
+            self.assertEqual(len(eq_payload["daily_sessions"]), 1)
+            self.assertAlmostEqual(eq_payload["equity_curve"][-1]["cum_net_pnl_inr"], closed_tr["net_pnl_inr"], places=2)
+
+            bridge.configure_arena_capital(100000.0, MODE_DUAL_FUNDED_ARENA, reset_ledger=True)
+            eq_reset = bridge.get_equity_curve_and_calendar()
+            self.assertEqual(eq_reset["closed_trades_count"], 0)
+            self.assertEqual(eq_reset["accounting"]["free_unreserved_cash_inr"], 100000.0)
+            self.assertEqual(eq_reset["equity_curve"][-1]["equity_inr"], 100000.0)
+            self.assertEqual(eq_reset["equity_curve"][-1]["cum_net_pnl_inr"], 0.0)
+
     def test_future_perturbation_immunity_and_qlib_legacy_independence(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_clean = os.path.join(tmp, "clean.db")

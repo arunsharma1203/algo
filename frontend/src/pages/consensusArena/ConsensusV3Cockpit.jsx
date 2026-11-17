@@ -21,6 +21,7 @@ import {
   formatTimestampLabel,
 } from '../optionSnifferAdvance/formatters';
 import ConsensusArmInterlockModal from './ConsensusArmInterlockModal';
+import ConsensusV3EquityPanel from './ConsensusV3EquityPanel';
 import ConsensusWorkspaceHeader from './ConsensusWorkspaceHeader';
 
 const V3_BASE = `${API_BASE}/consensus/v3`;
@@ -40,15 +41,18 @@ const INITIAL_META = {
   performance: { status: 'loading', lastSuccessMs: null, errorMessage: null },
   diagnostics: { status: 'loading', lastSuccessMs: null, errorMessage: null },
   intents: { status: 'loading', lastSuccessMs: null, errorMessage: null },
+  equity: { status: 'loading', lastSuccessMs: null, errorMessage: null },
 };
 
 export default function ConsensusV3Cockpit() {
   const [subTab, setSubTab] = useState('overview');
+  const [arenaEraView, setArenaEraView] = useState('v3_prospective');
   const [statusData, setStatusData] = useState(null);
   const [signalsData, setSignalsData] = useState(null);
   const [positionsData, setPositionsData] = useState(null);
   const [perfData, setPerfData] = useState(null);
   const [diagData, setDiagData] = useState(null);
+  const [equityData, setEquityData] = useState(null);
   const [liveIntents, setLiveIntents] = useState([]);
   const [sliceMeta, setSliceMeta] = useState(INITIAL_META);
 
@@ -125,6 +129,7 @@ export default function ConsensusV3Cockpit() {
       fetchSlice('performance', `${V3_BASE}/performance`, setPerfData),
       fetchSlice('diagnostics', `${V3_BASE}/diagnostics`, setDiagData),
       fetchSlice('intents', `${V3_BASE}/live/order-intents?limit=30`, setLiveIntents),
+      fetchSlice('equity', `${V3_BASE}/equity-curve`, setEquityData),
     ]);
   }, [fetchSlice]);
 
@@ -498,8 +503,39 @@ export default function ConsensusV3Cockpit() {
             </div>
           </div>
 
-          {/* Preserved Rich ConsensusGameArena (Equity Curve, Monthly Calendar, Day Replay, Badges) */}
-          <ConsensusGameArena />
+          {/* Strict Era-Separated Equity Curve & Calendar Toggle (Preserves 100% of Legacy Replay on Demand) */}
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-200 w-fit">
+              <button
+                type="button"
+                onClick={() => setArenaEraView('v3_prospective')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  arenaEraView === 'v3_prospective'
+                    ? 'bg-slate-900 text-emerald-300 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Active V3 Prospective Curve &amp; Calendar (Clean Forward Era)
+              </button>
+              <button
+                type="button"
+                onClick={() => setArenaEraView('legacy_v1_replay')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                  arenaEraView === 'legacy_v1_replay'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Archived V1/V2 Historical Replay Simulator (Legacy Era)
+              </button>
+            </div>
+
+            {arenaEraView === 'v3_prospective' ? (
+              <ConsensusV3EquityPanel equityData={equityData} accounting={liveStatus?.accounting} />
+            ) : (
+              <ConsensusGameArena />
+            )}
+          </div>
         </div>
       )}
 

@@ -1538,6 +1538,141 @@ class ConsensusArenaExecutionBridge:
                 ).fetchall()
             ]
 
+    def get_equity_curve_and_calendar(self) -> Dict[str, Any]:
+        """
+        Builds the strictly era-isolated Prospective V3 Equity Curve & Session P&L Calendar
+        directly from `consensus_v3_arena_state` and `consensus_v3_positions` (zero V1/V2 replay contamination).
+        """
+        acct = self.get_arena_accounting()
+        funded = float(acct["funded_capital_inr"])
+        now_s = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        with self._conn() as conn:
+            st = conn.execute(
+                "SELECT updated_at FROM consensus_v3_arena_state WHERE session_id = ?",
+                (self.session_id,),
+            ).fetchone()
+            closed_rows = [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT * FROM consensus_v3_positions WHERE session_id = ? AND status = 'CLOSED' ORDER BY exit_time ASC, position_id ASC",
+                    (self.session_id,),
+                ).fetchall()
+            ]
+
+        start_ts = str(st["updated_at"]) if st and st["updated_at"] else now_s
+        curve: List[Dict[str, Any]] = [
+            {
+                "idx": 0,
+                "label": "Funded Baseline",
+                "timestamp": start_ts,
+                "symbol": "START",
+                "equity_inr": round(funded, 2),
+                "cum_net_pnl_inr": 0.0,
+                "trade_net_pnl_inr": 0.0,
+                "drawdown_pct": 0.0,
+            }
+        ]
+
+        cum_net = 0.0
+        peak_eq = funded
+        by_date: Dict[str, Dict[str, Any]] = {}
+
+        for i, row in enumerate(closed_rows, start=1):
+            net = float(row.get("net_pnl_inr") or 0.0)
+            gross = float(row.get("gross_pnl_inr") or 0.0)
+            fees = float(row.get("fees_inr") or 0.0)
+            cum_net += net
+            eq = funded + cum_net
+            peak_eq = max(peak_eq, eq)
+            dd = ((peak_eq - eq) / max(1.0, peak_eq)) * 100.0
+            exit_ts = str(row.get("exit_time") or now_s)
+            d_key = exit_ts[:10]
+
+            curve.append(
+                {
+                    "idx": i,
+                    "label": f"{d_key[5:]} {exit_ts[11:16]} ({row.get('symbol')})",
+                    "timestamp": exit_ts,
+                    "symbol": row.get("symbol"),
+                    "book": row.get("book"),
+                    "equity_inr": round(eq, 2),
+                    "cum_net_pnl_inr": round(cum_net, 2),
+                    "trade_net_pnl_inr": round(net, 2),
+                    "drawdown_pct": round(dd, 2),
+                }
+            )
+
+            bucket = by_date.setdefault(
+                d_key,
+                {
+                    "date": d_key,
+                    "trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "gross_pnl_inr": 0.0,
+                    "fees_inr": 0.0,
+                    "net_pnl_inr": 0.0,
+                    "book1_net_inr": 0.0,
+                    "book2_net_inr": 0.0,
+                    "items": [],
+                },
+            )
+            bucket["trades"] += 1
+            if net > 0:
+                bucket["wins"] += 1
+            else:
+                bucket["losses"] += 1
+            bucket["gross_pnl_inr"] = round(bucket["gross_pnl_inr"] + gross, 2)
+            bucket["fees_inr"] = round(bucket["fees_inr"] + fees, 2)
+            bucket["net_pnl_inr"] = round(bucket["net_pnl_inr"] + net, 2)
+            if row.get("book") == "BOOK1_SWING_CNC_CORE":
+                bucket["book1_net_inr"] = round(bucket["book1_net_inr"] + net, 2)
+            else:
+                bucket["book2_net_inr"] = round(bucket["book2_net_inr"] + net, 2)
+            bucket["items"].append(
+                {
+                    "position_id": row.get("position_id"),
+                    "symbol": row.get("symbol"),
+                    "book": row.get("book"),
+                    "product_type": row.get("product_type"),
+                    "direction": row.get("direction"),
+                    "shares": row.get("shares"),
+                    "entry_price": row.get("entry_price"),
+                    "exit_price": row.get("exit_price"),
+                    "fees_inr": round(fees, 2),
+                    "net_pnl_inr": round(net, 2),
+                    "exit_reason": row.get("exit_reason"),
+                    "exit_time": exit_ts,
+                }
+            )
+
+        # Append live MTM point so open floating P&L (or clean 0-trade baseline) always renders accurately
+        live_eq = float(acct["current_equity_inr"])
+        live_cum = float(acct["realized_pnl_inr"]) + float(acct["unrealized_pnl_inr"])
+        peak_eq = max(peak_eq, live_eq)
+        live_dd = ((peak_eq - live_eq) / max(1.0, peak_eq)) * 100.0
+        curve.append(
+            {
+                "idx": len(curve),
+                "label": "Live MTM",
+                "timestamp": now_s,
+                "symbol": "LIVE",
+                "equity_inr": round(live_eq, 2),
+                "cum_net_pnl_inr": round(live_cum, 2),
+                "trade_net_pnl_inr": round(float(acct["unrealized_pnl_inr"]), 2),
+                "drawdown_pct": round(live_dd, 2),
+            }
+        )
+
+        return {
+            "protocol_id": PROTOCOL_ID,
+            "accounting": acct,
+            "closed_trades_count": len(closed_rows),
+            "equity_curve": curve,
+            "daily_sessions": [by_date[k] for k in sorted(by_date.keys(), reverse=True)],
+        }
+
 
 def get_consensus_v3_bridge() -> ConsensusArenaExecutionBridge:
     global _ARENA_BRIDGE_INSTANCE
