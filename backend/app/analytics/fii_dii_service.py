@@ -29,6 +29,26 @@ VERIFIED_HISTORICAL_SEEDS = [
 ]
 
 class FiiDiiService:
+    _last_live_attempt_ts: float = 0.0
+
+    @classmethod
+    def ensure_fresh_daily_flow(cls, cooldown_sec: float = 1800.0) -> Dict[str, Any]:
+        """
+        Prospectively refreshes official NSE EOD FII/DII cash disclosures at most once per cooldown window
+        (non-blocking fallback to authoritative local SQLite table if offline or outside disclosure window).
+        """
+        import time as _time
+
+        now_ep = _time.time()
+        flows = cls.get_latest_flows(limit=10)
+        today_nse_fmt = datetime.now().strftime("%d-%b-%Y")
+        if flows.get("disclosure_date") != today_nse_fmt and (now_ep - cls._last_live_attempt_ts) >= cooldown_sec:
+            cls._last_live_attempt_ts = now_ep
+            rec = cls.fetch_nse_live()
+            if rec:
+                flows = cls.get_latest_flows(limit=10)
+        return flows
+
     @staticmethod
     def init_table():
         db_path = get_db_path()

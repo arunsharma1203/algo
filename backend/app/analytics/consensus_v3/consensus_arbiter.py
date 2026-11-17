@@ -53,7 +53,10 @@ class ExitController:
             "hysteresis_keep_rank_floor": 0.78,
             "regime_shield_enabled": True,
             "corporate_action_split_guard": True,
-            "exit_rule_version": "SCHEDULED_20D_HYSTERESIS_SHIELD_V1",
+            "hard_disaster_stop_pct": -14.0,
+            "intra_cycle_institutional_breakdown_guard": True,
+            "live_finbert_shock_sentinel": True,
+            "exit_rule_version": "SCHEDULED_20D_HYSTERESIS_SHIELD_SMART_SENTINEL_V2",
             "ml_exit_challenger_active": False,
         }
 
@@ -195,10 +198,22 @@ class ConsensusArbiter:
         cls,
         scored_snapshot: Dict[str, Any],
         slot_cap_inr: float = 50000.0,
+        check_live_finbert: bool = False,
     ) -> Dict[str, Any]:
+        from app.analytics.consensus_v3.baseline_engine import resolve_fno_sector
+
         cands = scored_snapshot.get("candidates", [])
         shield = scored_snapshot.get("macro_shield", {})
         target_slots = int(shield.get("target_slots", 8))
+        eff_slot_cap = max(5000.0, float(slot_cap_inr or 50000.0))
+
+        nlp_analyzer = None
+        if check_live_finbert:
+            try:
+                from app.analytics.nlp_engine import get_nlp_analyzer
+                nlp_analyzer = get_nlp_analyzer()
+            except Exception:
+                nlp_analyzer = None
 
         approved: List[Dict[str, Any]] = []
         abstained: List[Dict[str, Any]] = []
@@ -206,20 +221,42 @@ class ConsensusArbiter:
 
         for c in cands:
             px = float(c["close"])
-            sh = max(1, int(slot_cap_inr // px))
-            cnc_cost_bps = compute_nse_cnc_charges(px, px, sh, True, 1.0)["total_cost_bps"]
-            e_qlib_net_bps = round(float(c.get("qlib_expected_gross_bps", 0.0)) - cnc_cost_bps, 2)
+            raw_sh = int(eff_slot_cap // max(0.05, px))
+            slot_util_pct = round((raw_sh * px) / eff_slot_cap * 100.0, 1) if raw_sh >= 1 else 0.0
+            sh_fee = max(1, raw_sh)
+            cnc_cost_bps = compute_nse_cnc_charges(px, px, sh_fee, True, 1.0)["total_cost_bps"]
+            gross_res_bps = float(c.get("qlib_expected_gross_bps", 0.0))
+            e_qlib_net_bps = round(gross_res_bps - cnc_cost_bps, 2)
+            # Rank-78% hysteresis holds winners ~2.1 cycles (~42d), amortizing fixed CDSL DP & STT friction
+            e_qlib_amortized_net_bps = round(gross_res_bps + 45.0 - 0.50 * cnc_cost_bps, 2)
             q_pct = float(c.get("qlib_pct_rank", 0.50))
             leg_shadow = LegacyPayoffEstimator.score_book1_shadow_telemetry(c)
+            sector = str(c.get("sector") or resolve_fno_sector(c.get("symbol", "")))
+            finbert_badge = "NLP:PASSIVE"
 
             if target_slots == 0:
                 decision, reason = "ABSTAIN", "MACRO_BEAR_CASH_SHIELD_ACTIVE"
             elif not c.get("sma_alignment_ok", False):
                 decision, reason = "ABSTAIN", "BELOW_SMA50_OR_SMA200_TREND_FILTER"
-            elif q_pct < 0.85 or e_qlib_net_bps <= 0.0:
+            elif raw_sh < 1:
+                decision, reason = "ABSTAIN", "SHARE_PRICE_EXCEEDS_SLOT_BUDGET"
+            elif eff_slot_cap <= 35000.0 and slot_util_pct < 78.0:
+                decision, reason = "ABSTAIN", "LOW_WHOLE_SHARE_SLOT_UTILIZATION"
+            elif q_pct < 0.85 or (e_qlib_net_bps <= 0.0 and e_qlib_amortized_net_bps <= 0.0):
                 decision, reason = "ABSTAIN", "BELOW_TOP15PCT_QLIB_20D_RANK_OR_NEGATIVE_NET"
             else:
                 decision, reason = "APPROVED_20D_REBALANCE_CANDIDATE", None
+                if nlp_analyzer is not None:
+                    try:
+                        nlp_res = nlp_analyzer.analyze_ticker_news(c["ticker"])
+                        if nlp_res.get("is_severe_negative_shock"):
+                            decision, reason = "ABSTAIN", "FINBERT_SEVERE_REGULATORY_SHOCK_VETO"
+                            finbert_badge = "NLP:SHOCK_VETO"
+                        else:
+                            sc = float(nlp_res.get("score", 0.0))
+                            finbert_badge = "NLP:BULL" if sc >= 0.20 else ("NLP:BEAR" if sc <= -0.25 else "NLP:NEUTRAL")
+                    except Exception:
+                        finbert_badge = "NLP:OFFLINE_OK"
 
             rec = {
                 "book": "BOOK1_SWING_CNC_CORE",
@@ -227,15 +264,19 @@ class ConsensusArbiter:
                 "timeframe": "1d",
                 "ticker": c["ticker"],
                 "symbol": c["symbol"],
+                "sector": sector,
                 "instrument_key": c["instrument_key"],
                 "fno_eligible": True,
                 "as_of_date": c["as_of_date"],
                 "direction": "BUY",
                 "close_px": px,
+                "vol60_ann_pct": float(c.get("vol60_ann_pct", 30.0)),
+                "slot_utilization_pct": slot_util_pct,
                 "est_roundtrip_cost_bps": cnc_cost_bps,
                 "baseline_mom_pct": c.get("baseline_mom_pct", 0.50),
                 "qlib_pct_rank": q_pct,
                 "e_qlib_net_bps": e_qlib_net_bps,
+                "e_qlib_amortized_net_bps": e_qlib_amortized_net_bps,
                 "legacy_shadow": leg_shadow,
                 "decision": decision,
                 "abstain_reason": reason,
@@ -245,6 +286,11 @@ class ConsensusArbiter:
                     "atr_pct": c["atr_pct"],
                     "mom_12_1_pct": c["mom_12_1_pct"],
                     "near_52w_ratio": c["near_52w_ratio"],
+                    "sma50": c.get("sma50"),
+                    "sma200": c.get("sma200"),
+                    "ret_1d_pct": c.get("ret_1d_pct", 0.0),
+                    "rvol_20d": c.get("rvol_20d", 1.0),
+                    "finbert_badge": finbert_badge,
                 },
                 "exit_plan": exit_plan,
             }
@@ -258,7 +304,7 @@ class ConsensusArbiter:
             "as_of_date": scored_snapshot.get("as_of_date"),
             "macro_shield": shield,
             "universe_evaluated": len(cands),
-            "approved_rebalance_leaders": approved[: max(target_slots, 12)],
+            "approved_rebalance_leaders": approved[: max(target_slots * 2, 16)],
             "abstained_count": len(abstained),
             "top_abstained_sample": abstained[:15],
         }

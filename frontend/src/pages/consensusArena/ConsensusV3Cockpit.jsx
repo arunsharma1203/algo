@@ -66,6 +66,11 @@ export default function ConsensusV3Cockpit() {
   const [capitalInput, setCapitalInput] = useState('400000');
   const [modeInput, setModeInput] = useState('DUAL_FUNDED_CASH_ARENA');
   const [marginModeInput, setMarginModeInput] = useState('CASH_1X');
+  const [snifferReserveInput, setSnifferReserveInput] = useState('0');
+  const [ddpiConfirmedInput, setDdpiConfirmedInput] = useState(false);
+  const [topUpCashInput, setTopUpCashInput] = useState('25000');
+  const [topUpModeInput, setTopUpModeInput] = useState('AUTO_4GATE_PMS');
+  const [topUpBusy, setTopUpBusy] = useState(false);
   const [configBusy, setConfigBusy] = useState(false);
   const [exitingPosId, setExitingPosId] = useState(null);
   const formDirtyRef = useRef(false);
@@ -119,8 +124,19 @@ export default function ConsensusV3Cockpit() {
           if (d?.live_bridge?.execution_mode) {
             setModeInput(d.live_bridge.execution_mode);
           }
-          if (d?.live_bridge?.margin_mode || d?.live_bridge?.accounting?.margin_mode) {
+          if (d?.live_bridge?.execution_mode === 'BOOK1_SWING_CNC_ONLY') {
+            setMarginModeInput('CASH_1X');
+          } else if (d?.live_bridge?.margin_mode || d?.live_bridge?.accounting?.margin_mode) {
             setMarginModeInput(d.live_bridge.margin_mode || d.live_bridge.accounting.margin_mode);
+          }
+          if (typeof d?.live_bridge?.accounting?.option_sniffer_reserve_inr === 'number') {
+            setSnifferReserveInput(String(Math.round(d.live_bridge.accounting.option_sniffer_reserve_inr)));
+          }
+          if (typeof d?.live_bridge?.accounting?.ddpi_confirmed === 'boolean') {
+            setDdpiConfirmedInput(d.live_bridge.accounting.ddpi_confirmed);
+          }
+          if (d?.live_bridge?.accounting?.topup_deploy_mode) {
+            setTopUpModeInput(d.live_bridge.accounting.topup_deploy_mode);
           }
         }
       }),
@@ -174,6 +190,9 @@ export default function ConsensusV3Cockpit() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Mode update failed');
       setModeInput(newMode);
+      if (newMode === 'BOOK1_SWING_CNC_ONLY') {
+        setMarginModeInput('CASH_1X');
+      }
       await refreshAllSlices();
     } catch (err) {
       setArmActionMsg({ tone: 'error', text: err.message });
@@ -191,6 +210,7 @@ export default function ConsensusV3Cockpit() {
         body: JSON.stringify({
           pin: armPinInput.trim(),
           execution_mode: statusData?.live_bridge?.execution_mode || modeInput,
+          ddpi_confirmed: ddpiConfirmedInput,
         }),
       });
       const data = await res.json();
@@ -266,13 +286,17 @@ export default function ConsensusV3Cockpit() {
     setConfigBusy(true);
     try {
       const parsedCap = Math.max(10000, Number(capitalInput) || 10000);
+      const effectiveMargin = modeInput === 'BOOK1_SWING_CNC_ONLY' ? 'CASH_1X' : marginModeInput;
+      const parsedSnifferRes = Math.max(0, Number(snifferReserveInput) || 0);
       const res = await fetch(`${V3_BASE}/arena/configure`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           funded_capital_inr: parsedCap,
           execution_mode: modeInput,
-          margin_mode: marginModeInput,
+          margin_mode: effectiveMargin,
+          option_sniffer_reserve_inr: parsedSnifferRes,
+          ddpi_confirmed: ddpiConfirmedInput,
           reset_ledger: resetFlag,
         }),
       });
@@ -284,13 +308,53 @@ export default function ConsensusV3Cockpit() {
         tone: 'ok',
         text: resetFlag
           ? `Funded Arena reset cleanly to ${formatINRValue(acct.funded_capital_inr)} in Paper Shadow mode.`
-          : `Updated Arena to ${formatINRValue(acct.funded_capital_inr)} • MIS ${acct.intraday_mis_leverage || 1}x • Auto Slots B1:${acct?.book1_slots?.max || '—'} / B2:${acct?.book2_slots?.max || '—'}.`,
+          : `Updated Sub-Wallet to ${formatINRValue(acct.funded_capital_inr)} • ${
+              acct.execution_mode === 'BOOK1_SWING_CNC_ONLY'
+                ? '1.0x Cash Locked (0x Lev)'
+                : `MIS ${acct.intraday_mis_leverage || 1}x`
+            } • Slots B1:${acct?.book1_slots?.max || '—'} / B2:${acct?.book2_slots?.max || '—'} • Sniffer Fence ${formatINRValue(acct.option_sniffer_reserve_inr || 0)}.`,
       });
       await refreshAllSlices();
     } catch (err) {
       setArmActionMsg({ tone: 'error', text: err.message });
     } finally {
       setConfigBusy(false);
+    }
+  };
+
+  const handleTopUpArena = async () => {
+    setTopUpBusy(true);
+    try {
+      const added = Math.max(1000, Number(topUpCashInput) || 0);
+      const parsedSnifferRes = Math.max(0, Number(snifferReserveInput) || 0);
+      const res = await fetch(`${V3_BASE}/arena/top-up`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          added_cash_inr: added,
+          deploy_mode: topUpModeInput,
+          option_sniffer_reserve_inr: parsedSnifferRes,
+          note: 'COCKPIT_MIDCYCLE_TOPUP',
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || 'Top-up failed');
+      const tp = body.top_up || {};
+      const md = body.midcycle_deployment || {};
+      const acct = body.accounting || {};
+      setArmActionMsg({
+        tone: 'ok',
+        text: `Top-Up +${formatINRValue(tp.added_cash_inr)} booked at Unit NAV ₹${Number(
+          tp.unit_nav_preserved || 100
+        ).toFixed(2)} (0% return distortion) • Auto Slots B1:${acct?.book1_slots?.max || '—'} • 4-Gate PMS: ${
+          md.status || 'DONE'
+        } (${md.opened || 0} new / ${md.pyramided || 0} winner pyramid).`,
+      });
+      await refreshAllSlices();
+    } catch (err) {
+      setArmActionMsg({ tone: 'error', text: err.message || 'Top-up error' });
+    } finally {
+      setTopUpBusy(false);
     }
   };
 
@@ -319,6 +383,9 @@ export default function ConsensusV3Cockpit() {
   const liveStatus = statusData?.live_bridge || null;
   const shield = statusData?.book1_macro_shield || signalsData?.book1_macro_shield || {};
   const b2Ctx = statusData?.book2_market_context || {};
+  const fiiDii = statusData?.fii_dii_macro_flows || {};
+  const shadowGate = statusData?.shadow_gate_progress || liveStatus?.shadow_gate_progress || {};
+  const isCncOnlyInput = modeInput === 'BOOK1_SWING_CNC_ONLY';
   const pendOrders = positionsData?.pending_reserved_orders || [];
   const openPositions = positionsData?.open_positions || [];
   const closedPositions = positionsData?.closed_positions || [];
@@ -432,10 +499,12 @@ export default function ConsensusV3Cockpit() {
               <div className="flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-slate-500">
                 <span className="flex items-center gap-1.5">
                   <Sliders size={13} />
-                  <span>Wallet Capital &amp; MIS Buying Power</span>
+                  <span>Sub-Wallet &amp; Leverage Guard</span>
                 </span>
                 <span className="font-mono text-[10px] text-indigo-700">
-                  Min ₹10k • SL Cap {liveStatus?.accounting?.max_risk_per_trade_pct ?? 0.5}%
+                  {isCncOnlyInput
+                    ? 'CNC 1.0x Cash Locked (0x Lev)'
+                    : `B2 MIS Only • SL Cap ${liveStatus?.accounting?.max_risk_per_trade_pct ?? 0.5}%`}
                 </span>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
@@ -453,30 +522,51 @@ export default function ConsensusV3Cockpit() {
                   aria-label="Funded capital in INR"
                 />
                 <select
-                  value={marginModeInput}
+                  value={isCncOnlyInput ? 'CASH_1X' : marginModeInput}
+                  disabled={isCncOnlyInput}
                   onChange={(e) => {
+                    if (isCncOnlyInput) return;
                     formDirtyRef.current = true;
                     setMarginModeInput(e.target.value);
                   }}
-                  className="px-2 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold text-slate-800"
-                  aria-label="Intraday MIS buying power"
+                  className={`px-2 py-1.5 rounded-lg border text-xs font-semibold ${
+                    isCncOnlyInput
+                      ? 'border-slate-200 bg-slate-100 text-slate-500 cursor-not-allowed'
+                      : 'border-slate-300 bg-white text-slate-800'
+                  }`}
+                  aria-label="Book-2 Intraday MIS buying power"
+                  title={
+                    isCncOnlyInput
+                      ? 'Leverage is strictly disallowed in NSE CNC Equity Delivery (1.0x Cash Locked)'
+                      : 'Applies exclusively to Book-2 Intraday MIS positions (Book-1 CNC is always 1.0x Cash)'
+                  }
                 >
-                  <option value="CASH_1X">1.0x Cash (0x Lev)</option>
-                  <option value="MIS_2X">2.0x MIS (SL Capped)</option>
-                  <option value="MIS_3X">3.0x MIS (SL Capped)</option>
-                  <option value="UPSTOX_VAR_ELM_MAX_5X">Upstox &lt;=5.0x VaR+ELM</option>
+                  {isCncOnlyInput ? (
+                    <option value="CASH_1X">1.0x Cash Locked (0x CNC)</option>
+                  ) : (
+                    <>
+                      <option value="CASH_1X">1.0x Cash (0x Lev)</option>
+                      <option value="MIS_2X">2.0x B2 MIS (SL Capped)</option>
+                      <option value="MIS_3X">3.0x B2 MIS (SL Capped)</option>
+                      <option value="UPSTOX_VAR_ELM_MAX_5X">Upstox &lt;=5.0x B2 MIS</option>
+                    </>
+                  )}
                 </select>
                 <select
                   value={modeInput}
                   onChange={(e) => {
+                    const nextMode = e.target.value;
                     formDirtyRef.current = true;
-                    setModeInput(e.target.value);
+                    setModeInput(nextMode);
+                    if (nextMode === 'BOOK1_SWING_CNC_ONLY') {
+                      setMarginModeInput('CASH_1X');
+                    }
                   }}
                   className="px-2 py-1.5 rounded-lg border border-slate-300 text-xs font-semibold text-slate-800"
                   aria-label="Arena execution mode"
                 >
+                  <option value="BOOK1_SWING_CNC_ONLY">Book 1 (20d CNC • 1.0x)</option>
                   <option value="DUAL_FUNDED_CASH_ARENA">Dual Book (B1 + B2)</option>
-                  <option value="BOOK1_SWING_CNC_ONLY">Book 1 (20d CNC)</option>
                   <option value="BOOK2_INTRADAY_MIS_SNIFFER">Book 2 (15m MIS)</option>
                 </select>
               </div>
@@ -489,7 +579,7 @@ export default function ConsensusV3Cockpit() {
                 >
                   {configBusy ? 'Saving...' : 'Apply Capital / Margin / Mode'}
                 </button>
-                {liveStatus?.simulation_mode !== false && (
+                {liveStatus?.simulation_mode !== false && (liveStatus?.active_live_positions?.length || 0) === 0 && (
                   <button
                     type="button"
                     disabled={configBusy}
@@ -499,6 +589,99 @@ export default function ConsensusV3Cockpit() {
                     Reset Shadow
                   </button>
                 )}
+              </div>
+            </div>
+          </div>
+
+          {/* Smart Portfolio Manager — Mid-Cycle Equity Top-Up, Option Sniffer Fence & Macro Flow Strip */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-2xs space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="space-y-0.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold text-slate-900">
+                    Smart Portfolio Manager • Mid-Cycle Equity Top-Up &amp; Option Sniffer Margin Fence
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-indigo-50 text-indigo-800 border border-indigo-200 font-mono text-[10px] font-bold">
+                    Unit NAV: ₹{Number(liveStatus?.accounting?.unit_nav ?? 100).toFixed(2)} (
+                    {formatPercent(liveStatus?.accounting?.time_weighted_return_pct ?? 0, { signed: true })})
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200 font-mono text-[10px] font-semibold">
+                    Ledger: {liveStatus?.accounting?.active_ledger || 'PAPER_SHADOW'}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-sky-50 text-sky-900 border border-sky-200 font-mono text-[10px] font-semibold">
+                    B2 Shadow Gate: {shadowGate.completed_sessions ?? 0}/{shadowGate.target_sessions ?? 60} sessions
+                  </span>
+                  {fiiDii?.status === 'AVAILABLE' && (
+                    <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-900 border border-emerald-200 font-mono text-[10px] font-semibold">
+                      FII {Number(fiiDii.fii_net_crores || 0) >= 0 ? '+' : ''}
+                      {Number(fiiDii.fii_net_crores || 0).toFixed(0)}Cr • DII{' '}
+                      {Number(fiiDii.dii_net_crores || 0) >= 0 ? '+' : ''}
+                      {Number(fiiDii.dii_net_crores || 0).toFixed(0)}Cr ({fiiDii.date})
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Add equity cash mid-cycle without distorting return % (`Unit NAV` shares). 4-Gate PMS deploys into
+                  unheld sector-diversified leaders or `Rank &gt;= 88%` winners (never averages down on losers) while
+                  protecting Option Sniffer margin.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs">
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                  Add Equity Top-Up Cash (₹)
+                </label>
+                <input
+                  type="number"
+                  min="1000"
+                  step="1000"
+                  value={topUpCashInput}
+                  onChange={(e) => setTopUpCashInput(e.target.value)}
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono text-xs text-slate-900"
+                  placeholder="e.g. 25000"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                  Top-Up Deployment Policy
+                </label>
+                <select
+                  value={topUpModeInput}
+                  onChange={(e) => setTopUpModeInput(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded-lg border border-slate-300 font-semibold text-xs text-slate-800"
+                >
+                  <option value="AUTO_4GATE_PMS">Auto-Deploy via 4-Gate PMS</option>
+                  <option value="HOLD_FOR_20D_REBALANCE">Hold Cash Until 20d Rebalance</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                  Option Sniffer Margin Fence (₹)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="5000"
+                  value={snifferReserveInput}
+                  onChange={(e) => {
+                    formDirtyRef.current = true;
+                    setSnifferReserveInput(e.target.value);
+                  }}
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono text-xs text-slate-900"
+                  placeholder="e.g. 90000"
+                />
+              </div>
+              <div className="flex items-end">
+                <button
+                  type="button"
+                  disabled={topUpBusy}
+                  onClick={handleTopUpArena}
+                  className="w-full py-1.5 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-xs cursor-pointer disabled:opacity-50"
+                >
+                  {topUpBusy ? 'Deploying...' : '+ Top Up Equity Sleeve'}
+                </button>
               </div>
             </div>
           </div>
@@ -665,14 +848,30 @@ export default function ConsensusV3Cockpit() {
                 <tbody className="divide-y divide-slate-100 font-mono">
                   {b1Leaders.slice(0, 10).map((r) => (
                     <tr key={r.ticker}>
-                      <td className="py-2 px-2.5 font-bold text-slate-900">{r.symbol}</td>
-                      <td className="py-2 px-2.5">{formatINRValue(r.close_px)}</td>
+                      <td className="py-2 px-2.5 font-bold text-slate-900">
+                        {r.symbol}{' '}
+                        {r.sector && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[9px] font-sans">
+                            {r.sector}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 px-2.5">
+                        {formatINRValue(r.close_px)}{' '}
+                        {typeof r.slot_utilization_pct === 'number' && (
+                          <span className="text-[10px] text-slate-500">({r.slot_utilization_pct}% slot)</span>
+                        )}
+                      </td>
                       <td className="py-2 px-2.5">{formatPercent((r.baseline_mom_pct || 0) * 100)}</td>
                       <td className="py-2 px-2.5 font-bold text-indigo-700">
                         {formatPercent((r.qlib_pct_rank || 0) * 100)}
                       </td>
                       <td className="py-2 px-2.5 text-emerald-700 font-bold">
-                        {formatNumber(r.e_qlib_net_bps, { decimals: 0, signed: true, suffix: ' bps' })}
+                        {formatNumber(r.e_qlib_amortized_net_bps ?? r.e_qlib_net_bps, {
+                          decimals: 0,
+                          signed: true,
+                          suffix: ' bps',
+                        })}
                       </td>
                       <td className="py-2 px-2.5 text-slate-500">
                         {formatPercent((r.legacy_shadow?.legacy_shadow_p_win || 0) * 100)} (SHADOW)
@@ -680,6 +879,7 @@ export default function ConsensusV3Cockpit() {
                       <td className="py-2 px-2.5 font-sans text-[11px] text-slate-600">
                         RSI {r.telemetry?.rsi} • ADX {r.telemetry?.adx} • ATR {r.telemetry?.atr_pct}% • 52w{' '}
                         {formatPercent((r.telemetry?.near_52w_ratio || 0) * 100)}
+                        {r.telemetry?.finbert_badge ? ` • ${r.telemetry.finbert_badge}` : ''}
                       </td>
                     </tr>
                   ))}
@@ -768,9 +968,25 @@ export default function ConsensusV3Cockpit() {
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {openPositions.map((pos) => (
-                      <tr key={pos.position_id}>
+                      <tr
+                        key={pos.position_id}
+                        className={pos.status === 'EXIT_RETRY_PENDING' ? 'bg-rose-50/70' : ''}
+                      >
                         <td className="py-2 px-2.5 font-bold text-slate-900">
                           {pos.symbol} <span className="text-[10px] text-slate-500">({pos.product_type})</span>
+                          {pos.sector && (
+                            <span className="ml-1.5 px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[9px] font-sans">
+                              {pos.sector}
+                            </span>
+                          )}
+                          {pos.status === 'EXIT_RETRY_PENDING' && (
+                            <span
+                              title={pos.exit_reason || 'Broker exit rejected — check DDPI/TPIN and retry'}
+                              className="ml-1.5 px-1.5 py-0.5 rounded bg-rose-600 text-white text-[9px] font-sans font-bold"
+                            >
+                              EXIT RETRY PENDING
+                            </span>
+                          )}
                         </td>
                         <td className="py-2 px-2.5 font-bold">{pos.direction}</td>
                         <td className="py-2 px-2.5">{pos.shares}</td>
@@ -792,7 +1008,11 @@ export default function ConsensusV3Cockpit() {
                             onClick={() => handleExitPosition(pos.position_id)}
                             className="px-2.5 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white font-sans font-bold text-[10px] cursor-pointer"
                           >
-                            {exitingPosId === pos.position_id ? 'Closing...' : 'Exit'}
+                            {exitingPosId === pos.position_id
+                              ? 'Closing...'
+                              : pos.status === 'EXIT_RETRY_PENDING'
+                              ? 'Retry Exit'
+                              : 'Exit'}
                           </button>
                         </td>
                       </tr>
@@ -1038,6 +1258,8 @@ export default function ConsensusV3Cockpit() {
         armActionBusy={armActionBusy}
         capitalInput={capitalInput}
         marginModeInput={marginModeInput}
+        snifferReserveInput={snifferReserveInput}
+        ddpiConfirmedInput={ddpiConfirmedInput}
         onChangeCapital={(val) => {
           formDirtyRef.current = true;
           setCapitalInput(val);
@@ -1045,6 +1267,14 @@ export default function ConsensusV3Cockpit() {
         onChangeMarginMode={(val) => {
           formDirtyRef.current = true;
           setMarginModeInput(val);
+        }}
+        onChangeSnifferReserve={(val) => {
+          formDirtyRef.current = true;
+          setSnifferReserveInput(val);
+        }}
+        onChangeDdpiConfirmed={(val) => {
+          formDirtyRef.current = true;
+          setDdpiConfirmedInput(val);
         }}
         onSaveCapitalConfig={() => handleConfigureArena(false)}
         configBusy={configBusy}

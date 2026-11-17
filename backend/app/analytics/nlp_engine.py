@@ -1,8 +1,122 @@
 import logging
-from datetime import datetime
-from typing import Dict, Any, Optional
+import time
+import urllib.parse
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Dict, Any, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+SEVERE_REGULATORY_SHOCK_KEYWORDS = (
+    "sebi order",
+    "sebi ban",
+    "fraud",
+    "forensic audit",
+    "auditor resign",
+    "default",
+    "insolvency",
+    "nclt",
+    "usfda",
+    "form 483",
+    "import alert",
+    "warning letter",
+    "ed raid",
+    "cbi",
+    "income tax search",
+    "plant fire",
+    "suspension",
+    "guidance cut",
+    "profit drops",
+    "net loss",
+)
+
+_TICKER_NEWS_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_NEWS_CACHE_TTL_SEC = 900.0  # 15-minute live cache per ticker
+
+
+def _fetch_live_exchange_and_rss_news(base_symbol: str, timeout_sec: float = 3.5) -> List[Dict[str, Any]]:
+    """
+    Fetches live corporate announcements from NSE India + Google News India Business RSS
+    strictly for point-in-time live risk monitoring (cached 15m; fails safely to `[]` if offline).
+    """
+    now_ep = time.time()
+    cached = _TICKER_NEWS_CACHE.get(base_symbol)
+    if cached and (now_ep - cached[0]) < _NEWS_CACHE_TTL_SEC:
+        return cached[1]
+
+    items: List[Dict[str, Any]] = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/xml, application/rss+xml, */*",
+    }
+
+    # 1. Official NSE Corporate Announcements (Tier-1 Exchange Filings)
+    try:
+        import requests
+
+        s = requests.Session()
+        s.get("https://www.nseindia.com", headers=headers, timeout=2.5)
+        nse_url = f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={urllib.parse.quote(base_symbol)}"
+        r_nse = s.get(nse_url, headers={**headers, "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-announcements"}, timeout=timeout_sec)
+        if r_nse.status_code == 200:
+            data = r_nse.json()
+            if isinstance(data, list):
+                for row in data[:8]:
+                    desc = str(row.get("desc") or "").strip()
+                    att = str(row.get("attchmntText") or "").strip()
+                    dt_raw = str(row.get("an_dt") or "").strip()
+                    pub_ts = None
+                    for fmt in ("%d-%b-%Y %H:%M:%S", "%d-%b-%Y %H:%M", "%Y-%m-%d %H:%M:%S"):
+                        try:
+                            pub_ts = datetime.strptime(dt_raw, fmt).timestamp()
+                            break
+                        except Exception:
+                            continue
+                    if desc or att:
+                        items.append({
+                            "title": f"{base_symbol}: {desc}",
+                            "summary": att[:280],
+                            "providerPublishTime": pub_ts,
+                            "source": "NSE_CORPORATE_FILING",
+                        })
+    except Exception:
+        pass
+
+    # 2. Google News India Business RSS Fallback / Supplement (`when:2d`)
+    if len(items) < 3:
+        try:
+            import requests
+
+            q = urllib.parse.quote(f'"{base_symbol}" NSE stock when:2d')
+            rss_url = f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en"
+            r_rss = requests.get(rss_url, headers=headers, timeout=timeout_sec)
+            if r_rss.status_code == 200 and r_rss.text:
+                root = ET.fromstring(r_rss.text)
+                for node in root.findall(".//item")[:8]:
+                    title = (node.findtext("title") or "").strip()
+                    pub_s = (node.findtext("pubDate") or "").strip()
+                    pub_ts = None
+                    if pub_s:
+                        try:
+                            pdt = parsedate_to_datetime(pub_s)
+                            if pdt.tzinfo is not None:
+                                pdt = pdt.astimezone(timezone.utc).replace(tzinfo=None)
+                            pub_ts = pdt.timestamp()
+                        except Exception:
+                            pub_ts = None
+                    if title:
+                        items.append({
+                            "title": title,
+                            "summary": "",
+                            "providerPublishTime": pub_ts,
+                            "source": "GOOGLE_NEWS_IN_RSS",
+                        })
+        except Exception:
+            pass
+
+    _TICKER_NEWS_CACHE[base_symbol] = (now_ep, items)
+    return items
 
 FINANCIAL_LEXICON_UPDATES = {
     "bullish": 2.5,
@@ -154,7 +268,11 @@ class FinancialSentimentAnalyzer:
             as_of_timestamp = datetime.now()
 
         try:
-            news_items = []
+            base_ticker = ticker.split('.')[0].strip().upper()
+            # Strictly point-in-time: only query live feeds when evaluating current/recent timestamps (<= 3 days);
+            # never leak current live news onto historical backtest timestamps!
+            age_days = abs((datetime.now() - as_of_timestamp).total_seconds()) / 86400.0
+            news_items = _fetch_live_exchange_and_rss_news(base_ticker) if age_days <= 3.0 else []
 
             if not news_items or len(news_items) == 0:
                 return {
@@ -162,13 +280,17 @@ class FinancialSentimentAnalyzer:
                     "headline": "No recent exchange news available.",
                     "status": "unavailable",
                     "articles_analyzed": 0,
+                    "max_neg_prob": 0.0,
+                    "regulatory_shock_keywords": [],
+                    "is_severe_negative_shock": False,
                     "engine": "FinBERT (ProsusAI/finbert)"
                 }
 
             total_compound = 0.0
             best_headline = ""
             max_intensity = -1.0
-            base_ticker = ticker.split('.')[0].upper()
+            max_neg_prob = 0.0
+            shock_hits_found: List[str] = []
             valid_news = 0
 
             for item in news_items:
@@ -178,12 +300,10 @@ class FinancialSentimentAnalyzer:
                     try:
                         pub_dt = datetime.fromtimestamp(pub_time)
                         if pub_dt > as_of_timestamp:
-                            # Skip future news
                             continue
                     except Exception:
                         pass
 
-                # Extract headline and body text
                 title = item.get('title', '')
                 if not title and 'content' in item:
                     title = item['content'].get('title', '')
@@ -193,15 +313,21 @@ class FinancialSentimentAnalyzer:
                     summary = item['content'].get('summary', '')
 
                 text = f"{title}. {summary}".strip()
+                text_lc = text.lower()
 
-                # Strict entity relevance filter
-                if base_ticker not in text.upper():
+                # Entity relevance filter (NSE corporate filing items already scoped to base_ticker)
+                if item.get("source") != "NSE_CORPORATE_FILING" and base_ticker not in text.upper():
                     continue
 
                 valid_news += 1
                 scores = self.analyzer.polarity_scores(text)
-                total_compound += scores['compound']
+                neg_p = float(scores.get("neg", 0.0))
+                max_neg_prob = max(max_neg_prob, neg_p)
+                for kw in SEVERE_REGULATORY_SHOCK_KEYWORDS:
+                    if kw in text_lc and kw not in shock_hits_found:
+                        shock_hits_found.append(kw)
 
+                total_compound += scores['compound']
                 intensity = abs(scores['compound'])
                 if intensity > max_intensity:
                     max_intensity = intensity
@@ -213,17 +339,24 @@ class FinancialSentimentAnalyzer:
                     "headline": "Recent filings reviewed (neutral/no relevant mentions).",
                     "status": "neutral",
                     "articles_analyzed": 0,
+                    "max_neg_prob": 0.0,
+                    "regulatory_shock_keywords": [],
+                    "is_severe_negative_shock": False,
                     "engine": "FinBERT (ProsusAI/finbert)"
                 }
 
             avg_compound = total_compound / valid_news
             normalized_score = round(avg_compound * 100.0, 1)
+            is_severe_shock = bool(max_neg_prob >= 0.85 and len(shock_hits_found) > 0)
 
             return {
                 "score": normalized_score,
                 "headline": best_headline or "Analyzed verified filings.",
                 "status": "active",
                 "articles_analyzed": valid_news,
+                "max_neg_prob": round(max_neg_prob, 4),
+                "regulatory_shock_keywords": shock_hits_found,
+                "is_severe_negative_shock": is_severe_shock,
                 "engine": "FinBERT (ProsusAI/finbert)"
             }
 
@@ -234,6 +367,9 @@ class FinancialSentimentAnalyzer:
                 "headline": "Sentiment feed offline.",
                 "status": "unavailable",
                 "articles_analyzed": 0,
+                "max_neg_prob": 0.0,
+                "regulatory_shock_keywords": [],
+                "is_severe_negative_shock": False,
                 "engine": "FinBERT (ProsusAI/finbert)"
             }
 

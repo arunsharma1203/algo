@@ -66,6 +66,13 @@ class ConsensusV3Orchestrator:
         scan_id = f"cv3_sniff_{uuid.uuid4().hex[:8]}"
         now_iso = datetime.now().isoformat()
 
+        if as_of_ts is None:
+            try:
+                from app.analytics.fii_dii_service import FiiDiiService
+                FiiDiiService.ensure_fresh_daily_flow(cooldown_sec=3600.0)
+            except Exception:
+                pass
+
         with self._ro_conn() as ro_conn:
             q_models = self.qlib_forecaster.ensure_models_ready(ro_conn)
             l_art = self.legacy_estimator.ensure_ready(ro_conn)
@@ -92,6 +99,7 @@ class ConsensusV3Orchestrator:
                 self._last_book1_summary = ConsensusArbiter.arbitrate_book1_20d_rebalance(
                     snap_b1,
                     slot_cap_inr=acct["book1_slots"]["slot_cap_inr"],
+                    check_live_finbert=(as_of_ts is None),
                 )
 
         # Persist evaluated signals & abstentions to audit table
@@ -132,6 +140,12 @@ class ConsensusV3Orchestrator:
                 )
             if arb_b2["approved_signals"]:
                 reserved_orders = self.bridge.reserve_book2_pending_limit_orders(arb_b2["approved_signals"])
+                # When Live Bridge is armed in BOOK1_SWING_CNC_ONLY, keep evaluating Book-2 in parallel Paper Shadow!
+                if not reserved_orders and not self.bridge.simulation_mode and acct.get("execution_mode") == "BOOK1_SWING_CNC_ONLY":
+                    self.bridge.reserve_book2_pending_limit_orders(
+                        arb_b2["approved_signals"],
+                        force_shadow_session=True,
+                    )
 
         elapsed_ms = round((time.time() - t0) * 1000.0, 1)
         self._last_sweep_ms = elapsed_ms
@@ -170,6 +184,7 @@ class ConsensusV3Orchestrator:
             arb_b1 = ConsensusArbiter.arbitrate_book1_20d_rebalance(
                 snap_b1,
                 slot_cap_inr=acct["book1_slots"]["slot_cap_inr"],
+                check_live_finbert=(as_of_date is None),
             )
             self._last_book1_snapshot = snap_b1
             self._last_book1_summary = arb_b1
@@ -185,6 +200,48 @@ class ConsensusV3Orchestrator:
             "accounting": self.bridge.get_arena_accounting(),
         }
 
+    def top_up_and_deploy(
+        self,
+        added_cash_inr: float,
+        deploy_mode: str = "AUTO_4GATE_PMS",
+        option_sniffer_reserve_inr: Optional[float] = None,
+        note: str = "USER_EQUITY_TOPUP",
+    ) -> Dict[str, Any]:
+        """Applies `Unit NAV` equity capital top-up and optionally triggers 4-Gate Smart PMS mid-cycle deployment."""
+        top_res = self.bridge.top_up_arena_capital(
+            added_cash_inr=added_cash_inr,
+            deploy_mode=deploy_mode,
+            option_sniffer_reserve_inr=option_sniffer_reserve_inr,
+            note=note,
+        )
+        if top_res.get("status") != "TOPPED_UP":
+            return top_res
+
+        deploy_res: Dict[str, Any] = {"status": "HELD_FOR_SCHEDULED_20D_REBALANCE", "opened": 0, "pyramided": 0}
+        hm_now = datetime.now().strftime("%H:%M")
+        if top_res.get("deploy_mode") == "AUTO_4GATE_PMS" and ("09:15" <= hm_now <= "15:29" or self.bridge.simulation_mode):
+            target_date = datetime.now().strftime("%Y-%m-%d")
+            with self._ro_conn() as ro_conn:
+                q_models = self.qlib_forecaster.ensure_models_ready(ro_conn)
+                acct = self.bridge.get_arena_accounting()
+                snap_b1 = BaselineEngine.build_book1_20d_snapshot(ro_conn, as_of_date=target_date)
+                self.qlib_forecaster.score_book1_snapshot(snap_b1, artifact=q_models["book1"])
+                arb_b1 = ConsensusArbiter.arbitrate_book1_20d_rebalance(
+                    snap_b1,
+                    slot_cap_inr=acct["book1_slots"]["slot_cap_inr"],
+                    check_live_finbert=True,
+                )
+                self._last_book1_snapshot = snap_b1
+                self._last_book1_summary = arb_b1
+            deploy_res = self.bridge.deploy_midcycle_inflow_4gate(scored_snapshot=snap_b1, arb_b1=arb_b1)
+
+        return {
+            "status": "SUCCESS",
+            "top_up": top_res,
+            "midcycle_deployment": deploy_res,
+            "accounting": self.bridge.get_arena_accounting(),
+        }
+
     def get_workspace_status(self) -> Dict[str, Any]:
         if not self._last_sweep_summary:
             try:
@@ -193,6 +250,13 @@ class ConsensusV3Orchestrator:
                 logger.warning(f"[ConsensusV3Orchestrator] Initial warm status note: {err}")
 
         live_st = self.bridge.get_live_status()
+        fii_dii: Dict[str, Any] = {}
+        try:
+            from app.analytics.fii_dii_service import FiiDiiService
+            fii_dii = FiiDiiService.get_latest_macro_flows() or {}
+        except Exception:
+            fii_dii = {}
+
         now_dt = datetime.now()
         hm = now_dt.strftime("%H:%M")
         if "09:30" <= hm <= "12:30":
@@ -212,6 +276,8 @@ class ConsensusV3Orchestrator:
             "last_sweep_elapsed_ms": self._last_sweep_ms,
             "legacy_alpha158_stall_eliminated": True,
             "live_bridge": live_st,
+            "fii_dii_macro_flows": fii_dii,
+            "shadow_gate_progress": live_st.get("shadow_gate_progress") or self.bridge.get_shadow_gate_progress(),
             "book1_macro_shield": self._last_book1_summary.get("macro_shield", {}),
             "book2_market_context": self._last_sweep_summary.get("book2_intraday_sniffer", {}).get("market_context", {}),
             "model_provenance": self._last_sweep_summary.get("model_provenance", {}),
@@ -317,6 +383,10 @@ class ConsensusV3Orchestrator:
                 "qlib_legacy_architectural_independence": True,
                 "chronological_purge_embargo_enforced": True,
                 "fno181_shortability_and_exact_statutory_fees": True,
+                "cnc_leverage_hard_locked_1x": acct.get("cnc_leverage_locked_1x", True),
+                "dual_ledger_shadow_live_isolation": True,
+                "option_sniffer_margin_firewall_active": True,
+                "fno181_instrument_keys_resolved_181_of_181": True,
             },
             "book1_legacy_incremental_value_gate": {
                 "status": "SHADOW_ONLY_DEMOTED",

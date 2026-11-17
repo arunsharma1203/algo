@@ -24,14 +24,111 @@ from app.analytics.consensus_v3 import resolve_v3_db_path as get_db_path
 
 _INSTRUMENT_KEY_CACHE: Optional[Dict[str, str]] = None
 
+# Canonical corporate-rename aliases & direct ISIN fallbacks so 181/181 NSE F&O symbols resolve valid NSE_EQ keys
+NSE_FNO_SYMBOL_ALIASES: Dict[str, str] = {
+    "GMRINFRA": "GMRAIRPORT",
+    "GUJGASLTD": "GUJENERGY",
+    "L&TFH": "LTF",
+    "MCDOWELL-N": "UNITDSPR",
+    "PEL": "PIRAMALFIN",
+}
+
+NSE_FNO_ISIN_FALLBACKS: Dict[str, str] = {
+    "GMRINFRA": "NSE_EQ|INE776C01039",
+    "GUJGASLTD": "NSE_EQ|INE844O01030",
+    "L&TFH": "NSE_EQ|INE498L01015",
+    "MCDOWELL-N": "NSE_EQ|INE854D01024",
+    "PEL": "NSE_EQ|INE202B01038",
+    "TATAMOTORS": "NSE_EQ|INE155A01022",
+    "LTIM": "NSE_EQ|INE214T01019",
+}
+
+FNO_SECTOR_MAP: Dict[str, str] = {
+    # Pharma & Healthcare
+    "LAURUSLABS": "PHARMA_HEALTH", "DIVISLAB": "PHARMA_HEALTH", "AUROPHARMA": "PHARMA_HEALTH",
+    "SUNPHARMA": "PHARMA_HEALTH", "CIPLA": "PHARMA_HEALTH", "DRREDDY": "PHARMA_HEALTH",
+    "LUPIN": "PHARMA_HEALTH", "BIOCON": "PHARMA_HEALTH", "TORNTPHARM": "PHARMA_HEALTH",
+    "ALKEM": "PHARMA_HEALTH", "GLENMARK": "PHARMA_HEALTH", "GRANULES": "PHARMA_HEALTH",
+    "ZYDUSLIFE": "PHARMA_HEALTH", "ABBOTINDIA": "PHARMA_HEALTH", "APOLLOHOSP": "PHARMA_HEALTH",
+    "IPCALAB": "PHARMA_HEALTH", "SYNGENE": "PHARMA_HEALTH", "LALPATHLAB": "PHARMA_HEALTH",
+    "METROPOLIS": "PHARMA_HEALTH",
+    # Banking
+    "HDFCBANK": "BANKING", "ICICIBANK": "BANKING", "SBIN": "BANKING", "KOTAKBANK": "BANKING",
+    "AXISBANK": "BANKING", "INDUSINDBK": "BANKING", "BANKBARODA": "BANKING", "PNB": "BANKING",
+    "CANBK": "BANKING", "FEDERALBNK": "BANKING", "IDFCFIRSTB": "BANKING", "AUBANK": "BANKING",
+    "BANDHANBNK": "BANKING", "RBLBANK": "BANKING", "CUB": "BANKING",
+    # Financials, NBFC & Exchanges
+    "MCX": "FINANCIALS", "BAJFINANCE": "FINANCIALS", "BAJAJFINSV": "FINANCIALS",
+    "CHOLAFIN": "FINANCIALS", "SHRIRAMFIN": "FINANCIALS", "MUTHOOTFIN": "FINANCIALS",
+    "MANAPPURAM": "FINANCIALS", "LICHSGFIN": "FINANCIALS", "PFC": "FINANCIALS",
+    "RECLTD": "FINANCIALS", "SBILIFE": "FINANCIALS", "HDFCLIFE": "FINANCIALS",
+    "ICICIPRULI": "FINANCIALS", "ICICIGI": "FINANCIALS", "SBICARD": "FINANCIALS",
+    "HDFCAMC": "FINANCIALS", "ABCAPITAL": "FINANCIALS", "L&TFH": "FINANCIALS",
+    "M&MFIN": "FINANCIALS", "PEL": "FINANCIALS", "CANFINHOME": "FINANCIALS", "IEX": "FINANCIALS",
+    # IT & Technology
+    "TCS": "IT_TECH", "INFY": "IT_TECH", "HCLTECH": "IT_TECH", "WIPRO": "IT_TECH",
+    "TECHM": "IT_TECH", "LTIM": "IT_TECH", "PERSISTENT": "IT_TECH", "COFORGE": "IT_TECH",
+    "MPHASIS": "IT_TECH", "LTTS": "IT_TECH", "OFSS": "IT_TECH", "BSOFT": "IT_TECH",
+    "NAUKRI": "IT_TECH", "DIXON": "IT_TECH", "INDIAMART": "IT_TECH",
+    # Auto & Auto Ancillaries
+    "MARUTI": "AUTO", "TATAMOTORS": "AUTO", "M&M": "AUTO", "BAJAJ-AUTO": "AUTO",
+    "EICHERMOT": "AUTO", "HEROMOTOCO": "AUTO", "TVSMOTOR": "AUTO", "ASHOKLEY": "AUTO",
+    "MOTHERSON": "AUTO", "BOSCHLTD": "AUTO", "BHARATFORG": "AUTO", "BALKRISIND": "AUTO",
+    "MRF": "AUTO", "APOLLOTYRE": "AUTO", "EXIDEIND": "AUTO", "ESCORTS": "AUTO",
+    # Metals & Mining
+    "TATASTEEL": "METALS_MINING", "JSWSTEEL": "METALS_MINING", "HINDALCO": "METALS_MINING",
+    "VEDL": "METALS_MINING", "JINDALSTEL": "METALS_MINING", "SAIL": "METALS_MINING",
+    "NMDC": "METALS_MINING", "NATIONALUM": "METALS_MINING", "HINDCOPPER": "METALS_MINING",
+    "COALINDIA": "METALS_MINING",
+    # Capital Goods, Defence & Infra
+    "LT": "CAPITAL_GOODS", "HAL": "CAPITAL_GOODS", "BEL": "CAPITAL_GOODS", "BHEL": "CAPITAL_GOODS",
+    "SIEMENS": "CAPITAL_GOODS", "ABB": "CAPITAL_GOODS", "CUMMINSIND": "CAPITAL_GOODS",
+    "POLYCAB": "CAPITAL_GOODS", "HAVELLS": "CAPITAL_GOODS", "ASTRAL": "CAPITAL_GOODS",
+    "CONCOR": "CAPITAL_GOODS", "ADANIPORTS": "CAPITAL_GOODS", "GMRINFRA": "CAPITAL_GOODS",
+    "IRCTC": "CAPITAL_GOODS", "INDIGO": "CAPITAL_GOODS", "VOLTAS": "CAPITAL_GOODS",
+    # Energy, Oil & Power
+    "RELIANCE": "ENERGY_POWER", "ONGC": "ENERGY_POWER", "NTPC": "ENERGY_POWER",
+    "POWERGRID": "ENERGY_POWER", "TATAPOWER": "ENERGY_POWER", "BPCL": "ENERGY_POWER",
+    "IOC": "ENERGY_POWER", "HINDPETRO": "ENERGY_POWER", "GAIL": "ENERGY_POWER",
+    "IGL": "ENERGY_POWER", "MGL": "ENERGY_POWER", "GUJGASLTD": "ENERGY_POWER",
+    "PETRONET": "ENERGY_POWER", "TORNTPHARM": "PHARMA_HEALTH",
+    # Chemicals & Agri
+    "NAVINFLUOR": "CHEMICALS_AGRI", "PIIND": "CHEMICALS_AGRI", "SRF": "CHEMICALS_AGRI",
+    "UPL": "CHEMICALS_AGRI", "AARTIIND": "CHEMICALS_AGRI", "DEEPAKNTR": "CHEMICALS_AGRI",
+    "TATACHEM": "CHEMICALS_AGRI", "ATUL": "CHEMICALS_AGRI", "COROMANDEL": "CHEMICALS_AGRI",
+    "CHAMBLFERT": "CHEMICALS_AGRI", "GNFC": "CHEMICALS_AGRI", "BALRAMCHIN": "CHEMICALS_AGRI",
+    # FMCG, Retail & Consumer
+    "ITC": "FMCG_CONSUMER", "HINDUNILVR": "FMCG_CONSUMER", "NESTLEIND": "FMCG_CONSUMER",
+    "BRITANNIA": "FMCG_CONSUMER", "TATACONSUM": "FMCG_CONSUMER", "DABUR": "FMCG_CONSUMER",
+    "MARICO": "FMCG_CONSUMER", "GODREJCP": "FMCG_CONSUMER", "COLPAL": "FMCG_CONSUMER",
+    "TITAN": "FMCG_CONSUMER", "TRENT": "FMCG_CONSUMER", "ASIANPAINT": "FMCG_CONSUMER",
+    "BERGEPAINT": "FMCG_CONSUMER", "PIDILITIND": "FMCG_CONSUMER", "PAGEIND": "FMCG_CONSUMER",
+    "ABFRL": "FMCG_CONSUMER", "BATAINDIA": "FMCG_CONSUMER", "JUBLFOOD": "FMCG_CONSUMER",
+    "UBL": "FMCG_CONSUMER", "MCDOWELL-N": "FMCG_CONSUMER", "INDHOTEL": "FMCG_CONSUMER",
+    # Cement & Realty
+    "ULTRACEMCO": "CEMENT_REALTY", "GRASIM": "CEMENT_REALTY", "AMBUJACEM": "CEMENT_REALTY",
+    "ACC": "CEMENT_REALTY", "SHREECEM": "CEMENT_REALTY", "DALBHARAT": "CEMENT_REALTY",
+    "JKCEMENT": "CEMENT_REALTY", "RAMCOCEM": "CEMENT_REALTY", "DLF": "CEMENT_REALTY",
+    "GODREJPROP": "CEMENT_REALTY", "OBEROIRLTY": "CEMENT_REALTY",
+    # Telecom & Media
+    "BHARTIARTL": "TELECOM_MEDIA", "INDUSTOWER": "TELECOM_MEDIA", "IDEA": "TELECOM_MEDIA",
+    "TATACOMM": "TELECOM_MEDIA", "SUNTV": "TELECOM_MEDIA", "ZEEL": "TELECOM_MEDIA",
+    "PVRINOX": "TELECOM_MEDIA",
+}
+
+
+def resolve_fno_sector(symbol: str) -> str:
+    bare = str(symbol or "").replace(".NS", "").replace(".BO", "").strip().upper()
+    return FNO_SECTOR_MAP.get(bare, "DIVERSIFIED_FNO")
+
 
 def load_nse_eq_instrument_map() -> Dict[str, str]:
-    """Loads `SYMBOL -> NSE_EQ|<ISIN>` map from local `upstox_nse_instruments.json` + `upstox_provider`."""
+    """Loads `SYMBOL -> NSE_EQ|<ISIN>` map from local `upstox_nse_instruments.json` + `NSE_INSTRUMENT_MAP` + corporate-rename aliases."""
     global _INSTRUMENT_KEY_CACHE
     if _INSTRUMENT_KEY_CACHE is not None:
         return _INSTRUMENT_KEY_CACHE
 
-    mapping: Dict[str, str] = {}
+    mapping: Dict[str, str] = dict(NSE_FNO_ISIN_FALLBACKS)
     json_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "upstox_nse_instruments.json")
     if os.path.exists(json_path):
         try:
@@ -40,17 +137,21 @@ def load_nse_eq_instrument_map() -> Dict[str, str]:
             if isinstance(raw, dict):
                 for k, v in raw.items():
                     if isinstance(v, str) and v.startswith("NSE_EQ|"):
-                        mapping[k.strip().upper()] = v.strip()
+                        mapping[k.replace(".NS", "").strip().upper()] = v.strip()
         except Exception:
             pass
 
     try:
-        from app.data.upstox_provider import INSTRUMENT_KEYS
-        for k, v in INSTRUMENT_KEYS.items():
+        from app.data.upstox_provider import NSE_INSTRUMENT_MAP
+        for k, v in NSE_INSTRUMENT_MAP.items():
             if isinstance(v, str) and v.startswith("NSE_EQ|"):
-                mapping[k.strip().upper()] = v.strip()
+                mapping[k.replace(".NS", "").strip().upper()] = v.strip()
     except Exception:
         pass
+
+    for old_sym, new_sym in NSE_FNO_SYMBOL_ALIASES.items():
+        if old_sym not in mapping and new_sym in mapping:
+            mapping[old_sym] = mapping[new_sym]
 
     _INSTRUMENT_KEY_CACHE = mapping
     return mapping
@@ -149,6 +250,9 @@ class BaselineEngine:
 
         # Stitch completed 15m sessions >= 2026-09-24 strictly <= as_of_date
         if as_of_date is None or as_of_date >= "2026-09-24":
+            now_ist = datetime.now()
+            today_live_str = now_ist.strftime("%Y-%m-%d")
+            hm_live = now_ist.strftime("%H:%M")
             q15 = f"""
                 SELECT ticker, date, open, high, low, close, volume
                 FROM ohlcv
@@ -160,7 +264,11 @@ class BaselineEngine:
                 if sym in fno_set and float(bo) > 0 and float(bc) > 0 and float(bh) >= float(bl):
                     by_td[(sym, str(dt_s)[:10])].append((float(bo), float(bh), float(bl), float(bc), float(bv or 0.0)))
             for (sym, d_s), bls in by_td.items():
-                if len(bls) >= 15:
+                # Never stitch an active intraday session before 15:30 IST market close into 1d bars
+                if d_s == today_live_str and hm_live < "15:30" and len(bls) < 25:
+                    continue
+                min_bars_req = 24 if d_s == today_live_str else 15
+                if len(bls) >= min_bars_req:
                     raw_1d[sym][d_s] = (
                         bls[0][0],
                         max(x[1] for x in bls),
@@ -227,15 +335,23 @@ class BaselineEngine:
             ) / 14.0
             rsi14 = compute_rsi_14([sl[j]["c"] for j in range(-20, 0)])
             adx14 = compute_adx_proxy_14([(sl[j]["h"], sl[j]["l"], sl[j]["c"]) for j in range(-16, 0)])
+            ret_1d_pct = ((c_now / sl[-2]["c"]) - 1.0) * 100.0 if (len(sl) >= 2 and not sl[-1]["sp"]) else 0.0
+            avg_turn_20 = sum(sl[j]["turn"] for j in range(-21, -1)) / 20.0
+            rvol_20d = r["turn"] / max(1.0, avg_turn_20)
             bare = sym.replace(".NS", "").replace(".BO", "")
 
             candidates.append({
                 "ticker": sym,
                 "symbol": bare,
+                "sector": resolve_fno_sector(bare),
                 "instrument_key": ikey_map.get(bare, ""),
                 "fno_eligible": True,
                 "as_of_date": eval_date,
                 "close": round(c_now, 2),
+                "sma50": round(sma50, 2),
+                "sma200": round(sma200, 2),
+                "ret_1d_pct": round(ret_1d_pct, 2),
+                "rvol_20d": round(rvol_20d, 2),
                 "med_turnover_60d_inr": round(med_turn_60, 0),
                 "mom_12_1_pct": round(mom_12_1, 2),
                 "mom_6_1_pct": round(mom_6_1, 2),

@@ -1,25 +1,25 @@
 import React, { useEffect, useRef } from 'react';
-import { AlertTriangle, Lock, ShieldAlert, Unlock, X } from 'lucide-react';
+import { AlertTriangle, Lock, ShieldAlert, ShieldCheck, Unlock, X } from 'lucide-react';
 import { formatINRValue } from '../optionSnifferAdvance/formatters';
 
 const ARENA_EXECUTION_MODES = [
   {
-    id: 'DUAL_FUNDED_CASH_ARENA',
-    title: 'Dual Funded-Cash Arena (Recommended)',
+    id: 'BOOK1_SWING_CNC_ONLY',
+    title: 'Book 1 Only • 20d Positional Cash Delivery (CNC • Recommended Monday Start)',
     description:
-      'Unites Book 1 (20d Scheduled F&O-181 Cash CNC Core + Macro Exposure Shield) with Book 2 (15m Post-Only Limit Sniffer using strictly unreserved idle cash). Zero leverage.',
+      'Executes scheduled 20-day F&O-181 cash delivery rebalances + 4-Gate top-up deployment + SMA50/SMA200/FinBERT breakdown protection. Hard-locked to 1.0x Cash (0x leverage). Book 2 continues in Paper Shadow.',
   },
   {
-    id: 'BOOK1_SWING_CNC_ONLY',
-    title: 'Book 1 Only • 20d Positional Cash Delivery (CNC)',
+    id: 'DUAL_FUNDED_CASH_ARENA',
+    title: 'Dual Funded-Cash Arena (Book 1 CNC + Book 2 Intraday MIS)',
     description:
-      'Executes only scheduled 20-trading-day F&O-181 cash delivery rebalances with Top-8 / Rank-78% hysteresis and Macro Breadth Shield.',
+      'Unites Book 1 (1.0x Cash CNC Core) with Book 2 (15m Post-Only Limit MIS Sniffer) using a fenced 20% intraday cash reserve so swing holdings never starve intraday margin.',
   },
   {
     id: 'BOOK2_INTRADAY_MIS_SNIFFER',
     title: 'Book 2 Only • 15m F&O-181 Post-Only Limit Sniffer (MIS)',
     description:
-      'Executes only 09:30–12:30 IST post-only passive limit orders on F&O-181 PDH bull-traps with mandatory 15:15 IST square-off.',
+      'Executes only 09:30–12:30 IST post-only passive limit orders on F&O-181 PDH/PDL failed sweeps with mandatory 15:15 IST square-off. Recommended after 60 shadow sessions.',
   },
 ];
 
@@ -31,8 +31,12 @@ export default function ConsensusArmInterlockModal({
   armActionBusy,
   capitalInput,
   marginModeInput,
+  snifferReserveInput,
+  ddpiConfirmedInput,
   onChangeCapital,
   onChangeMarginMode,
+  onChangeSnifferReserve,
+  onChangeDdpiConfirmed,
   onSaveCapitalConfig,
   configBusy,
   onSelectMode,
@@ -57,9 +61,16 @@ export default function ConsensusArmInterlockModal({
   if (!isOpen) return null;
 
   const activeMode = liveStatus?.execution_mode || 'DUAL_FUNDED_CASH_ARENA';
+  const isCncOnlyMode = activeMode === 'BOOK1_SWING_CNC_ONLY';
+  const effectiveMarginMode = isCncOnlyMode ? 'CASH_1X' : marginModeInput || 'CASH_1X';
+
   const expectedPin = liveStatus?.current_pin ? String(liveStatus.current_pin) : null;
   const availMargin = liveStatus?.available_margin;
   const reqMargin = liveStatus?.required_margin_for_mode;
+  const configuredSleeveCap = liveStatus?.configured_sleeve_capital_inr ?? liveStatus?.accounting?.funded_capital_inr;
+  const liveInvestedEq = liveStatus?.live_invested_equity_inr || 0;
+  const snifferFw = liveStatus?.option_sniffer_firewall || {};
+  const shadowGate = liveStatus?.shadow_gate_progress || {};
   const marginOk = liveStatus?.mode_margin_ok === true;
   const eligible = liveStatus?.readiness?.live_trading_eligible === true;
   const blockers = Array.isArray(liveStatus?.readiness?.blockers)
@@ -74,6 +85,10 @@ export default function ConsensusArmInterlockModal({
     if (!canArm) return;
     onConfirmArm();
   };
+
+  const fenceNum = Math.max(0, Number(snifferReserveInput) || 0);
+  const maxAllocatableAfterFence =
+    typeof availMargin === 'number' ? Math.max(10000, Math.floor(availMargin - fenceNum)) : null;
 
   return (
     <div
@@ -97,7 +112,7 @@ export default function ConsensusArmInterlockModal({
             </div>
             <p className="text-xs text-slate-300 mt-1">
               Exclusive human operator control (`AGENTS.md` Rule 6). Boots strictly in Paper Shadow mode
-              (`simulation_mode = true`). Recommended: complete 60 prospective shadow sessions before arming real cash.
+              (`simulation_mode = true`). Live `LIVE_UPSTOX` ledger is isolated from Paper Shadow positions.
             </p>
           </div>
           <button
@@ -141,26 +156,26 @@ export default function ConsensusArmInterlockModal({
             </div>
           </div>
 
-          {/* Inline Wallet Capital & MIS Buying Power Configurator */}
+          {/* Inline Wallet Capital, CNC 0x-Leverage Lock & Option Sniffer Fence Configurator */}
           <div className="p-3.5 rounded-xl bg-indigo-50/60 border border-indigo-200 space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-bold uppercase tracking-wider text-indigo-950">
-                2. Configure Arena Wallet Capital &amp; Intraday MIS Buying Power
+                2. Equity Sub-Wallet, Leverage Lock &amp; Option Sniffer Margin Fence
               </span>
               {typeof availMargin === 'number' && availMargin >= 10000 && onChangeCapital && (
                 <button
                   type="button"
-                  onClick={() => onChangeCapital(String(Math.floor(availMargin)))}
+                  onClick={() => onChangeCapital(String(maxAllocatableAfterFence))}
                   className="px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold cursor-pointer"
                 >
-                  Match My Upstox Wallet ({formatINRValue(Math.floor(availMargin), { decimals: 0 })})
+                  Use Free Upstox After Fence ({formatINRValue(maxAllocatableAfterFence, { decimals: 0 })})
                 </button>
               )}
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <div>
                 <label className="block text-[10px] font-semibold text-slate-600 mb-1">
-                  Wallet Capital (Min ₹10,000)
+                  Equity Sub-Wallet Capital (₹ • e.g. 50,000)
                 </label>
                 <input
                   type="number"
@@ -173,17 +188,44 @@ export default function ConsensusArmInterlockModal({
               </div>
               <div>
                 <label className="block text-[10px] font-semibold text-slate-600 mb-1">
-                  Book-2 Intraday MIS Buying Power
+                  Option Sniffer Reserved Margin Fence (₹ Protected)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="5000"
+                  value={snifferReserveInput ?? '0'}
+                  onChange={(e) => onChangeSnifferReserve && onChangeSnifferReserve(e.target.value)}
+                  placeholder="e.g. 90000 to protect Option Sniffer"
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-900 font-mono text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-slate-600 mb-1">
+                  {isCncOnlyMode
+                    ? 'CNC Delivery Leverage (Exchange Locked 1.0x)'
+                    : 'Book-2 MIS Leverage Only (Book-1 CNC Always 1.0x)'}
                 </label>
                 <select
-                  value={marginModeInput || 'CASH_1X'}
-                  onChange={(e) => onChangeMarginMode && onChangeMarginMode(e.target.value)}
-                  className="w-full px-2 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-900 font-semibold text-xs"
+                  value={effectiveMarginMode}
+                  disabled={isCncOnlyMode}
+                  onChange={(e) => !isCncOnlyMode && onChangeMarginMode && onChangeMarginMode(e.target.value)}
+                  className={`w-full px-2 py-1.5 rounded-lg border font-semibold text-xs ${
+                    isCncOnlyMode
+                      ? 'border-slate-300 bg-slate-100 text-slate-500 cursor-not-allowed'
+                      : 'border-slate-300 bg-white text-slate-900'
+                  }`}
                 >
-                  <option value="CASH_1X">1.0x Cash (0x Lev • Default)</option>
-                  <option value="MIS_2X">2.0x MIS (0.50% SL Risk Cap)</option>
-                  <option value="MIS_3X">3.0x MIS (0.50% SL Risk Cap)</option>
-                  <option value="UPSTOX_VAR_ELM_MAX_5X">Upstox VaR+ELM (&lt;=5.0x • SL Capped)</option>
+                  {isCncOnlyMode ? (
+                    <option value="CASH_1X">1.0x Cash Locked (0x Lev — Mandatory for CNC)</option>
+                  ) : (
+                    <>
+                      <option value="CASH_1X">1.0x Cash (0x Lev • Default)</option>
+                      <option value="MIS_2X">2.0x MIS Intraday Only (0.50% SL Cap)</option>
+                      <option value="MIS_3X">3.0x MIS Intraday Only (0.50% SL Cap)</option>
+                      <option value="UPSTOX_VAR_ELM_MAX_5X">Upstox VaR+ELM (&lt;=5.0x MIS Only • SL Capped)</option>
+                    </>
+                  )}
                 </select>
               </div>
               <div className="flex items-end">
@@ -193,16 +235,33 @@ export default function ConsensusArmInterlockModal({
                   onClick={() => onSaveCapitalConfig && onSaveCapitalConfig()}
                   className="w-full py-1.5 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs cursor-pointer disabled:opacity-50"
                 >
-                  {configBusy ? 'Saving...' : 'Apply Capital & Margin'}
+                  {configBusy ? 'Saving...' : 'Save Sub-Wallet & Fence'}
                 </button>
               </div>
             </div>
           </div>
 
-          {/* Pre-Flight Readiness & Cash Reservation Summary */}
-          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 font-mono">
+          {/* Pre-Flight Readiness, Option Sniffer Firewall & Day-2 Invested Summary */}
+          <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5 font-mono">
             <div className="flex items-center justify-between">
-              <span className="text-slate-600">Arena Funded Cash Requirement:</span>
+              <span className="text-slate-600">Configured Equity Sub-Wallet:</span>
+              <span className="font-bold text-slate-900">{formatINRValue(configuredSleeveCap)}</span>
+            </div>
+            {liveInvestedEq > 0 && (
+              <div className="flex items-center justify-between text-sky-800">
+                <span>Already Invested in Live CNC Shares:</span>
+                <span className="font-bold">{formatINRValue(liveInvestedEq)}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between">
+              <span className="text-slate-600">Option Sniffer Protected Fence:</span>
+              <span className="font-bold text-indigo-700">
+                {formatINRValue(snifferFw.reserved_margin_inr || 0)}{' '}
+                {snifferFw.option_sniffer_armed ? '(SNIFFER ARMED)' : '(FENCED)'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between border-t border-slate-200 pt-1.5">
+              <span className="text-slate-700 font-semibold">Required Free Upstox Cash Today:</span>
               <span className="font-bold text-slate-900">{formatINRValue(reqMargin)}</span>
             </div>
             <div className="flex items-center justify-between">
@@ -214,7 +273,16 @@ export default function ConsensusArmInterlockModal({
             <div className="flex items-center justify-between">
               <span className="text-slate-600">Auto-Scaled Slots (B1 CNC / B2 MIS):</span>
               <span className="font-bold text-indigo-800">
-                {liveStatus?.accounting?.book1_slots?.max ?? '—'} CNC / {liveStatus?.accounting?.book2_slots?.max ?? '—'} MIS ({liveStatus?.intraday_mis_leverage ?? 1}x)
+                {liveStatus?.accounting?.book1_slots?.max ?? '—'} CNC (1.0x) /{' '}
+                {isCncOnlyMode
+                  ? 'Shadow Only'
+                  : `${liveStatus?.accounting?.book2_slots?.max ?? '—'} MIS (${liveStatus?.intraday_mis_leverage ?? 1}x)`}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-slate-600">Book-2 60-Session Shadow Gate:</span>
+              <span className="font-bold text-slate-700">
+                {shadowGate.completed_sessions ?? 0} / {shadowGate.target_sessions ?? 60} sessions
               </span>
             </div>
             <div className="flex items-center justify-between">
@@ -222,6 +290,24 @@ export default function ConsensusArmInterlockModal({
               <span className="font-bold text-rose-700">{formatINRValue(maxDailyLoss)}</span>
             </div>
           </div>
+
+          {/* DDPI / CDSL TPIN Advisory for CNC Delivery Exits */}
+          <label className="flex items-start gap-2.5 p-3 rounded-xl bg-emerald-50/70 border border-emerald-200 text-emerald-950 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={Boolean(ddpiConfirmedInput)}
+              onChange={(e) => onChangeDdpiConfirmed && onChangeDdpiConfirmed(e.target.checked)}
+              className="mt-0.5 rounded border-emerald-400"
+            />
+            <span className="text-[11px] leading-relaxed">
+              <strong className="inline-flex items-center gap-1">
+                <ShieldCheck size={13} className="text-emerald-700" />
+                Upstox DDPI / CDSL TPIN Ready:
+              </strong>{' '}
+              I confirm DDPI is enabled on my Upstox demat (or I will pre-authorize CDSL EDIS TPIN before 09:15 IST) so
+              automated protective &amp; 20-day rebalance `CNC SELL` exits execute without demat authorization rejection.
+            </span>
+          </label>
 
           {blockers.length > 0 && (
             <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 space-y-1">

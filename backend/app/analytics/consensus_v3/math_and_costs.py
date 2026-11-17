@@ -262,8 +262,17 @@ class RegularizedBoostedStumpPAV:
             for i in range(n):
                 f_vals[i] += self.lr * (lv if float(X[i][j]) <= thr else rv)
 
-        pairs = sorted(zip(f_vals, y_bin), key=lambda x: x[0])
-        blocks = [[s, s, float(yb), 1] for s, yb in pairs]
+        # Pre-aggregate exact/near-identical discrete tree scores `s` BEFORE Pool-Adjacent-Violators
+        # so tied `(s, y=0)` / `(s, y=1)` boundary rows never create spurious 0.00 or 1.00 singleton blocks.
+        grouped: Dict[float, List[float]] = {}
+        for s, yb in zip(f_vals, y_bin):
+            key = round(float(s), 9)
+            if key not in grouped:
+                grouped[key] = [float(s), float(s), float(yb), 1.0]
+            else:
+                grouped[key][2] += float(yb)
+                grouped[key][3] += 1.0
+        blocks = [grouped[k] for k in sorted(grouped.keys())]
         idx = 0
         while idx < len(blocks) - 1:
             if (blocks[idx][2] / blocks[idx][3]) > (blocks[idx + 1][2] / blocks[idx + 1][3]):
@@ -278,9 +287,11 @@ class RegularizedBoostedStumpPAV:
         self.pav = [(float(b[0]), float(b[1]), float(b[2] / b[3])) for b in blocks]
 
     def predict_proba(self, row: Sequence[float]) -> float:
-        s = self.base_log_odds
-        for j, thr, lv, rv in self.stumps:
-            s += self.lr * (lv if float(row[j]) <= thr else rv)
+        s = round(
+            self.base_log_odds
+            + sum(self.lr * (lv if float(row[j]) <= thr else rv) for j, thr, lv, rv in self.stumps),
+            9,
+        )
         if not self.pav:
             return self._sig(s)
         if s <= self.pav[0][0]:
@@ -288,7 +299,7 @@ class RegularizedBoostedStumpPAV:
         if s >= self.pav[-1][1]:
             return self.pav[-1][2]
         for _, mx, pr in self.pav:
-            if s <= mx:
+            if s <= mx + 1e-9:
                 return pr
         return self.pav[-1][2]
 

@@ -53,10 +53,14 @@ def get_v3_signals(limit: int = Query(60, ge=1, le=200)) -> Dict[str, Any]:
 
 
 @router.get("/positions")
-def get_v3_positions(limit: int = Query(100, ge=1, le=300)) -> Dict[str, Any]:
+def get_v3_positions(
+    limit: int = Query(100, ge=1, le=300),
+    reconcile: bool = Query(False),
+) -> Dict[str, Any]:
     try:
         orch = get_consensus_v3_orchestrator()
-        orch.bridge.reconcile_orders_and_positions()
+        if reconcile:
+            orch.bridge.reconcile_orders_and_positions()
         return orch.bridge.get_positions_and_reservations(limit=limit)
     except Exception as e:
         logger.error(f"[ConsensusV3API] /positions error: {e}", exc_info=True)
@@ -127,6 +131,10 @@ def configure_v3_arena(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         mis_lev = payload.get("intraday_mis_leverage")
         risk_pct = payload.get("max_risk_per_trade_pct")
         b1_slots = payload.get("book1_max_slots")
+        res_pct = payload.get("intraday_cash_reserve_pct")
+        sniffer_res = payload.get("option_sniffer_reserve_inr")
+        topup_mode = payload.get("topup_deploy_mode")
+        ddpi_ok = payload.get("ddpi_confirmed")
         res = orch.bridge.configure_arena_capital(
             funded_capital_inr=cap,
             execution_mode=mode,
@@ -135,14 +143,53 @@ def configure_v3_arena(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
             intraday_mis_leverage=float(mis_lev) if mis_lev is not None else None,
             max_risk_per_trade_pct=float(risk_pct) if risk_pct is not None else None,
             book1_max_slots=int(b1_slots) if b1_slots is not None else None,
+            intraday_cash_reserve_pct=float(res_pct) if res_pct is not None else None,
+            option_sniffer_reserve_inr=float(sniffer_res) if sniffer_res is not None else None,
+            topup_deploy_mode=str(topup_mode) if topup_mode is not None else None,
+            ddpi_confirmed=bool(ddpi_ok) if ddpi_ok is not None else None,
         )
         if res.get("status") == "ERROR":
-            raise HTTPException(status_code=400, detail=res.get("message"))
+            status_code = 409 if res.get("code") == "LIVE_POSITIONS_ACTIVE" else 400
+            raise HTTPException(status_code=status_code, detail=res.get("message"))
         return {"status": "SUCCESS", "accounting": res}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[ConsensusV3API] /arena/configure error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/arena/top-up")
+def top_up_v3_arena(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    try:
+        orch = get_consensus_v3_orchestrator()
+        added = float(payload.get("added_cash_inr") or 0.0)
+        deploy_mode = str(payload.get("deploy_mode") or "AUTO_4GATE_PMS")
+        sniffer_res = payload.get("option_sniffer_reserve_inr")
+        note = str(payload.get("note") or "USER_EQUITY_TOPUP")
+        res = orch.top_up_and_deploy(
+            added_cash_inr=added,
+            deploy_mode=deploy_mode,
+            option_sniffer_reserve_inr=float(sniffer_res) if sniffer_res is not None else None,
+            note=note,
+        )
+        if res.get("status") == "ERROR":
+            raise HTTPException(status_code=400, detail=res.get("message"))
+        return res
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[ConsensusV3API] /arena/top-up error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/live/sync-holdings")
+def sync_v3_live_holdings() -> Dict[str, Any]:
+    try:
+        orch = get_consensus_v3_orchestrator()
+        return orch.bridge.sync_live_upstox_holdings()
+    except Exception as e:
+        logger.error(f"[ConsensusV3API] /live/sync-holdings error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -211,7 +258,12 @@ def arm_v3_live_trading(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         orch = get_consensus_v3_orchestrator()
         pin = str(payload.get("pin") or "").strip()
         mode = payload.get("execution_mode")
-        res = orch.bridge.arm_live_trading(pin=pin, execution_mode=mode)
+        ddpi_ok = payload.get("ddpi_confirmed")
+        res = orch.bridge.arm_live_trading(
+            pin=pin,
+            execution_mode=mode,
+            ddpi_confirmed=bool(ddpi_ok) if ddpi_ok is not None else None,
+        )
         if res.get("status") != "ARMED":
             raise HTTPException(status_code=400, detail=res.get("message", "Failed to arm Consensus V3 bridge"))
         return res

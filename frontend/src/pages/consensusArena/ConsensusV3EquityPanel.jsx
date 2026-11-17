@@ -62,10 +62,19 @@ export default function ConsensusV3EquityPanel({ equityData, accounting }) {
           </p>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs font-mono">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs font-mono">
           <div className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200">
             <span className="block text-[10px] text-slate-500 uppercase">Configured Capital</span>
             <span className="font-bold text-slate-900">{formatINRValue(funded)}</span>
+          </div>
+          <div className="px-3 py-2 rounded-xl bg-indigo-50/60 border border-indigo-200">
+            <span className="block text-[10px] text-indigo-800 uppercase">Unit NAV (TWR)</span>
+            <span className="font-bold text-indigo-900">
+              ₹{Number(acct.unit_nav ?? 100).toFixed(2)}{' '}
+              <span className="text-[10px]">
+                ({formatPercent(acct.time_weighted_return_pct ?? 0, { signed: true })})
+              </span>
+            </span>
           </div>
           <div className="px-3 py-2 rounded-xl bg-emerald-50/60 border border-emerald-200">
             <span className="block text-[10px] text-emerald-800 uppercase">Available Free Cash</span>

@@ -342,6 +342,302 @@ class TestConsensusV3SixLayerInvariants(unittest.TestCase):
             self.assertEqual(rec_done["filled"], 1)
             self.assertEqual(rec_done["expired"], 1)
 
+    def test_monday_50k_cnc_zero_leverage_lock_slot_scaling_and_sector_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = os.path.join(tmp, "cnc_lock.db")
+            _seed_synthetic_fno_db(db_p)
+            bridge = ConsensusArenaExecutionBridge(db_path=db_p, session_id="cnc_lock_test")
+
+            # Attempt to pass MIS_3X / 5x leverage into BOOK1_SWING_CNC_ONLY -> MUST hard-lock to CASH_1X (1.0x)!
+            acct = bridge.configure_arena_capital(
+                funded_capital_inr=50000.0,
+                execution_mode="BOOK1_SWING_CNC_ONLY",
+                margin_mode="MIS_3X",
+                intraday_mis_leverage=5.0,
+                reset_ledger=True,
+            )
+            self.assertEqual(acct["execution_mode"], "BOOK1_SWING_CNC_ONLY")
+            self.assertEqual(acct["margin_mode"], "CASH_1X")
+            self.assertEqual(acct["intraday_mis_leverage"], 1.0)
+            self.assertTrue(acct["cnc_leverage_locked_1x"])
+            self.assertEqual(acct["book1_slots"]["max"], 3)
+
+            # Verify 3 -> 8 dynamic slot ladder as capital grows
+            from app.analytics.consensus_v3.arena_execution_bridge import compute_optimal_slot_counts
+            self.assertEqual(compute_optimal_slot_counts(50000.0, 1.0, "BOOK1_SWING_CNC_ONLY")[0], 3)
+            self.assertEqual(compute_optimal_slot_counts(75000.0, 1.0, "BOOK1_SWING_CNC_ONLY")[0], 4)
+            self.assertEqual(compute_optimal_slot_counts(100000.0, 1.0, "BOOK1_SWING_CNC_ONLY")[0], 5)
+            self.assertEqual(compute_optimal_slot_counts(125000.0, 1.0, "BOOK1_SWING_CNC_ONLY")[0], 6)
+            self.assertEqual(compute_optimal_slot_counts(160000.0, 1.0, "BOOK1_SWING_CNC_ONLY")[0], 8)
+
+            # Sector Concentration Cap: at 3 slots, max 1 stock per sector!
+            snap = {"as_of_date": "2026-10-19", "candidates": []}
+            arb = {
+                "as_of_date": "2026-10-19",
+                "macro_shield": {"regime": "BULL_FULL_DEPLOYMENT", "target_slots": 8},
+                "approved_rebalance_leaders": [
+                    {"ticker": "LAURUSLABS.NS", "symbol": "LAURUSLABS", "sector": "PHARMA", "instrument_key": "NSE_EQ|INE947Q01028", "close_px": 950.0, "vol60_ann_pct": 30.0},
+                    {"ticker": "AUROPHARMA.NS", "symbol": "AUROPHARMA", "sector": "PHARMA", "instrument_key": "NSE_EQ|INE406A01037", "close_px": 1200.0, "vol60_ann_pct": 28.0},
+                    {"ticker": "MCX.NS", "symbol": "MCX", "sector": "EXCHANGES_FINTECH", "instrument_key": "NSE_EQ|INE745G01035", "close_px": 2500.0, "vol60_ann_pct": 32.0},
+                    {"ticker": "MOTHERSON.NS", "symbol": "MOTHERSON", "sector": "AUTO", "instrument_key": "NSE_EQ|INE775A01035", "close_px": 180.0, "vol60_ann_pct": 29.0},
+                ],
+            }
+            rb = bridge.execute_book1_scheduled_rebalance(snap, arb, force=True, now_dt=datetime(2026, 10, 19, 10, 0, 0))
+            self.assertEqual(rb["opened"], 3)
+            opened_syms = [p["ticker"] for p in rb["opened_positions"]]
+            self.assertEqual(opened_syms, ["LAURUSLABS.NS", "MCX.NS", "MOTHERSON.NS"])
+
+    def test_unit_nav_midcycle_topup_4gate_pms_zero_loser_averaging(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = os.path.join(tmp, "topup_pms.db")
+            _seed_synthetic_fno_db(db_p)
+            bridge = ConsensusArenaExecutionBridge(db_path=db_p, session_id="topup_test")
+            bridge.configure_arena_capital(50000.0, "BOOK1_SWING_CNC_ONLY", reset_ledger=True)
+
+            snap = {
+                "as_of_date": "2026-10-19",
+                "candidates": [
+                    {"ticker": "LAURUSLABS.NS", "symbol": "LAURUSLABS", "close": 1100.0, "sma_alignment_ok": True, "qlib_pct_rank": 0.94},
+                    {"ticker": "MCX.NS", "symbol": "MCX", "close": 1900.0, "sma_alignment_ok": True, "qlib_pct_rank": 0.92},
+                    {"ticker": "MOTHERSON.NS", "symbol": "MOTHERSON", "close": 200.0, "sma_alignment_ok": True, "qlib_pct_rank": 0.90},
+                    {"ticker": "BHEL.NS", "symbol": "BHEL", "close": 250.0, "sma_alignment_ok": True, "qlib_pct_rank": 0.89},
+                ],
+            }
+            arb = {
+                "as_of_date": "2026-10-19",
+                "macro_shield": {"regime": "BULL_FULL_DEPLOYMENT", "target_slots": 8},
+                "approved_rebalance_leaders": [
+                    {"ticker": "LAURUSLABS.NS", "symbol": "LAURUSLABS", "sector": "PHARMA", "instrument_key": "NSE_EQ|INE947Q01028", "close_px": 1000.0, "vol60_ann_pct": 30.0},
+                    {"ticker": "MCX.NS", "symbol": "MCX", "sector": "EXCHANGES_FINTECH", "instrument_key": "NSE_EQ|INE745G01035", "close_px": 2000.0, "vol60_ann_pct": 30.0},
+                    {"ticker": "MOTHERSON.NS", "symbol": "MOTHERSON", "sector": "AUTO", "instrument_key": "NSE_EQ|INE775A01035", "close_px": 200.0, "vol60_ann_pct": 30.0},
+                    {"ticker": "BHEL.NS", "symbol": "BHEL", "sector": "CAPITAL_GOODS", "instrument_key": "NSE_EQ|INE257A01026", "close_px": 250.0, "vol60_ann_pct": 30.0},
+                ],
+            }
+            rb0 = bridge.execute_book1_scheduled_rebalance(snap, arb, force=True, now_dt=datetime(2026, 10, 19, 10, 0, 0))
+            self.assertEqual(rb0["opened"], 3)
+
+            # Simulate +10% gain on LAURUSLABS (1000 -> 1100) and -5% dip on MCX (2000 -> 1900)
+            bridge.reconcile_orders_and_positions(
+                live_quotes={"LAURUSLABS.NS": {"price": 1100.0}, "MCX.NS": {"price": 1900.0}, "MOTHERSON.NS": {"price": 200.0}},
+                now_dt=datetime(2026, 10, 20, 11, 0, 0),
+            )
+            acct_pre = bridge.get_arena_accounting()
+            pre_unav = acct_pre["unit_nav"]
+            pre_twr = acct_pre["time_weighted_return_pct"]
+            self.assertGreater(pre_unav, 100.0)
+
+            # Mid-cycle +₹25,000 top-up MUST preserve Unit NAV & TWR% while scaling Book-1 slots 3 -> 4!
+            tp = bridge.top_up_arena_capital(25000.0, deploy_mode="AUTO_4GATE_PMS")
+            self.assertEqual(tp["status"], "TOPPED_UP")
+            self.assertAlmostEqual(tp["accounting"]["unit_nav"], pre_unav, places=2)
+            self.assertAlmostEqual(tp["accounting"]["time_weighted_return_pct"], pre_twr, places=2)
+            self.assertEqual(tp["accounting"]["book1_slots"]["max"], 4)
+
+            # 4-Gate deployment fills the 4th slot with BHEL without resetting last_book1_rebalance_date!
+            dep = bridge.deploy_midcycle_inflow_4gate(snap, arb, now_dt=datetime(2026, 10, 20, 11, 5, 0))
+            self.assertEqual(dep["status"], "DEPLOYED_MIDCYCLE_4GATE")
+            self.assertEqual(dep["opened"], 1)
+            self.assertEqual(dep["opened_positions"][0]["ticker"], "BHEL.NS")
+            self.assertEqual(bridge.get_arena_accounting()["last_book1_rebalance_date"], "2026-10-19")
+
+            # Add another ₹15,000 while all 4 slots are full (cap=₹90k, still 4 slots): MCX is losing (1900 < 2000) -> MUST NOT average down!
+            bridge.top_up_arena_capital(15000.0, deploy_mode="AUTO_4GATE_PMS")
+            snap_only_loser_room = {
+                "as_of_date": "2026-10-20",
+                "candidates": [
+                    {"ticker": "MCX.NS", "symbol": "MCX", "close": 1900.0, "sma_alignment_ok": True, "qlib_pct_rank": 0.95},
+                ],
+            }
+            dep_no_loser = bridge.deploy_midcycle_inflow_4gate(snap_only_loser_room, {"as_of_date": "2026-10-20", "macro_shield": {"target_slots": 8}, "approved_rebalance_leaders": []})
+            self.assertEqual(dep_no_loser["pyramided"], 0)
+
+    def test_live_upstox_hardening_cancel_retrieve_exit_retry_sniffer_firewall_and_day2_guard(self):
+        from unittest.mock import patch
+        from app.analytics.consensus_v3.math_and_costs import RegularizedBoostedStumpPAV
+
+        # 1. Verify PAV tie-aggregation eliminates fake 0.0 / 1.0 boundary spikes on tied scores
+        clf = RegularizedBoostedStumpPAV(n_trees=2, lr=0.1, min_leaf=5)
+        X_tie = [[1.0, 2.0]] * 25 + [[5.0, 6.0]] * 25
+        y_tie = ([0, 1, 0, 1, 0] * 5) + ([1, 1, 0, 1, 1] * 5)
+        clf.fit(X_tie, y_tie)
+        p_lo = clf.predict_proba([1.0, 2.0])
+        p_hi = clf.predict_proba([5.0, 6.0])
+        self.assertGreater(p_lo, 0.15)
+        self.assertLess(p_hi, 0.90)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = os.path.join(tmp, "live_mock.db")
+            _seed_synthetic_fno_db(db_p)
+            bridge = ConsensusArenaExecutionBridge(db_path=db_p, session_id="live_suite")
+            bridge.configure_arena_capital(
+                funded_capital_inr=50000.0,
+                execution_mode="DUAL_FUNDED_CASH_ARENA",
+                option_sniffer_reserve_inr=90000.0,
+                reset_ledger=True,
+            )
+
+            # Tag sanitization <= 20 chars & unique on trailing UUID
+            t1 = bridge._sanitize_upstox_tag("ord_b2_20261123_aaaa1111", "BUY")
+            t2 = bridge._sanitize_upstox_tag("ord_b2_20261123_bbbb2222", "BUY")
+            self.assertLessEqual(len(t1), 20)
+            self.assertNotEqual(t1, t2)
+
+            # Option Sniffer Margin Firewall: if Upstox has ₹1,10,000 and ₹90,000 is fenced for Option Sniffer,
+            # a ₹25,000 equity order (leaving ₹85,000 < ₹90,000) MUST be blocked!
+            with patch.object(bridge, "_fetch_upstox_readiness", return_value={"token_valid": True, "available_margin": 110000.0}):
+                fw_block = bridge._check_option_sniffer_margin_firewall(25000.0)
+                self.assertFalse(fw_block["allowed"])
+                fw_ok = bridge._check_option_sniffer_margin_firewall(15000.0)
+                self.assertTrue(fw_ok["allowed"])
+
+            # Mock live readiness with ₹1,50,000 wallet (>= ₹50k equity + ₹90k Sniffer fence = ₹1,40,000)
+            with patch.object(bridge, "_fetch_upstox_readiness", return_value={"token_valid": True, "available_margin": 150000.0, "is_read_only_token": False, "static_ip_matched": True}):
+                st0 = bridge.get_live_status()
+                self.assertTrue(st0["readiness"]["live_trading_eligible"])
+                arm_res = bridge.arm_live_trading(pin=bridge.current_pin)
+                self.assertEqual(arm_res["status"], "ARMED")
+                self.assertEqual(bridge.session_id, bridge.live_session_id)
+
+                # Reset ledger MUST be hard-blocked while armed!
+                rst_err = bridge.configure_arena_capital(50000.0, reset_ledger=True)
+                self.assertEqual(rst_err["status"], "ERROR")
+                self.assertEqual(rst_err["code"], "LIVE_POSITIONS_ACTIVE")
+
+                # Place mocked LIVE_UPSTOX Book-2 order -> verify it does NOT fill from OHLCV bars, and cancels via /order/cancel at TIF!
+                with patch.object(bridge, "_route_upstox_equity_order", return_value={"routed": True, "state": "SUBMITTED", "broker_order_id": "UPX_ORD_1", "avg_fill_price": None}):
+                    sigs = [{
+                        "book": "BOOK2_INTRADAY_MIS_SNIFFER",
+                        "ticker": "FNO01.NS",
+                        "symbol": "FNO01",
+                        "instrument_key": "NSE_EQ|INE000001001",
+                        "direction": "SELL",
+                        "signal_close_px": 498.0,
+                        "limit_entry_px": 500.0,
+                        "stop_loss_px": 510.0,
+                        "scheduled_exit_hm": "15:15",
+                        "liq_1pct_bar_inr": 500000.0,
+                    }]
+                    ords = bridge.reserve_book2_pending_limit_orders(sigs, now_dt=datetime(2026, 10, 19, 10, 0, 0), allow_broker_probe=False)
+                    self.assertEqual(len(ords), 1)
+                    self.assertEqual(ords[0]["execution_env"], "LIVE_UPSTOX")
+
+                # Even if quote trades through 505.0, LIVE_UPSTOX order stays PENDING while broker status is 'open'!
+                with patch.object(bridge, "_fetch_upstox_day_orders_map", return_value=({"UPX_ORD_1": {"status": "open", "filled_quantity": 0}}, {})):
+                    r_open = bridge.reconcile_orders_and_positions(live_quotes={"FNO01.NS": {"price": 505.0}}, now_dt=datetime(2026, 10, 19, 10, 5, 0))
+                    self.assertEqual(r_open["filled"], 0)
+
+                # At 10:16 (past 15m TIF), reconciler calls _cancel_upstox_order before releasing cash!
+                with patch.object(bridge, "_fetch_upstox_day_orders_map", return_value=({"UPX_ORD_1": {"status": "open", "filled_quantity": 0}}, {})), \
+                     patch.object(bridge, "_cancel_upstox_order", return_value={"cancelled": True, "http_status": 200}) as mock_cancel:
+                    r_exp = bridge.reconcile_orders_and_positions(live_quotes={}, now_dt=datetime(2026, 10, 19, 10, 16, 0))
+                    self.assertEqual(r_exp["expired"], 1)
+                    mock_cancel.assert_called_once_with("UPX_ORD_1")
+
+                # Open a LIVE_UPSTOX CNC position (₹18,000), then disarm (simulating Day-2 overnight auto-disarm)
+                with patch.object(bridge, "_route_upstox_equity_order", return_value={"routed": True, "state": "SUBMITTED", "broker_order_id": "UPX_BUY_1", "avg_fill_price": 900.0}):
+                    rb_live = bridge.execute_book1_scheduled_rebalance(
+                        {"as_of_date": "2026-10-19", "candidates": []},
+                        {
+                            "as_of_date": "2026-10-19",
+                            "macro_shield": {"regime": "BULL_FULL_DEPLOYMENT", "target_slots": 8},
+                            "approved_rebalance_leaders": [
+                                {"ticker": "LAURUSLABS.NS", "symbol": "LAURUSLABS", "sector": "PHARMA", "instrument_key": "NSE_EQ|INE947Q01028", "close_px": 900.0, "vol60_ann_pct": 30.0},
+                            ],
+                        },
+                        force=True,
+                        now_dt=datetime(2026, 10, 19, 10, 20, 0),
+                    )
+                    self.assertEqual(rb_live["opened"], 1)
+                    live_pid = rb_live["opened_positions"][0]["position_id"]
+
+                bridge.disarm_live_trading()
+                self.assertTrue(bridge.simulation_mode)
+                # Active session MUST still track live_session_id & block Reset Shadow while LIVE_UPSTOX position is open!
+                self.assertEqual(bridge.session_id, bridge.live_session_id)
+                self.assertEqual(bridge.configure_arena_capital(50000.0, reset_ledger=True)["code"], "LIVE_POSITIONS_ACTIVE")
+
+            # Day-2 cash check: ₹18,000 is already invested in CNC shares, so ₹1,25,000 free broker cash (>= ₹32k rem + ₹90k fence = ₹1,22,000) MUST be eligible!
+            with patch.object(bridge, "_fetch_upstox_readiness", return_value={"token_valid": True, "available_margin": 125000.0, "is_read_only_token": False, "static_ip_matched": True}):
+                st_day2 = bridge.get_live_status()
+                self.assertTrue(st_day2["mode_margin_ok"])
+
+            # If broker rejects SELL exit (e.g., DDPI/TPIN missing), position MUST become EXIT_RETRY_PENDING (NEVER silently CLOSED)!
+            with patch.object(bridge, "_route_upstox_equity_order", return_value={"routed": False, "state": "REJECTED", "error": "EDIS_TPIN_REQUIRED"}):
+                ex_fail = bridge.manual_exit_position(live_pid, reason="TEST_EXIT")
+                self.assertEqual(ex_fail["status"], "EXIT_RETRY_PENDING")
+                open_after_fail = bridge.get_positions_and_reservations()["open_positions"]
+                self.assertEqual(len(open_after_fail), 1)
+                self.assertEqual(open_after_fail[0]["status"], "EXIT_RETRY_PENDING")
+
+            # Retry exit once DDPI/TPIN is authorized -> routes cleanly EVEN WHILE DISARMED (`is_exit=True`) and closes!
+            with patch.object(bridge, "_route_upstox_equity_order", return_value={"routed": True, "state": "SUBMITTED", "broker_order_id": "UPX_SELL_1", "avg_fill_price": 945.0}):
+                ex_ok = bridge.manual_exit_position(live_pid, reason="TEST_EXIT_RETRY")
+                self.assertEqual(ex_ok["status"], "CLOSED")
+                self.assertGreater(ex_ok["net_pnl_inr"], 700.0)
+
+    def test_intracycle_institutional_breakdown_and_finbert_shock_sentinel(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_p = os.path.join(tmp, "breakdown.db")
+            conn = sqlite3.connect(db_p)
+            conn.execute("CREATE TABLE fno_universe_cache (symbol TEXT PRIMARY KEY);")
+            conn.execute("CREATE TABLE ohlcv (ticker TEXT, date TEXT, timeframe TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL);")
+            conn.execute("INSERT INTO fno_universe_cache VALUES ('LAURUSLABS');")
+
+            # Seed 205 calm daily bars rising to 1000.0 (SMA50 ~ 975, SMA200 ~ 900, avg turnover = 1000 * 100k = 10Cr)
+            base_d = datetime(2026, 1, 1)
+            rows = []
+            for i in range(205):
+                d_s = (base_d + timedelta(days=i)).strftime("%Y-%m-%d")
+                px = 800.0 + i * 1.0
+                rows.append(("LAURUSLABS.NS", d_s, "1d", px, px * 1.01, px * 0.99, px, 100000.0))
+            entry_d = (base_d + timedelta(days=204)).strftime("%Y-%m-%d")
+            next_d = (base_d + timedelta(days=205)).strftime("%Y-%m-%d")
+            conn.executemany("INSERT INTO ohlcv VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+            conn.commit()
+            conn.close()
+
+            bridge = ConsensusArenaExecutionBridge(db_path=db_p, session_id="bd_test")
+            bridge.configure_arena_capital(50000.0, "BOOK1_SWING_CNC_ONLY", reset_ledger=True)
+            bridge.execute_book1_scheduled_rebalance(
+                {"as_of_date": entry_d, "candidates": []},
+                {
+                    "as_of_date": entry_d,
+                    "macro_shield": {"regime": "BULL_FULL_DEPLOYMENT", "target_slots": 8},
+                    "approved_rebalance_leaders": [
+                        {"ticker": "LAURUSLABS.NS", "symbol": "LAURUSLABS", "sector": "PHARMA", "instrument_key": "NSE_EQ|INE947Q01028", "close_px": 1004.0, "vol60_ann_pct": 30.0},
+                    ],
+                },
+                force=True,
+                now_dt=datetime.strptime(f"{entry_d} 15:00:00", "%Y-%m-%d %H:%M:%S"),
+            )
+
+            # 1. Normal -2.5% dip on average volume (above SMA50) MUST NOT shake out the position!
+            conn = sqlite3.connect(db_p)
+            conn.execute("INSERT INTO ohlcv VALUES ('LAURUSLABS.NS', ?, '1d', 1000.0, 1002.0, 978.0, 980.0, 100000.0)", (next_d,))
+            conn.commit()
+            conn.close()
+            r_calm = bridge.reconcile_orders_and_positions(
+                live_quotes={"LAURUSLABS.NS": {"price": 980.0}},
+                now_dt=datetime.strptime(f"{next_d} 15:35:00", "%Y-%m-%d %H:%M:%S"),
+            )
+            self.assertEqual(r_calm["closed"], 0)
+
+            # 2. High-volume institutional distribution breakdown (< SMA50, ret_1d <= -4%, RVOL >= 2.0x) MUST exit!
+            d_bd = (base_d + timedelta(days=206)).strftime("%Y-%m-%d")
+            conn = sqlite3.connect(db_p)
+            conn.execute("INSERT INTO ohlcv VALUES ('LAURUSLABS.NS', ?, '1d', 975.0, 976.0, 925.0, 930.0, 320000.0)", (d_bd,))
+            conn.commit()
+            conn.close()
+            r_bd = bridge.reconcile_orders_and_positions(
+                live_quotes={"LAURUSLABS.NS": {"price": 930.0}},
+                now_dt=datetime.strptime(f"{d_bd} 15:35:00", "%Y-%m-%d %H:%M:%S"),
+            )
+            self.assertEqual(r_bd["closed"], 1)
+            closed_pos = bridge.get_positions_and_reservations()["closed_positions"][0]
+            self.assertEqual(closed_pos["exit_reason"], "INTRACYCLE_INSTITUTIONAL_DISTRIBUTION_EXIT")
+
 
 if __name__ == "__main__":
     unittest.main()
