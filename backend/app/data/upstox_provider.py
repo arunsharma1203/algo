@@ -1026,11 +1026,67 @@ _sector_quotes_cache: Dict[str, Dict[str, Any]] = {}
 _sector_quotes_ts: float = 0.0
 _SECTOR_CACHE_TTL_SEC: float = 30.0
 
-def fetch_upstox_bulk_quotes(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+def _extract_l1_depth(q_val: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Fetches full real-time market quotes (LTP, VWAP, Open, High, Low, Net Change, Volume)
+    Safely extracts top-of-book L1 bid/ask quotes from Upstox `/market-quote/quotes` `depth` payload.
+    Returns fail-closed `None` fields when depth is missing, empty, or zero.
+    """
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    best_bid_qty: Optional[int] = None
+    best_ask_qty: Optional[int] = None
+
+    depth = q_val.get("depth")
+    if isinstance(depth, dict):
+        buys = depth.get("buy")
+        if isinstance(buys, list) and buys and isinstance(buys[0], dict):
+            try:
+                bp = float(buys[0].get("price") or 0.0)
+                if bp > 0.0:
+                    best_bid = bp
+                    bq = buys[0].get("quantity")
+                    best_bid_qty = int(float(bq)) if bq is not None else None
+            except (TypeError, ValueError):
+                pass
+        sells = depth.get("sell")
+        if isinstance(sells, list) and sells and isinstance(sells[0], dict):
+            try:
+                ap = float(sells[0].get("price") or 0.0)
+                if ap > 0.0:
+                    best_ask = ap
+                    aq = sells[0].get("quantity")
+                    best_ask_qty = int(float(aq)) if aq is not None else None
+            except (TypeError, ValueError):
+                pass
+
+    spread_bps: Optional[float] = None
+    is_crossed = False
+    if best_bid is not None and best_ask is not None and best_bid > 0.0 and best_ask > 0.0:
+        mid = 0.5 * (best_bid + best_ask)
+        if mid > 0.0:
+            spread_bps = round(((best_ask - best_bid) / mid) * 10000.0, 2)
+        is_crossed = best_ask < best_bid
+
+    has_l1_depth = bool(best_bid is not None and best_ask is not None and not is_crossed)
+    return {
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "best_bid_qty": best_bid_qty,
+        "best_ask_qty": best_ask_qty,
+        "spread_bps": spread_bps,
+        "is_crossed_book": is_crossed,
+        "has_l1_depth": has_l1_depth,
+    }
+
+
+def fetch_upstox_bulk_quotes(
+    tickers: List[str],
+    max_cache_age_sec: Optional[float] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Fetches full real-time market quotes (LTP, VWAP, Open, High, Low, Net Change, Volume, L1 Depth)
     for multiple tickers in single-batch calls (up to 500 per call) via Upstox V3 /market-quote/quotes.
-    Applies in-memory 2s caching and strict rate limiting (8/s, 400/m, 1600/30m).
+    Applies in-memory caching and strict rate limiting (8/s, 400/m, 1600/30m).
     """
     if not tickers:
         return {}
@@ -1044,20 +1100,21 @@ def fetch_upstox_bulk_quotes(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
         return {}
 
     now = time.time()
+    cache_ttl = _QUOTES_CACHE_TTL_SEC if max_cache_age_sec is None else max(0.0, float(max_cache_age_sec))
     results: Dict[str, Dict[str, Any]] = {}
     needed: List[str] = []
 
     for t in tickers:
         clean = t.replace('.NS', '').replace('.BO', '').strip().upper()
-        if clean in _quotes_cache:
+        if cache_ttl > 0.0 and clean in _quotes_cache:
             q_data, ts = _quotes_cache[clean]
-            if (now - ts) < _QUOTES_CACHE_TTL_SEC:
+            if (now - ts) < cache_ttl:
                 results[clean] = q_data
                 results[t] = q_data
                 continue
-        elif t in _quotes_cache:
+        elif cache_ttl > 0.0 and t in _quotes_cache:
             q_data, ts = _quotes_cache[t]
-            if (now - ts) < _QUOTES_CACHE_TTL_SEC:
+            if (now - ts) < cache_ttl:
                 results[clean] = q_data
                 results[t] = q_data
                 continue
@@ -1114,6 +1171,7 @@ def fetch_upstox_bulk_quotes(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
                         close_px = float(ohlc.get("close", 0.0)) if ohlc.get("close") else ltp
                         net_chg = float(q_val.get("net_change", 0.0))
                         vol = int(q_val.get("volume", 0))
+                        l1 = _extract_l1_depth(q_val)
 
                         q_entry = {
                             "ticker": matched_sym,
@@ -1127,7 +1185,14 @@ def fetch_upstox_bulk_quotes(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
                             "volume": vol,
                             "source": "upstox",
                             "is_realtime": True,
-                            "timestamp": datetime.now().strftime("%H:%M:%S IST")
+                            "timestamp": datetime.now().strftime("%H:%M:%S IST"),
+                            "best_bid": l1["best_bid"],
+                            "best_ask": l1["best_ask"],
+                            "best_bid_qty": l1["best_bid_qty"],
+                            "best_ask_qty": l1["best_ask_qty"],
+                            "spread_bps": l1["spread_bps"],
+                            "is_crossed_book": l1["is_crossed_book"],
+                            "has_l1_depth": l1["has_l1_depth"],
                         }
                         clean_sym = matched_sym.replace('.NS', '').replace('.BO', '').strip().upper()
                         aliases = {matched_sym, clean_sym, f"{clean_sym}.NS", f"{clean_sym}.BO"}

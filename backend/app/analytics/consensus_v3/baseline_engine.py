@@ -265,7 +265,7 @@ class BaselineEngine:
                     by_td[(sym, str(dt_s)[:10])].append((float(bo), float(bh), float(bl), float(bc), float(bv or 0.0)))
             for (sym, d_s), bls in by_td.items():
                 # Never stitch an active intraday session before 15:30 IST market close into 1d bars
-                if d_s == today_live_str and hm_live < "15:30" and len(bls) < 25:
+                if d_s == today_live_str and hm_live < "15:30":
                     continue
                 min_bars_req = 24 if d_s == today_live_str else 15
                 if len(bls) >= min_bars_req:

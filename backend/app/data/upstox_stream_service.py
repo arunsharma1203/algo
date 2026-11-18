@@ -915,6 +915,31 @@ class UpstoxStreamService:
             "source": "FAIL_CLOSED"
         }
 
+    def get_forming_15m_open(self, symbol: str, as_of_dt: Optional[datetime] = None) -> Optional[float]:
+        """Read-only causal getter for the current forming 15-minute bar's open from 1m WebSocket bars."""
+        now_dt = as_of_dt or datetime.now()
+        slot_start = now_dt.replace(minute=(now_dt.minute // 15) * 15, second=0, microsecond=0)
+        canonical = normalize_ticker(symbol)
+        clean = canonical.replace(".NS", "").replace(".BO", "").strip().upper()
+        with self._lock:
+            m_dict = self._minute_bars.get(canonical) or self._minute_bars.get(clean)
+            if not m_dict:
+                return None
+            earliest_dt = None
+            earliest_open = None
+            for m_key, b in m_dict.items():
+                b_dt = b.get("dt")
+                if not b_dt:
+                    try:
+                        b_dt = datetime.strptime(m_key, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        continue
+                if slot_start <= b_dt <= now_dt and float(b.get("open") or 0.0) > 0.0:
+                    if earliest_dt is None or b_dt < earliest_dt:
+                        earliest_dt = b_dt
+                        earliest_open = float(b["open"])
+            return earliest_open
+
     # ──────────────────────────────────────────────────────────────────────────
     # STATUS & TELEMETRY
     # ──────────────────────────────────────────────────────────────────────────

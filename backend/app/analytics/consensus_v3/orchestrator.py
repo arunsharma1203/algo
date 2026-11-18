@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.analytics.consensus_v3 import ENGINE_VERSION, PROTOCOL_ID, resolve_v3_db_path as get_db_path
 from app.analytics.consensus_v3.arena_execution_bridge import (
@@ -43,6 +43,7 @@ class ConsensusV3Orchestrator:
         self._last_sweep_summary: Dict[str, Any] = {}
         self._last_book1_summary: Dict[str, Any] = {}
         self._last_book1_snapshot: Dict[str, Any] = {}
+        self._last_book1_cache_key: Optional[Tuple[str, bool, float]] = None
         self._last_sweep_ms: float = 0.0
 
     def _ro_conn(self) -> sqlite3.Connection:
@@ -90,17 +91,33 @@ class ConsensusV3Orchestrator:
             )
             b2_ms = round((time.time() - t_b2) * 1000.0, 1)
 
-            # Refresh Book 1 Macro Shield & Rebalance Leaders (cached within same calendar date unless forced)
+            # Refresh Book 1 Macro Shield & Rebalance Leaders (cached per calendar date + pre/post-15:30 session boundary + slot cap)
+            now_dt = datetime.now()
             today_str = (as_of_ts or now_iso)[:10]
-            if self._last_book1_summary.get("as_of_date") != today_str or as_of_ts is not None:
+            hm_eval = (as_of_ts[11:16] if (as_of_ts and len(as_of_ts) >= 16) else now_dt.strftime("%H:%M"))
+            b1_slot_cap = round(float(acct["book1_slots"]["slot_cap_inr"]), 2)
+            b1_cache_key = (today_str, hm_eval >= "15:30", b1_slot_cap)
+
+            if as_of_ts is not None:
                 snap_b1 = BaselineEngine.build_book1_20d_snapshot(ro_conn, as_of_date=today_str)
                 self.qlib_forecaster.score_book1_snapshot(snap_b1, artifact=q_models["book1"])
-                self._last_book1_snapshot = snap_b1
-                self._last_book1_summary = ConsensusArbiter.arbitrate_book1_20d_rebalance(
+                b1_summary_for_run = ConsensusArbiter.arbitrate_book1_20d_rebalance(
                     snap_b1,
-                    slot_cap_inr=acct["book1_slots"]["slot_cap_inr"],
-                    check_live_finbert=(as_of_ts is None),
+                    slot_cap_inr=b1_slot_cap,
+                    check_live_finbert=False,
                 )
+            else:
+                if self._last_book1_cache_key != b1_cache_key or not self._last_book1_summary:
+                    snap_b1 = BaselineEngine.build_book1_20d_snapshot(ro_conn, as_of_date=today_str)
+                    self.qlib_forecaster.score_book1_snapshot(snap_b1, artifact=q_models["book1"])
+                    self._last_book1_snapshot = snap_b1
+                    self._last_book1_summary = ConsensusArbiter.arbitrate_book1_20d_rebalance(
+                        snap_b1,
+                        slot_cap_inr=b1_slot_cap,
+                        check_live_finbert=True,
+                    )
+                    self._last_book1_cache_key = b1_cache_key
+                b1_summary_for_run = self._last_book1_summary
 
         # Persist evaluated signals & abstentions to audit table
         if as_of_ts is None:
@@ -157,7 +174,7 @@ class ConsensusV3Orchestrator:
             "elapsed_ms": elapsed_ms,
             "book2_latency_ms": b2_ms,
             "book2_intraday_sniffer": arb_b2,
-            "book1_20d_rebalance": self._last_book1_summary,
+            "book1_20d_rebalance": b1_summary_for_run,
             "book1_execution": book1_exec_summary,
             "reserved_orders_created": reserved_orders,
             "reconcile_summary": reconcile_summary,
@@ -186,8 +203,14 @@ class ConsensusV3Orchestrator:
                 slot_cap_inr=acct["book1_slots"]["slot_cap_inr"],
                 check_live_finbert=(as_of_date is None),
             )
-            self._last_book1_snapshot = snap_b1
-            self._last_book1_summary = arb_b1
+            if as_of_date is None:
+                self._last_book1_snapshot = snap_b1
+                self._last_book1_summary = arb_b1
+                self._last_book1_cache_key = (
+                    target_date,
+                    datetime.now().strftime("%H:%M") >= "15:30",
+                    round(float(acct["book1_slots"]["slot_cap_inr"]), 2),
+                )
 
         exec_res = self.bridge.execute_book1_scheduled_rebalance(
             scored_snapshot=snap_b1,
@@ -217,6 +240,7 @@ class ConsensusV3Orchestrator:
         if top_res.get("status") != "TOPPED_UP":
             return top_res
 
+        self._last_book1_cache_key = None
         deploy_res: Dict[str, Any] = {"status": "HELD_FOR_SCHEDULED_20D_REBALANCE", "opened": 0, "pyramided": 0}
         hm_now = datetime.now().strftime("%H:%M")
         if top_res.get("deploy_mode") == "AUTO_4GATE_PMS" and ("09:15" <= hm_now <= "15:29" or self.bridge.simulation_mode):
@@ -233,6 +257,11 @@ class ConsensusV3Orchestrator:
                 )
                 self._last_book1_snapshot = snap_b1
                 self._last_book1_summary = arb_b1
+                self._last_book1_cache_key = (
+                    target_date,
+                    datetime.now().strftime("%H:%M") >= "15:30",
+                    round(float(acct["book1_slots"]["slot_cap_inr"]), 2),
+                )
             deploy_res = self.bridge.deploy_midcycle_inflow_4gate(scored_snapshot=snap_b1, arb_b1=arb_b1)
 
         return {
@@ -273,10 +302,10 @@ class ConsensusV3Orchestrator:
         hm = now_dt.strftime("%H:%M")
         if "09:30" <= hm <= "12:30":
             phase = "09:30–12:30 IST • ACTIVE SNIFFER WINDOW"
-        elif "12:30" < hm < "15:15":
-            phase = "12:30–15:15 IST • POSITION MONITORING ONLY"
-        elif hm >= "15:15" and hm <= "15:30":
-            phase = "15:15 IST • MANDATORY MIS SQUAREOFF"
+        elif "12:30" < hm < "15:10":
+            phase = "12:30–15:10 IST • POSITION MONITORING ONLY"
+        elif hm >= "15:10" and hm <= "15:30":
+            phase = "15:10 IST • MANDATORY MIS SQUAREOFF"
         else:
             phase = "OUTSIDE MARKET HOURS • PAPER STANDBY"
 

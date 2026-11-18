@@ -12,7 +12,7 @@ Responsibilities:
       * Book 1 (`20d` Scheduled Positional): Scheduled `20`-day rebalance + `Rank >= 78%` hysteresis
         + Macro Shield step-down + Corporate-Action Guard (`0` ML exit model initially).
       * Book 2 (`15m` Intraday Sniffer): Explicit structural stop (`max(SessionHigh * 1.0015, Limit + 0.55 * ATR15)`)
-        + Mandatory `15:15:00 IST` NSE `MIS` square-off (`0` ML exit model initially).
+        + Mandatory `15:10:00 IST` NSE `MIS` square-off (`0` ML exit model initially).
 """
 
 from typing import Any, Dict, List
@@ -40,9 +40,9 @@ class ExitController:
         return {
             "stop_loss_px": stop_px,
             "stop_distance_bps": stop_dist_bps,
-            "scheduled_squareoff_hm": "15:15",
+            "scheduled_squareoff_hm": "15:10",
             "limit_tif_minutes": 15,
-            "exit_rule_version": "EXPLICIT_STRUCTURAL_SL_PLUS_1515_SQUAREOFF_V1",
+            "exit_rule_version": "EXPLICIT_STRUCTURAL_SL_PLUS_1510_SQUAREOFF_V2",
             "ml_exit_challenger_active": False,
         }
 
@@ -94,7 +94,7 @@ class ConsensusArbiter:
             cost_info = compute_nse_mis_charges(limit_px, limit_px, est_shares, direction, True, True, 1.0)
             est_cost_bps = cost_info["total_cost_bps"]
 
-            # Qlib expected net payoff in trade direction (bps) over `-> 15:15 IST`
+            # Qlib expected net payoff in trade direction (bps) over `-> 15:10 IST`
             e_qlib_gross_bps = (dsgn * float(it.get("qlib_stock_residual_pct", 0.0)) + 0.10 * float(it["adr_pct"])) * 100.0
             e_qlib_net_bps = round(e_qlib_gross_bps - est_cost_bps, 2)
             q_pct = float(it.get("qlib_pct_rank", 0.50))

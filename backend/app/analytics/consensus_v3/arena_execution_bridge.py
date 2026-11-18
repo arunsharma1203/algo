@@ -77,6 +77,21 @@ MIN_FUNDED_CAPITAL_INR = 10000.0
 DEFAULT_FUNDED_CAPITAL_INR = 400000.0
 DAILY_LOSS_HALT_FRACTION = 0.0125  # -1.25% daily realized loss halt (-₹5,000 on ₹4,00,000; -₹625 on ₹50,000)
 SEBI_SAME_DAY_CNC_SALE_CREDIT_FRACTION = 0.80  # SEBI 80% T+0 credit on CNC delivery sales (20% blocked until T+1)
+BOOK2_MAX_L1_SPREAD_BPS = 15.0
+
+
+def _compute_book2_slot_cap_inr(funded_inr: float, b2_max: int) -> float:
+    """
+    Computes concentrated 1x-notional Book 2 slot cap (`<= funded_inr / b2_max`):
+      - ₹50,000 (1 slot) -> ₹48,000
+      - ₹90,000 (2 slots) -> ₹45,000
+      - ₹1,00,000 (2 slots) -> ₹47,500 (leaves 5% buffer so 2x ~21% VaR+ELM fits cleanly inside 20% cash reserve)
+      - >=₹1,40,000 -> `funded_inr / b2_max`
+    """
+    if b2_max <= 2 and funded_inr <= 120000.0:
+        per_slot = 47500.0 if b2_max == 2 else 48000.0
+        return round(min(per_slot, funded_inr / max(1, b2_max)), 2)
+    return round(funded_inr / max(1, b2_max), 2)
 
 
 def compute_optimal_slot_counts(
@@ -88,12 +103,12 @@ def compute_optimal_slot_counts(
     """
     Auto-scales Book 1 (`1.0x CNC`) from `3 -> 8` diversified slots as equity capital grows
     (`₹50k CNC-only -> 3 slots`, `₹75k -> 4`, `₹1L -> 5`, `₹1.25L -> 6`, `>=₹1.6L -> 8`),
-    while respecting the `20%` intraday margin reserve in `DUAL_FUNDED_CASH_ARENA` so Book 2 (`MIS`)
-    is never starved of cash margin.
+    while concentrating Book 2 (`1.0x`-notional MIS) into `1–2 >=₹45,000` slots on `₹50k–₹1L`
+    accounts so every trade clears Upstox's ₹20 flat brokerage cap efficiently.
     """
     cap = max(MIN_FUNDED_CAPITAL_INR, float(funded_capital_inr))
     mode = str(execution_mode or MODE_DUAL_FUNDED_ARENA).upper().strip()
-    lev = 1.0 if mode == MODE_BOOK1_SWING_CNC else max(1.0, min(5.0, float(mis_leverage_cap)))
+    _ = 1.0 if mode == MODE_BOOK1_SWING_CNC else max(1.0, min(5.0, float(mis_leverage_cap)))
 
     if mode == MODE_BOOK1_SWING_CNC:
         eff_res_pct = 0.0
@@ -118,8 +133,16 @@ def compute_optimal_slot_counts(
     else:
         b1_slots = 8
 
-    b2_bp = cap * lev
-    b2_slots = max(1, min(4, int(b2_bp // 25000.0))) if b2_bp < 100000.0 else 4
+    # Book 2 MIS total notional is capped at <= 1.0x funded equity (`cap`), concentrating into
+    # 1-2 >=₹45,000 slots on ₹50k-₹1L accounts.
+    if cap < 90000.0:
+        b2_slots = 1
+    elif cap < 140000.0:
+        b2_slots = 2
+    elif cap < 190000.0:
+        b2_slots = 3
+    else:
+        b2_slots = 4
     return b1_slots, b2_slots
 
 
@@ -451,6 +474,15 @@ class ConsensusArenaExecutionBridge:
                             "UPDATE consensus_v3_arena_state SET peak_equity_inr = ?, max_drawdown_pct = 0.0 WHERE session_id = ?",
                             (cap_now, sid),
                         )
+                    mode_now = str(row["execution_mode"] or MODE_DUAL_FUNDED_ARENA)
+                    lev_now = float(row["intraday_mis_leverage"]) if ("intraday_mis_leverage" in rkeys and row["intraday_mis_leverage"]) else 1.0
+                    res_pct_now = float(row["intraday_cash_reserve_pct"]) if ("intraday_cash_reserve_pct" in rkeys and row["intraday_cash_reserve_pct"] is not None) else 20.0
+                    _, exp_b2 = compute_optimal_slot_counts(cap_now, lev_now, mode_now, res_pct_now)
+                    if int(row["book2_max_slots"]) != exp_b2:
+                        conn.execute(
+                            "UPDATE consensus_v3_arena_state SET book2_max_slots = ? WHERE session_id = ?",
+                            (exp_b2, sid),
+                        )
             conn.commit()
 
     def configure_arena_capital(
@@ -730,11 +762,107 @@ class ConsensusArenaExecutionBridge:
             "accounting": self.get_arena_accounting(),
         }
 
+    @staticmethod
+    def _count_trading_days_since(
+        conn: sqlite3.Connection,
+        last_reb_date: str,
+        end_date: str,
+    ) -> int:
+        """
+        Counts distinct trading sessions strictly `(last_reb_date, end_date]` across BOTH
+        `1d` historical bars (stopped at 2026-09-24) and live `15m` bars (`>= 2026-09-24`),
+        remaining compatible with single-ticker (`1d`-only or `15m`-only) synthetic test DBs.
+        """
+        last_s = str(last_reb_date or "")[:10]
+        end_s = str(end_date or "")[:10]
+        if not last_s or not end_s or last_s >= end_s:
+            return 0
+        row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT substr(date,1,10))
+            FROM ohlcv
+            WHERE timeframe IN ('1d', '15m')
+              AND date > ?
+              AND date <= ?
+            """,
+            (f"{last_s} 23:59:59", f"{end_s} 23:59:59"),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    @staticmethod
+    def _fetch_bulk_quotes_safe(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+        clean_list = [t for t in dict.fromkeys(tickers) if t]
+        if not clean_list:
+            return {}
+        try:
+            from app.data.market_provider import get_bulk_live_quotes_with_meta
+            return get_bulk_live_quotes_with_meta(clean_list) or {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _resolve_book1_exec_price(
+        conn: sqlite3.Connection,
+        ticker: str,
+        fallback_px: float,
+        today_s: str,
+        now_s: str,
+        quotes: Optional[Dict[str, Dict[str, Any]]] = None,
+        require_live_quote: bool = False,
+    ) -> Tuple[Optional[float], str]:
+        """
+        Resolves causal Book 1 execution/valuation price without leaking yesterday's close:
+          1. Live Upstox quote from `quotes` (required & fail-closed when `require_live_quote=True`).
+          2. Causal session open / completed post-close bar for `today_s` strictly `<= now_s`:
+             - If `hm_now >= "15:30"`, prefer today's latest `15m` close (or `1d` close) if present.
+             - Otherwise during `09:15..15:29`, use today's `09:15` `15m` bar `open` (or `1d` `open` in synthetic `1d` DBs).
+          3. `fallback_px` ONLY in `PAPER_SHADOW` (`require_live_quote=False`) when neither live quote nor today's bar exists.
+        """
+        qmap = quotes or {}
+        bare = str(ticker).replace(".NS", "").replace(".BO", "").strip().upper()
+        q = qmap.get(ticker) or qmap.get(bare) or qmap.get(f"{bare}.NS")
+        if q and isinstance(q.get("price"), (int, float)) and float(q["price"]) > 0.0:
+            if q.get("source") != "unavailable" and q.get("is_realtime", True):
+                return round_nse_eq_tick(float(q["price"])), "LIVE_UPSTOX_QUOTE"
+
+        if require_live_quote:
+            return None, "MISSING_LIVE_QUOTE"
+
+        hm_now = now_s[11:16] if len(now_s) >= 16 else "09:15"
+        if hm_now >= "09:15":
+            if hm_now >= "15:30":
+                row_close_15m = conn.execute(
+                    "SELECT close FROM ohlcv WHERE ticker = ? AND timeframe = '15m' AND date >= ? AND date <= ? ORDER BY date DESC LIMIT 1",
+                    (ticker, f"{today_s} 09:15:00", now_s),
+                ).fetchone()
+                if row_close_15m and float(row_close_15m[0] or 0.0) > 0.0:
+                    return round_nse_eq_tick(float(row_close_15m[0])), "TODAY_15M_CLOSE"
+
+            row_open_15m = conn.execute(
+                "SELECT open FROM ohlcv WHERE ticker = ? AND timeframe = '15m' AND date >= ? AND date <= ? ORDER BY date ASC LIMIT 1",
+                (ticker, f"{today_s} 09:15:00", now_s),
+            ).fetchone()
+            if row_open_15m and float(row_open_15m[0] or 0.0) > 0.0:
+                return round_nse_eq_tick(float(row_open_15m[0])), "TODAY_0915_OPEN"
+
+            row_1d = conn.execute(
+                "SELECT open, close FROM ohlcv WHERE ticker = ? AND timeframe = '1d' AND substr(date,1,10) = ? LIMIT 1",
+                (ticker, today_s),
+            ).fetchone()
+            if row_1d:
+                px_1d = float((row_1d[1] if hm_now >= "15:30" else row_1d[0]) or 0.0)
+                if px_1d > 0.0:
+                    return round_nse_eq_tick(px_1d), "TODAY_1D_BAR"
+
+        fb = round_nse_eq_tick(float(fallback_px)) if float(fallback_px or 0.0) > 0.0 else None
+        return fb, "FALLBACK_REF"
+
     def deploy_midcycle_inflow_4gate(
         self,
         scored_snapshot: Dict[str, Any],
         arb_b1: Dict[str, Any],
         now_dt: Optional[datetime] = None,
+        live_quotes: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Institutional 4-Gate Mid-Cycle Capital Deployment Engine:
@@ -776,15 +904,12 @@ class ConsensusArenaExecutionBridge:
                 return {"status": "GATE2_MACRO_BEAR_SHIELD_ACTIVE", "opened": 0, "pyramided": 0}
 
             sid = acct["session_id"]
+            if self.simulation_mode and sid == self.live_session_id:
+                return {"status": "SKIPPED_DISARMED_LIVE_SESSION", "opened": 0, "pyramided": 0}
             last_reb = acct.get("last_book1_rebalance_date")
             with self._conn() as conn:
                 if last_reb:
-                    tdays_elapsed = int(
-                        conn.execute(
-                            "SELECT COUNT(DISTINCT substr(date,1,10)) FROM ohlcv WHERE timeframe = '1d' AND substr(date,1,10) > ? AND substr(date,1,10) <= ?",
-                            (str(last_reb)[:10], as_of_date),
-                        ).fetchone()[0]
-                    )
+                    tdays_elapsed = self._count_trading_days_since(conn, str(last_reb)[:10], today_s)
                     if (20 - tdays_elapsed) < 4:
                         return {
                             "status": "GATE3_NEAR_SCHEDULED_REBALANCE_HOLD",
@@ -811,6 +936,8 @@ class ConsensusArenaExecutionBridge:
 
                 opened_records = []
                 pyramided_records = []
+                tickers_needed = [l["ticker"] for l in (arb_b1.get("approved_rebalance_leaders") or [])] + [r["ticker"] for r in open_b1]
+                quotes = live_quotes if live_quotes is not None else self._fetch_bulk_quotes_safe(tickers_needed)
 
                 # Priority 1: Fill empty slots with unheld sector-diversified leaders
                 for leader in (arb_b1.get("approved_rebalance_leaders") or []):
@@ -826,7 +953,12 @@ class ConsensusArenaExecutionBridge:
                     vol60 = max(18.0, min(65.0, float(leader.get("vol60_ann_pct") or 30.0)))
                     vol_mult = max(0.85, min(1.15, 30.0 / vol60))
                     adj_slot_cap = min(b1_alloc_cash, slot_cap_inr * vol_mult)
-                    epx = round_nse_eq_tick(float(leader["close_px"]))
+                    epx, _ = self._resolve_book1_exec_price(
+                        conn, sym, float(leader["close_px"]), today_s, now_s,
+                        quotes=quotes, require_live_quote=(exec_env == "LIVE_UPSTOX"),
+                    )
+                    if epx is None or epx <= 0.0:
+                        continue
                     sh = compute_whole_shares(
                         allocatable_cash_inr=b1_alloc_cash,
                         price_inr=epx,
@@ -890,7 +1022,12 @@ class ConsensusArenaExecutionBridge:
                         if not cinfo or not cinfo.get("sma_alignment_ok", False) or float(cinfo.get("qlib_pct_rank", 0.0)) < 0.88:
                             continue
                         epx_old = float(pos["entry_price"])
-                        cpx = round_nse_eq_tick(float(cinfo["close"]))
+                        cpx, _ = self._resolve_book1_exec_price(
+                            conn, sym, float(cinfo["close"]), today_s, now_s,
+                            quotes=quotes, require_live_quote=(exec_env == "LIVE_UPSTOX"),
+                        )
+                        if cpx is None or cpx <= 0.0:
+                            continue
                         if cpx < epx_old:
                             # HARD PMS RULE: NEVER average down on losing momentum positions!
                             continue
@@ -946,7 +1083,7 @@ class ConsensusArenaExecutionBridge:
                 if last_reb is None and opened_records:
                     conn.execute(
                         "UPDATE consensus_v3_arena_state SET last_book1_rebalance_date = ?, updated_at = ? WHERE session_id = ?",
-                        (as_of_date, now_s, sid),
+                        (today_s, now_s, sid),
                     )
                 conn.commit()
 
@@ -970,17 +1107,15 @@ class ConsensusArenaExecutionBridge:
     ) -> tuple:
         """
         Determines per-share cash margin required for Book-2 NSE `MIS` Intraday orders:
-          - `CASH_1X` (`1.0x`): exact `100%` cash (`CASH_1X_EXACT`).
-          - `> 1.0x`: queries Upstox `/v2/charges/margin` (`product="I"`) when live token is active (`UPSTOX_API_VAR_ELM`),
+          - Queries Upstox `/v2/charges/margin` (`product="I"`) when live token is active (`UPSTOX_API_VAR_ELM`),
             otherwise applies conservative SEBI `VaR + ELM` floor (`max(20%, 14% + 3.5 * ADR%)`) explicitly tagged
-            `UNVERIFIED_HEURISTIC_NOT_BROKER_SPAN` per `.agents/rules/no-data-leakage.md` Rule 4, bounded by `mis_leverage_cap`.
+            `UNVERIFIED_HEURISTIC_NOT_BROKER_SPAN` per `.agents/rules/no-data-leakage.md` Rule 4.
+          - Under `CASH_1X` (`1.0x`-notional MIS), `user_min_margin_frac = 0.20` (reserves `~20%-33%` unpledged
+            wallet cash while `reserve_book2_pending_limit_orders` caps total Book-2 notional at `<= 1.0x` equity).
         """
         px = max(0.05, float(limit_px))
         cap_lev = max(1.0, min(5.0, float(mis_leverage_cap)))
-        if cap_lev <= 1.001 or margin_mode == MARGIN_MODE_CASH_1X:
-            return round(px, 4), 1.0, "CASH_1X_EXACT"
-
-        user_min_margin_frac = 1.0 / cap_lev
+        user_min_margin_frac = (1.0 / cap_lev) if cap_lev > 1.001 else 0.20
         cache_key = f"{instrument_key}_{direction}"
         now_ep = time.time()
 
@@ -1177,7 +1312,21 @@ class ConsensusArenaExecutionBridge:
         fills_today = int(risk_row["fills_today"]) if risk_row else 0
         cb_tripped = bool(risk_row["circuit_breaker_tripped"]) if risk_row else (today_realized <= max_daily_loss_inr)
 
-        b2_total_buying_power = funded * mis_lev
+        b2_open_notional_inr = sum(
+            float(r["invested_notional_inr"]) for r in open_rows if r["book"] == "BOOK2_INTRADAY_MIS_SNIFFER"
+        )
+        b2_pend_notional_inr = sum(
+            (
+                float(r["exposure_notional_inr"])
+                if ("exposure_notional_inr" in r.keys() and r["exposure_notional_inr"] is not None)
+                else round(float(r["shares"]) * float(r["limit_price"]), 2)
+            )
+            for r in pend_rows
+            if r["book"] == "BOOK2_INTRADAY_MIS_SNIFFER"
+        )
+        b2_total_notional_inr = round(b2_open_notional_inr + b2_pend_notional_inr, 2)
+        b2_remaining_notional_cap_inr = max(0.0, round(current_equity_inr - b2_total_notional_inr, 2))
+        b2_slot_cap_1x = _compute_book2_slot_cap_inr(funded, b2_max)
         return {
             "session_id": sid,
             "shadow_session_id": self.shadow_session_id,
@@ -1221,8 +1370,11 @@ class ConsensusArenaExecutionBridge:
                 "open": b2_open,
                 "pending": b2_pend,
                 "max": b2_max,
-                "slot_cap_inr": round(b2_total_buying_power / max(1, b2_max), 2),
+                "slot_cap_inr": b2_slot_cap_1x,
                 "cash_slot_cap_inr": round(funded / max(1, b2_max), 2),
+                "open_and_pending_notional_inr": b2_total_notional_inr,
+                "remaining_notional_cap_inr": b2_remaining_notional_cap_inr,
+                "mis_notional_within_1x_equity_ok": b2_total_notional_inr <= (current_equity_inr + 1.0),
             },
             "circuit_breaker": {
                 "session_date": today_s,
@@ -1655,6 +1807,54 @@ class ConsensusArenaExecutionBridge:
             pass
         return by_id, by_tag
 
+    @staticmethod
+    def _fetch_l1_quotes(tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+        clean_list = [t for t in dict.fromkeys(tickers) if t]
+        if not clean_list:
+            return {}
+        try:
+            from app.data.upstox_provider import fetch_upstox_bulk_quotes
+            return fetch_upstox_bulk_quotes(clean_list, max_cache_age_sec=2.0) or {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _evaluate_l1_postonly_guard(
+        direction: str,
+        limit_px: float,
+        l1_quote: Optional[Dict[str, Any]],
+        max_spread_bps: float = BOOK2_MAX_L1_SPREAD_BPS,
+    ) -> Tuple[bool, str]:
+        if not isinstance(l1_quote, dict):
+            return False, "L1_QUOTE_MISSING"
+        try:
+            best_bid = float(l1_quote.get("best_bid")) if l1_quote.get("best_bid") is not None else None
+            best_ask = float(l1_quote.get("best_ask")) if l1_quote.get("best_ask") is not None else None
+        except (TypeError, ValueError):
+            return False, "L1_DEPTH_INVALID"
+        if (
+            best_bid is None
+            or best_ask is None
+            or not (math.isfinite(best_bid) and math.isfinite(best_ask) and math.isfinite(float(limit_px)))
+        ):
+            return False, "L1_DEPTH_INVALID"
+        if best_bid <= 0.0 or best_ask <= 0.0:
+            return False, "L1_DEPTH_MISSING_OR_ZERO"
+        if best_ask < best_bid:
+            return False, f"L1_CROSSED_BOOK(bid={best_bid},ask={best_ask})"
+        mid = 0.5 * (best_bid + best_ask)
+        spread_bps = ((best_ask - best_bid) / mid) * 10000.0 if mid > 0.0 else 99999.0
+        if spread_bps > max_spread_bps:
+            return False, f"L1_SPREAD_TOO_WIDE({spread_bps:.1f}bps>{max_spread_bps:.1f}bps)"
+        d = str(direction or "").upper().strip()
+        if d not in ("BUY", "SELL"):
+            return False, f"L1_INVALID_DIRECTION({d})"
+        if d == "SELL" and not (0.0 < best_bid < limit_px):
+            return False, f"L1_SELL_POSTONLY_VIOLATED(best_bid={best_bid}>=limit={limit_px})"
+        if d == "BUY" and not (best_ask > limit_px > 0.0):
+            return False, f"L1_BUY_POSTONLY_VIOLATED(best_ask={best_ask}<=limit={limit_px})"
+        return True, f"L1_OK(bid={best_bid},ask={best_ask},spread={spread_bps:.1f}bps)"
+
     def _route_upstox_equity_order(
         self,
         order_or_pos_id: str,
@@ -1667,10 +1867,12 @@ class ConsensusArenaExecutionBridge:
         price: float,
         is_emergency: bool = False,
         is_exit: bool = False,
+        l1_quote: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Routes an idempotent cash-equity order to Upstox:
-          - New entry orders (`not is_exit and not is_emergency`) require human arming (`not self.simulation_mode`)
+          - New entry orders (`not is_exit and not is_emergency`) require human arming (`not self.simulation_mode`),
+            fresh live quote (for `MARKET` entries), live L1 post-only guard (for Book-2 `MIS` `LIMIT` entries),
             AND must pass the Option Sniffer Margin Firewall!
           - Protective/rebalance/manual/SOS exits (`is_exit or is_emergency`) on verified `LIVE_UPSTOX` positions
             are permitted even if `self.simulation_mode == True` (e.g. Day-2 disarmed stop-loss protection).
@@ -1685,9 +1887,47 @@ class ConsensusArenaExecutionBridge:
         if not instrument_key or not instrument_key.startswith("NSE_EQ|"):
             return {"routed": False, "state": "MISSING_NSE_EQ_KEY", "broker_order_id": None, "error": f"Missing NSE_EQ key for {ticker}"}
 
-        # Enforce Option Sniffer Margin Firewall on all new live entry orders!
+        orig_order_type = str(order_type or "LIMIT").upper()
+        eff_order_type = orig_order_type
+        eff_px = round_nse_eq_tick(price) if float(price or 0.0) > 0 else 0.0
+        if eff_order_type == "MARKET":
+            live_q_px = None
+            try:
+                from app.data.market_provider import get_live_quote_with_meta
+                qm = get_live_quote_with_meta(ticker)
+                if (
+                    qm
+                    and isinstance(qm.get("price"), (int, float))
+                    and float(qm["price"]) > 0.0
+                    and qm.get("source") != "unavailable"
+                    and qm.get("is_realtime", True)
+                ):
+                    live_q_px = round_nse_eq_tick(float(qm["price"]))
+            except Exception:
+                live_q_px = None
+
+            if live_q_px is not None:
+                eff_px = live_q_px
+            elif not is_exit and not is_emergency:
+                err_q = f"Live Upstox quote unavailable for {ticker}; refusing stale-price MARKET entry"
+                with self._conn() as conn:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO consensus_v3_live_intents (
+                            intent_id, order_or_pos_id, action, product_type, order_type, ticker,
+                            instrument_key, shares, price, state, broker_order_id, rejection_reason,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'BLOCKED_NO_LIVE_QUOTE', NULL, ?, ?, ?)
+                        """,
+                        (intent_id, order_or_pos_id, action.upper(), product_type, eff_order_type, ticker, instrument_key, int(shares), float(eff_px or price), err_q[:240], now_s, now_s),
+                    )
+                    conn.commit()
+                return {"routed": False, "state": "MISSING_LIVE_QUOTE", "broker_order_id": None, "avg_fill_price": None, "error": err_q}
+
+        # Enforce Option Sniffer Margin Firewall on all new live entry orders using refreshed `eff_px`!
         if not is_exit and not is_emergency:
-            est_cash = round(int(shares) * max(0.05, float(price)), 2) if product_type == "CNC" else round(int(shares) * max(0.05, float(price)) * 0.35, 2)
+            px_for_fw = eff_px if eff_px > 0 else float(price or 0.0)
+            est_cash = round(int(shares) * max(0.05, px_for_fw), 2) if product_type == "CNC" else round(int(shares) * max(0.05, px_for_fw) * 0.35, 2)
             fw = self._check_option_sniffer_margin_firewall(est_cash)
             if not fw.get("allowed", True):
                 rej_fw = str(fw.get("reason") or "Option Sniffer Margin Firewall blocked entry")
@@ -1700,17 +1940,37 @@ class ConsensusArenaExecutionBridge:
                             created_at, updated_at
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'BLOCKED_FIREWALL', NULL, ?, ?, ?)
                         """,
-                        (intent_id, order_or_pos_id, action.upper(), product_type, order_type, ticker, instrument_key, int(shares), float(price), rej_fw[:240], now_s, now_s),
+                        (intent_id, order_or_pos_id, action.upper(), product_type, eff_order_type, ticker, instrument_key, int(shares), float(px_for_fw), rej_fw[:240], now_s, now_s),
                     )
                     conn.commit()
                 return {"routed": False, "state": "BLOCKED_FIREWALL", "broker_order_id": None, "error": rej_fw}
 
-        eff_order_type = str(order_type or "LIMIT").upper()
-        eff_px = round_nse_eq_tick(price) if float(price or 0.0) > 0 else 0.0
         if eff_order_type == "MARKET" and eff_px > 0.0:
             band = 0.025 if is_emergency else 0.010
             eff_px = round_nse_eq_tick(eff_px * ((1.0 + band) if action.upper() == "BUY" else (1.0 - band)))
             eff_order_type = "LIMIT"
+
+        if product_type == "MIS" and orig_order_type == "LIMIT" and not is_exit and not is_emergency:
+            q_l1 = l1_quote
+            if q_l1 is None:
+                q_map = self._fetch_l1_quotes([ticker])
+                clean_t = ticker.replace(".NS", "").replace(".BO", "").strip().upper()
+                q_l1 = q_map.get(ticker) or q_map.get(clean_t)
+            l1_ok, l1_reason = self._evaluate_l1_postonly_guard(action, eff_px, q_l1)
+            if not l1_ok:
+                with self._conn() as conn:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO consensus_v3_live_intents (
+                            intent_id, order_or_pos_id, action, product_type, order_type, ticker,
+                            instrument_key, shares, price, state, broker_order_id, rejection_reason,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'BLOCKED_L1_GUARD', NULL, ?, ?, ?)
+                        """,
+                        (intent_id, order_or_pos_id, action.upper(), product_type, eff_order_type, ticker, instrument_key, int(shares), float(eff_px or price), l1_reason[:240], now_s, now_s),
+                    )
+                    conn.commit()
+                return {"routed": False, "state": "BLOCKED_L1_GUARD", "broker_order_id": None, "avg_fill_price": None, "error": l1_reason}
 
         tag = self._sanitize_upstox_tag(order_or_pos_id, action)
         payload = {
@@ -1832,18 +2092,25 @@ class ConsensusArenaExecutionBridge:
         now_dt: Optional[datetime] = None,
         allow_broker_probe: bool = True,
         force_shadow_session: bool = False,
+        l1_quotes: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Places 15-minute Post-Only Limit Reservations in `consensus_v3_pending_orders`:
           - Immediately locks `shares * margin_per_share` in `pending_reserved_cash_inr`.
-          - Enforces `invested_margin + pending_reserved_cash <= current_equity` (`0` wallet cash deficit!).
+          - Enforces `invested_margin + pending_reserved_cash <= current_equity` (`0` wallet cash deficit!)
+            and `total_b2_open_and_pending_notional <= 1.0x current_equity`.
+          - Blocks new reservations at `>= 14:55 IST` and clamps `expires_at <= 14:55:00` (`< 15:10 IST` square-off).
           - When `force_shadow_session=True` (used while Live `BOOK1_SWING_CNC_ONLY` is armed), records Book-2
             shadow limit orders strictly in `shadow_session_id` (`PAPER_SHADOW`) so the 60-session gate keeps advancing!
         """
         ts = now_dt or datetime.now()
         today_s = ts.strftime("%Y-%m-%d")
+        hm_now = ts.strftime("%H:%M")
+        if hm_now >= "14:55":
+            return []
         now_s = ts.strftime("%Y-%m-%d %H:%M:%S")
-        exp_s = (ts + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
+        cutoff_1455 = ts.replace(hour=14, minute=55, second=0, microsecond=0)
+        exp_s = min(ts + timedelta(minutes=15), cutoff_1455).strftime("%Y-%m-%d %H:%M:%S")
 
         created_orders: List[Dict[str, Any]] = []
         with self._lock:
@@ -1863,12 +2130,20 @@ class ConsensusArenaExecutionBridge:
                 return []
 
             free_cash = acct["free_unreserved_cash_inr"]
+            rem_b2_notional = float(acct["book2_slots"]["remaining_notional_cap_inr"])
             slot_cap = acct["book2_slots"]["slot_cap_inr"]
             m_mode = acct.get("margin_mode", MARGIN_MODE_CASH_1X)
             mis_lev = float(acct.get("intraday_mis_leverage", 1.0))
             risk_pct = float(acct.get("max_risk_per_trade_pct", 0.50))
             risk_budget_inr = acct["current_equity_inr"] * (risk_pct / 100.0)
+            daily_halt_budget_inr = acct["funded_capital_inr"] * DAILY_LOSS_HALT_FRACTION
             exec_env = "PAPER_SHADOW" if (self.simulation_mode or force_shadow_session) else "LIVE_UPSTOX"
+
+            check_l1 = (exec_env == "LIVE_UPSTOX" and (allow_broker_probe or l1_quotes is not None)) or (l1_quotes is not None)
+            if check_l1:
+                l1_map = l1_quotes if l1_quotes is not None else self._fetch_l1_quotes([s["ticker"] for s in approved_signals])
+            else:
+                l1_map = {}
 
             with self._conn() as conn:
                 already_today = {
@@ -1891,6 +2166,18 @@ class ConsensusArenaExecutionBridge:
                         continue
 
                     lim_px = round_nse_eq_tick(float(sig["limit_entry_px"]))
+                    if rem_b2_notional < lim_px:
+                        continue
+
+                    q_l1 = None
+                    if check_l1:
+                        clean_t = ticker.replace(".NS", "").replace(".BO", "").strip().upper()
+                        q_l1 = l1_map.get(ticker) or l1_map.get(clean_t)
+                        if exec_env == "LIVE_UPSTOX" or q_l1 is not None:
+                            l1_ok, _ = self._evaluate_l1_postonly_guard(sig["direction"], lim_px, q_l1)
+                            if not l1_ok:
+                                continue
+
                     sl_px = float(sig["stop_loss_px"])
                     adr_pct = float((sig.get("telemetry") or {}).get("atr_pct") or 2.0)
 
@@ -1905,17 +2192,19 @@ class ConsensusArenaExecutionBridge:
                     )
 
                     max_by_cash_margin = int(free_cash // max(0.05, margin_per_sh))
+                    max_by_1x_notional = int(rem_b2_notional // max(0.05, lim_px))
                     max_by_slot_notional = compute_whole_shares(
-                        allocatable_cash_inr=slot_cap,
+                        allocatable_cash_inr=min(slot_cap, rem_b2_notional),
                         price_inr=lim_px,
                         max_slot_inr=slot_cap,
                         liquidity_cap_inr=float(sig.get("liq_1pct_bar_inr", slot_cap)),
                     )
-                    shares = min(max_by_cash_margin, max_by_slot_notional)
+                    shares = min(max_by_cash_margin, max_by_slot_notional, max_by_1x_notional)
 
-                    if eff_lev > 1.001 and shares >= 1:
+                    if shares >= 1:
                         stop_dist_px = max(lim_px * 0.0035, abs(sl_px - lim_px))
-                        max_by_stop_risk = int(risk_budget_inr // stop_dist_px)
+                        sl_cap_budget = risk_budget_inr if mis_lev > 1.001 else daily_halt_budget_inr
+                        max_by_stop_risk = int(sl_cap_budget // stop_dist_px)
                         shares = min(shares, max_by_stop_risk)
 
                     if shares < 1:
@@ -1936,6 +2225,7 @@ class ConsensusArenaExecutionBridge:
                             instrument_key=sig.get("instrument_key", ""),
                             shares=shares,
                             price=lim_px,
+                            l1_quote=q_l1,
                         )
                         if not route_res["routed"]:
                             continue
@@ -1955,11 +2245,12 @@ class ConsensusArenaExecutionBridge:
                             oid, sid, sig["book"], ticker, sig["symbol"], sig.get("instrument_key", ""),
                             sig["direction"], shares, float(sig["signal_close_px"]), lim_px, reserved_inr,
                             notional_inr, eff_lev, margin_src,
-                            sl_px, sig.get("scheduled_exit_hm", "15:15"),
+                            sl_px, sig.get("scheduled_exit_hm", "15:10"),
                             exec_env, broker_oid, now_s, exp_s, json.dumps(sig),
                         ),
                     )
                     free_cash -= reserved_inr
+                    rem_b2_notional -= notional_inr
                     avail_b2_slots -= 1
                     already_today.add(ticker)
                     created_orders.append({
@@ -1985,6 +2276,7 @@ class ConsensusArenaExecutionBridge:
         arb_b1: Dict[str, Any],
         force: bool = False,
         now_dt: Optional[datetime] = None,
+        live_quotes: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Executes Layer-6 Book 1 (`20d` Scheduled Cash `CNC` Swing Core) Rebalance + Mid-Cycle PMS Check:
@@ -2022,18 +2314,13 @@ class ConsensusArenaExecutionBridge:
 
                 tdays_elapsed = 999
                 if last_reb:
-                    tdays_elapsed = int(
-                        conn.execute(
-                            "SELECT COUNT(DISTINCT substr(date,1,10)) FROM ohlcv WHERE timeframe = '1d' AND substr(date,1,10) > ? AND substr(date,1,10) <= ?",
-                            (str(last_reb)[:10], as_of_date),
-                        ).fetchone()[0]
-                    )
+                    tdays_elapsed = self._count_trading_days_since(conn, str(last_reb)[:10], today_s)
 
                 shield_stepdown_needed = len(open_b1) > target_slots
                 is_due = force or (last_reb is None) or (tdays_elapsed >= 20) or shield_stepdown_needed
 
             if not is_due:
-                mid_res = self.deploy_midcycle_inflow_4gate(scored_snapshot, arb_b1, now_dt=ts)
+                mid_res = self.deploy_midcycle_inflow_4gate(scored_snapshot, arb_b1, now_dt=ts, live_quotes=live_quotes)
                 if mid_res.get("opened", 0) > 0 or mid_res.get("pyramided", 0) > 0:
                     return {
                         "status": "MIDCYCLE_TOPUP_DEPLOYED",
@@ -2061,6 +2348,10 @@ class ConsensusArenaExecutionBridge:
                     "SELECT * FROM consensus_v3_positions WHERE session_id = ? AND book = 'BOOK1_SWING_CNC_CORE' AND status IN ('OPEN', 'EXIT_RETRY_PENDING')",
                     (sid,),
                 ).fetchall()
+                tickers_needed = [r["ticker"] for r in open_b1] + [
+                    l["ticker"] for l in (arb_b1.get("approved_rebalance_leaders") or [])
+                ]
+                quotes = live_quotes if live_quotes is not None else self._fetch_bulk_quotes_safe(tickers_needed)
                 cand_map = {c["ticker"]: c for c in (scored_snapshot.get("candidates") or [])}
                 keep_candidates = []
                 to_close = []
@@ -2069,7 +2360,11 @@ class ConsensusArenaExecutionBridge:
                     sym = pos["ticker"]
                     epx = float(pos["entry_price"])
                     cinfo = cand_map.get(sym)
-                    curr_px = float(cinfo["close"]) if cinfo else float(pos["current_price"] or epx)
+                    fb_px = float(cinfo["close"]) if cinfo else float(pos["current_price"] or epx)
+                    curr_px_resolved, _ = self._resolve_book1_exec_price(
+                        conn, sym, fb_px, today_s, now_s, quotes=quotes, require_live_quote=False,
+                    )
+                    curr_px = float(curr_px_resolved or fb_px)
                     raw_jump = abs(curr_px - float(pos["current_price"] or epx)) / max(1.0, float(pos["current_price"] or epx))
 
                     if raw_jump > 0.40:
@@ -2157,7 +2452,12 @@ class ConsensusArenaExecutionBridge:
                     fair_rem_cap = free_cash / max(1, slots_to_open) if slots_to_open > 1 else free_cash
                     eff_slot_cap = min(free_cash, max(base_slot_cap_inr * 0.85, min(base_slot_cap_inr * vol_mult, fair_rem_cap * 1.12)))
 
-                    epx = round_nse_eq_tick(float(leader["close_px"]))
+                    epx, _ = self._resolve_book1_exec_price(
+                        conn, sym, float(leader["close_px"]), today_s, now_s,
+                        quotes=quotes, require_live_quote=(exec_env == "LIVE_UPSTOX"),
+                    )
+                    if epx is None or epx <= 0.0:
+                        continue
                     sh = compute_whole_shares(
                         allocatable_cash_inr=free_cash,
                         price_inr=epx,
@@ -2218,7 +2518,7 @@ class ConsensusArenaExecutionBridge:
 
                 conn.execute(
                     "UPDATE consensus_v3_arena_state SET last_book1_rebalance_date = ?, updated_at = ? WHERE session_id = ?",
-                    (as_of_date, now_s, sid),
+                    (today_s, now_s, sid),
                 )
                 conn.commit()
 
@@ -2226,6 +2526,7 @@ class ConsensusArenaExecutionBridge:
             "status": "REBALANCED",
             "session_id": sid,
             "as_of_date": as_of_date,
+            "rebalance_date": today_s,
             "target_slots": target_slots,
             "sebi_same_day_cnc_haircut_inr": round(sebi_t0_haircut_inr, 2),
             "retained": len(retained_list),
@@ -2328,17 +2629,27 @@ class ConsensusArenaExecutionBridge:
     ) -> Dict[str, Any]:
         """
         Causal 1-Minute Reconciler across Paper Shadow and Live Upstox ledgers:
-          1. `PAPER_SHADOW` orders: strict post-signal `3 bps` limit trade-through or `15m` TIF expiry.
+          1. `PAPER_SHADOW` orders: strict post-signal `3 bps` limit trade-through or `15m` TIF expiry
+             with forming-bar open post-only gap protection, `fills_today < 6` enforcement, and post-SL cash recheck.
           2. `LIVE_UPSTOX` orders: queries Upstox `/v2/order/retrieve-all` for true exchange fills/partials,
              and calls `/v2/order/cancel` upon `15m` TIF expiry (`14:55 IST` cutoff) before releasing cash!
-          3. `OPEN` / `EXIT_RETRY_PENDING` positions: updates live MTM, enforces `15:15 IST` NSE `MIS` square-off,
-             structural stops, and Book-1 Intra-Cycle Breakdown + FinBERT Sentinel.
+          3. `OPEN` / `EXIT_RETRY_PENDING` positions: updates live MTM, enforces `15:10 IST` NSE `MIS` square-off,
+             entry-candle + multi-bar structural stops, and Book-1 Intra-Cycle Breakdown + FinBERT Sentinel.
         """
         ts = now_dt or datetime.now()
         now_s = ts.strftime("%Y-%m-%d %H:%M:%S")
         hm_now = ts.strftime("%H:%M")
         today_s = ts.strftime("%Y-%m-%d")
         allow_live_finbert = now_dt is None
+        slot_start_dt = ts.replace(minute=(ts.minute // 15) * 15, second=0, microsecond=0)
+        slot_start_s = slot_start_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        def _slot_floor_str(raw_ts: Optional[str]) -> str:
+            try:
+                parsed = datetime.strptime(str(raw_ts or "")[:19], "%Y-%m-%d %H:%M:%S")
+                return parsed.replace(minute=(parsed.minute // 15) * 15, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return slot_start_s
 
         total_filled, total_expired, total_closed = 0, 0, 0
         with self._lock, self._conn() as conn:
@@ -2373,51 +2684,193 @@ class ConsensusArenaExecutionBridge:
 
             completed_15m_cutoff = (ts - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
 
-            def _latest_px_and_bar(sym: str, after_ts: str, prod_type: str = "MIS", details_json: Optional[str] = None):
+            def _latest_px_and_bars(
+                sym: str,
+                after_ts: str,
+                prod_type: str = "MIS",
+                details_json: Optional[str] = None,
+                is_pending: bool = False,
+            ) -> Tuple[Optional[float], Optional[Tuple[Any, ...]], Optional[float], Optional[float]]:
                 q = quotes.get(sym) or quotes.get(sym.replace(".NS", ""))
                 ltp = float(q["price"]) if (q and isinstance(q.get("price"), (int, float)) and q["price"] > 0) else None
 
-                sig_bar_dt = None
+                djson: Dict[str, Any] = {}
                 if details_json:
                     try:
-                        sig_bar_dt = (json.loads(details_json) or {}).get("bar_dt")
+                        parsed = json.loads(details_json)
+                        if isinstance(parsed, dict):
+                            djson = parsed
                     except Exception:
-                        sig_bar_dt = None
+                        djson = {}
 
-                brow = None
-                if sig_bar_dt:
-                    brow = conn.execute(
-                        "SELECT open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '15m' AND date > ? AND date <= ? ORDER BY date DESC LIMIT 1",
-                        (sym, str(sig_bar_dt)[:19], completed_15m_cutoff),
-                    ).fetchone()
+                bars: List[Tuple[Any, ...]] = []
+                if is_pending:
+                    sig_bar_dt = djson.get("bar_dt")
+                    if sig_bar_dt:
+                        bars = conn.execute(
+                            "SELECT date, open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '15m' AND date > ? AND date <= ? ORDER BY date ASC",
+                            (sym, str(sig_bar_dt)[:19], completed_15m_cutoff),
+                        ).fetchall()
+                    else:
+                        min_bar_s = str(after_ts)[:19]
+                        use_gte = False
+                        try:
+                            adt = datetime.strptime(min_bar_s, "%Y-%m-%d %H:%M:%S")
+                            slot_dt = adt.replace(minute=(adt.minute // 15) * 15, second=0, microsecond=0)
+                            if 0.0 <= (adt - slot_dt).total_seconds() <= 90.0:
+                                min_bar_s = slot_dt.strftime("%Y-%m-%d %H:%M:%S")
+                                use_gte = True
+                        except Exception:
+                            pass
+                        op = ">=" if use_gte else ">"
+                        bars = conn.execute(
+                            f"SELECT date, open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '15m' AND date {op} ? AND date <= ? ORDER BY date ASC",
+                            (sym, min_bar_s, completed_15m_cutoff),
+                        ).fetchall()
+                    if bars:
+                        first_b = bars[0]
+                        return ltp, first_b, float(first_b[2]), float(first_b[3])
+                    return ltp, None, None, None
+
+                # Open position evaluation: check ALL completed bars since fill/entry slot
+                entry_bar_dt = djson.get("entry_bar_dt")
+                entry_slot_dt = djson.get("entry_slot_dt")
+                if entry_bar_dt:
+                    op = ">"
+                    min_bar_s = str(entry_bar_dt)[:19]
+                elif entry_slot_dt:
+                    op = ">="
+                    min_bar_s = str(entry_slot_dt)[:19]
                 else:
                     min_bar_s = str(after_ts)[:19]
                     use_gte = False
                     try:
                         adt = datetime.strptime(min_bar_s, "%Y-%m-%d %H:%M:%S")
                         slot_dt = adt.replace(minute=(adt.minute // 15) * 15, second=0, microsecond=0)
-                        if 0.0 <= (adt - slot_dt).total_seconds() <= 90.0:
+                        if prod_type == "MIS" or (0.0 <= (adt - slot_dt).total_seconds() <= 90.0):
                             min_bar_s = slot_dt.strftime("%Y-%m-%d %H:%M:%S")
                             use_gte = True
                     except Exception:
                         pass
                     op = ">=" if use_gte else ">"
-                    brow = conn.execute(
-                        f"SELECT open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '15m' AND date {op} ? AND date <= ? ORDER BY date DESC LIMIT 1",
-                        (sym, min_bar_s, completed_15m_cutoff),
-                    ).fetchone()
 
-                if brow is None and prod_type == "CNC":
-                    brow = conn.execute(
-                        "SELECT open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '1d' AND substr(date,1,10) > ? AND substr(date,1,10) <= ? ORDER BY date DESC LIMIT 1",
+                bars = conn.execute(
+                    f"SELECT date, open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '15m' AND date {op} ? AND date <= ? ORDER BY date ASC",
+                    (sym, min_bar_s, completed_15m_cutoff),
+                ).fetchall()
+
+                if bars:
+                    latest_b = bars[-1]
+                    max_high = max(float(b[2]) for b in bars)
+                    min_low = min(float(b[3]) for b in bars)
+                    return ltp, latest_b, max_high, min_low
+
+                if prod_type == "CNC":
+                    row_1d = conn.execute(
+                        "SELECT date, open, high, low, close FROM ohlcv WHERE ticker = ? AND timeframe = '1d' AND substr(date,1,10) > ? AND substr(date,1,10) <= ? ORDER BY date DESC LIMIT 1",
                         (sym, str(after_ts)[:10], today_s),
                     ).fetchone()
-                return ltp, brow
+                    if row_1d:
+                        return ltp, row_1d, float(row_1d[2]), float(row_1d[3])
+
+                return ltp, None, None, None
+
+            def _resolve_forming_15m_open(sym: str) -> Optional[float]:
+                q = quotes.get(sym) or quotes.get(sym.replace(".NS", ""))
+                if isinstance(q, dict):
+                    for k in ("bar_open", "forming_open", "15m_open"):
+                        v = q.get(k)
+                        if isinstance(v, (int, float)) and float(v) > 0.0:
+                            return float(v)
+                    if slot_start_dt.strftime("%H:%M") == "09:15":
+                        v_open = q.get("open")
+                        if isinstance(v_open, (int, float)) and float(v_open) > 0.0:
+                            return float(v_open)
+                row_1m = conn.execute(
+                    "SELECT open FROM ohlcv WHERE ticker = ? AND timeframe = '1m' AND date >= ? AND date <= ? ORDER BY date ASC LIMIT 1",
+                    (sym, slot_start_s, now_s),
+                ).fetchone()
+                if row_1m and float(row_1m[0] or 0.0) > 0.0:
+                    return float(row_1m[0])
+                try:
+                    from app.data.upstox_stream_service import get_stream_service
+                    f_op = get_stream_service().get_forming_15m_open(sym, as_of_dt=ts)
+                    if f_op is not None and float(f_op) > 0.0:
+                        return float(f_op)
+                except Exception:
+                    pass
+                return None
+
+            def _evaluate_open_positions(sid_val: str, pos_rows: List[sqlite3.Row]) -> int:
+                closed_cnt = 0
+                for pos in pos_rows:
+                    pid = pos["position_id"]
+                    sym = pos["ticker"]
+                    sdir = pos["direction"]
+                    sh = int(pos["shares"])
+                    epx = float(pos["entry_price"])
+                    sl = float(pos["stop_loss_px"])
+                    prod = pos["product_type"]
+                    ltp, brow, max_high, min_low = _latest_px_and_bars(
+                        sym, pos["entry_time"], prod, pos["details_json"], is_pending=False,
+                    )
+
+                    curr_px = ltp
+                    if curr_px is None and brow is not None:
+                        curr_px = float(brow[4])
+                    if curr_px is None:
+                        curr_px = float(pos["current_price"])
+
+                    exit_reason = None
+                    exit_px = curr_px
+                    if pos["status"] == "EXIT_RETRY_PENDING" and ("09:15" <= hm_now <= "15:29"):
+                        exit_reason = "RETRY_PENDING_BROKER_EXIT"
+                    elif prod == "MIS" and sym and str(pos["entry_time"])[:10] < today_s:
+                        exit_reason = "OVERDUE_SESSION_SQUAREOFF"
+                    elif prod == "MIS" and hm_now >= "15:10":
+                        exit_reason = "MANDATORY_1510_MIS_SQUAREOFF"
+                    elif sdir == "SELL" and ((max_high is not None and max_high >= sl) or curr_px >= sl):
+                        exit_reason = "STRUCTURAL_STOP_HIT"
+                        exit_px = max(sl, curr_px) if ltp is not None else sl
+                    elif sdir == "BUY" and sl > 0 and ((min_low is not None and min_low <= sl) or curr_px <= sl):
+                        exit_reason = "STRUCTURAL_STOP_HIT"
+                        exit_px = min(sl, curr_px) if ltp is not None else sl
+                    elif prod == "CNC" and pos["book"] == "BOOK1_SWING_CNC_CORE":
+                        bd_reason = self._check_book1_intracycle_breakdown(
+                            conn=conn,
+                            sym=sym,
+                            entry_date_s=str(pos["entry_time"])[:10],
+                            curr_px=curr_px,
+                            today_s=today_s,
+                            hm_now=hm_now,
+                            allow_live_finbert=allow_live_finbert,
+                        )
+                        if bd_reason:
+                            exit_reason = bd_reason
+
+                    if exit_reason and pos["status"] != "EXIT_RETRY_PENDING":
+                        cres = self._close_position_in_tx(conn, pos, exit_px, exit_reason, now_s, today_s, session_id=sid_val)
+                        if cres.get("closed", True):
+                            closed_cnt += 1
+                    else:
+                        unreal = ((curr_px - epx) if sdir == "BUY" else (epx - curr_px)) * sh
+                        conn.execute(
+                            "UPDATE consensus_v3_positions SET current_price = ?, unrealized_pnl_inr = ? WHERE position_id = ?",
+                            (round(curr_px, 2), round(unreal, 2), pid),
+                        )
+                return closed_cnt
 
             for sid in sessions_to_run:
                 pend = [r for r in all_pend if r["session_id"] == sid]
                 r_key = self._risk_date_key(sid, today_s)
 
+                # 1. Evaluate pre-existing open positions FIRST so same-cycle SL losses & circuit breaker
+                #    updates are reflected immediately before evaluating pending fills.
+                pre_open_pos = [r for r in all_open if r["session_id"] == sid]
+                if pre_open_pos:
+                    total_closed += _evaluate_open_positions(sid, pre_open_pos)
+
+                newly_opened_pids: List[str] = []
                 for pr in pend:
                     oid = pr["order_id"]
                     sym = pr["ticker"]
@@ -2432,6 +2885,19 @@ class ConsensusArenaExecutionBridge:
                         filled_qty = int(float((b_ord or {}).get("filled_quantity") or 0))
                         avg_px = round_nse_eq_tick(float((b_ord or {}).get("average_price") or lim))
                         is_expired_time = now_s >= str(pr["expires_at"]) or (pr["product_type"] == "MIS" and hm_now >= "14:55")
+
+                        def _with_entry_slot_json(raw_json: Optional[str]) -> str:
+                            dj: Dict[str, Any] = {}
+                            if raw_json:
+                                try:
+                                    parsed = json.loads(raw_json)
+                                    if isinstance(parsed, dict):
+                                        dj = parsed
+                                except Exception:
+                                    dj = {}
+                            dj["entry_slot_dt"] = _slot_floor_str(pr["created_at"])
+                            dj["filled_via"] = "LIVE_UPSTOX"
+                            return json.dumps(dj)
 
                         if ost == "complete" and filled_qty >= 1:
                             pid = f"pos_{oid[4:]}"
@@ -2458,7 +2924,7 @@ class ConsensusArenaExecutionBridge:
                                     pid, sid, oid, pr["book"], pr["product_type"], sym, pr["symbol"],
                                     pr["instrument_key"], sdir, filled_qty, avg_px, notional,
                                     m_used, eff_lev, m_src, float(pr["stop_loss_px"]),
-                                    pr["scheduled_exit_hm"] or "15:15", avg_px, now_s, pr["details_json"],
+                                    pr["scheduled_exit_hm"] or "15:10", avg_px, now_s, _with_entry_slot_json(pr["details_json"]),
                                 ),
                             )
                             conn.execute(
@@ -2470,6 +2936,7 @@ class ConsensusArenaExecutionBridge:
                                 (r_key, now_s),
                             )
                             total_filled += 1
+                            newly_opened_pids.append(pid)
                             continue
 
                         if ost in ("rejected", "cancelled", "canceled"):
@@ -2496,10 +2963,19 @@ class ConsensusArenaExecutionBridge:
                                         pid, sid, oid, pr["book"], pr["product_type"], sym, pr["symbol"],
                                         pr["instrument_key"], sdir, filled_qty, avg_px, notional,
                                         m_used, float(pr["effective_leverage"] or 1.0), str(pr["margin_source"] or "UPSTOX_API_VAR_ELM"),
-                                        float(pr["stop_loss_px"]), pr["scheduled_exit_hm"] or "15:15", avg_px, now_s, pr["details_json"],
+                                        float(pr["stop_loss_px"]), pr["scheduled_exit_hm"] or "15:10", avg_px, now_s, _with_entry_slot_json(pr["details_json"]),
                                     ),
                                 )
+                                conn.execute(
+                                    """
+                                    INSERT INTO consensus_v3_risk_ledger (session_date, realized_pnl_inr, fills_today, circuit_breaker_tripped, updated_at)
+                                    VALUES (?, 0.0, 1, 0, ?)
+                                    ON CONFLICT(session_date) DO UPDATE SET fills_today = fills_today + 1, updated_at = excluded.updated_at
+                                    """,
+                                    (r_key, now_s),
+                                )
                                 total_filled += 1
+                                newly_opened_pids.append(pid)
                             else:
                                 msg_b = str((b_ord or {}).get("status_message") or ost)[:160]
                                 conn.execute(
@@ -2540,10 +3016,19 @@ class ConsensusArenaExecutionBridge:
                                             pid, sid, oid, pr["book"], pr["product_type"], sym, pr["symbol"],
                                             pr["instrument_key"], sdir, f_qty, f_px, notional,
                                             m_used, float(pr["effective_leverage"] or 1.0), str(pr["margin_source"] or "UPSTOX_API_VAR_ELM"),
-                                            float(pr["stop_loss_px"]), pr["scheduled_exit_hm"] or "15:15", f_px, now_s, pr["details_json"],
+                                            float(pr["stop_loss_px"]), pr["scheduled_exit_hm"] or "15:10", f_px, now_s, _with_entry_slot_json(pr["details_json"]),
                                         ),
                                     )
+                                    conn.execute(
+                                        """
+                                        INSERT INTO consensus_v3_risk_ledger (session_date, realized_pnl_inr, fills_today, circuit_breaker_tripped, updated_at)
+                                        VALUES (?, 0.0, 1, 0, ?)
+                                        ON CONFLICT(session_date) DO UPDATE SET fills_today = fills_today + 1, updated_at = excluded.updated_at
+                                        """,
+                                        (r_key, now_s),
+                                    )
                                     total_filled += 1
+                                    newly_opened_pids.append(pid)
                                 else:
                                     conn.execute(
                                         "UPDATE consensus_v3_pending_orders SET status = 'EXPIRED_UNFILLED', resolved_at = ?, resolution_note = 'Upstox order cancelled at 15m TIF; cash released' WHERE order_id = ?",
@@ -2553,26 +3038,56 @@ class ConsensusArenaExecutionBridge:
                         continue
 
                     # ── BRANCH B: PAPER_SHADOW STRICT POST-ONLY OHLCV/QUOTE RECONCILIATION ──
-                    ltp, brow = _latest_px_and_bar(sym, pr["created_at"], pr["product_type"], pr["details_json"])
+                    is_expired_time = now_s >= str(pr["expires_at"]) or (pr["product_type"] == "MIS" and hm_now >= "14:55")
+                    ltp, brow, _, _ = _latest_px_and_bars(
+                        sym, pr["created_at"], pr["product_type"], pr["details_json"], is_pending=True,
+                    )
                     is_filled = False
+                    filled_via_brow = False
                     post_only_violated = False
+                    brow_dt_s = None
                     if brow is not None:
-                        bo, bh, bl, _ = float(brow[0]), float(brow[1]), float(brow[2]), float(brow[3])
-                        if sdir == "SELL":
-                            if bo >= lim:
-                                post_only_violated = True
-                            elif bh >= lim * 1.0003:
+                        brow_dt_s = str(brow[0])[:19]
+                        brow_valid_for_order = True
+                        try:
+                            brow_end_dt = datetime.strptime(brow_dt_s, "%Y-%m-%d %H:%M:%S") + timedelta(minutes=15)
+                            exp_limit_dt = datetime.strptime(str(pr["expires_at"])[:19], "%Y-%m-%d %H:%M:%S")
+                            if pr["product_type"] == "MIS":
+                                exp_limit_dt = min(exp_limit_dt, exp_limit_dt.replace(hour=14, minute=55, second=0, microsecond=0))
+                            if brow_end_dt > exp_limit_dt:
+                                brow_valid_for_order = False
+                        except Exception:
+                            brow_valid_for_order = True
+
+                        if brow_valid_for_order:
+                            bo, bh, bl = float(brow[1]), float(brow[2]), float(brow[3])
+                            if sdir == "SELL":
+                                if bo >= lim:
+                                    post_only_violated = True
+                                elif bh >= lim * 1.0003:
+                                    is_filled = True
+                                    filled_via_brow = True
+                            else:
+                                if bo <= lim:
+                                    post_only_violated = True
+                                elif bl <= lim * 0.9997:
+                                    is_filled = True
+                                    filled_via_brow = True
+
+                    if (not is_expired_time) and (not post_only_violated) and (not is_filled):
+                        if brow is None or (brow_dt_s is not None and brow_dt_s < slot_start_s):
+                            forming_open = _resolve_forming_15m_open(sym)
+                            if forming_open is not None:
+                                if sdir == "SELL" and forming_open >= lim:
+                                    post_only_violated = True
+                                elif sdir == "BUY" and forming_open <= lim:
+                                    post_only_violated = True
+
+                        if not post_only_violated and ltp is not None:
+                            if sdir == "SELL" and ltp >= lim * 1.0003:
                                 is_filled = True
-                        else:
-                            if bo <= lim:
-                                post_only_violated = True
-                            elif bl <= lim * 0.9997:
+                            elif sdir == "BUY" and ltp <= lim * 0.9997:
                                 is_filled = True
-                    if not post_only_violated and not is_filled and ltp is not None:
-                        if sdir == "SELL" and ltp >= lim * 1.0003:
-                            is_filled = True
-                        elif sdir == "BUY" and ltp <= lim * 0.9997:
-                            is_filled = True
 
                     if post_only_violated:
                         conn.execute(
@@ -2583,6 +3098,78 @@ class ConsensusArenaExecutionBridge:
                         continue
 
                     if is_filled:
+                        # M2 Advisory 1: Strict daily fills_today < 6 and circuit-breaker check before filling
+                        if pr["book"] == "BOOK2_INTRADAY_MIS_SNIFFER":
+                            rl_row = conn.execute(
+                                "SELECT fills_today, circuit_breaker_tripped FROM consensus_v3_risk_ledger WHERE session_date = ?",
+                                (r_key,),
+                            ).fetchone()
+                            if rl_row and bool(rl_row["circuit_breaker_tripped"]):
+                                conn.execute(
+                                    "UPDATE consensus_v3_pending_orders SET status = 'CANCELLED_CIRCUIT_BREAKER', resolved_at = ?, resolution_note = 'Session daily-loss circuit breaker tripped' WHERE order_id = ?",
+                                    (now_s, oid),
+                                )
+                                total_expired += 1
+                                continue
+                            if rl_row and int(rl_row["fills_today"] or 0) >= 6:
+                                conn.execute(
+                                    "UPDATE consensus_v3_pending_orders SET status = 'CANCELLED_DAILY_FILL_CAP', resolved_at = ?, resolution_note = 'Daily MIS fill cap (6) reached' WHERE order_id = ?",
+                                    (now_s, oid),
+                                )
+                                total_expired += 1
+                                continue
+
+                            # M2 Advisory 2: Recompute live DB equity, free cash, and 1.0x MIS notional after any SL losses
+                            st_cur = conn.execute(
+                                "SELECT funded_capital_inr, realized_pnl_inr FROM consensus_v3_arena_state WHERE session_id = ?",
+                                (sid,),
+                            ).fetchone()
+                            open_cur = conn.execute(
+                                "SELECT book, margin_used_inr, invested_notional_inr, unrealized_pnl_inr FROM consensus_v3_positions WHERE session_id = ? AND status IN ('OPEN', 'EXIT_RETRY_PENDING')",
+                                (sid,),
+                            ).fetchall()
+                            other_pend = conn.execute(
+                                "SELECT book, reserved_cash_inr, exposure_notional_inr, shares, limit_price FROM consensus_v3_pending_orders WHERE session_id = ? AND status = 'PENDING_RESERVED' AND order_id != ?",
+                                (sid, oid),
+                            ).fetchall()
+                            eq_cur = (
+                                float(st_cur["funded_capital_inr"])
+                                + float(st_cur["realized_pnl_inr"])
+                                + sum(float(r["unrealized_pnl_inr"]) for r in open_cur)
+                            )
+                            other_margin = (
+                                sum(
+                                    float(r["margin_used_inr"] if r["margin_used_inr"] is not None else r["invested_notional_inr"])
+                                    for r in open_cur
+                                )
+                                + sum(float(r["reserved_cash_inr"]) for r in other_pend)
+                            )
+                            avail_cash_for_pr = eq_cur - other_margin
+                            b2_other_notional = (
+                                sum(
+                                    float(r["invested_notional_inr"])
+                                    for r in open_cur
+                                    if r["book"] == "BOOK2_INTRADAY_MIS_SNIFFER"
+                                )
+                                + sum(
+                                    float(
+                                        r["exposure_notional_inr"]
+                                        if r["exposure_notional_inr"] is not None
+                                        else float(r["shares"]) * float(r["limit_price"])
+                                    )
+                                    for r in other_pend
+                                    if r["book"] == "BOOK2_INTRADAY_MIS_SNIFFER"
+                                )
+                            )
+                            pr_notional = round(int(pr["shares"]) * lim, 2)
+                            if avail_cash_for_pr + 1e-6 < float(pr["reserved_cash_inr"]) or (b2_other_notional + pr_notional) > (eq_cur + 1.0):
+                                conn.execute(
+                                    "UPDATE consensus_v3_pending_orders SET status = 'CANCELLED_POST_SL_CASH_SHORTFALL', resolved_at = ?, resolution_note = 'Post-SL equity/margin shortfall prevented fill' WHERE order_id = ?",
+                                    (now_s, oid),
+                                )
+                                total_expired += 1
+                                continue
+
                         pid = f"pos_{oid[4:]}"
                         sh = int(pr["shares"])
                         notional = round(sh * lim, 2)
@@ -2590,6 +3177,22 @@ class ConsensusArenaExecutionBridge:
                         m_used = float(pr["reserved_cash_inr"])
                         eff_lev = float(pr["effective_leverage"]) if ("effective_leverage" in pr_keys and pr["effective_leverage"]) else 1.0
                         m_src = str(pr["margin_source"]) if ("margin_source" in pr_keys and pr["margin_source"]) else "CASH_1X_EXACT"
+
+                        pos_details: Dict[str, Any] = {}
+                        if pr["details_json"]:
+                            try:
+                                parsed_d = json.loads(pr["details_json"])
+                                if isinstance(parsed_d, dict):
+                                    pos_details = parsed_d
+                            except Exception:
+                                pos_details = {}
+                        if filled_via_brow and brow_dt_s:
+                            pos_details["entry_bar_dt"] = brow_dt_s
+                            pos_details["filled_via"] = "BAR"
+                        else:
+                            pos_details["entry_slot_dt"] = slot_start_s
+                            pos_details["filled_via"] = "LTP"
+
                         conn.execute(
                             "UPDATE consensus_v3_pending_orders SET status = 'FILLED', resolved_at = ?, resolution_note = 'Limit trade-through verified' WHERE order_id = ?",
                             (now_s, oid),
@@ -2609,7 +3212,7 @@ class ConsensusArenaExecutionBridge:
                                 pr["instrument_key"], sdir, sh, lim, notional,
                                 m_used, eff_lev, m_src,
                                 float(pr["stop_loss_px"]),
-                                pr["scheduled_exit_hm"] or "15:15", pr["execution_env"], lim, now_s, pr["details_json"],
+                                pr["scheduled_exit_hm"] or "15:10", pr["execution_env"], lim, now_s, json.dumps(pos_details),
                             ),
                         )
                         conn.execute(
@@ -2621,6 +3224,27 @@ class ConsensusArenaExecutionBridge:
                             (r_key, now_s),
                         )
                         total_filled += 1
+
+                        # Bug 5: Check same-bar intrabar SL breach immediately when filled via completed bar `brow`!
+                        same_bar_closed = False
+                        if filled_via_brow and brow is not None:
+                            sl_px = float(pr["stop_loss_px"])
+                            bh_f, bl_f = float(brow[2]), float(brow[3])
+                            same_bar_sl_hit = (sdir == "SELL" and bh_f >= sl_px) or (sdir == "BUY" and sl_px > 0 and bl_f <= sl_px)
+                            if same_bar_sl_hit:
+                                pos_row = conn.execute(
+                                    "SELECT * FROM consensus_v3_positions WHERE position_id = ?",
+                                    (pid,),
+                                ).fetchone()
+                                if pos_row:
+                                    cres = self._close_position_in_tx(
+                                        conn, pos_row, sl_px, "STRUCTURAL_STOP_HIT", now_s, today_s, session_id=sid,
+                                    )
+                                    if cres.get("closed", True):
+                                        total_closed += 1
+                                        same_bar_closed = True
+                        if not same_bar_closed:
+                            newly_opened_pids.append(pid)
                         continue
 
                     if now_s >= str(pr["expires_at"]) or (pr["product_type"] == "MIS" and hm_now >= "14:55"):
@@ -2630,65 +3254,15 @@ class ConsensusArenaExecutionBridge:
                         )
                         total_expired += 1
 
-                # Refresh open positions for this session
-                open_pos = conn.execute(
-                    "SELECT * FROM consensus_v3_positions WHERE session_id = ? AND status IN ('OPEN', 'EXIT_RETRY_PENDING')",
-                    (sid,),
-                ).fetchall()
-
-                for pos in open_pos:
-                    pid = pos["position_id"]
-                    sym = pos["ticker"]
-                    sdir = pos["direction"]
-                    sh = int(pos["shares"])
-                    epx = float(pos["entry_price"])
-                    sl = float(pos["stop_loss_px"])
-                    prod = pos["product_type"]
-                    ltp, brow = _latest_px_and_bar(sym, pos["entry_time"], prod)
-
-                    curr_px = ltp
-                    if curr_px is None and brow is not None:
-                        curr_px = float(brow[3])
-                    if curr_px is None:
-                        curr_px = float(pos["current_price"])
-
-                    exit_reason = None
-                    exit_px = curr_px
-                    if pos["status"] == "EXIT_RETRY_PENDING" and ("09:15" <= hm_now <= "15:29"):
-                        exit_reason = "RETRY_PENDING_BROKER_EXIT"
-                    elif prod == "MIS" and sym and str(pos["entry_time"])[:10] < today_s:
-                        exit_reason = "OVERDUE_SESSION_SQUAREOFF"
-                    elif prod == "MIS" and hm_now >= "15:15":
-                        exit_reason = "MANDATORY_1515_MIS_SQUAREOFF"
-                    elif sdir == "SELL" and ((brow is not None and float(brow[1]) >= sl) or curr_px >= sl):
-                        exit_reason = "STRUCTURAL_STOP_HIT"
-                        exit_px = max(sl, curr_px) if ltp is not None else sl
-                    elif sdir == "BUY" and sl > 0 and ((brow is not None and float(brow[2]) <= sl) or curr_px <= sl):
-                        exit_reason = "STRUCTURAL_STOP_HIT"
-                        exit_px = min(sl, curr_px) if ltp is not None else sl
-                    elif prod == "CNC" and pos["book"] == "BOOK1_SWING_CNC_CORE":
-                        bd_reason = self._check_book1_intracycle_breakdown(
-                            conn=conn,
-                            sym=sym,
-                            entry_date_s=str(pos["entry_time"])[:10],
-                            curr_px=curr_px,
-                            today_s=today_s,
-                            hm_now=hm_now,
-                            allow_live_finbert=allow_live_finbert,
-                        )
-                        if bd_reason:
-                            exit_reason = bd_reason
-
-                    if exit_reason and pos["status"] != "EXIT_RETRY_PENDING":
-                        cres = self._close_position_in_tx(conn, pos, exit_px, exit_reason, now_s, today_s, session_id=sid)
-                        if cres.get("closed", True):
-                            total_closed += 1
-                    else:
-                        unreal = ((curr_px - epx) if sdir == "BUY" else (epx - curr_px)) * sh
-                        conn.execute(
-                            "UPDATE consensus_v3_positions SET current_price = ?, unrealized_pnl_inr = ? WHERE position_id = ?",
-                            (round(curr_px, 2), round(unreal, 2), pid),
-                        )
+                # Evaluate any newly opened positions (LTP fills / LIVE_UPSTOX / surviving BAR fills) on this tick
+                if newly_opened_pids:
+                    placeholders = ",".join("?" for _ in newly_opened_pids)
+                    new_open_rows = conn.execute(
+                        f"SELECT * FROM consensus_v3_positions WHERE position_id IN ({placeholders}) AND status IN ('OPEN', 'EXIT_RETRY_PENDING')",
+                        tuple(newly_opened_pids),
+                    ).fetchall()
+                    if new_open_rows:
+                        total_closed += _evaluate_open_positions(sid, new_open_rows)
 
                 # Update Peak Equity, Unit NAV & Max Drawdown for this session
                 st = conn.execute("SELECT * FROM consensus_v3_arena_state WHERE session_id = ?", (sid,)).fetchone()
