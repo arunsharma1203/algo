@@ -704,6 +704,36 @@ class TestConsensusV3SixLayerInvariants(unittest.TestCase):
                 self.assertEqual(reason, "FINBERT_REGULATORY_SHOCK_EXIT")
                 conn.close()
 
+        # 4. Archival staleness immunity: 2016 NSE filings (>7d) MUST be discarded & never trigger shock flags,
+        #    while fresh <=72h regulatory shocks MUST trigger!
+        now_dt = datetime.now()
+        stale_2016_ts = datetime(2016, 6, 30, 12, 0, 0).timestamp()
+        old_5d_ts = (now_dt - timedelta(days=5.2)).timestamp()
+        fresh_4h_ts = (now_dt - timedelta(hours=4)).timestamp()
+
+        with patch("app.analytics.nlp_engine._fetch_live_exchange_and_rss_news", return_value=[
+            {"title": "MCX: SEBI ban fraud default warning letter", "summary": "Archival 2016 row", "providerPublishTime": stale_2016_ts, "source": "NSE_CORPORATE_FILING"},
+        ]), patch.object(nlp_engine.analyzer, "polarity_scores", return_value={"neg": 0.96, "neu": 0.02, "pos": 0.02, "compound": -0.94}):
+            res_stale = nlp_engine.analyze_ticker_news("MCX.NS", as_of_timestamp=now_dt)
+            self.assertEqual(res_stale["articles_analyzed"], 0)
+            self.assertFalse(res_stale["is_severe_negative_shock"])
+
+        # 5.2-day-old item is within 7d sentiment window, but >72h shock cutoff -> must NOT trigger emergency shock exit!
+        with patch("app.analytics.nlp_engine._fetch_live_exchange_and_rss_news", return_value=[
+            {"title": "MCX: SEBI order warning letter", "summary": "5d ago", "providerPublishTime": old_5d_ts, "source": "NSE_CORPORATE_FILING"},
+        ]), patch.object(nlp_engine.analyzer, "polarity_scores", return_value={"neg": 0.92, "neu": 0.05, "pos": 0.03, "compound": -0.89}):
+            res_5d = nlp_engine.analyze_ticker_news("MCX.NS", as_of_timestamp=now_dt)
+            self.assertEqual(res_5d["articles_analyzed"], 1)
+            self.assertFalse(res_5d["is_severe_negative_shock"])
+
+        # Fresh 4-hour-old item (<72h) WITH severe neg >= 0.85 + shock keyword -> MUST trigger is_severe_negative_shock!
+        with patch("app.analytics.nlp_engine._fetch_live_exchange_and_rss_news", return_value=[
+            {"title": "MCX: SEBI order forensic audit", "summary": "4h ago", "providerPublishTime": fresh_4h_ts, "source": "NSE_CORPORATE_FILING"},
+        ]), patch.object(nlp_engine.analyzer, "polarity_scores", return_value={"neg": 0.93, "neu": 0.05, "pos": 0.02, "compound": -0.91}):
+            res_fresh = nlp_engine.analyze_ticker_news("MCX.NS", as_of_timestamp=now_dt)
+            self.assertEqual(res_fresh["articles_analyzed"], 1)
+            self.assertTrue(res_fresh["is_severe_negative_shock"])
+
 
 if __name__ == "__main__":
     unittest.main()

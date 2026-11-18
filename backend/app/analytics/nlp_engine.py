@@ -1,9 +1,13 @@
+import json
 import logging
+import os
+import subprocess
+import sys
 import threading
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -57,12 +61,18 @@ def _get_shared_nse_session(headers: Dict[str, str], timeout_sec: float = 2.0) -
         return _NSE_SHARED_SESSION
 
 
-def _fetch_live_exchange_and_rss_news(base_symbol: str, timeout_sec: float = 2.5) -> List[Dict[str, Any]]:
+def _fetch_live_exchange_and_rss_news(
+    base_symbol: str,
+    timeout_sec: float = 2.5,
+    max_filing_age_days: float = 7.0,
+) -> List[Dict[str, Any]]:
     """
     Fetches live corporate announcements from NSE India + Google News India Business RSS
-    strictly for point-in-time live risk monitoring (cached 15m; fails safely to `[]` if offline).
+    strictly within `max_filing_age_days` (default 7d; cached 15m; fails safely to `[]` if offline).
+    Discards stale archival exchange rows (e.g. multi-year-old announcements) before RSS fallback check.
     """
     now_ep = time.time()
+    now_dt = datetime.now()
     cached = _TICKER_NEWS_CACHE.get(base_symbol)
     if cached and (now_ep - cached[0]) < _NEWS_CACHE_TTL_SEC:
         return cached[1]
@@ -81,28 +91,34 @@ def _fetch_live_exchange_and_rss_news(base_symbol: str, timeout_sec: float = 2.5
         if r_nse.status_code == 200:
             data = r_nse.json()
             if isinstance(data, list):
-                for row in data[:8]:
+                for row in data[:10]:
                     desc = str(row.get("desc") or "").strip()
                     att = str(row.get("attchmntText") or "").strip()
                     dt_raw = str(row.get("an_dt") or "").strip()
-                    pub_ts = None
+                    parsed_dt = None
                     for fmt in ("%d-%b-%Y %H:%M:%S", "%d-%b-%Y %H:%M", "%Y-%m-%d %H:%M:%S"):
                         try:
-                            pub_ts = datetime.strptime(dt_raw, fmt).timestamp()
+                            parsed_dt = datetime.strptime(dt_raw, fmt)
                             break
                         except Exception:
                             continue
+                    # Enforce strict recency window so multi-month/year archival NSE rows are never scored as live news
+                    if parsed_dt is None:
+                        continue
+                    age_d = (now_dt - parsed_dt).total_seconds() / 86400.0
+                    if age_d > max_filing_age_days or age_d < -0.1:
+                        continue
                     if desc or att:
                         items.append({
                             "title": f"{base_symbol}: {desc}",
                             "summary": att[:280],
-                            "providerPublishTime": pub_ts,
+                            "providerPublishTime": parsed_dt.timestamp(),
                             "source": "NSE_CORPORATE_FILING",
                         })
     except Exception:
         pass
 
-    # 2. Google News India Business RSS Fallback / Supplement (`when:2d`)
+    # 2. Google News India Business RSS Fallback / Supplement (`when:2d`) whenever recent NSE filings < 3
     if len(items) < 3:
         try:
             import requests
@@ -119,11 +135,14 @@ def _fetch_live_exchange_and_rss_news(base_symbol: str, timeout_sec: float = 2.5
                     if pub_s:
                         try:
                             pdt = parsedate_to_datetime(pub_s)
-                            if pdt.tzinfo is not None:
-                                pdt = pdt.astimezone(timezone.utc).replace(tzinfo=None)
                             pub_ts = pdt.timestamp()
                         except Exception:
                             pub_ts = None
+                    if pub_ts is None:
+                        continue
+                    rss_age_d = (now_ep - pub_ts) / 86400.0
+                    if rss_age_d > max_filing_age_days or rss_age_d < -0.1:
+                        continue
                     if title:
                         items.append({
                             "title": title,
@@ -166,91 +185,137 @@ FINANCIAL_LEXICON_UPDATES = {
 }
 
 
+_FINBERT_SUBPROCESS_SCRIPT = """
+import json, os, sys
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["OMP_NUM_THREADS"] = "1"
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+model_name = sys.argv[1]
+try:
+    tok = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+    mdl = AutoModelForSequenceClassification.from_pretrained(model_name, local_files_only=True)
+except Exception:
+    tok = AutoTokenizer.from_pretrained(model_name)
+    mdl = AutoModelForSequenceClassification.from_pretrained(model_name)
+mdl.eval()
+dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+mdl.to(dev)
+id2label = {i: mdl.config.id2label[i].lower() for i in range(len(mdl.config.id2label))}
+sys.stdout.write(json.dumps({"ready": True, "device": str(dev)}) + "\\n")
+sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    txt = str(req.get("text") or "")
+    inputs = tok(txt, return_tensors="pt", truncation=True, max_length=512, padding=True)
+    inputs = {k: v.to(dev) for k, v in inputs.items()}
+    with torch.no_grad():
+        probs = torch.nn.functional.softmax(mdl(**inputs).logits, dim=-1)[0].cpu().tolist()
+    lmap = {id2label[i]: float(probs[i]) for i in range(len(probs))}
+    pos = lmap.get("positive", 0.0)
+    neg = lmap.get("negative", 0.0)
+    neu = lmap.get("neutral", 0.0)
+    sys.stdout.write(json.dumps({
+        "neg": round(neg, 4),
+        "neu": round(neu, 4),
+        "pos": round(pos, 4),
+        "compound": round(pos - neg, 4),
+    }) + "\\n")
+    sys.stdout.flush()
+"""
+
+
 class FinBERTAnalyzer:
     """
-    FinBERT Neural Sentiment Analyzer (ProsusAI/finbert).
-    Processes financial texts into probability distributions over positive, negative, and neutral classes.
-    Includes seamless lazy initialization and defensive fallback to VADER for offline/test isolation.
+    Fault-Isolated FinBERT Neural Sentiment Analyzer (`ProsusAI/finbert`).
+    Runs neural PyTorch inference inside a dedicated persistent child worker process so PyTorch's
+    `libomp` / Metal runtime never collides with LightGBM/Qlib OpenMP inside the FastAPI server!
+    Includes seamless defensive fallback to VADER for offline/stdlib test isolation.
     """
 
     def __init__(self, model_name: str = "ProsusAI/finbert"):
         self.model_name = model_name
-        self._tokenizer = None
-        self._model = None
-        self._device = None
+        self._proc: Optional[subprocess.Popen] = None
+        self._model = None  # Truthy sentinel once neural worker is active
         self._load_failed = False
         self._fallback_analyzer = None
+        self._infer_lock = threading.RLock()
         self.lexicon = FINANCIAL_LEXICON_UPDATES.copy()
 
-    def _load_model(self):
-        if self._model is not None or self._load_failed:
-            return
-        try:
-            import torch
-            from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    def _ensure_worker(self) -> bool:
+        if self._proc is not None and self._proc.poll() is None:
+            return True
+        if self._load_failed:
+            return False
+        with self._infer_lock:
+            if self._proc is not None and self._proc.poll() is None:
+                return True
+            if self._load_failed:
+                return False
+            try:
+                # Verify torch & transformers exist in this Python environment before spawning
+                import importlib.util
+                if importlib.util.find_spec("torch") is None or importlib.util.find_spec("transformers") is None:
+                    self._load_failed = True
+                    return False
 
-            logger.info(f"[FinBERT] Loading model {self.model_name}...")
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            self._model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
-            self._model.eval()
-
-            # Assign device (MPS on Apple Silicon, CUDA, or CPU)
-            if torch.cuda.is_available():
-                self._device = torch.device("cuda")
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                self._device = torch.device("mps")
-            else:
-                self._device = torch.device("cpu")
-
-            self._model.to(self._device)
-            logger.info(f"[FinBERT] Successfully initialized on device: {self._device}")
-        except Exception as e:
-            logger.warning(f"[FinBERT] Initialization error ({e}). Engaging defensive fallback.")
-            self._load_failed = True
+                env = os.environ.copy()
+                env["TOKENIZERS_PARALLELISM"] = "false"
+                env["OMP_NUM_THREADS"] = "1"
+                proc = subprocess.Popen(
+                    [sys.executable, "-B", "-c", _FINBERT_SUBPROCESS_SCRIPT, self.model_name],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                    env=env,
+                )
+                ready_line = proc.stdout.readline().strip() if proc.stdout else ""
+                info = json.loads(ready_line) if ready_line else {}
+                if not info.get("ready"):
+                    proc.kill()
+                    raise RuntimeError("FinBERT worker did not report ready")
+                self._proc = proc
+                self._model = True
+                logger.info(f"[FinBERT] Isolated neural worker initialized on {info.get('device')}.")
+                return True
+            except Exception as e:
+                logger.warning(f"[FinBERT] Worker initialization fallback ({e}). Using VADER.")
+                self._proc = None
+                self._model = None
+                self._load_failed = True
+                return False
 
     def polarity_scores(self, text: str) -> Dict[str, float]:
         """
-        Calculates polarity scores using FinBERT deep neural classification.
+        Calculates polarity scores using isolated FinBERT deep neural classification.
         Output dictionary matches standard sentiment interface:
         {'neg': float, 'neu': float, 'pos': float, 'compound': float}
-        where compound = pos - neg (-1.0 to +1.0).
         """
-        self._load_model()
-
-        if self._model is not None and self._tokenizer is not None:
-            try:
-                import torch
-
-                inputs = self._tokenizer(
-                    text,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=512,
-                    padding=True
-                )
-                if self._device is not None:
-                    inputs = {k: v.to(self._device) for k, v in inputs.items()}
-
-                with torch.no_grad():
-                    outputs = self._model(**inputs)
-                    probs = torch.nn.functional.softmax(outputs.logits, dim=-1)[0].cpu().numpy()
-
-                id2label = self._model.config.id2label
-                label2prob = {id2label[i].lower(): float(probs[i]) for i in range(len(probs))}
-
-                pos = float(label2prob.get("positive", 0.0))
-                neg = float(label2prob.get("negative", 0.0))
-                neu = float(label2prob.get("neutral", 0.0))
-                compound = pos - neg
-
-                return {
-                    "neg": round(neg, 4),
-                    "neu": round(neu, 4),
-                    "pos": round(pos, 4),
-                    "compound": round(compound, 4)
-                }
-            except Exception as e:
-                logger.warning(f"[FinBERT] Inference exception: {e}")
+        if self._ensure_worker():
+            with self._infer_lock:
+                try:
+                    assert self._proc is not None and self._proc.stdin is not None and self._proc.stdout is not None
+                    self._proc.stdin.write(json.dumps({"text": str(text or "")[:1500]}) + "\n")
+                    self._proc.stdin.flush()
+                    out_line = self._proc.stdout.readline().strip()
+                    if out_line:
+                        return json.loads(out_line)
+                except Exception as e:
+                    logger.warning(f"[FinBERT] Worker pipe exception ({e}); falling back cleanly.")
+                    try:
+                        if self._proc is not None:
+                            self._proc.kill()
+                    except Exception:
+                        pass
+                    self._proc = None
+                    self._model = None
 
         # Defensive fallback to VADER
         if self._fallback_analyzer is None:
@@ -276,27 +341,33 @@ class FinancialSentimentAnalyzer:
         self.analyzer = FinBERTAnalyzer()
         self.engine_name = "FinBERT Financial Sentiment Engine"
 
-    def analyze_ticker_news(self, ticker: str, as_of_timestamp: Optional[datetime] = None) -> Dict[str, Any]:
+    def analyze_ticker_news(
+        self,
+        ticker: str,
+        as_of_timestamp: Optional[datetime] = None,
+        max_age_days: float = 7.0,
+        shock_max_age_days: float = 3.0,
+    ) -> Dict[str, Any]:
         """
-        Fetches news for a ticker and calculates point-in-time sentiment using FinBERT.
+        Fetches news for a ticker and calculates recency-weighted, point-in-time sentiment using FinBERT.
 
-        CRITICAL RULE:
-        Articles published AFTER as_of_timestamp are strictly filtered out to prevent future-news leakage.
+        CRITICAL RULES:
+          1. Future articles (`pub_dt > as_of_timestamp`) are strictly discarded (zero lookahead bias).
+          2. Stale articles (`age > max_age_days`, default 7d) are strictly discarded (zero archival contamination).
+          3. Emergency regulatory shock flags (`is_severe_negative_shock`) require fresh filings `<= shock_max_age_days` (default 72h).
         """
         if as_of_timestamp is None:
             as_of_timestamp = datetime.now()
 
         try:
             base_ticker = ticker.split('.')[0].strip().upper()
-            # Strictly point-in-time: only query live feeds when evaluating current/recent timestamps (<= 3 days);
-            # never leak current live news onto historical backtest timestamps!
-            age_days = abs((datetime.now() - as_of_timestamp).total_seconds()) / 86400.0
-            news_items = _fetch_live_exchange_and_rss_news(base_ticker) if age_days <= 3.0 else []
+            eval_lag_days = abs((datetime.now() - as_of_timestamp).total_seconds()) / 86400.0
+            news_items = _fetch_live_exchange_and_rss_news(base_ticker, max_filing_age_days=max_age_days) if eval_lag_days <= 3.0 else []
 
             if not news_items or len(news_items) == 0:
                 return {
                     "score": 0.0,
-                    "headline": "No recent exchange news available.",
+                    "headline": "No recent exchange news available (last 7d).",
                     "status": "unavailable",
                     "articles_analyzed": 0,
                     "max_neg_prob": 0.0,
@@ -305,23 +376,29 @@ class FinancialSentimentAnalyzer:
                     "engine": "FinBERT (ProsusAI/finbert)"
                 }
 
-            total_compound = 0.0
+            weighted_compound_sum = 0.0
+            weight_sum = 0.0
             best_headline = ""
             max_intensity = -1.0
             max_neg_prob = 0.0
+            recent_shock_neg_prob = 0.0
             shock_hits_found: List[str] = []
             valid_news = 0
 
             for item in news_items:
-                # 1. Point-in-time filter: check publication time
+                # 1. Point-in-time & staleness filter: require valid publication timestamp within [as_of - max_age_days, as_of]
                 pub_time = item.get('providerPublishTime')
-                if pub_time:
-                    try:
-                        pub_dt = datetime.fromtimestamp(pub_time)
-                        if pub_dt > as_of_timestamp:
-                            continue
-                    except Exception:
-                        pass
+                if not pub_time:
+                    continue
+                try:
+                    pub_dt = datetime.fromtimestamp(float(pub_time))
+                except Exception:
+                    continue
+                if pub_dt > as_of_timestamp:
+                    continue
+                item_age_days = (as_of_timestamp - pub_dt).total_seconds() / 86400.0
+                if item_age_days > max_age_days:
+                    continue
 
                 title = item.get('title', '')
                 if not title and 'content' in item:
@@ -342,20 +419,26 @@ class FinancialSentimentAnalyzer:
                 scores = self.analyzer.polarity_scores(text)
                 neg_p = float(scores.get("neg", 0.0))
                 max_neg_prob = max(max_neg_prob, neg_p)
-                for kw in SEVERE_REGULATORY_SHOCK_KEYWORDS:
-                    if kw in text_lc and kw not in shock_hits_found:
-                        shock_hits_found.append(kw)
 
-                total_compound += scores['compound']
-                intensity = abs(scores['compound'])
+                # Severe regulatory shock veto/exit applies strictly to fresh news (<= shock_max_age_days, default 72h)
+                if item_age_days <= shock_max_age_days:
+                    recent_shock_neg_prob = max(recent_shock_neg_prob, neg_p)
+                    for kw in SEVERE_REGULATORY_SHOCK_KEYWORDS:
+                        if kw in text_lc and kw not in shock_hits_found:
+                            shock_hits_found.append(kw)
+
+                recency_w = 1.0 if item_age_days <= 1.0 else (0.85 if item_age_days <= 3.0 else 0.60)
+                weighted_compound_sum += float(scores['compound']) * recency_w
+                weight_sum += recency_w
+                intensity = abs(float(scores['compound'])) * recency_w
                 if intensity > max_intensity:
                     max_intensity = intensity
                     best_headline = title
 
-            if valid_news == 0:
+            if valid_news == 0 or weight_sum <= 0.0:
                 return {
                     "score": 0.0,
-                    "headline": "Recent filings reviewed (neutral/no relevant mentions).",
+                    "headline": "Recent filings reviewed (neutral/no relevant mentions in last 7d).",
                     "status": "neutral",
                     "articles_analyzed": 0,
                     "max_neg_prob": 0.0,
@@ -364,9 +447,9 @@ class FinancialSentimentAnalyzer:
                     "engine": "FinBERT (ProsusAI/finbert)"
                 }
 
-            avg_compound = total_compound / valid_news
+            avg_compound = weighted_compound_sum / weight_sum
             normalized_score = round(avg_compound * 100.0, 1)
-            is_severe_shock = bool(max_neg_prob >= 0.85 and len(shock_hits_found) > 0)
+            is_severe_shock = bool(recent_shock_neg_prob >= 0.85 and len(shock_hits_found) > 0)
 
             return {
                 "score": normalized_score,
