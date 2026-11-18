@@ -253,7 +253,19 @@ class ConsensusV3Orchestrator:
         fii_dii: Dict[str, Any] = {}
         try:
             from app.analytics.fii_dii_service import FiiDiiService
-            fii_dii = FiiDiiService.get_latest_macro_flows() or {}
+            raw_flows = FiiDiiService.get_latest_flows(limit=5) or {}
+            if raw_flows.get("status") == "success":
+                fii_net = float((raw_flows.get("fii") or {}).get("net") or 0.0)
+                dii_net = float((raw_flows.get("dii") or {}).get("net") or 0.0)
+                fii_dii = {
+                    "status": "AVAILABLE",
+                    "date": raw_flows.get("disclosure_date"),
+                    "fii_net_crores": round(fii_net, 2),
+                    "dii_net_crores": round(dii_net, 2),
+                    "net_total_crores": round(fii_net + dii_net, 2),
+                    "market_sentiment": raw_flows.get("market_sentiment"),
+                    "summary": raw_flows.get("summary"),
+                }
         except Exception:
             fii_dii = {}
 

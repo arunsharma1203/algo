@@ -246,17 +246,6 @@ class ConsensusArbiter:
                 decision, reason = "ABSTAIN", "BELOW_TOP15PCT_QLIB_20D_RANK_OR_NEGATIVE_NET"
             else:
                 decision, reason = "APPROVED_20D_REBALANCE_CANDIDATE", None
-                if nlp_analyzer is not None:
-                    try:
-                        nlp_res = nlp_analyzer.analyze_ticker_news(c["ticker"])
-                        if nlp_res.get("is_severe_negative_shock"):
-                            decision, reason = "ABSTAIN", "FINBERT_SEVERE_REGULATORY_SHOCK_VETO"
-                            finbert_badge = "NLP:SHOCK_VETO"
-                        else:
-                            sc = float(nlp_res.get("score", 0.0))
-                            finbert_badge = "NLP:BULL" if sc >= 0.20 else ("NLP:BEAR" if sc <= -0.25 else "NLP:NEUTRAL")
-                    except Exception:
-                        finbert_badge = "NLP:OFFLINE_OK"
 
             rec = {
                 "book": "BOOK1_SWING_CNC_CORE",
@@ -300,6 +289,38 @@ class ConsensusArbiter:
                 abstained.append(rec)
 
         approved.sort(key=lambda r: r["qlib_pct_rank"], reverse=True)
+
+        # Vet only the top ranked buyable leaders (plus replacement buffer) via live FinBERT + NSE Corporate Filings
+        if nlp_analyzer is not None and approved:
+            vet_limit = max(8, target_slots + 2)
+            clean_approved: List[Dict[str, Any]] = []
+            vetted_clean_count = 0
+            for rec in approved:
+                if vetted_clean_count < vet_limit:
+                    try:
+                        nlp_res = nlp_analyzer.analyze_ticker_news(rec["ticker"])
+                        if nlp_res.get("is_severe_negative_shock"):
+                            rec["decision"] = "ABSTAIN"
+                            rec["abstain_reason"] = "FINBERT_SEVERE_REGULATORY_SHOCK_VETO"
+                            rec["telemetry"]["finbert_badge"] = "NLP:SHOCK_VETO"
+                            abstained.insert(0, rec)
+                            continue
+                        sc = float(nlp_res.get("score", 0.0))
+                        n_art = int(nlp_res.get("articles_analyzed", 0))
+                        if sc >= 15.0:
+                            rec["telemetry"]["finbert_badge"] = f"NLP:BULL({n_art})"
+                        elif sc <= -20.0:
+                            rec["telemetry"]["finbert_badge"] = f"NLP:BEAR({n_art})"
+                        elif n_art > 0:
+                            rec["telemetry"]["finbert_badge"] = f"NLP:FILINGS_OK({n_art})"
+                        else:
+                            rec["telemetry"]["finbert_badge"] = "NLP:NEUTRAL"
+                    except Exception:
+                        rec["telemetry"]["finbert_badge"] = "NLP:OFFLINE_OK"
+                    vetted_clean_count += 1
+                clean_approved.append(rec)
+            approved = clean_approved
+
         return {
             "as_of_date": scored_snapshot.get("as_of_date"),
             "macro_shield": shield,

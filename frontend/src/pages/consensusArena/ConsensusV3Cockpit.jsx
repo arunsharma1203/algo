@@ -611,12 +611,13 @@ export default function ConsensusV3Cockpit() {
                   <span className="px-2 py-0.5 rounded bg-sky-50 text-sky-900 border border-sky-200 font-mono text-[10px] font-semibold">
                     B2 Shadow Gate: {shadowGate.completed_sessions ?? 0}/{shadowGate.target_sessions ?? 60} sessions
                   </span>
-                  {fiiDii?.status === 'AVAILABLE' && (
+                  {(fiiDii?.status === 'AVAILABLE' || fiiDii?.status === 'success') && (
                     <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-900 border border-emerald-200 font-mono text-[10px] font-semibold">
-                      FII {Number(fiiDii.fii_net_crores || 0) >= 0 ? '+' : ''}
-                      {Number(fiiDii.fii_net_crores || 0).toFixed(0)}Cr • DII{' '}
-                      {Number(fiiDii.dii_net_crores || 0) >= 0 ? '+' : ''}
-                      {Number(fiiDii.dii_net_crores || 0).toFixed(0)}Cr ({fiiDii.date})
+                      FII {Number(fiiDii.fii_net_crores ?? fiiDii?.fii?.net ?? 0) >= 0 ? '+' : ''}
+                      {Number(fiiDii.fii_net_crores ?? fiiDii?.fii?.net ?? 0).toFixed(0)}Cr • DII{' '}
+                      {Number(fiiDii.dii_net_crores ?? fiiDii?.dii?.net ?? 0) >= 0 ? '+' : ''}
+                      {Number(fiiDii.dii_net_crores ?? fiiDii?.dii?.net ?? 0).toFixed(0)}Cr (
+                      {fiiDii.date || fiiDii.disclosure_date})
                     </span>
                   )}
                 </div>

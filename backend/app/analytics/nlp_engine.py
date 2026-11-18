@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -33,9 +34,30 @@ SEVERE_REGULATORY_SHOCK_KEYWORDS = (
 
 _TICKER_NEWS_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 _NEWS_CACHE_TTL_SEC = 900.0  # 15-minute live cache per ticker
+_NSE_COOKIE_LOCK = threading.Lock()
+_NSE_SHARED_SESSION: Any = None
+_NSE_COOKIE_INIT_TS: float = 0.0
+_NSE_COOKIE_TTL_SEC = 600.0  # Reuse NSE session cookies for 10 minutes
 
 
-def _fetch_live_exchange_and_rss_news(base_symbol: str, timeout_sec: float = 3.5) -> List[Dict[str, Any]]:
+def _get_shared_nse_session(headers: Dict[str, str], timeout_sec: float = 2.0) -> Any:
+    global _NSE_SHARED_SESSION, _NSE_COOKIE_INIT_TS
+    import requests
+
+    now_ep = time.time()
+    with _NSE_COOKIE_LOCK:
+        if _NSE_SHARED_SESSION is None or (now_ep - _NSE_COOKIE_INIT_TS) > _NSE_COOKIE_TTL_SEC:
+            s = requests.Session()
+            try:
+                s.get("https://www.nseindia.com", headers=headers, timeout=timeout_sec)
+            except Exception:
+                pass
+            _NSE_SHARED_SESSION = s
+            _NSE_COOKIE_INIT_TS = now_ep
+        return _NSE_SHARED_SESSION
+
+
+def _fetch_live_exchange_and_rss_news(base_symbol: str, timeout_sec: float = 2.5) -> List[Dict[str, Any]]:
     """
     Fetches live corporate announcements from NSE India + Google News India Business RSS
     strictly for point-in-time live risk monitoring (cached 15m; fails safely to `[]` if offline).
@@ -51,12 +73,9 @@ def _fetch_live_exchange_and_rss_news(base_symbol: str, timeout_sec: float = 3.5
         "Accept": "application/json, text/xml, application/rss+xml, */*",
     }
 
-    # 1. Official NSE Corporate Announcements (Tier-1 Exchange Filings)
+    # 1. Official NSE Corporate Announcements (Tier-1 Exchange Filings via shared cookie session)
     try:
-        import requests
-
-        s = requests.Session()
-        s.get("https://www.nseindia.com", headers=headers, timeout=2.5)
+        s = _get_shared_nse_session(headers, timeout_sec=2.0)
         nse_url = f"https://www.nseindia.com/api/corporate-announcements?index=equities&symbol={urllib.parse.quote(base_symbol)}"
         r_nse = s.get(nse_url, headers={**headers, "Referer": "https://www.nseindia.com/companies-listing/corporate-filings-announcements"}, timeout=timeout_sec)
         if r_nse.status_code == 200:
@@ -375,3 +394,8 @@ class FinancialSentimentAnalyzer:
 
 
 nlp_engine = FinancialSentimentAnalyzer()
+
+
+def get_nlp_analyzer() -> FinancialSentimentAnalyzer:
+    """Returns the process-wide FinBERT + NSE Corporate Announcements singleton."""
+    return nlp_engine

@@ -638,6 +638,72 @@ class TestConsensusV3SixLayerInvariants(unittest.TestCase):
             closed_pos = bridge.get_positions_and_reservations()["closed_positions"][0]
             self.assertEqual(closed_pos["exit_reason"], "INTRACYCLE_INSTITUTIONAL_DISTRIBUTION_EXIT")
 
+    def test_finbert_analyzer_export_shock_veto_and_intracycle_shock_exit(self):
+        from unittest.mock import patch
+        from app.analytics.nlp_engine import get_nlp_analyzer, nlp_engine
+
+        # 1. Unmocked singleton export check (prevents silent ImportError regression!)
+        self.assertIs(get_nlp_analyzer(), nlp_engine)
+
+        # 2. Verify ConsensusArbiter vetoes severe FinBERT shock & formats clean NSE filings badge
+        snap = {
+            "as_of_date": "2026-11-17",
+            "macro_shield": {"regime": "BULL_FULL_DEPLOYMENT", "target_slots": 3},
+            "candidates": [
+                {
+                    "ticker": "SHOCKCO.NS", "symbol": "SHOCKCO", "sector": "PHARMA",
+                    "instrument_key": "NSE_EQ|INE000001111", "as_of_date": "2026-11-17",
+                    "close": 1000.0, "sma_alignment_ok": True, "qlib_pct_rank": 0.96,
+                    "qlib_expected_gross_bps": 120.0, "rsi": 58.0, "adx": 28.0,
+                    "atr_pct": 2.1, "mom_12_1_pct": 42.0, "near_52w_ratio": 0.95,
+                },
+                {
+                    "ticker": "CLEANCO.NS", "symbol": "CLEANCO", "sector": "AUTO",
+                    "instrument_key": "NSE_EQ|INE000002222", "as_of_date": "2026-11-17",
+                    "close": 500.0, "sma_alignment_ok": True, "qlib_pct_rank": 0.92,
+                    "qlib_expected_gross_bps": 95.0, "rsi": 60.0, "adx": 30.0,
+                    "atr_pct": 1.9, "mom_12_1_pct": 38.0, "near_52w_ratio": 0.94,
+                },
+            ],
+        }
+
+        def _fake_analyze(sym):
+            if "SHOCKCO" in sym:
+                return {"score": -91.0, "articles_analyzed": 3, "max_neg_prob": 0.92, "is_severe_negative_shock": True}
+            return {"score": 4.5, "articles_analyzed": 8, "max_neg_prob": 0.04, "is_severe_negative_shock": False}
+
+        with patch.object(nlp_engine, "analyze_ticker_news", side_effect=_fake_analyze):
+            arb = ConsensusArbiter.arbitrate_book1_20d_rebalance(snap, slot_cap_inr=20000.0, check_live_finbert=True)
+            self.assertEqual(len(arb["approved_rebalance_leaders"]), 1)
+            self.assertEqual(arb["approved_rebalance_leaders"][0]["symbol"], "CLEANCO")
+            self.assertEqual(arb["approved_rebalance_leaders"][0]["telemetry"]["finbert_badge"], "NLP:FILINGS_OK(8)")
+            self.assertEqual(arb["top_abstained_sample"][0]["abstain_reason"], "FINBERT_SEVERE_REGULATORY_SHOCK_VETO")
+
+            # 3. Verify intra-cycle >=3% intraday drop + severe FinBERT shock triggers FINBERT_REGULATORY_SHOCK_EXIT!
+            with tempfile.TemporaryDirectory() as tmp:
+                db_p = os.path.join(tmp, "finbert_exit.db")
+                conn = sqlite3.connect(db_p)
+                conn.execute("CREATE TABLE ohlcv (ticker TEXT, date TEXT, timeframe TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL);")
+                base_d = datetime(2026, 1, 1)
+                rows = [
+                    ("SHOCKCO.NS", (base_d + timedelta(days=i)).strftime("%Y-%m-%d"), "1d", 1000.0, 1005.0, 995.0, 1000.0, 100000.0)
+                    for i in range(205)
+                ]
+                conn.executemany("INSERT INTO ohlcv VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                conn.commit()
+                bridge = ConsensusArenaExecutionBridge(db_path=db_p, session_id="fb_exit")
+                reason = bridge._check_book1_intracycle_breakdown(
+                    conn=conn,
+                    sym="SHOCKCO.NS",
+                    entry_date_s=(base_d + timedelta(days=204)).strftime("%Y-%m-%d"),
+                    curr_px=962.0,  # -3.8% intraday drop vs 1000.0 prior close
+                    today_s=(base_d + timedelta(days=204)).strftime("%Y-%m-%d"),
+                    hm_now="11:15",
+                    allow_live_finbert=True,
+                )
+                self.assertEqual(reason, "FINBERT_REGULATORY_SHOCK_EXIT")
+                conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
