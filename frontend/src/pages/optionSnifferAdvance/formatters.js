@@ -162,7 +162,11 @@ export function classifyStrategyEra(strategyMode, regimeContext = {}, entryTime 
   if (
     mode === 'LONG_BOOK_ONLY' ||
     mode === 'DUAL_BOOK_NAKED' ||
-    mode === 'DUAL_BOOK_HEDGED'
+    mode === 'DUAL_BOOK_HEDGED' ||
+    mode === 'SHADOW_DRY_RUN_AB' ||
+    mode === 'SHADOW_LIVE_BOOK_A' ||
+    mode === 'SHADOW_LIVE_BOOK_B' ||
+    mode === 'SHADOW_LIVE_AB'
   ) {
     return 'LIVE_BROKER';
   }

@@ -99,8 +99,181 @@ export default function OverviewTab({
     ? shCohort.total_charges_inr
     : shadowLedger?.total_canonical_charges_inr;
 
+  const shadowMirror = liveStatus?.shadow_mirror || null;
+  const regimeBanners = shadowMirror?.regime_banners || null;
+  const vixBannerVal = regimeBanners?.india_vix;
+  const vixBannerHigh = regimeBanners?.vix_high_warning === true;
+  const dteBannerVal = regimeBanners?.front_dte;
+  const expiryDayWarn = regimeBanners?.is_expiry_day === true;
+  const mirrorRecent = Array.isArray(shadowMirror?.recent_packages)
+    ? shadowMirror.recent_packages.slice(0, 6)
+    : [];
+
   return (
     <div className="space-y-5">
+      {/* 0. Regime Watch Banners (VIX > 18 & Expiry Day) + Isolated Shadow Mirror Status */}
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div
+          className={`rounded-xl border p-3.5 flex items-center justify-between shadow-2xs ${
+            !hasValidNumber(vixBannerVal)
+              ? 'bg-white border-slate-200 text-slate-800'
+              : vixBannerHigh
+              ? 'bg-rose-50 border-rose-300 text-rose-950'
+              : 'bg-emerald-50/70 border-emerald-300 text-emerald-950'
+          }`}
+        >
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wide">
+              India VIX Watch (&gt; 18 Gate)
+            </div>
+            <div className="text-lg font-bold font-mono mt-0.5 tabular-nums">
+              {hasValidNumber(vixBannerVal) ? formatNumber(vixBannerVal) : UNAVAILABLE_LABEL}
+            </div>
+          </div>
+          <span
+            className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold ${
+              !hasValidNumber(vixBannerVal)
+                ? 'bg-slate-200 text-slate-700'
+                : vixBannerHigh
+                ? 'bg-rose-600 text-white'
+                : 'bg-emerald-600 text-white'
+            }`}
+          >
+            {!hasValidNumber(vixBannerVal) ? 'UNAVAILABLE' : vixBannerHigh ? 'VIX > 18' : 'VIX <= 18'}
+          </span>
+        </div>
+
+        <div
+          className={`rounded-xl border p-3.5 flex items-center justify-between shadow-2xs ${
+            !hasValidNumber(dteBannerVal)
+              ? 'bg-white border-slate-200 text-slate-800'
+              : expiryDayWarn
+              ? 'bg-rose-50 border-rose-300 text-rose-950'
+              : 'bg-emerald-50/70 border-emerald-300 text-emerald-950'
+          }`}
+        >
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wide">
+              Expiry Watch ({regimeBanners?.front_expiry || UNAVAILABLE_LABEL})
+            </div>
+            <div className="text-lg font-bold font-mono mt-0.5 tabular-nums">
+              {hasValidNumber(dteBannerVal) ? `DTE ${dteBannerVal}` : UNAVAILABLE_LABEL}
+            </div>
+          </div>
+          <span
+            className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold ${
+              !hasValidNumber(dteBannerVal)
+                ? 'bg-slate-200 text-slate-700'
+                : expiryDayWarn
+                ? 'bg-rose-600 text-white'
+                : 'bg-emerald-600 text-white'
+            }`}
+          >
+            {!hasValidNumber(dteBannerVal) ? 'UNAVAILABLE' : expiryDayWarn ? 'EXPIRY DAY' : 'NON-EXPIRY'}
+          </span>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-white p-3.5 flex items-center justify-between shadow-2xs">
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wide text-slate-700">
+              Isolated Shadow V1 Mirror
+            </div>
+            <div className="text-xs font-mono text-slate-800 mt-1">
+              Book A: <strong>{shadowMirror?.book_a_tier || 'DRY_RUN'}</strong> • Book B:{' '}
+              <strong>{shadowMirror?.book_b_tier || 'DRY_RUN'}</strong>
+            </div>
+            <div className="text-[11px] font-mono text-slate-500 mt-0.5">
+              Dry-Run Closed: {shadowMirror?.dry_run_completed_count ?? 0} • Live Closed:{' '}
+              {shadowMirror?.live_completed_count ?? 0}
+            </div>
+          </div>
+          <span
+            className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold ${
+              shadowMirror?.book_a_tier === 'LIVE_ARMED' || shadowMirror?.book_b_tier === 'LIVE_ARMED'
+                ? 'bg-rose-600 text-white'
+                : 'bg-indigo-100 text-indigo-900 border border-indigo-200'
+            }`}
+          >
+            {shadowMirror?.book_a_tier === 'LIVE_ARMED' || shadowMirror?.book_b_tier === 'LIVE_ARMED'
+              ? 'LIVE MIRROR'
+              : 'DRY-RUN ACTIVE'}
+          </span>
+        </div>
+      </section>
+
+      {mirrorRecent.length > 0 && (
+        <section className="bg-white rounded-xl border border-slate-200 shadow-2xs p-4 sm:p-5 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-bold text-slate-900">
+                Shadow V1 Mirror Execution Log (Dry-Run &amp; Live Audit)
+              </h2>
+              <p className="text-xs text-slate-500">
+                Isolated atomic 2-leg Buy-First / Short-First-Exit (Book A) and Cancel-First SL-L
+                (Book B) mirror ledger.
+              </p>
+            </div>
+            <span className="text-xs font-mono text-slate-500">
+              Broker Mutations Sent: {shadowMirror?.mutation_call_count ?? 0}
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-200 text-slate-500 font-mono text-[11px]">
+                  <th className="py-1.5 pr-3">Tier</th>
+                  <th className="py-1.5 pr-3">Book</th>
+                  <th className="py-1.5 pr-3">State</th>
+                  <th className="py-1.5 pr-3">Leg 1 Entry→Exit</th>
+                  <th className="py-1.5 pr-3">Leg 2 / SL</th>
+                  <th className="py-1.5 pr-3 text-right">Mirror Net</th>
+                  <th className="py-1.5 text-right">vs Shadow</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 font-mono">
+                {mirrorRecent.map((m) => (
+                  <tr key={m.mirror_id}>
+                    <td className="py-1.5 pr-3">
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                          m.execution_tier === 'LIVE_ARMED'
+                            ? 'bg-rose-100 text-rose-800'
+                            : 'bg-slate-100 text-slate-700'
+                        }`}
+                      >
+                        {m.execution_tier}
+                      </span>
+                    </td>
+                    <td className="py-1.5 pr-3">{m.book_id}</td>
+                    <td className="py-1.5 pr-3">{m.state}</td>
+                    <td className="py-1.5 pr-3">
+                      {hasValidNumber(m.leg1_entry_fill) ? formatINRValue(m.leg1_entry_fill) : UNAVAILABLE_LABEL}
+                      {' → '}
+                      {hasValidNumber(m.leg1_exit_fill) ? formatINRValue(m.leg1_exit_fill) : '—'}
+                    </td>
+                    <td className="py-1.5 pr-3">
+                      {m.book_id === 'SHADOW_BOOK_A_SPREAD_150'
+                        ? `${hasValidNumber(m.leg2_entry_fill) ? formatINRValue(m.leg2_entry_fill) : UNAVAILABLE_LABEL} → ${hasValidNumber(m.leg2_exit_fill) ? formatINRValue(m.leg2_exit_fill) : '—'}`
+                        : `SL ${hasValidNumber(m.broker_sl_trigger) ? formatINRValue(m.broker_sl_trigger) : '—'}`}
+                    </td>
+                    <td className="py-1.5 pr-3 text-right">
+                      {hasValidNumber(m.realized_net_pnl_inr)
+                        ? formatSignedINR(m.realized_net_pnl_inr)
+                        : UNAVAILABLE_LABEL}
+                    </td>
+                    <td className="py-1.5 text-right">
+                      {hasValidNumber(m.live_minus_shadow_drift_inr)
+                        ? formatSignedINR(m.live_minus_shadow_drift_inr)
+                        : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       {/* 1. Open Exposure & Outstanding Execution Problems */}
       <section className="bg-white rounded-xl border border-slate-200 shadow-2xs p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-100">

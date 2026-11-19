@@ -219,6 +219,16 @@ class S205UpstoxOrchestrator:
         self._latest_engine_readiness: List[Dict[str, Any]] = []
         self._latest_context_summary: Dict[str, Any] = {}
         self._shadow_collector: S205ShadowCollector = S205ShadowCollector(sync_advance_db=True)
+        try:
+            from app.analytics.option_sniffer_advance_live.advance_live_bridge import (
+                get_advance_live_bridge,
+            )
+
+            self._shadow_collector.register_lifecycle_listener(
+                lambda ev, payload: get_advance_live_bridge().enqueue_shadow_lifecycle_event(ev, payload)
+            )
+        except Exception:
+            pass
 
         self._install_tick_guard_router()
         try:
@@ -1301,16 +1311,22 @@ class S205UpstoxOrchestrator:
         # 3B. Evaluate Canonical `₹2,00,000` Pre-Registered Shadow Books & Persist L5 Chain Telemetry
         eff_spot_ref = float(ctx["c"][bar_idx]) if (ctx is not None and bar_idx >= 0) else spot_live_px
         eff_vix_ref = vix_live_px if vix_live_px > 0 else float((self._prior_day_stats or {}).get("last_vix_close") or 14.0)
-        shadow_readiness_rows, shadow_opened, shadow_closed = self._shadow_collector.evaluate_completed_bar(
-            ctx=ctx,
-            bar_idx=bar_idx,
-            quote_lookup=quote_lookup,
-            fut_quote=fut_nifty,
-            india_vix=eff_vix_ref,
-            now_dt=now_dt,
-            execute_new_entries=is_new_completed_bar,
-            allow_network=allow_network,
-        )
+        shadow_readiness_rows: List[Dict[str, Any]] = []
+        shadow_opened: List[str] = []
+        shadow_closed: List[Dict[str, Any]] = []
+        try:
+            shadow_readiness_rows, shadow_opened, shadow_closed = self._shadow_collector.evaluate_completed_bar(
+                ctx=ctx,
+                bar_idx=bar_idx,
+                quote_lookup=quote_lookup,
+                fut_quote=fut_nifty,
+                india_vix=eff_vix_ref,
+                now_dt=now_dt,
+                execute_new_entries=is_new_completed_bar,
+                allow_network=allow_network,
+            )
+        except Exception as sh_err:
+            logger.error(f"[S205Engine] Shadow evaluate_completed_bar isolated error: {sh_err}", exc_info=True)
         opened_ids.extend(shadow_opened)
         closed_on_bar.extend(shadow_closed)
         decorated_shadow_rows: List[Dict[str, Any]] = []
@@ -1324,17 +1340,20 @@ class S205UpstoxOrchestrator:
         readiness_rows = decorated_shadow_rows + v6b_readiness_rows
 
         if is_new_completed_bar and bar_ts and eff_spot_ref > 0:
-            self._shadow_collector.record_1m_chain_and_snapshot(
-                bar_ts=bar_ts,
-                now_dt=now_dt,
-                nifty_quotes=nifty_quotes,
-                spot_ltp=eff_spot_ref,
-                fut_quote=fut_nifty,
-                india_vix=eff_vix_ref,
-                front_exp=front_exp,
-                next_exp=next_exp,
-                readiness_rows=readiness_rows,
-            )
+            try:
+                self._shadow_collector.record_1m_chain_and_snapshot(
+                    bar_ts=bar_ts,
+                    now_dt=now_dt,
+                    nifty_quotes=nifty_quotes,
+                    spot_ltp=eff_spot_ref,
+                    fut_quote=fut_nifty,
+                    india_vix=eff_vix_ref,
+                    front_exp=front_exp,
+                    next_exp=next_exp,
+                    readiness_rows=readiness_rows,
+                )
+            except Exception as rec_err:
+                logger.error(f"[S205Engine] L5 record_1m_chain_and_snapshot isolated error: {rec_err}", exc_info=True)
 
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         with self._op_lock:

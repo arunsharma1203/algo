@@ -227,6 +227,31 @@ def get_advance_live_order_intents(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/live/shadow-mirror/status")
+def get_advance_shadow_mirror_status() -> Dict[str, Any]:
+    """Returns isolated Shadow V1 Mirror (`Book A` + `Book B`) status, dry-run/live counts, and VIX/DTE regime banners."""
+    try:
+        bridge = get_advance_live_bridge()
+        return bridge.shadow_mirror.get_mirror_status()
+    except Exception as e:
+        logger.error(f"[OptionSnifferAdvanceAPI] Failed to get shadow mirror status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/live/shadow-mirror/packages")
+def get_advance_shadow_mirror_packages(
+    limit: int = Query(25, ge=1, le=200),
+    tier: Optional[str] = Query(None),
+) -> List[Dict[str, Any]]:
+    """Returns recent isolated Shadow V1 Mirror packages (`DRY_RUN` and/or `LIVE_ARMED`)."""
+    try:
+        bridge = get_advance_live_bridge()
+        return bridge.shadow_mirror.get_recent_packages(limit=limit, tier_filter=tier)
+    except Exception as e:
+        logger.error(f"[OptionSnifferAdvanceAPI] Failed to get shadow mirror packages: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/live/mode")
 def set_advance_live_execution_mode(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """Updates the capital-matched execution mode (`LONG_BOOK_ONLY`, `DUAL_BOOK_NAKED`, or `DUAL_BOOK_HEDGED`)."""

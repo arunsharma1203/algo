@@ -48,6 +48,19 @@ from app.analytics.option_sniffer_advance.advance_constants import (
 )
 from app.analytics.option_sniffer_advance.advance_paper_execution import AdvancePaperExecution
 from app.analytics.option_sniffer_advance.advance_signal_engine import AdvanceSignalEngine
+from app.analytics.option_sniffer_advance_live.shadow_mirror_executor import (
+    MIN_MARGIN_SHADOW_AB_INR,
+    MIN_MARGIN_SHADOW_BOOK_A_INR,
+    MIN_MARGIN_SHADOW_BOOK_B_INR,
+    MIN_MARGIN_SHADOW_DRY_RUN_INR,
+    MODE_SHADOW_DRY_RUN_AB,
+    MODE_SHADOW_LIVE_AB,
+    MODE_SHADOW_LIVE_BOOK_A,
+    MODE_SHADOW_LIVE_BOOK_B,
+    SHADOW_MIRROR_MODES,
+    ShadowMirrorExecutor,
+    init_shadow_mirror_tables,
+)
 from app.data.historical_data_layer import get_db_path
 
 logger = logging.getLogger(__name__)
@@ -61,6 +74,10 @@ VALID_EXECUTION_MODES = (
     MODE_LONG_BOOK_ONLY,
     MODE_DUAL_BOOK_NAKED,
     MODE_DUAL_BOOK_HEDGED,
+    MODE_SHADOW_DRY_RUN_AB,
+    MODE_SHADOW_LIVE_BOOK_A,
+    MODE_SHADOW_LIVE_BOOK_B,
+    MODE_SHADOW_LIVE_AB,
 )
 
 MIN_MARGIN_LONG_ONLY_INR: float = 18000.0
@@ -177,6 +194,46 @@ class AdvanceLiveBridge:
         self._last_priority_quote_refresh_ts: float = -999999.0
         self._last_sl_modify_epoch: Dict[str, float] = {}
         self._sl_reanchored_intent_ids: set = set()
+        init_shadow_mirror_tables(self.db_path)
+        self._shadow_mirror = ShadowMirrorExecutor(
+            db_path=self.db_path,
+            bridge_state_fn=self._snapshot_bridge_state_for_shadow_mirror,
+            disarm_callback=self._emergency_disarm_from_shadow_mirror,
+            auto_start_worker=bool(auto_start_daemon),
+        )
+
+    def _snapshot_bridge_state_for_shadow_mirror(self, include_cb: bool = False) -> Dict[str, Any]:
+        base = {
+            "is_live_armed": self._is_live_armed,
+            "execution_mode": self._execution_mode,
+            "armed_at_iso": self._armed_at_iso,
+            "armed_for_date": self._armed_for_date,
+            "is_session_halted": False,
+            "halt_reason": None,
+            "daily_total_exposure_pnl_inr": 0.0,
+            "max_daily_loss_inr": float(MAX_DAILY_COMBINED_LOSS_INR),
+        }
+        if include_cb:
+            today = to_ist_naive().strftime("%Y-%m-%d")
+            cb = self.get_circuit_breaker_status(today)
+            base["is_session_halted"] = bool(cb.get("is_session_halted", False))
+            base["halt_reason"] = cb.get("halt_reason")
+            base["daily_total_exposure_pnl_inr"] = float(cb.get("total_exposure_pnl_inr") or 0.0)
+            base["max_daily_loss_inr"] = float(cb.get("max_daily_loss_inr") or MAX_DAILY_COMBINED_LOSS_INR)
+        return base
+
+    def _emergency_disarm_from_shadow_mirror(self, reason: str) -> None:
+        with self._op_lock:
+            self._is_live_armed = False
+            self.generate_new_pin()
+        logger.error(f"🚨 [AdvanceLiveBridge] Auto-disarmed by ShadowMirrorExecutor failsafe: {reason}")
+
+    def enqueue_shadow_lifecycle_event(self, event_type: str, payload: Dict[str, Any]) -> bool:
+        return self._shadow_mirror.enqueue_shadow_event(event_type, payload)
+
+    @property
+    def shadow_mirror(self) -> ShadowMirrorExecutor:
+        return self._shadow_mirror
 
     @property
     def db_path(self) -> str:
@@ -301,15 +358,35 @@ class AdvanceLiveBridge:
             return {
                 "status": "ERROR",
                 "execution_mode": self._execution_mode,
+                "is_live_armed": self._is_live_armed,
                 "message": f"Invalid execution_mode '{clean_mode}'. Must be one of {VALID_EXECUTION_MODES}.",
             }
+        was_auto_disarmed = False
         with self._op_lock:
+            if self._is_live_armed and (clean_mode != self._execution_mode or clean_mode == MODE_SHADOW_DRY_RUN_AB):
+                self._is_live_armed = False
+                self._armed_at_epoch = 0.0
+                self._armed_at_iso = ""
+                self.generate_new_pin()
+                was_auto_disarmed = True
+                logger.warning(
+                    f"🛡️ [AdvanceLiveBridge] Mode switch ({self._execution_mode} -> {clean_mode}) while armed: "
+                    "auto-disarmed to enforce fresh PIN + margin verification."
+                )
             self._execution_mode = clean_mode
+        msg = f"Execution mode updated to {clean_mode}."
+        if was_auto_disarmed:
+            msg = (
+                f"Execution mode updated to {clean_mode}. Session was automatically disarmed; "
+                "re-enter PIN to arm with fresh margin & readiness verification."
+            )
         return {
             "status": "UPDATED",
             "execution_mode": self._execution_mode,
+            "is_live_armed": self._is_live_armed,
+            "was_auto_disarmed": was_auto_disarmed,
             "required_margin_for_mode": self.get_mode_margin_requirement(clean_mode),
-            "message": f"Execution mode updated to {clean_mode}.",
+            "message": msg,
         }
 
     def get_circuit_breaker_status(
@@ -341,7 +418,8 @@ class AdvanceLiveBridge:
 
                 rows = cur.execute(
                     """
-                    SELECT realized_pnl FROM option_advance_live_order_intents
+                    SELECT COALESCE(updated_at, created_at) AS closed_ts, realized_pnl
+                    FROM option_advance_live_order_intents
                     WHERE SUBSTR(created_at, 1, 10) = ?
                       AND exit_state = 'CONFIRMED_FLAT'
                       AND COALESCE(state, '') != 'CANCELLED'
@@ -350,13 +428,24 @@ class AdvanceLiveBridge:
                     """,
                     (today,),
                 ).fetchall()
-                for r in rows:
-                    pnl = float(r[0] or 0.0)
-                    realized_pnl += pnl
-                    if pnl < 0:
-                        consec_losses += 1
-                    else:
-                        consec_losses = 0
+
+            closed_events: List[Tuple[str, int, float]] = []
+            seq_idx = 0
+            for r in rows:
+                seq_idx += 1
+                ts_norm = str(r[0] or "").replace("T", " ")[:19]
+                closed_events.append((ts_norm, seq_idx, float(r[1] or 0.0)))
+            for sh_ev in self._shadow_mirror.get_today_live_closed_events(today):
+                seq_idx += 1
+                ts_norm = str(sh_ev[0] or "").replace("T", " ")[:19]
+                closed_events.append((ts_norm, seq_idx, float(sh_ev[3] or 0.0)))
+            closed_events.sort(key=lambda item: (item[0], item[1]))
+            for _, _, pnl in closed_events:
+                realized_pnl += pnl
+                if pnl < 0:
+                    consec_losses += 1
+                else:
+                    consec_losses = 0
 
             pos_list = active_positions if active_positions is not None else self.get_active_live_positions()
             for pos in pos_list:
@@ -414,6 +503,14 @@ class AdvanceLiveBridge:
             return MIN_MARGIN_DUAL_NAKED_INR
         if m == MODE_DUAL_BOOK_HEDGED:
             return MIN_MARGIN_DUAL_HEDGED_INR
+        if m == MODE_SHADOW_DRY_RUN_AB:
+            return MIN_MARGIN_SHADOW_DRY_RUN_INR
+        if m == MODE_SHADOW_LIVE_BOOK_B:
+            return MIN_MARGIN_SHADOW_BOOK_B_INR
+        if m == MODE_SHADOW_LIVE_BOOK_A:
+            return MIN_MARGIN_SHADOW_BOOK_A_INR
+        if m == MODE_SHADOW_LIVE_AB:
+            return MIN_MARGIN_SHADOW_AB_INR
         return MIN_MARGIN_LONG_ONLY_INR
 
     def get_live_status(self) -> Dict[str, Any]:
@@ -424,6 +521,7 @@ class AdvanceLiveBridge:
         active_positions = self.get_active_live_positions()
         cb_status = self.get_circuit_breaker_status(today, active_positions=active_positions)
 
+        cb_should_flatten_shadow = False
         with self._op_lock:
             if self._is_live_armed:
                 if self._armed_for_date != today:
@@ -432,9 +530,17 @@ class AdvanceLiveBridge:
                 elif now.time() >= dt_time(15, 15):
                     logger.info("[AdvanceLiveBridge] Session cutoff (15:15 IST) reached. Reverting to Paper Mode.")
                     self._is_live_armed = False
+                elif self._execution_mode == MODE_SHADOW_DRY_RUN_AB:
+                    self._is_live_armed = False
                 elif cb_status.get("is_session_halted"):
                     logger.warning(f"🚨 [AdvanceLiveBridge] Auto-disarming due to live circuit breaker: {cb_status.get('halt_reason')}")
                     self._is_live_armed = False
+                    cb_should_flatten_shadow = True
+        if cb_should_flatten_shadow:
+            try:
+                self._shadow_mirror.flatten_all_open_live_packages("CIRCUIT_BREAKER_HALT", now_dt=now)
+            except Exception:
+                pass
 
         # Reuse cached 30s Upstox readiness snapshot from OptionLiveAdapter (0 extra REST calls)
         base_adapter = self._live_adapter
@@ -488,7 +594,32 @@ class AdvanceLiveBridge:
                     "required_margin_inr": MIN_MARGIN_DUAL_HEDGED_INR,
                     "alpha_retention": "100% Long Book + ~50% Short Book (200-pt Wing Drag)",
                 },
+                {
+                    "mode": MODE_SHADOW_DRY_RUN_AB,
+                    "label": "Shadow V1 Dry-Run Verification (Book A + Book B — Zero Broker Orders)",
+                    "required_margin_inr": MIN_MARGIN_SHADOW_DRY_RUN_INR,
+                    "alpha_retention": "100% Shadow V1 Payload & Margin Verification (0 Live Orders)",
+                },
+                {
+                    "mode": MODE_SHADOW_LIVE_BOOK_A,
+                    "label": "Shadow V1 • Book A 150pt Buy-First Spread (+ Hedged Advance)",
+                    "required_margin_inr": MIN_MARGIN_SHADOW_BOOK_A_INR,
+                    "alpha_retention": "Atomic 2-Leg Buy-First / Short-First-Exit Spread Mirror",
+                },
+                {
+                    "mode": MODE_SHADOW_LIVE_BOOK_B,
+                    "label": "Shadow V1 • Book B 1-Lot Paid Flow (+ Long Advance)",
+                    "required_margin_inr": MIN_MARGIN_SHADOW_BOOK_B_INR,
+                    "alpha_retention": "1-Lot Paid Convexity + Cancel-First Exchange SL-L Mirror",
+                },
+                {
+                    "mode": MODE_SHADOW_LIVE_AB,
+                    "label": "Shadow V1 • Full System Book A + Book B (+ Hedged Advance)",
+                    "required_margin_inr": MIN_MARGIN_SHADOW_AB_INR,
+                    "alpha_retention": "Unified Book A 150pt Spread + Book B Paid Flow + Hedged Advance",
+                },
             ],
+            "shadow_mirror": self._shadow_mirror.get_mirror_status(today),
         }
 
     def arm_live_trading(
@@ -522,6 +653,18 @@ class AdvanceLiveBridge:
                         "execution_mode": self._execution_mode,
                         "message": mode_res.get("message", "Invalid execution mode"),
                     }
+
+            if self._execution_mode == MODE_SHADOW_DRY_RUN_AB:
+                self._is_live_armed = False
+                return {
+                    "status": "ARM_REJECTED",
+                    "is_live_armed": False,
+                    "execution_mode": self._execution_mode,
+                    "message": (
+                        "DRY_RUN_MODE_ACTIVE: SHADOW_DRY_RUN_AB is a zero-order verification mode. "
+                        "Select SHADOW_LIVE_BOOK_A, SHADOW_LIVE_BOOK_B, or SHADOW_LIVE_AB to arm real Upstox orders."
+                    ),
+                }
 
             now = to_ist_naive(now_dt)
             if now.time() >= dt_time(15, 15):
@@ -843,10 +986,22 @@ class AdvanceLiveBridge:
                 elif is_past_cutoff:
                     logger.info("[AdvanceLiveBridge] Session cutoff (15:15 IST) reached in follower sync. Reverting to Paper Mode.")
                     self._is_live_armed = False
+                elif self._execution_mode == MODE_SHADOW_DRY_RUN_AB:
+                    self._is_live_armed = False
 
+        # 0C. Lock-Free Dual-Channel Reconciliation & 5s Watchdog for Isolated Shadow V1 Mirror (`Book A` + `Book B`)
+        # Runs outside `_op_lock` so Upstox order polling under `_pkg_locks` never blocks `/live/status` or `/live/disarm`,
+        # guaranteeing zero AB-BA lock inversion with `_emergency_disarm_from_shadow_mirror`.
+        try:
+            self._shadow_mirror.sync_with_shadow_db_once(now_dt=now_dt)
+        except Exception as sm_err:
+            logger.debug(f"[AdvanceLiveBridge] Shadow mirror sync note: {sm_err}")
+
+        cb_halted_flatten_shadow = False
+        with self._op_lock:
             pre_existing_pending_ids = set(self._pending_exit_verifications.keys())
             had_pending_exit_verifications = bool(pre_existing_pending_ids)
-            active_intents = self.get_active_live_positions()
+            active_intents = self._get_legacy_active_live_positions()
 
             # 1A. Sub-250ms Local SQLite Exit Fast-Path FIRST (Zero network blocking before checking paper exits)
             if active_intents:
@@ -890,7 +1045,7 @@ class AdvanceLiveBridge:
                     logger.error(f"[AdvanceLiveBridge] Exit sync error: {ex_err}")
 
             # 0B. Prioritize still-open Option Sniffer Advance contracts for real-time ticks & stale-quote fallback
-            still_open_after_1a = self.get_active_live_positions()
+            still_open_after_1a = self._get_legacy_active_live_positions()
             prio_res = self._prioritize_advance_real_time_ticks(still_open_after_1a, now_dt=now_dt)
             if prio_res.get("refreshed_via_rest") and still_open_after_1a:
                 try:
@@ -921,7 +1076,7 @@ class AdvanceLiveBridge:
 
             # 1B. Throttled (3.0s) Broker Order-Book Reconciliation for Still-Open Live Positions & Pending Exit Verifications
             # Prevents 0.25s /order/retrieve-all polling from exhausting the 64 req/min Upstox rate limit
-            still_open_intents = self.get_active_live_positions()
+            still_open_intents = self._get_legacy_active_live_positions()
             if still_open_intents or had_pending_exit_verifications:
                 has_unreconciled_new_intent = any(
                     str(i.get("order_intent_id") or "") not in self._reconciled_once_intent_ids
@@ -948,6 +1103,8 @@ class AdvanceLiveBridge:
                     )
 
             # 2. Check Entries if Armed
+            if self._execution_mode == MODE_SHADOW_DRY_RUN_AB:
+                self._is_live_armed = False
             if not self._is_live_armed:
                 return {
                     "status": "STANDBY_PAPER",
@@ -956,11 +1113,27 @@ class AdvanceLiveBridge:
                     "skipped_by_mode": skipped_by_mode,
                 }
 
-            cb = self.get_circuit_breaker_status(today_str, active_positions=still_open_intents)
+            cb = self.get_circuit_breaker_status(today_str, active_positions=self.get_active_live_positions())
             if cb.get("is_session_halted"):
                 self._is_live_armed = False
+                cb_halted_flatten_shadow = True
+
+        if cb_halted_flatten_shadow:
+            try:
+                self._shadow_mirror.flatten_all_open_live_packages("CIRCUIT_BREAKER_HALT", now_dt=now_dt)
+            except Exception:
+                pass
+            return {
+                "status": "HALTED_CIRCUIT_BREAKER",
+                "entries_mirrored": mirrored_entries,
+                "exits_mirrored": mirrored_exits,
+                "skipped_by_mode": skipped_by_mode,
+            }
+
+        with self._op_lock:
+            if not self._is_live_armed:
                 return {
-                    "status": "HALTED_CIRCUIT_BREAKER",
+                    "status": "STANDBY_PAPER",
                     "entries_mirrored": mirrored_entries,
                     "exits_mirrored": mirrored_exits,
                     "skipped_by_mode": skipped_by_mode,
@@ -1028,13 +1201,24 @@ class AdvanceLiveBridge:
                     )
                     continue
 
-                if self._execution_mode == MODE_LONG_BOOK_ONLY and book_type != BOOK_LONG_BUY:
-                    # In LONG_BOOK_ONLY mode (for ₹55k wallet), Book 2 stays strictly in Paper Sandbox
+                if self._execution_mode in (MODE_LONG_BOOK_ONLY, MODE_SHADOW_LIVE_BOOK_B) and book_type != BOOK_LONG_BUY:
+                    # In LONG_BOOK_ONLY / SHADOW_LIVE_BOOK_B mode, Book 2 stays strictly in Paper Sandbox
                     skipped_by_mode.append(
                         {
                             "trade_id": adv_tid,
                             "book_type": book_type,
                             "reason": "LONG_BOOK_ONLY_SKIP_SHORT",
+                        }
+                    )
+                    continue
+
+                if self._execution_mode == MODE_SHADOW_LIVE_BOOK_A and book_type == BOOK_LONG_BUY:
+                    # In SHADOW_LIVE_BOOK_A mode, single-leg paid longs stay in Paper Sandbox
+                    skipped_by_mode.append(
+                        {
+                            "trade_id": adv_tid,
+                            "book_type": book_type,
+                            "reason": "BOOK_A_ONLY_SKIP_SINGLE_LONG",
                         }
                     )
                     continue
@@ -1184,7 +1368,7 @@ class AdvanceLiveBridge:
         hedge_wing_strike = 0.0
         hedge_wing_ikey = None
         hedge_wing_oid = None
-        if self._execution_mode == MODE_DUAL_BOOK_HEDGED and book_type == BOOK_SHORT_SELL:
+        if self._execution_mode in (MODE_DUAL_BOOK_HEDGED, MODE_SHADOW_LIVE_BOOK_A, MODE_SHADOW_LIVE_AB) and book_type == BOOK_SHORT_SELL:
             try:
                 ctx = json.loads(str(paper_trade.get("regime_context_json") or "{}") or "{}")
                 opt_t = str(paper_trade.get("option_type") or "CE").upper()
@@ -2346,11 +2530,14 @@ class AdvanceLiveBridge:
         Emergency 1-Click SOS Panic Exit:
         Disarms live bridge and immediately flattens all open Advance live positions.
         """
+        now_dt = to_ist_naive()
+        flattened: List[str] = []
         with self._op_lock:
             self._is_live_armed = False
-            active = self.get_active_live_positions()
-            flattened = []
-            now_dt = to_ist_naive()
+            self._armed_at_epoch = 0.0
+            self._armed_at_iso = ""
+            self.generate_new_pin()
+            active = self._get_legacy_active_live_positions()
             for pos in active:
                 res = self._execute_mirrored_live_exit(
                     intent=pos,
@@ -2372,17 +2559,32 @@ class AdvanceLiveBridge:
                         now_dt=now_dt,
                     )
 
-            self.generate_new_pin()
-            return {
-                "status": "SOS_EXECUTED_AND_DISARMED",
-                "is_live_armed": False,
-                "positions_flattened": len(flattened),
-                "flattened_intent_ids": flattened,
-                "message": f"SOS Panic Square-Off completed. Flattened {len(flattened)} position(s) and disarmed to Paper Sandbox.",
-            }
+        # Flatten Shadow Mirror packages outside `_op_lock` to preserve strict lock hierarchy
+        try:
+            sh_flat = self._shadow_mirror.flatten_all_open_live_packages("SOS_PANIC_EXIT", now_dt=now_dt)
+            flattened.extend(sh_flat)
+        except Exception as sos_sh_err:
+            logger.error(f"[AdvanceLiveBridge] Shadow mirror SOS flatten error: {sos_sh_err}")
+
+        return {
+            "status": "SOS_EXECUTED_AND_DISARMED",
+            "is_live_armed": False,
+            "positions_flattened": len(flattened),
+            "flattened_intent_ids": flattened,
+            "message": f"SOS Panic Square-Off completed. Flattened {len(flattened)} position(s) and disarmed to Paper Sandbox.",
+        }
 
     def get_active_live_positions(self) -> List[Dict[str, Any]]:
-        """Returns currently open live positions from `option_advance_live_order_intents` enriched with live MTM."""
+        """Returns combined active live positions across legacy intents and `LIVE_ARMED` Shadow Mirror packages."""
+        legacy = self._get_legacy_active_live_positions()
+        try:
+            sh_live = self._shadow_mirror.get_active_live_positions_for_bridge()
+        except Exception:
+            sh_live = []
+        return sh_live + legacy
+
+    def _get_legacy_active_live_positions(self) -> List[Dict[str, Any]]:
+        """Returns currently open live positions strictly from `option_advance_live_order_intents` enriched with live MTM."""
         try:
             with self._get_ro_conn() as conn:
                 rows = conn.execute(
@@ -2549,6 +2751,17 @@ class AdvanceLiveBridge:
         except Exception:
             pass
 
+        try:
+            sh_tot = self._shadow_mirror.get_today_live_realized_totals(today)
+            realized_gross += float(sh_tot.get("gross_pnl") or 0.0)
+            statutory += float(sh_tot.get("charges") or 0.0)
+            realized_net += float(sh_tot.get("net_pnl") or 0.0)
+            closed_count += int(sh_tot.get("closed_count") or 0)
+            wins += int(sh_tot.get("wins") or 0)
+            losses += int(sh_tot.get("losses") or 0)
+        except Exception:
+            pass
+
         active = active_positions if active_positions is not None else self.get_active_live_positions()
         unrealized = sum(float(p.get("unrealized_pnl") or 0.0) for p in active)
         return {
@@ -2587,40 +2800,45 @@ class AdvanceLiveBridge:
         try:
             with self._get_ro_conn() as conn:
                 if flt == "LIVE_BROKER" or era_flt == "LIVE_BROKER":
-                    rows = conn.execute(
-                        """
-                        SELECT
-                            order_intent_id AS trade_id,
-                            signal_id,
-                            book_type,
-                            strategy_mode,
-                            direction,
-                            instrument_key,
-                            trading_symbol,
-                            underlying,
-                            option_type,
-                            strike,
-                            expiry,
-                            lot_size,
-                            COALESCE(NULLIF(filled_quantity, 0), target_quantity) AS quantity,
-                            created_at AS entry_time,
-                            updated_at AS exit_time,
-                            average_fill_price AS entry_price_used,
-                            exit_fill_price AS exit_price_used,
-                            0.0 AS mfe_pct,
-                            0.0 AS mae_pct,
-                            gross_pnl,
-                            statutory_charges AS charges,
-                            0.0 AS slippage,
-                            realized_pnl AS net_pnl,
-                            exit_reason
-                        FROM option_advance_live_order_intents
-                        WHERE exit_state = 'CONFIRMED_FLAT'
-                          AND COALESCE(state, '') != 'CANCELLED'
-                          AND COALESCE(filled_quantity, 0) > 0
-                        ORDER BY created_at ASC;
-                        """
-                    ).fetchall()
+                    rows = [
+                        dict(r)
+                        for r in conn.execute(
+                            """
+                            SELECT
+                                order_intent_id AS trade_id,
+                                signal_id,
+                                book_type,
+                                strategy_mode,
+                                direction,
+                                instrument_key,
+                                trading_symbol,
+                                underlying,
+                                option_type,
+                                strike,
+                                expiry,
+                                lot_size,
+                                COALESCE(NULLIF(filled_quantity, 0), target_quantity) AS quantity,
+                                created_at AS entry_time,
+                                updated_at AS exit_time,
+                                average_fill_price AS entry_price_used,
+                                exit_fill_price AS exit_price_used,
+                                0.0 AS mfe_pct,
+                                0.0 AS mae_pct,
+                                gross_pnl,
+                                statutory_charges AS charges,
+                                0.0 AS slippage,
+                                realized_pnl AS net_pnl,
+                                exit_reason
+                            FROM option_advance_live_order_intents
+                            WHERE exit_state = 'CONFIRMED_FLAT'
+                              AND COALESCE(state, '') != 'CANCELLED'
+                              AND COALESCE(filled_quantity, 0) > 0
+                            ORDER BY created_at ASC;
+                            """
+                        ).fetchall()
+                    ]
+                    rows.extend(self._shadow_mirror.get_closed_live_rows_for_calendar())
+                    rows.sort(key=lambda item: str(item.get("entry_time") or ""))
                 else:
                     rows = conn.execute(
                         """

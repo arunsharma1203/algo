@@ -432,7 +432,27 @@ class S205ShadowCollector:
         # Expiry-day 15:00..15:30 IST spot samples
         self._expiry_fsp_samples: Dict[str, List[Tuple[str, float]]] = {}
 
+        # Optional read-only lifecycle listeners (e.g. isolated ShadowMirrorExecutor)
+        self._lifecycle_listeners: List[Callable[[str, Dict[str, Any]], Any]] = []
+
         self._restore_open_packages_from_db()
+
+    def register_lifecycle_listener(self, listener: Callable[[str, Dict[str, Any]], Any]) -> None:
+        """Registers a non-blocking read-only package lifecycle listener."""
+        if callable(listener):
+            with self._lock:
+                if listener not in self._lifecycle_listeners:
+                    self._lifecycle_listeners.append(listener)
+
+    def _emit_lifecycle_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Invokes registered listeners inside try/except so external listeners can never fault Shadow V1."""
+        with self._lock:
+            listeners = list(self._lifecycle_listeners)
+        for fn in listeners:
+            try:
+                fn(event_type, payload)
+            except Exception as exc:
+                logger.debug(f"[S205ShadowCollector] Lifecycle listener note ({event_type}): {exc}")
 
     def _db_path(self) -> str:
         return self._db_path_override or _resolve_default_db_path()
@@ -1389,6 +1409,7 @@ class S205ShadowCollector:
 
         if self._sync_advance_db:
             self._mirror_open_to_advance_db(pkg_row, quote, entry_px, capped_sl_pct, hard_stop_px, spot_c)
+        self._emit_lifecycle_event("BOOK_B_OPEN", pkg_row)
         return pkg_id
 
     def _initiate_buy_first_spread_leg1(
@@ -1637,6 +1658,7 @@ class S205ShadowCollector:
                     max_debit_stop,
                     float(pending["spot_c"]),
                 )
+            self._emit_lifecycle_event("BOOK_A_OPEN", pkg_row)
             return {"state": "OPEN", "package_id": package_id, "net_entry_credit_pts": net_credit_pts}
 
         # Emergency Incomplete-Leg Unwind: Sell bought protective wing back at L5 bid!
@@ -1841,103 +1863,112 @@ class S205ShadowCollector:
         cfg_b = self.config["shadow_books"]["SHADOW_BOOK_B_PAID_FLOW"]
 
         for pkg in open_list:
-            ls = pkg["legs_state"]
-            mode = ls.get("mode")
-            is_bull = bool(ls.get("is_bull", True))
             try:
-                ent_dt = datetime.fromisoformat(str(pkg["entry_time"]).replace("T", " ")[:19])
-                held_mins = max(0, int((now_dt - ent_dt).total_seconds() // 60))
-            except Exception:
-                held_mins = 0
+                ls = pkg["legs_state"]
+                mode = ls.get("mode")
+                is_bull = bool(ls.get("is_bull", True))
+                try:
+                    ent_dt = datetime.fromisoformat(str(pkg["entry_time"]).replace("T", " ")[:19])
+                    held_mins = max(0, int((now_dt - ent_dt).total_seconds() // 60))
+                except Exception:
+                    held_mins = 0
 
-            vflip_hit = False
-            vf_pts = float(cfg_b["vflip_pts"] if mode == "SINGLE_PAID_LONG" else cfg_a["vflip_pts"])
-            if held_mins >= 4 and bar_idx >= 1:
-                c0, c1 = float(ctx["c"][bar_idx]), float(ctx["c"][bar_idx - 1])
-                t0_v, t1_v = float(ctx["tpb"][bar_idx]), float(ctx["tpb"][bar_idx - 1])
-                vflip_hit = (is_bull and c0 < t0_v - vf_pts and c1 < t1_v - vf_pts) or (
-                    (not is_bull) and c0 > t0_v + vf_pts and c1 > t1_v + vf_pts
-                )
-
-            if mode == "SINGLE_PAID_LONG":
-                ll = ls["long_leg"]
-                eso_l = (str(ll["expiry"])[:10], float(ll["strike"]), str(ll["option_type"]).upper())
-                ql = quote_lookup.get(eso_l) or {}
-                sw_s = sweep_l5_book_for_qty(
-                    ql, "SELL", qty=int(ll["qty"]), adverse_ticks=1, max_spread_pct=None, require_observed=False
-                )
-                if not sw_s.get("ok"):
-                    continue
-                close_px = float(sw_s["fill_price"])
-                gain_pct = ((close_px - float(ll["entry_price"])) / max(0.05, float(ll["entry_price"]))) * 100.0
-
-                rsn = ""
-                if ist_hhmm >= int(cfg_b["eod_squareoff_hhmm"]):
-                    rsn = "EOD_SQUAREOFF_1515"
-                elif held_mins >= int(cfg_b["stagnation_mins"]) and gain_pct < float(cfg_b["stagnation_min_gain_pct"]):
-                    rsn = "STAGNATION_TIME_STOP"
-                elif vflip_hit:
-                    rsn = "SPOT_VWAP_FLIP_EXIT"
-
-                if rsn:
-                    c_res = self._close_single_long_package(pkg, ql, close_px, rsn, now_dt, exit_bar_ts=bar_ts)
-                    if c_res:
-                        closed.append(c_res)
-                    continue
-
-                # Strictly Close-Only Ratchet Update!
-                ls["best_close_pts"] = max(float(ls.get("best_close_pts") or ll["entry_price"]), close_px)
-                stages = [tuple(s) for s in cfg_b["ratchet_stages"]]
-                new_r = compute_close_only_ratchet(
-                    False, float(ll["entry_price"]), float(ls["best_close_pts"]), ls.get("ratchet_stop"), stages
-                )
-                ls["ratchet_stop"] = new_r
-                self._update_open_legs_state(pkg["package_id"], ls)
-
-            elif mode == "DEFINED_RISK_CREDIT_SPREAD_150":
-                sl = ls["short_leg"]
-                wl = ls["wing_leg"]
-                eso_s = (str(sl["expiry"])[:10], float(sl["strike"]), str(sl["option_type"]).upper())
-                eso_w = (str(wl["expiry"])[:10], float(wl["strike"]), str(wl["option_type"]).upper())
-                qs = quote_lookup.get(eso_s) or {}
-                qw = quote_lookup.get(eso_w) or {}
-                qty_abs = abs(int(sl["qty"]))
-                sw_bs = sweep_l5_book_for_qty(
-                    qs, "BUY", qty=qty_abs, adverse_ticks=1, max_spread_pct=None, require_observed=False
-                )
-                sw_sw = sweep_l5_book_for_qty(
-                    qw, "SELL", qty=qty_abs, adverse_ticks=1, max_spread_pct=None, require_observed=False
-                )
-                if not sw_bs.get("ok") or not sw_sw.get("ok"):
-                    continue
-                cur_debit = round(float(sw_bs["fill_price"]) - float(sw_sw["fill_price"]), 2)
-
-                rsn = ""
-                if ist_hhmm >= int(cfg_a["eod_squareoff_hhmm"]):
-                    rsn = "EOD_SQUAREOFF_1515"
-                elif vflip_hit:
-                    rsn = "SPOT_VWAP_FLIP_EXIT"
-
-                if rsn:
-                    c_res = self._close_spread_package(
-                        pkg, qs, qw, float(sw_bs["fill_price"]), float(sw_sw["fill_price"]), rsn, now_dt, exit_bar_ts=bar_ts
+                vflip_hit = False
+                vf_pts = float(cfg_b["vflip_pts"] if mode == "SINGLE_PAID_LONG" else cfg_a["vflip_pts"])
+                if held_mins >= 4 and bar_idx >= 1:
+                    c0, c1 = float(ctx["c"][bar_idx]), float(ctx["c"][bar_idx - 1])
+                    t0_v, t1_v = float(ctx["tpb"][bar_idx]), float(ctx["tpb"][bar_idx - 1])
+                    vflip_hit = (is_bull and c0 < t0_v - vf_pts and c1 < t1_v - vf_pts) or (
+                        (not is_bull) and c0 > t0_v + vf_pts and c1 > t1_v + vf_pts
                     )
-                    if c_res:
-                        closed.append(c_res)
-                    continue
 
-                # Strictly Close-Only Spread Decay Ratchet Update!
-                init_cr = float(ls["net_entry_credit_pts"])
-                best_d = min(float(ls.get("best_close_credit_decay_pts") or init_cr), max(0.05, cur_debit))
-                ls["best_close_credit_decay_pts"] = best_d
-                decay_pct = ((init_cr - best_d) / max(0.05, init_cr)) * 100.0
-                r_debit = ls.get("ratchet_max_debit_pts")
-                for trig_pct, lock_pct in cfg_a["ratchet_stages"]:
-                    if decay_pct >= float(trig_pct):
-                        cand_debit = round(init_cr * (1.0 - float(lock_pct) / 100.0), 2)
-                        r_debit = cand_debit if r_debit is None else min(float(r_debit), cand_debit)
-                ls["ratchet_max_debit_pts"] = r_debit
-                self._update_open_legs_state(pkg["package_id"], ls)
+                if mode == "SINGLE_PAID_LONG":
+                    ll = ls["long_leg"]
+                    eso_l = (str(ll["expiry"])[:10], float(ll["strike"]), str(ll["option_type"]).upper())
+                    ql = quote_lookup.get(eso_l) or {}
+                    sw_s = sweep_l5_book_for_qty(
+                        ql, "SELL", qty=int(ll["qty"]), adverse_ticks=1, max_spread_pct=None, require_observed=False
+                    )
+                    if not sw_s.get("ok"):
+                        continue
+                    close_px = float(sw_s["fill_price"])
+                    gain_pct = ((close_px - float(ll["entry_price"])) / max(0.05, float(ll["entry_price"]))) * 100.0
+
+                    rsn = ""
+                    if ist_hhmm >= int(cfg_b["eod_squareoff_hhmm"]):
+                        rsn = "EOD_SQUAREOFF_1515"
+                    elif held_mins >= int(cfg_b["stagnation_mins"]) and gain_pct < float(cfg_b["stagnation_min_gain_pct"]):
+                        rsn = "STAGNATION_TIME_STOP"
+                    elif vflip_hit:
+                        rsn = "SPOT_VWAP_FLIP_EXIT"
+
+                    if rsn:
+                        c_res = self._close_single_long_package(pkg, ql, close_px, rsn, now_dt, exit_bar_ts=bar_ts)
+                        if c_res:
+                            closed.append(c_res)
+                        continue
+
+                    # Strictly Close-Only Ratchet Update (supports both 2-tuple [act, lock] and 3-tuple [act, dist, lock])!
+                    prev_r = ls.get("ratchet_stop")
+                    ls["best_close_pts"] = max(float(ls.get("best_close_pts") or ll["entry_price"]), close_px)
+                    stages = [
+                        (float(s[0]), float(s[1]), float(s[2])) if len(s) >= 3 else (float(s[0]), 0.0, float(s[1]))
+                        for s in cfg_b["ratchet_stages"]
+                    ]
+                    new_r = compute_close_only_ratchet(
+                        False, float(ll["entry_price"]), float(ls["best_close_pts"]), prev_r, stages
+                    )
+                    ls["ratchet_stop"] = new_r
+                    self._update_open_legs_state(pkg["package_id"], ls)
+                    if new_r is not None and (prev_r is None or float(new_r) > float(prev_r) + 1e-6):
+                        self._emit_lifecycle_event("BOOK_B_RATCHET", {**pkg, "legs_state": ls})
+
+                elif mode == "DEFINED_RISK_CREDIT_SPREAD_150":
+                    sl = ls["short_leg"]
+                    wl = ls["wing_leg"]
+                    eso_s = (str(sl["expiry"])[:10], float(sl["strike"]), str(sl["option_type"]).upper())
+                    eso_w = (str(wl["expiry"])[:10], float(wl["strike"]), str(wl["option_type"]).upper())
+                    qs = quote_lookup.get(eso_s) or {}
+                    qw = quote_lookup.get(eso_w) or {}
+                    qty_abs = abs(int(sl["qty"]))
+                    sw_bs = sweep_l5_book_for_qty(
+                        qs, "BUY", qty=qty_abs, adverse_ticks=1, max_spread_pct=None, require_observed=False
+                    )
+                    sw_sw = sweep_l5_book_for_qty(
+                        qw, "SELL", qty=qty_abs, adverse_ticks=1, max_spread_pct=None, require_observed=False
+                    )
+                    if not sw_bs.get("ok") or not sw_sw.get("ok"):
+                        continue
+                    cur_debit = round(float(sw_bs["fill_price"]) - float(sw_sw["fill_price"]), 2)
+
+                    rsn = ""
+                    if ist_hhmm >= int(cfg_a["eod_squareoff_hhmm"]):
+                        rsn = "EOD_SQUAREOFF_1515"
+                    elif vflip_hit:
+                        rsn = "SPOT_VWAP_FLIP_EXIT"
+
+                    if rsn:
+                        c_res = self._close_spread_package(
+                            pkg, qs, qw, float(sw_bs["fill_price"]), float(sw_sw["fill_price"]), rsn, now_dt, exit_bar_ts=bar_ts
+                        )
+                        if c_res:
+                            closed.append(c_res)
+                        continue
+
+                    # Strictly Close-Only Spread Decay Ratchet Update!
+                    init_cr = float(ls["net_entry_credit_pts"])
+                    best_d = min(float(ls.get("best_close_credit_decay_pts") or init_cr), max(0.05, cur_debit))
+                    ls["best_close_credit_decay_pts"] = best_d
+                    decay_pct = ((init_cr - best_d) / max(0.05, init_cr)) * 100.0
+                    r_debit = ls.get("ratchet_max_debit_pts")
+                    for trig_pct, lock_pct in cfg_a["ratchet_stages"]:
+                        if decay_pct >= float(trig_pct):
+                            cand_debit = round(init_cr * (1.0 - float(lock_pct) / 100.0), 2)
+                            r_debit = cand_debit if r_debit is None else min(float(r_debit), cand_debit)
+                    ls["ratchet_max_debit_pts"] = r_debit
+                    self._update_open_legs_state(pkg["package_id"], ls)
+            except Exception as pkg_err:
+                logger.error(f"[S205ShadowCollector] Bar-close package evaluation error ({pkg.get('package_id')}): {pkg_err}", exc_info=True)
 
         return closed
 
@@ -1995,6 +2026,7 @@ class S205ShadowCollector:
 
         if self._sync_advance_db:
             self._mirror_close_to_advance_db(closed_row, exit_px, exit_px, now_dt)
+        self._emit_lifecycle_event("BOOK_B_CLOSE", closed_row)
         return closed_row
 
     def _close_spread_package(
@@ -2065,6 +2097,7 @@ class S205ShadowCollector:
         if self._sync_advance_db:
             exit_debit = max(0.05, round(short_exit_px - wing_exit_px, 2))
             self._mirror_close_to_advance_db(closed_row, exit_debit, exit_debit, now_dt)
+        self._emit_lifecycle_event("BOOK_A_CLOSE", closed_row)
         return closed_row
 
     def _compute_open_unrealized_pnl(

@@ -631,6 +631,60 @@ class TestS205ShadowCollectorGolden(unittest.TestCase):
         self.assertEqual(comp["HISTORICAL_LEGACY_V2"]["closed_trades_count"], 1)
         self.assertEqual(comp["HISTORICAL_LEGACY_V2"]["realized_net_pnl_inr"], -744.6)
 
+    def test_09_book_b_close_only_ratchet_2tuple_stages_and_lifecycle_listener(self) -> None:
+        events_captured: List[Tuple[str, str]] = []
+        sc = S205ShadowCollector(db_path=self.db_path, sync_advance_db=False)
+        sc.register_lifecycle_listener(lambda ev, p: events_captured.append((ev, str(p.get("package_id")))))
+
+        day, spot_b, vix_b, opt_b = _build_trending_session(50)
+        ctx = build_causal_intraday_context(day, spot_b, vix_b, {}, opt_b, "2026-11-19", "2026-11-26", {})
+        b_idx = 40
+        atm = round(ctx["c"][b_idx] / 50.0) * 50.0
+        q_open = _make_observed_quote("NSE_FO|BOOKB_CE", "2026-11-19", atm, "CE", 144.95, 145.00, l5_qty_each=100, obi=0.22)
+
+        _, opened, _ = sc.evaluate_completed_bar(
+            ctx=ctx,
+            bar_idx=b_idx,
+            quote_lookup={("2026-11-19", atm, "CE"): q_open},
+            fut_quote={"fut_ltp": ctx["c"][b_idx] + 9.0},
+            india_vix=15.8,
+            now_dt=datetime(2026, 11, 16, 9, 55, 0),
+            execute_new_entries=True,
+            allow_network=False,
+        )
+        self.assertEqual(len(opened), 1)
+        pid = opened[0]
+        self.assertEqual(sc._open_packages[pid]["legs_state"]["long_leg"]["entry_price"], 145.05)
+
+        # Next completed 1m bar closes at 163.55 (+12.7% >= +12.0% Stage-1 -> locks +2.0% = ₹147.95 without crashing on 2-tuples!)
+        q_bar2 = _make_observed_quote("NSE_FO|BOOKB_CE", "2026-11-19", atm, "CE", 163.55, 163.80, l5_qty_each=100, obi=0.20)
+        _, _, closed_b2 = sc.evaluate_completed_bar(
+            ctx=ctx,
+            bar_idx=b_idx + 1,
+            quote_lookup={("2026-11-19", atm, "CE"): q_bar2},
+            fut_quote={"fut_ltp": ctx["c"][b_idx + 1] + 9.0},
+            india_vix=15.8,
+            now_dt=datetime(2026, 11, 16, 9, 56, 0),
+            execute_new_entries=True,
+            allow_network=False,
+        )
+        self.assertEqual(len(closed_b2), 0)
+        r_stop = sc._open_packages[pid]["legs_state"]["ratchet_stop"]
+        self.assertIsNotNone(r_stop)
+        self.assertAlmostEqual(float(r_stop), 147.95, places=2)
+
+        # Subsequent tick pulls back to 147.90 (fill_price = 147.85 <= 147.95) -> exits via RATCHET_STOP_HIT!
+        q_pullback = _make_observed_quote("NSE_FO|BOOKB_CE", "2026-11-19", atm, "CE", 147.90, 148.20, l5_qty_each=100, obi=0.05)
+        closed_tick = sc.on_observed_tick(
+            "NSE_FO|BOOKB_CE",
+            q_pullback,
+            now_dt=datetime(2026, 11, 16, 9, 56, 30),
+        )
+        self.assertEqual(len(closed_tick), 1)
+        self.assertEqual(closed_tick[0]["exit_reason"], "RATCHET_STOP_HIT")
+        ev_names = [e[0] for e in events_captured]
+        self.assertEqual(ev_names, ["BOOK_B_OPEN", "BOOK_B_RATCHET", "BOOK_B_CLOSE"])
+
 
 if __name__ == "__main__":
     unittest.main()
