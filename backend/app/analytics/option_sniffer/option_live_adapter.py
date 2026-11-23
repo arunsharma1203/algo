@@ -120,6 +120,42 @@ class OptionLiveAdapter:
         conn.row_factory = sqlite3.Row
         return conn
 
+    READINESS_MAX_FALLBACK_AGE_SEC: float = 120.0
+
+    def _build_rate_limited_fallback(
+        self,
+        prev_cached: Dict[str, Any],
+        prev_fetch_ts: float,
+        now: float,
+        observed_blockers: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Builds an explicitly flagged fallback snapshot when Upstox rate-limiting rejects a
+        non-forced readiness refresh. Never mutates `self._cached_readiness` in place, preserves
+        any freshly observed fatal blockers (e.g. 401/read-only/IP mismatch), and hard-expires
+        `live_trading_eligible` once cache age exceeds `120.0s`.
+        """
+        fb = dict(prev_cached)
+        fb["blockers"] = list(prev_cached.get("blockers") or [])
+        age_sec = round(max(0.0, now - prev_fetch_ts), 1) if prev_fetch_ts > 0 else 9999.0
+        fb["readiness_stale"] = True
+        fb["readiness_cache_age_sec"] = age_sec
+        fb["stale_reason"] = "RATE_LIMIT_FALLBACK"
+        if observed_blockers:
+            for b in observed_blockers:
+                if b and b not in fb["blockers"]:
+                    fb["blockers"].append(b)
+            fb["live_trading_eligible"] = False
+        if age_sec > self.READINESS_MAX_FALLBACK_AGE_SEC:
+            fb["live_trading_eligible"] = False
+            exp_msg = (
+                f"Readiness cache expired ({age_sec:.1f}s > {self.READINESS_MAX_FALLBACK_AGE_SEC:.0f}s) "
+                "under Upstox rate limiting."
+            )
+            if exp_msg not in fb["blockers"]:
+                fb["blockers"].append(exp_msg)
+        return fb
+
     def fetch_account_readiness(self, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Queries Upstox via the Mumbai static IPv6 proxy to verify:
@@ -127,13 +163,17 @@ class OptionLiveAdapter:
           2. F&O Segment ('NFO') enablement
           3. Available Equity Margin
           4. Static IP match against whitelisted primary/secondary IPs
-        Caches responses for 15s to respect API rate limits.
+        Caches responses for 30s to respect API rate limits.
         """
         now = time.time()
         with self._cache_lock:
             if not force_refresh and self._cached_readiness is not None:
                 if (now - self._last_readiness_fetch) < self._cache_ttl_seconds:
-                    return dict(self._cached_readiness)
+                    cached_hit = dict(self._cached_readiness)
+                    cached_hit["blockers"] = list(self._cached_readiness.get("blockers") or [])
+                    cached_hit["readiness_stale"] = False
+                    cached_hit["readiness_cache_age_sec"] = round(max(0.0, now - self._last_readiness_fetch), 1)
+                    return cached_hit
 
         token = ""
         is_read_only_token = False
@@ -182,6 +222,9 @@ class OptionLiveAdapter:
             "secondary_ip": "",
             "static_ip_matched": False,
             "live_trading_eligible": False,
+            "readiness_stale": False,
+            "readiness_cache_age_sec": 0.0,
+            "stale_reason": None,
             "blockers": []
         }
 
@@ -197,12 +240,13 @@ class OptionLiveAdapter:
 
         # 1. Probe Profile & Exchanges + 2. Static IP Whitelist
         # Static profile/IP metadata is cached for 300s per token unless force_refresh=True,
-        # while Funds & Margin refreshes every 15s (cutting routine readiness quota drain by 66%).
+        # while Funds & Margin refreshes every 30s (cutting routine readiness quota drain by 66%).
         with self._cache_lock:
             prof_ip_cache = getattr(self, "_cached_profile_ip", None)
             prof_ip_ts = float(getattr(self, "_last_profile_ip_fetch", 0.0) or 0.0)
             prof_ip_tok = str(getattr(self, "_cached_profile_ip_token", "") or "")
             prev_cached = dict(self._cached_readiness) if self._cached_readiness is not None else None
+            prev_fetch_ts = float(self._last_readiness_fetch or 0.0)
 
         reuse_prof_ip = bool(
             not force_refresh
@@ -230,7 +274,9 @@ class OptionLiveAdapter:
                     get_upstox_limiter().acquire(timeout=2.0, is_emergency=bool(force_refresh))
                 except Exception as rl_err:
                     if not force_refresh and prev_cached is not None:
-                        return prev_cached
+                        return self._build_rate_limited_fallback(
+                            prev_cached, prev_fetch_ts, now, observed_blockers=readiness["blockers"]
+                        )
                     raise rl_err
                 resp_prof = requests.get(
                     "https://api.upstox.com/v2/user/profile",
@@ -260,7 +306,9 @@ class OptionLiveAdapter:
                     get_upstox_limiter().acquire(timeout=2.0, is_emergency=bool(force_refresh))
                 except Exception as rl_err:
                     if not force_refresh and prev_cached is not None:
-                        return prev_cached
+                        return self._build_rate_limited_fallback(
+                            prev_cached, prev_fetch_ts, now, observed_blockers=readiness["blockers"]
+                        )
                     raise rl_err
                 resp_ip = requests.get(
                     "https://api.upstox.com/v2/user/ip",
@@ -304,7 +352,9 @@ class OptionLiveAdapter:
                 get_upstox_limiter().acquire(timeout=2.0, is_emergency=bool(force_refresh))
             except Exception as rl_err:
                 if not force_refresh and prev_cached is not None:
-                    return prev_cached
+                    return self._build_rate_limited_fallback(
+                        prev_cached, prev_fetch_ts, now, observed_blockers=readiness["blockers"]
+                    )
                 raise rl_err
             resp_margin = requests.get(
                 "https://api.upstox.com/v2/user/get-funds-and-margin",

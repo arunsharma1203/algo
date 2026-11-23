@@ -251,9 +251,9 @@ class TestShadowMirrorExecutor(unittest.TestCase):
             init_advance_live_tables(self.db_path)
         self.broker = MockUpstoxBroker()
         self.quotes: Dict[str, Dict[str, Any]] = {
-            "NSE_FO|WING_25000PE": {"bid": 56.30, "ask": 56.45, "ltp": 56.40},
-            "NSE_FO|SHORT_25150PE": {"bid": 101.30, "ask": 101.55, "ltp": 101.40},
-            "NSE_FO|LONG_25300CE": {"bid": 144.95, "ask": 145.00, "ltp": 145.00},
+            "NSE_FO|WING_25000PE": {"bid": 56.30, "ask": 56.45, "ltp": 56.40, "quote_age_ms": 100},
+            "NSE_FO|SHORT_25150PE": {"bid": 101.30, "ask": 101.55, "ltp": 101.40, "quote_age_ms": 100},
+            "NSE_FO|LONG_25300CE": {"bid": 144.95, "ask": 145.00, "ltp": 145.00, "quote_age_ms": 100},
         }
         self.bridge_state: Dict[str, Any] = {
             "is_live_armed": False,
@@ -292,8 +292,8 @@ class TestShadowMirrorExecutor(unittest.TestCase):
         self.assertEqual(ex.mutation_call_count, 0)
         self.assertEqual(len(self.broker.calls), 0)
 
-        self.quotes["NSE_FO|SHORT_25150PE"] = {"bid": 32.00, "ask": 32.20, "ltp": 32.10}
-        self.quotes["NSE_FO|WING_25000PE"] = {"bid": 18.80, "ask": 19.00, "ltp": 18.90}
+        self.quotes["NSE_FO|SHORT_25150PE"] = {"bid": 32.00, "ask": 32.20, "ltp": 32.10, "quote_age_ms": 100}
+        self.quotes["NSE_FO|WING_25000PE"] = {"bid": 18.80, "ask": 19.00, "ltp": 18.90, "quote_age_ms": 100}
         r_close = ex.process_shadow_event_sync(
             "BOOK_A_CLOSE",
             {"package_id": "shdw_booka000001", "book_id": BOOK_ID_SPREAD_A, "exit_reason": "SPREAD_DECAY_TARGET_70PCT", "net_pnl_inr": 1928.67},
@@ -400,7 +400,7 @@ class TestShadowMirrorExecutor(unittest.TestCase):
         self.broker.place_behavior["BUY:NSE_FO|WING_25000PE:LIMIT"] = {"mode": "complete", "fill_price": 56.50}
         self.broker.place_behavior["SELL:NSE_FO|WING_25000PE:LIMIT"] = {"mode": "complete", "fill_price": 56.00}
         # Short bid collapses to 65.00 -> net credit 8.50 < 14.0 floor!
-        self.quotes["NSE_FO|SHORT_25150PE"] = {"bid": 65.00, "ask": 65.50, "ltp": 65.20}
+        self.quotes["NSE_FO|SHORT_25150PE"] = {"bid": 65.00, "ask": 65.50, "ltp": 65.20, "quote_age_ms": 100}
 
         r = ex.process_shadow_event_sync("BOOK_A_OPEN", _sample_book_a_pkg("shdw_fade000001"), now_dt=datetime(2026, 11, 19, 10, 5, 1))
         self.assertEqual(r["state"], "LEG2_CREDIT_FADE_UNWOUND")
@@ -786,6 +786,12 @@ class TestShadowMirrorExecutor(unittest.TestCase):
         r3 = ex.process_shadow_event_sync("BOOK_B_OPEN", _sample_book_b_pkg("shdw_q_cros001"), now_dt=datetime(2026, 11, 19, 10, 52, 1))
         self.assertEqual(r3["state"], "PREFLIGHT_BLOCKED")
         self.assertIn("CROSSED_QUOTE", r3["error_reason"])
+
+        # 4. Unknown quote age (valid bid/ask without quote_age_ms or l1_book_age_ms)
+        self.quotes["NSE_FO|LONG_25300CE"] = {"bid": 144.95, "ask": 145.00, "ltp": 145.00}
+        r4 = ex.process_shadow_event_sync("BOOK_B_OPEN", _sample_book_b_pkg("shdw_q_noag001"), now_dt=datetime(2026, 11, 19, 10, 53, 1))
+        self.assertEqual(r4["state"], "PREFLIGHT_BLOCKED")
+        self.assertIn("UNKNOWN_LIVE_QUOTE_AGE", r4["error_reason"])
         self.assertEqual(ex.mutation_call_count, 0)
 
     def test_19_p1_2_rejected_exchange_sl_triggers_immediate_protective_flatten(self) -> None:

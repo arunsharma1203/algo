@@ -291,6 +291,8 @@ class ShadowMirrorExecutor:
 
         self._mutation_call_count: int = 0
         self._last_ratchet_modify_epoch: Dict[str, float] = {}
+        self._exit_quote_fail_streak: Dict[str, int] = {}
+        self._pending_disarm_reasons: List[str] = []
         self._last_watchdog_epoch: float = 0.0
         self._last_db_sync_epoch: float = 0.0
         self._last_worker_idle_mono: float = 0.0
@@ -447,36 +449,84 @@ class ShadowMirrorExecutor:
                 pass
         return {}
 
+    def _queue_disarm_trigger(self, reason: str) -> None:
+        rsn = str(reason or "SHADOW_MIRROR_FAILSAFE").strip()
+        with self._lock:
+            if rsn not in self._pending_disarm_reasons:
+                self._pending_disarm_reasons.append(rsn)
+
+    def _flush_pending_disarms(self) -> None:
+        """Invokes disarm callback strictly OUTSIDE `_pkg_locks` to guarantee zero AB-BA lock inversion."""
+        with self._lock:
+            pending = list(self._pending_disarm_reasons)
+            self._pending_disarm_reasons.clear()
+        for rsn in pending:
+            if self._disarm_callback:
+                try:
+                    self._disarm_callback(rsn)
+                except Exception as exc:
+                    logger.error(f"[ShadowMirrorExecutor] Disarm callback error ({rsn}): {exc}")
+
     @staticmethod
-    def _extract_quote_age_ms(quote: Optional[Dict[str, Any]]) -> int:
+    def _extract_quote_age_ms(quote: Optional[Dict[str, Any]]) -> Optional[int]:
+        """
+        Extracts conservative quote/book age in ms.
+        Returns `None` when age is missing, negative, unparseable, or an unbacked `999999` sentinel —
+        NEVER defaults unknown age to `0`!
+        """
         if not isinstance(quote, dict) or not quote:
-            return 999999
+            return None
+
+        q_age: Optional[int] = None
         if quote.get("quote_age_ms") is not None:
             try:
-                return max(0, int(quote["quote_age_ms"]))
+                qa = int(quote["quote_age_ms"])
+                has_q_ts = any(
+                    isinstance(quote.get(k), (int, float)) and int(quote.get(k) or 0) > 0
+                    for k in ("timestamp_ms", "local_receipt_ts_ms", "l1_book_timestamp_ms")
+                )
+                if qa >= 0 and not (qa == 999999 and not has_q_ts):
+                    q_age = qa
             except (ValueError, TypeError):
-                return 999999
-        if quote.get("l1_book_age_ms") is not None:
-            try:
-                l1a = int(quote["l1_book_age_ms"])
-                if l1a < 999999:
-                    return max(0, l1a)
-            except (ValueError, TypeError):
-                pass
-        return 0
+                return None
 
-    def _get_fresh_exit_quote(self, ikey: str, max_age_ms: int = 5000) -> Dict[str, Any]:
+        l1_age: Optional[int] = None
+        has_l1_field = quote.get("l1_book_age_ms") is not None
+        if has_l1_field:
+            try:
+                la = int(quote["l1_book_age_ms"])
+                has_l1_ts = isinstance(quote.get("l1_book_timestamp_ms"), (int, float)) and int(quote.get("l1_book_timestamp_ms") or 0) > 0
+                if la >= 0 and not (la == 999999 and not has_l1_ts):
+                    l1_age = la
+            except (ValueError, TypeError):
+                return None
+
+        prov = str(quote.get("book_provenance") or "")
+        if prov == "EMERGENCY_REST_L1":
+            return q_age
+        if has_l1_field and l1_age is None:
+            # Explicit unbacked `l1_book_age_ms=999999` sentinel MUST NOT be masked by `q_age`!
+            return None
+        if q_age is not None and l1_age is not None:
+            return max(q_age, l1_age)
+        return q_age if q_age is not None else l1_age
+
+    def _get_fresh_exit_quote(
+        self, ikey: str, max_age_ms: int = 5000
+    ) -> Tuple[bool, Dict[str, Any], str]:
         """
-        Returns a fresh (`<= max_age_ms`) live quote for exit limit-collar pricing.
-        If the cached WebSocket quote is missing, zero/crossed, or stale (`> max_age_ms` — e.g. evicted
-        OTM wing), executes an emergency single-instrument Upstox REST quote query (`is_emergency=True`)
-        so exit limit collars NEVER anchor off a frozen stale price.
+        Fail-closed fresh exit quote resolver (`<= max_age_ms`) for LIVE_ARMED limit-collar pricing.
+        1. Validates cached WebSocket quote via `_extract_strict_live_bid_ask`.
+        2. If stale/missing/unknown, executes emergency REST `GET /market-quote/quotes` (`is_emergency=True`).
+        3. If emergency REST fails, times out, or returns zero/crossed depth, returns
+           `(False, {}, "STALE_EXIT_QUOTE_UNRECOVERABLE:...")` — NEVER returns the stale quote!
         """
         q = self._get_quote(ikey)
-        ok_ba, _, _, _ = self._extract_strict_live_bid_ask(q, max_age_ms=max_age_ms)
+        ok_ba, _, _, ws_rsn = self._extract_strict_live_bid_ask(q, max_age_ms=max_age_ms)
         if ok_ba:
-            return q
+            return True, q, "WS_FRESH"
 
+        rest_detail = "NO_IKEY"
         if ikey:
             try:
                 ok_r, sc_r, rdata = self._broker_query(
@@ -507,20 +557,35 @@ class ShadowMirrorExecutor:
                             b_px = float((buy_d[0] if buy_d else {}).get("price") or 0.0)
                             a_px = float((sell_d[0] if sell_d else {}).get("price") or 0.0)
                             ltp_px = float(matched.get("last_price") or 0.0)
-                            if b_px > 0.0 and a_px >= b_px:
-                                return {
-                                    "instrument_key": str(ikey),
-                                    "bid": b_px,
-                                    "ask": a_px,
-                                    "raw_bid": b_px,
-                                    "raw_ask": a_px,
-                                    "ltp": ltp_px if ltp_px > 0.0 else round(0.5 * (b_px + a_px), 2),
-                                    "quote_age_ms": 0,
-                                    "book_provenance": "EMERGENCY_REST_L1",
-                                }
+                            now_ms = int(time.time() * 1000)
+                            fresh_q = {
+                                "instrument_key": str(ikey),
+                                "bid": b_px,
+                                "ask": a_px,
+                                "raw_bid": b_px,
+                                "raw_ask": a_px,
+                                "ltp": ltp_px if ltp_px > 0.0 else round(0.5 * (b_px + a_px), 2),
+                                "quote_age_ms": 0,
+                                "timestamp_ms": now_ms,
+                                "local_receipt_ts_ms": now_ms,
+                                "book_provenance": "EMERGENCY_REST_L1",
+                            }
+                            ok_rest_ba, _, _, rest_ba_rsn = self._extract_strict_live_bid_ask(
+                                fresh_q, max_age_ms=max_age_ms
+                            )
+                            if ok_rest_ba:
+                                return True, fresh_q, "EMERGENCY_REST_FRESH"
+                            rest_detail = f"REST_INVALID_BOOK:{rest_ba_rsn}"
+                        else:
+                            rest_detail = "REST_NO_MATCHED_QUOTE"
+                    else:
+                        rest_detail = "REST_EMPTY_DATA"
+                else:
+                    rest_detail = f"REST_HTTP_{sc_r}"
             except Exception as exc:
+                rest_detail = f"REST_EXC:{type(exc).__name__}"
                 logger.warning(f"[ShadowMirrorExecutor] Emergency exit quote REST refresh note ({ikey}): {exc}")
-        return q
+        return False, {}, f"STALE_EXIT_QUOTE_UNRECOVERABLE:ws={ws_rsn}|rest={rest_detail}"
 
     @staticmethod
     def _extract_strict_live_bid_ask(
@@ -529,14 +594,16 @@ class ShadowMirrorExecutor:
     ) -> Tuple[bool, float, float, str]:
         """
         Fail-closed live quote validator (`.agents/rules/no-data-leakage.md` Rule 4):
-        NEVER invents bid/ask from `ltp` or `entry_price` when quotes are missing, stale,
-        zero (`bid <= 0`), or crossed (`ask < bid`).
+        NEVER invents bid/ask from `ltp` or `entry_price` when quotes are missing, unknown-age,
+        stale, zero (`bid <= 0`), or crossed (`ask < bid`).
         """
         if not isinstance(quote, dict) or not quote:
             return False, 0.0, 0.0, "MISSING_LIVE_QUOTE"
-        q_age = ShadowMirrorExecutor._extract_quote_age_ms(quote)
-        if max_age_ms > 0 and q_age > max_age_ms:
-            return False, 0.0, 0.0, f"STALE_LIVE_QUOTE:{q_age}ms"
+        prov = str(quote.get("book_provenance") or "")
+        if prov == "SYNTHETIC_LTP_FALLBACK":
+            return False, 0.0, 0.0, "SYNTHETIC_LTP_FALLBACK_REJECTED"
+        if str(quote.get("quote_freshness") or "") == "SEEDED_BASELINE":
+            return False, 0.0, 0.0, "SEEDED_BASELINE_REJECTED"
         rb_raw = quote.get("raw_bid") if quote.get("raw_bid") is not None else quote.get("bid")
         ra_raw = quote.get("raw_ask") if quote.get("raw_ask") is not None else quote.get("ask")
         if rb_raw is None or ra_raw is None:
@@ -547,6 +614,12 @@ class ShadowMirrorExecutor:
             return False, 0.0, 0.0, f"ZERO_OR_NEGATIVE_BID:{rb}"
         if ra < rb:
             return False, 0.0, 0.0, f"CROSSED_QUOTE:{rb}>{ra}"
+        if max_age_ms is not None and max_age_ms >= 0:
+            q_age = ShadowMirrorExecutor._extract_quote_age_ms(quote)
+            if q_age is None:
+                return False, 0.0, 0.0, "UNKNOWN_LIVE_QUOTE_AGE"
+            if q_age > max_age_ms:
+                return False, 0.0, 0.0, f"STALE_LIVE_QUOTE:{q_age}ms"
         return True, round(rb, 2), round(ra, 2), "OK"
 
     @staticmethod
@@ -781,8 +854,44 @@ class ShadowMirrorExecutor:
             return {"ok": True, "terminal_confirmed": True, "cum_qty": cum_qty, "avg_fill": cur_avg, "last_oid": stored_oid or None, "reason": ""}
 
         # Step B: Collared execution strictly for remaining `target_total_qty - cum_qty`
-        q_live = self._get_fresh_exit_quote(ikey, max_age_ms=5000)
-        bid, ask = self._extract_mtm_or_exit_bid_ask(q_live, fallback_px)
+        # HARD FAILSAFE (Finding #1): NEVER price a live exit collar from a stale/unrecoverable quote!
+        streak_key = f"{mirror_id}:{ikey}"
+        ok_fresh, q_live, q_rsn = self._get_fresh_exit_quote(ikey, max_age_ms=5000)
+        ok_ba, bid, ask, ba_rsn = (
+            self._extract_strict_live_bid_ask(q_live, max_age_ms=5000)
+            if ok_fresh
+            else (False, 0.0, 0.0, q_rsn)
+        )
+        if not ok_fresh or not ok_ba:
+            fail_rsn = q_rsn if not ok_fresh else f"STALE_EXIT_QUOTE_UNRECOVERABLE:{ba_rsn}"
+            with self._lock:
+                streak = int(self._exit_quote_fail_streak.get(streak_key, 0)) + 1
+                self._exit_quote_fail_streak[streak_key] = streak
+            if streak >= 3:
+                logger.critical(
+                    f"🚨 [ShadowMirrorExecutor] {streak} consecutive unrecoverable exit-quote failures on "
+                    f"{mirror_id} ({ikey}): {fail_rsn} — escalating auto-disarm for new entries while keeping EXIT_RETRY_PENDING!"
+                )
+                if streak == 3:
+                    self._queue_disarm_trigger("UNRECOVERABLE_STALE_EXIT_QUOTE")
+            else:
+                logger.error(
+                    f"[ShadowMirrorExecutor] Unrecoverable exit quote on {mirror_id} ({ikey}, streak={streak}): "
+                    f"{fail_rsn} — holding EXIT_RETRY_PENDING without placing stale LIMIT order."
+                )
+            return {
+                "ok": False,
+                "terminal_confirmed": True,
+                "cum_qty": cum_qty,
+                "avg_fill": cur_avg,
+                "last_oid": stored_oid or None,
+                "reason": fail_rsn,
+            }
+
+        with self._lock:
+            self._exit_quote_fail_streak[streak_key] = 0
+        anchor_base_age_s = float(self._extract_quote_age_ms(q_live) or 0) / 1000.0
+        anchor_mono = time.monotonic()
         ref_px = ask if side.upper() == "BUY" else bid
         last_reason = "EXIT_UNFILLED"
 
@@ -791,10 +900,32 @@ class ShadowMirrorExecutor:
             if rem <= 0:
                 break
             if stg >= 2:
-                q_retry = self._get_fresh_exit_quote(ikey, max_age_ms=2500)
-                if q_retry:
-                    b_r, a_r = self._extract_mtm_or_exit_bid_ask(q_retry, ref_px)
-                    ref_px = a_r if side.upper() == "BUY" else b_r
+                refreshed_ok = False
+                ok_r, q_retry, r_rsn = self._get_fresh_exit_quote(ikey, max_age_ms=2500)
+                if ok_r:
+                    ok_rba, b_r, a_r, rba_rsn = self._extract_strict_live_bid_ask(q_retry, max_age_ms=2500)
+                    if ok_rba:
+                        ref_px = a_r if side.upper() == "BUY" else b_r
+                        anchor_base_age_s = float(self._extract_quote_age_ms(q_retry) or 0) / 1000.0
+                        anchor_mono = time.monotonic()
+                        refreshed_ok = True
+                    else:
+                        r_rsn = f"STALE_EXIT_QUOTE_UNRECOVERABLE:{rba_rsn}"
+                if not refreshed_ok and (anchor_base_age_s + (time.monotonic() - anchor_mono)) > 5.0:
+                    with self._lock:
+                        streak = int(self._exit_quote_fail_streak.get(streak_key, 0)) + 1
+                        self._exit_quote_fail_streak[streak_key] = streak
+                    if streak >= 3:
+                        if streak == 3:
+                            self._queue_disarm_trigger("UNRECOVERABLE_STALE_EXIT_QUOTE")
+                    return {
+                        "ok": False,
+                        "terminal_confirmed": True,
+                        "cum_qty": cum_qty,
+                        "avg_fill": cur_avg,
+                        "last_oid": stored_oid or None,
+                        "reason": r_rsn,
+                    }
             lim_px = compute_smart_limit_collar(ref_px, side, stage=stg)
             pl = {
                 "quantity": int(rem),
@@ -890,16 +1021,18 @@ class ShadowMirrorExecutor:
             return None
 
         now_ist = to_ist_naive(now_dt)
+        result: Optional[Dict[str, Any]] = None
         with self._get_pkg_lock(spid):
             if event_type == "BOOK_A_OPEN" and book_id == BOOK_ID_SPREAD_A:
-                return self._handle_book_a_open(pkg, now_ist)
-            if event_type == "BOOK_B_OPEN" and book_id == BOOK_ID_PAID_B:
-                return self._handle_book_b_open(pkg, now_ist)
-            if event_type == "BOOK_B_RATCHET" and book_id == BOOK_ID_PAID_B:
-                return self._handle_book_b_ratchet(pkg, now_ist)
-            if event_type in ("BOOK_A_CLOSE", "BOOK_B_CLOSE"):
-                return self._handle_package_close(pkg, now_ist)
-        return None
+                result = self._handle_book_a_open(pkg, now_ist)
+            elif event_type == "BOOK_B_OPEN" and book_id == BOOK_ID_PAID_B:
+                result = self._handle_book_b_open(pkg, now_ist)
+            elif event_type == "BOOK_B_RATCHET" and book_id == BOOK_ID_PAID_B:
+                result = self._handle_book_b_ratchet(pkg, now_ist)
+            elif event_type in ("BOOK_A_CLOSE", "BOOK_B_CLOSE"):
+                result = self._handle_package_close(pkg, now_ist)
+        self._flush_pending_disarms()
+        return result
 
     # ──────────────────────────────────────────────────────────────────────────
     # PREFLIGHT GATES
@@ -984,6 +1117,8 @@ class ShadowMirrorExecutor:
             return False, "PAST_1515_SESSION_CUTOFF", details
         if bool(st.get("is_session_halted", False)):
             return False, f"CIRCUIT_BREAKER_HALTED:{st.get('halt_reason')}", details
+        if bool(st.get("has_stale_positions", False)):
+            return False, "STALE_OPEN_POSITION_MTM_BLOCK", details
         max_loss = float(st.get("max_daily_loss_inr") or 3500.0)
         if float(st.get("daily_total_exposure_pnl_inr") or 0.0) <= -abs(max_loss):
             return False, "DAILY_LOSS_CEILING_REACHED", details
@@ -2035,6 +2170,8 @@ class ShadowMirrorExecutor:
                 actions.extend(wd_actions)
         except Exception as e:
             logger.debug(f"[ShadowMirrorExecutor] sync_with_shadow_db_once note: {e}")
+        finally:
+            self._flush_pending_disarms()
 
         return {"status": "OK", "actions": actions}
 
@@ -2172,6 +2309,7 @@ class ShadowMirrorExecutor:
         for rsn in disarm_triggers:
             if self._disarm_callback:
                 self._disarm_callback(rsn)
+        self._flush_pending_disarms()
 
         return notes
 
@@ -2196,6 +2334,7 @@ class ShadowMirrorExecutor:
                 )
                 if res and res.get("state") in TERMINAL_STATES:
                     flattened.append(str(rd["mirror_id"]))
+        self._flush_pending_disarms()
         return flattened
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -2221,6 +2360,7 @@ class ShadowMirrorExecutor:
                 s_open = max(0, int(d.get("leg2_filled_qty") or 0) - int(d.get("leg2_exited_qty") or 0))
                 qty = max(w_open, s_open, int(d.get("qty") or SHADOW_LOT_QTY))
                 unreal = 0.0
+                est_fees = 0.0
                 c_bid = None
                 c_ask = None
                 w_age_ms: Optional[int] = None
@@ -2231,7 +2371,7 @@ class ShadowMirrorExecutor:
                     if w_open > 0 and d.get("leg1_entry_fill"):
                         qw = self._get_quote(str(d["leg1_instrument_key"]))
                         w_age_ms = self._extract_quote_age_ms(qw)
-                        if w_age_ms > 10000:
+                        if w_age_ms is None or w_age_ms > 10000:
                             quote_stale = True
                         wb, _ = self._extract_mtm_or_exit_bid_ask(qw, float(d["leg1_entry_fill"]))
                         c_bid = wb
@@ -2239,7 +2379,7 @@ class ShadowMirrorExecutor:
                     if s_open > 0 and d.get("leg2_entry_fill"):
                         qs = self._get_quote(str(d["leg2_instrument_key"]))
                         s_age_ms = self._extract_quote_age_ms(qs)
-                        if s_age_ms > 10000:
+                        if s_age_ms is None or s_age_ms > 10000:
                             quote_stale = True
                         _, sa = self._extract_mtm_or_exit_bid_ask(qs, float(d["leg2_entry_fill"]))
                         c_ask = sa
@@ -2247,11 +2387,12 @@ class ShadowMirrorExecutor:
                     if legs_u:
                         acc = compute_package_accounting(legs=legs_u, trade_date=str(d["session_date"]))
                         unreal = float(acc["net_pnl"])
+                        est_fees = float(acc["total_friction"])
                     tsym = f"{d.get('leg2_trading_symbol') or ''} / +{int(float(d.get('leg1_strike') or 0))}{d.get('leg1_option_type') or ''}"
                 elif d["book_id"] == BOOK_ID_PAID_B and w_open > 0 and d.get("leg1_entry_fill"):
                     ql = self._get_quote(str(d["leg1_instrument_key"]))
                     w_age_ms = self._extract_quote_age_ms(ql)
-                    if w_age_ms > 10000:
+                    if w_age_ms is None or w_age_ms > 10000:
                         quote_stale = True
                     lb, la = self._extract_mtm_or_exit_bid_ask(ql, float(d["leg1_entry_fill"]))
                     c_bid = lb
@@ -2261,6 +2402,7 @@ class ShadowMirrorExecutor:
                         trade_date=str(d["session_date"]),
                     )
                     unreal = float(acc["net_pnl"])
+                    est_fees = float(acc["total_friction"])
                     tsym = str(d["leg1_trading_symbol"] or "")
                 else:
                     tsym = str(d.get("leg1_trading_symbol") or d.get("direction_label") or "")
@@ -2288,6 +2430,7 @@ class ShadowMirrorExecutor:
                         "average_fill_price": d.get("leg2_entry_fill") or d.get("leg1_entry_fill"),
                         "hedge_wing_strike": d.get("leg1_strike") if d["book_id"] == BOOK_ID_SPREAD_A else 0.0,
                         "hedge_wing_instrument_key": d.get("leg1_instrument_key") if d["book_id"] == BOOK_ID_SPREAD_A else None,
+                        "hedge_wing_broker_order_id": d.get("leg1_entry_oid") if d["book_id"] == BOOK_ID_SPREAD_A else None,
                         "broker_sl_order_id": d.get("broker_sl_oid"),
                         "stop_loss_trigger": d.get("broker_sl_trigger"),
                         "state": "FILLED" if (w_open > 0 or s_open > 0) else "SUBMITTED",
@@ -2297,6 +2440,7 @@ class ShadowMirrorExecutor:
                         "wing_quote_age_ms": w_age_ms,
                         "short_quote_age_ms": s_age_ms,
                         "quote_stale": quote_stale,
+                        "statutory_charges": round(est_fees, 2),
                         "unrealized_pnl": round(unreal, 2),
                         "is_shadow_mirror": True,
                         "created_at": d["created_at"],
