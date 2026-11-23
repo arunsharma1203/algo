@@ -245,12 +245,47 @@ def init_shadow_telemetry_tables(db_path: Optional[str] = None) -> None:
         conn.close()
 
 
+SHADOW_EXIT_MAX_QUOTE_AGE_MS: int = 5000
+SHADOW_CROSS_LEG_MAX_SKEW_MS: int = 5000
+CLEAN_BOOK_A_EPOCH_START_DATE: str = "2026-11-24"
+
+
+def _extract_quote_ts_ms(quote: Optional[Dict[str, Any]]) -> int:
+    if not isinstance(quote, dict) or not quote:
+        return 0
+    for k in ("local_receipt_ts_ms", "timestamp_ms", "l1_book_timestamp_ms"):
+        v = quote.get(k)
+        if v is not None:
+            try:
+                iv = int(v)
+                if iv > 0:
+                    return iv
+            except (ValueError, TypeError):
+                pass
+    return 0
+
+
+def _quotes_within_skew(
+    quote_a: Optional[Dict[str, Any]],
+    quote_b: Optional[Dict[str, Any]],
+    max_skew_ms: int = SHADOW_CROSS_LEG_MAX_SKEW_MS,
+) -> bool:
+    """Returns False if both quotes carry receipt timestamps that diverge by > max_skew_ms."""
+    if not isinstance(quote_a, dict) or not isinstance(quote_b, dict) or not quote_a or not quote_b:
+        return False
+    ts_a = _extract_quote_ts_ms(quote_a)
+    ts_b = _extract_quote_ts_ms(quote_b)
+    if ts_a > 0 and ts_b > 0 and abs(ts_a - ts_b) > max_skew_ms:
+        return False
+    return True
+
+
 def sweep_l5_book_for_qty(
     quote: Optional[Dict[str, Any]],
     side: str,
     qty: int = 65,
     adverse_ticks: int = 1,
-    max_age_ms: int = 1500,
+    max_age_ms: Optional[int] = 1500,
     max_spread_pct: Optional[float] = 2.5,
     max_spread_pts: Optional[float] = None,
     require_observed: bool = True,
@@ -259,7 +294,8 @@ def sweep_l5_book_for_qty(
     Sweeps the 5-level order book (`depth_levels[0..4]`) for `qty` contracts and applies
     canonical `₹0.05` adverse tick rounding via `options_accounting.round_to_nse_tick`.
 
-    Fails closed (`ok = False`) on synthetic/carried books, stale books, crossed quotes,
+    Fails closed (`ok = False`) on synthetic/carried books, stale books (`max_age_ms` enforced
+    independently of `require_observed` whenever `max_age_ms is not None`), crossed quotes,
     excessive spread (when `max_spread_pct` is set for entries), or cumulative 5-level depth `< qty`.
     """
     side_u = str(side or "").upper().strip()
@@ -287,11 +323,25 @@ def sweep_l5_book_for_qty(
                 "reason": "SYNTHETIC_OR_CARRIED_BOOK_REJECTED",
                 "book_provenance": prov or "UNKNOWN",
             }
-        if age_ms > max_age_ms:
+        if max_age_ms is not None and age_ms > max_age_ms:
             return {
                 "ok": False,
                 "reason": "STALE_L1_BOOK",
                 "l1_book_age_ms": age_ms,
+                "max_age_ms": max_age_ms,
+            }
+    elif max_age_ms is not None:
+        if quote.get("quote_age_ms") is not None:
+            eff_age_ms = int(quote["quote_age_ms"])
+        elif quote.get("l1_book_age_ms") is not None and int(quote["l1_book_age_ms"]) < 999999:
+            eff_age_ms = int(quote["l1_book_age_ms"])
+        else:
+            eff_age_ms = 0
+        if eff_age_ms > max_age_ms:
+            return {
+                "ok": False,
+                "reason": "STALE_L1_BOOK",
+                "l1_book_age_ms": eff_age_ms,
                 "max_age_ms": max_age_ms,
             }
 
@@ -399,11 +449,13 @@ class S205ShadowCollector:
         prereg_path: Optional[str] = None,
         sync_advance_db: bool = True,
         margin_fetcher: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]] = None,
+        emergency_quote_fetcher: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     ) -> None:
         self._lock = threading.RLock()
         self._db_path_override = db_path
         self._sync_advance_db = bool(sync_advance_db)
         self._margin_fetcher = margin_fetcher
+        self._emergency_quote_fetcher = emergency_quote_fetcher
         self.config, self.prereg_sha256 = load_shadow_preregistration(prereg_path)
 
         init_shadow_telemetry_tables(self._db_path())
@@ -473,7 +525,108 @@ class S205ShadowCollector:
             self._locked_until_after_bar.clear()
             self._cooldown_until_epoch.clear()
 
+    def _active_pinned_leg_keys(self) -> set:
+        keys = set()
+        with self._lock:
+            for pkg in self._open_packages.values():
+                ls = pkg.get("legs_state") or {}
+                for lk in ("wing_leg", "short_leg", "long_leg"):
+                    ld = ls.get(lk)
+                    if isinstance(ld, dict) and ld.get("instrument_key"):
+                        keys.add(str(ld["instrument_key"]))
+            for pobj in self._pending_leg2.values():
+                for lk in ("wing_leg", "short_target"):
+                    ld = pobj.get(lk)
+                    if isinstance(ld, dict) and ld.get("instrument_key"):
+                        keys.add(str(ld["instrument_key"]))
+        return keys
+
+    def _pin_package_contracts(self, legs: Sequence[Dict[str, Any]]) -> None:
+        if not self._sync_advance_db or not legs:
+            return
+        to_pin: List[Dict[str, Any]] = []
+        for ld in legs:
+            if not isinstance(ld, dict) or not ld.get("instrument_key"):
+                continue
+            to_pin.append(
+                {
+                    "instrument_key": str(ld["instrument_key"]),
+                    "trading_symbol": str(ld.get("trading_symbol") or ld["instrument_key"]),
+                    "underlying": "NIFTY",
+                    "expiry": str(ld.get("expiry") or "")[:10],
+                    "strike": float(ld.get("strike") or 0.0),
+                    "option_type": str(ld.get("option_type") or "CE").upper(),
+                    "lot_size": abs(int(ld.get("qty") or 65)) or 65,
+                    "is_pinned_active_leg": True,
+                    "is_active_position_leg": True,
+                }
+            )
+        if to_pin:
+            try:
+                from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+                OptionStreamManager().pin_extra_contracts(to_pin)
+            except Exception as exc:
+                logger.debug(f"[S205ShadowCollector] Pin package contracts note: {exc}")
+
+    def _unpin_unused_package_keys(self, candidate_keys: Sequence[str]) -> None:
+        if not self._sync_advance_db or not candidate_keys:
+            return
+        still_active = self._active_pinned_leg_keys()
+        releasable = [str(k) for k in candidate_keys if k and str(k) not in still_active]
+        if releasable:
+            try:
+                from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+                sm = OptionStreamManager()
+                if hasattr(sm, "unpin_extra_contracts"):
+                    sm.unpin_extra_contracts(releasable)
+            except Exception as exc:
+                logger.debug(f"[S205ShadowCollector] Unpin package contracts note: {exc}")
+
+    def _resolve_exit_quote(
+        self,
+        ikey: str,
+        cand_quote: Optional[Dict[str, Any]],
+        max_age_ms: int = SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+        allow_emergency_rest: bool = False,
+    ) -> Dict[str, Any]:
+        chk = sweep_l5_book_for_qty(
+            cand_quote,
+            "SELL",
+            qty=1,
+            adverse_ticks=0,
+            max_age_ms=max_age_ms,
+            max_spread_pct=None,
+            require_observed=False,
+        )
+        if chk.get("ok") and isinstance(cand_quote, dict):
+            return cand_quote
+
+        if not allow_emergency_rest or not ikey:
+            return cand_quote if isinstance(cand_quote, dict) else {}
+
+        if self._emergency_quote_fetcher is not None:
+            try:
+                q_em = self._emergency_quote_fetcher(str(ikey))
+                if isinstance(q_em, dict) and q_em:
+                    return q_em
+            except Exception as exc:
+                logger.debug(f"[S205ShadowCollector] Custom emergency quote fetcher note ({ikey}): {exc}")
+
+        if self._sync_advance_db:
+            try:
+                from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+                sm = OptionStreamManager()
+                if hasattr(sm, "fetch_single_quote_emergency_rest"):
+                    q_rest = sm.fetch_single_quote_emergency_rest(str(ikey), max_cache_age_ms=max_age_ms)
+                    if isinstance(q_rest, dict) and q_rest:
+                        return q_rest
+            except Exception as exc:
+                logger.debug(f"[S205ShadowCollector] Emergency REST quote fetch note ({ikey}): {exc}")
+
+        return cand_quote if isinstance(cand_quote, dict) else {}
+
     def _restore_open_packages_from_db(self) -> None:
+        legs_to_pin: List[Dict[str, Any]] = []
         try:
             conn = self._connect()
             try:
@@ -482,13 +635,20 @@ class S205ShadowCollector:
                 ).fetchall()
                 for r in rows:
                     d = dict(r)
-                    d["legs_state"] = json.loads(d.get("legs_state_json") or "{}")
+                    ls = json.loads(d.get("legs_state_json") or "{}")
+                    d["legs_state"] = ls
                     d["regime_context"] = json.loads(d.get("regime_context_json") or "{}")
                     self._open_packages[str(d["package_id"])] = d
+                    for lk in ("wing_leg", "short_leg", "long_leg"):
+                        ld = ls.get(lk)
+                        if isinstance(ld, dict) and ld.get("instrument_key"):
+                            legs_to_pin.append(ld)
             finally:
                 conn.close()
         except Exception as exc:
             logger.debug(f"[S205ShadowCollector] Restore open packages note: {exc}")
+        if legs_to_pin:
+            self._pin_package_contracts(legs_to_pin)
 
     # ──────────────────────────────────────────────────────────────────────────
     # 1. L5 CHAIN TELEMETRY, QUOTE-FADE HORIZONS & EXPIRY FSP RECORDING
@@ -527,6 +687,7 @@ class S205ShadowCollector:
         obs_spreads: List[float] = []
         obs_obis: List[float] = []
         now_iso = now_dt.isoformat()
+        open_leg_keys = self._active_pinned_leg_keys()
 
         for q in nifty_quotes:
             exp_s = str(q.get("expiry") or "")[:10]
@@ -535,9 +696,9 @@ class S205ShadowCollector:
             ikey = str(q.get("instrument_key") or "")
             if not ikey or ot not in ("CE", "PE"):
                 continue
-            if target_exps and exp_s not in target_exps:
+            if target_exps and exp_s not in target_exps and ikey not in open_leg_keys:
                 continue
-            if abs(stk - atm) > 300.0:
+            if abs(stk - atm) > 300.0 and ikey not in open_leg_keys:
                 continue
 
             vtt = int(q.get("volume") or 0)
@@ -715,8 +876,8 @@ class S205ShadowCollector:
             ikey = str(q.get("instrument_key") or "")
             if not ikey:
                 continue
-            b_sw = sweep_l5_book_for_qty(q, "BUY", qty=65, adverse_ticks=0, max_spread_pct=None, require_observed=False)
-            s_sw = sweep_l5_book_for_qty(q, "SELL", qty=65, adverse_ticks=0, max_spread_pct=None, require_observed=False)
+            b_sw = sweep_l5_book_for_qty(q, "BUY", qty=65, adverse_ticks=0, max_age_ms=None, max_spread_pct=None, require_observed=False)
+            s_sw = sweep_l5_book_for_qty(q, "SELL", qty=65, adverse_ticks=0, max_age_ms=None, max_spread_pct=None, require_observed=False)
             immediate_rows.append(
                 (
                     event_id,
@@ -770,8 +931,8 @@ class S205ShadowCollector:
 
         if not due:
             return
-        b_sw = sweep_l5_book_for_qty(quote, "BUY", qty=65, adverse_ticks=0, max_spread_pct=None, require_observed=False)
-        s_sw = sweep_l5_book_for_qty(quote, "SELL", qty=65, adverse_ticks=0, max_spread_pct=None, require_observed=False)
+        b_sw = sweep_l5_book_for_qty(quote, "BUY", qty=65, adverse_ticks=0, max_age_ms=None, max_spread_pct=None, require_observed=False)
+        s_sw = sweep_l5_book_for_qty(quote, "SELL", qty=65, adverse_ticks=0, max_age_ms=None, max_spread_pct=None, require_observed=False)
         rows = [
             (
                 d["event_id"],
@@ -1058,7 +1219,9 @@ class S205ShadowCollector:
         # Step A: Manage open shadow packages on `:00` completed 1m candle close
         if execute_new_entries:
             closed_pkgs.extend(
-                self._manage_open_packages_on_bar_close(ctx, bar_idx, bar_ts, quote_lookup, ist_hhmm, now_dt)
+                self._manage_open_packages_on_bar_close(
+                    ctx, bar_idx, bar_ts, quote_lookup, ist_hhmm, now_dt, allow_network=allow_network
+                )
             )
 
         cap_state = self._active_capital_and_slots(bar_ts, today_s)
@@ -1403,6 +1566,7 @@ class S205ShadowCollector:
         self._persist_open_package(pkg_row)
         with self._lock:
             self._open_packages[pkg_id] = pkg_row
+        self._pin_package_contracts([legs_state["long_leg"]])
 
         now_ms = int(quote.get("local_receipt_ts_ms") or int(time.time() * 1000))
         self._schedule_quote_fade_event(pkg_id, "ENTRY_PAID_LONG", [("BUY", quote)], now_ms)
@@ -1507,6 +1671,7 @@ class S205ShadowCollector:
         }
         with self._lock:
             self._pending_leg2[pkg_id] = pending_obj
+        self._pin_package_contracts([pending_obj["wing_leg"], pending_obj["short_target"]])
         self._schedule_quote_fade_event(pkg_id, "ENTRY_SPREAD_LEG1_WING", [("BUY", q_wing), ("SELL", q_short)], leg1_ts_ms)
         return pkg_id
 
@@ -1648,6 +1813,7 @@ class S205ShadowCollector:
             self._persist_open_package(pkg_row)
             with self._lock:
                 self._open_packages[package_id] = pkg_row
+            self._pin_package_contracts([legs_state["wing_leg"], legs_state["short_leg"]])
             if self._sync_advance_db:
                 sl_pct_equiv = round(((max_debit_stop - net_credit_pts) / max(0.05, net_credit_pts)) * 100.0, 2)
                 self._mirror_open_to_advance_db(
@@ -1662,12 +1828,18 @@ class S205ShadowCollector:
             return {"state": "OPEN", "package_id": package_id, "net_entry_credit_pts": net_credit_pts}
 
         # Emergency Incomplete-Leg Unwind: Sell bought protective wing back at L5 bid!
-        eff_wing_q = wing_quote or wing_leg.get("last_quote") or {}
+        eff_wing_q = self._resolve_exit_quote(
+            str(wing_leg["instrument_key"]),
+            wing_quote or wing_leg.get("last_quote") or {},
+            max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+            allow_emergency_rest=True,
+        )
         sw_unwind = sweep_l5_book_for_qty(
             eff_wing_q,
             side="SELL",
             qty=lot_sz,
             adverse_ticks=int(hyg["adverse_latency_ticks"]),
+            max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
             max_spread_pct=None,
             require_observed=False,
         )
@@ -1729,6 +1901,7 @@ class S205ShadowCollector:
             "regime_context": {"shadow_only": True, "reject_reason": reject_reason},
         }
         self._persist_closed_or_unwound_package(unwound_row)
+        self._unpin_unused_package_keys([str(wing_leg["instrument_key"]), str(short_t["instrument_key"])])
         return {"state": "INCOMPLETE_LEG_UNWOUND", "package_id": package_id, "net_pnl_inr": float(acc["net_pnl"]), "reason": reject_reason}
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1788,8 +1961,16 @@ class S205ShadowCollector:
                 if ikey != l_ik and not is_eod:
                     continue
                 lq = quote_payload if ikey == l_ik else getter(l_ik)
+                if is_eod:
+                    lq = self._resolve_exit_quote(l_ik, lq, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
                 sw_sell = sweep_l5_book_for_qty(
-                    lq, "SELL", qty=abs(int(ls["long_leg"]["qty"])), adverse_ticks=1, max_spread_pct=None, require_observed=False
+                    lq,
+                    "SELL",
+                    qty=abs(int(ls["long_leg"]["qty"])),
+                    adverse_ticks=1,
+                    max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                    max_spread_pct=None,
+                    require_observed=False,
                 )
                 if not sw_sell.get("ok"):
                     continue
@@ -1813,13 +1994,42 @@ class S205ShadowCollector:
                 wq = quote_payload if ikey == w_ik else getter(w_ik)
                 qty_abs = abs(int(ls["short_leg"]["qty"]))
                 sw_buy_short = sweep_l5_book_for_qty(
-                    sq, "BUY", qty=qty_abs, adverse_ticks=1, max_spread_pct=None, require_observed=False
+                    sq,
+                    "BUY",
+                    qty=qty_abs,
+                    adverse_ticks=1,
+                    max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                    max_spread_pct=None,
+                    require_observed=False,
                 )
                 sw_sell_wing = sweep_l5_book_for_qty(
-                    wq, "SELL", qty=qty_abs, adverse_ticks=1, max_spread_pct=None, require_observed=False
+                    wq,
+                    "SELL",
+                    qty=qty_abs,
+                    adverse_ticks=1,
+                    max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                    max_spread_pct=None,
+                    require_observed=False,
                 )
+                # Emergency REST quote recovery ONLY for protective exits (`is_eod` or sharp adverse short-leg surge)
+                short_surge_threat = bool(
+                    sw_buy_short.get("ok")
+                    and float(sw_buy_short["fill_price"]) >= float(ls["short_leg"]["entry_price"]) + 12.0
+                )
+                if is_eod or short_surge_threat:
+                    if not sw_buy_short.get("ok"):
+                        sq = self._resolve_exit_quote(s_ik, sq, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
+                        sw_buy_short = sweep_l5_book_for_qty(
+                            sq, "BUY", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                        )
+                    if not sw_sell_wing.get("ok"):
+                        wq = self._resolve_exit_quote(w_ik, wq, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
+                        sw_sell_wing = sweep_l5_book_for_qty(
+                            wq, "SELL", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                        )
                 if not sw_buy_short.get("ok") or not sw_sell_wing.get("ok"):
                     continue
+                legs_synchronized = _quotes_within_skew(sq, wq, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS)
                 cur_debit = round(float(sw_buy_short["fill_price"]) - float(sw_sell_wing["fill_price"]), 2)
                 hard_debit = float(ls["hard_stop_debit_pts"])
                 r_debit = ls.get("ratchet_max_debit_pts")
@@ -1827,9 +2037,9 @@ class S205ShadowCollector:
                 rsn = ""
                 if is_eod:
                     rsn = "EOD_SQUAREOFF_1515"
-                elif cur_debit >= eff_max_debit:
-                    rsn = "SPREAD_RATCHET_STOP_HIT" if (r_debit is not None and float(r_debit) < hard_debit - 0.01) else "SPREAD_HARD_SL_HIT"
-                elif cur_debit <= float(ls["target_debit_pts"]):
+                elif cur_debit >= eff_max_debit and (legs_synchronized or short_surge_threat):
+                    rsn = "SPREAD_RATCHET_STOP_HIT" if (r_debit is not None and float(r_debit) < hard_debit - 0.01 and legs_synchronized) else "SPREAD_HARD_SL_HIT"
+                elif legs_synchronized and cur_debit <= float(ls["target_debit_pts"]):
                     rsn = "SPREAD_DECAY_TARGET_70PCT"
                 if rsn:
                     c_out = self._close_spread_package(
@@ -1854,6 +2064,7 @@ class S205ShadowCollector:
         quote_lookup: Dict[Tuple[str, float, str], Dict[str, Any]],
         ist_hhmm: int,
         now_dt: datetime,
+        allow_network: bool = False,
     ) -> List[Dict[str, Any]]:
         closed: List[Dict[str, Any]] = []
         with self._lock:
@@ -1861,6 +2072,7 @@ class S205ShadowCollector:
 
         cfg_a = self.config["shadow_books"]["SHADOW_BOOK_A_SPREAD_150"]
         cfg_b = self.config["shadow_books"]["SHADOW_BOOK_B_PAID_FLOW"]
+        can_rest = bool(allow_network or self._emergency_quote_fetcher is not None)
 
         for pkg in open_list:
             try:
@@ -1884,11 +2096,28 @@ class S205ShadowCollector:
 
                 if mode == "SINGLE_PAID_LONG":
                     ll = ls["long_leg"]
+                    l_ik = str(ll["instrument_key"])
                     eso_l = (str(ll["expiry"])[:10], float(ll["strike"]), str(ll["option_type"]).upper())
                     ql = quote_lookup.get(eso_l) or {}
-                    sw_s = sweep_l5_book_for_qty(
-                        ql, "SELL", qty=int(ll["qty"]), adverse_ticks=1, max_spread_pct=None, require_observed=False
+                    need_bar_exit_b = (
+                        ist_hhmm >= int(cfg_b["eod_squareoff_hhmm"])
+                        or vflip_hit
+                        or held_mins >= int(cfg_b["stagnation_mins"])
                     )
+                    sw_s = sweep_l5_book_for_qty(
+                        ql,
+                        "SELL",
+                        qty=int(ll["qty"]),
+                        adverse_ticks=1,
+                        max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                        max_spread_pct=None,
+                        require_observed=False,
+                    )
+                    if not sw_s.get("ok") and need_bar_exit_b and can_rest:
+                        ql = self._resolve_exit_quote(l_ik, ql, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
+                        sw_s = sweep_l5_book_for_qty(
+                            ql, "SELL", qty=int(ll["qty"]), adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                        )
                     if not sw_s.get("ok"):
                         continue
                     close_px = float(sw_s["fill_price"])
@@ -1926,17 +2155,43 @@ class S205ShadowCollector:
                 elif mode == "DEFINED_RISK_CREDIT_SPREAD_150":
                     sl = ls["short_leg"]
                     wl = ls["wing_leg"]
+                    s_ik = str(sl["instrument_key"])
+                    w_ik = str(wl["instrument_key"])
                     eso_s = (str(sl["expiry"])[:10], float(sl["strike"]), str(sl["option_type"]).upper())
                     eso_w = (str(wl["expiry"])[:10], float(wl["strike"]), str(wl["option_type"]).upper())
                     qs = quote_lookup.get(eso_s) or {}
                     qw = quote_lookup.get(eso_w) or {}
                     qty_abs = abs(int(sl["qty"]))
+                    need_bar_exit_a = ist_hhmm >= int(cfg_a["eod_squareoff_hhmm"]) or vflip_hit
                     sw_bs = sweep_l5_book_for_qty(
-                        qs, "BUY", qty=qty_abs, adverse_ticks=1, max_spread_pct=None, require_observed=False
+                        qs,
+                        "BUY",
+                        qty=qty_abs,
+                        adverse_ticks=1,
+                        max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                        max_spread_pct=None,
+                        require_observed=False,
                     )
                     sw_sw = sweep_l5_book_for_qty(
-                        qw, "SELL", qty=qty_abs, adverse_ticks=1, max_spread_pct=None, require_observed=False
+                        qw,
+                        "SELL",
+                        qty=qty_abs,
+                        adverse_ticks=1,
+                        max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                        max_spread_pct=None,
+                        require_observed=False,
                     )
+                    if need_bar_exit_a and can_rest:
+                        if not sw_bs.get("ok"):
+                            qs = self._resolve_exit_quote(s_ik, qs, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
+                            sw_bs = sweep_l5_book_for_qty(
+                                qs, "BUY", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                            )
+                        if not sw_sw.get("ok"):
+                            qw = self._resolve_exit_quote(w_ik, qw, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
+                            sw_sw = sweep_l5_book_for_qty(
+                                qw, "SELL", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                            )
                     if not sw_bs.get("ok") or not sw_sw.get("ok"):
                         continue
                     cur_debit = round(float(sw_bs["fill_price"]) - float(sw_sw["fill_price"]), 2)
@@ -1953,6 +2208,9 @@ class S205ShadowCollector:
                         )
                         if c_res:
                             closed.append(c_res)
+                        continue
+
+                    if not _quotes_within_skew(qs, qw, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS):
                         continue
 
                     # Strictly Close-Only Spread Decay Ratchet Update!
@@ -2021,6 +2279,7 @@ class S205ShadowCollector:
             "exit_reason": exit_reason,
         }
         self._persist_closed_or_unwound_package(closed_row)
+        self._unpin_unused_package_keys([str(ll["instrument_key"])])
         now_ms = int(exit_quote.get("local_receipt_ts_ms") or int(time.time() * 1000))
         self._schedule_quote_fade_event(pid, f"EXIT_{exit_reason}", [("SELL", exit_quote)], now_ms)
 
@@ -2091,6 +2350,7 @@ class S205ShadowCollector:
             "exit_reason": exit_reason,
         }
         self._persist_closed_or_unwound_package(closed_row)
+        self._unpin_unused_package_keys([str(wl["instrument_key"]), str(sl["instrument_key"])])
         now_ms = int(short_quote.get("local_receipt_ts_ms") or int(time.time() * 1000))
         self._schedule_quote_fade_event(pid, f"EXIT_{exit_reason}", [("BUY", short_quote), ("SELL", wing_quote)], now_ms)
 
@@ -2112,7 +2372,13 @@ class S205ShadowCollector:
                 ll = ls["long_leg"]
                 q = quote_lookup.get((str(ll["expiry"])[:10], float(ll["strike"]), str(ll["option_type"]).upper()))
                 sw = sweep_l5_book_for_qty(
-                    q, "SELL", qty=int(ll["qty"]), adverse_ticks=1, max_spread_pct=None, require_observed=False
+                    q,
+                    "SELL",
+                    qty=int(ll["qty"]),
+                    adverse_ticks=1,
+                    max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                    max_spread_pct=None,
+                    require_observed=False,
                 )
                 if sw.get("ok"):
                     acc = compute_package_accounting(
@@ -2127,12 +2393,24 @@ class S205ShadowCollector:
                 qw = quote_lookup.get((str(wl["expiry"])[:10], float(wl["strike"]), str(wl["option_type"]).upper()))
                 qty_abs = abs(int(sl["qty"]))
                 sw_s = sweep_l5_book_for_qty(
-                    qs, "BUY", qty=qty_abs, adverse_ticks=1, max_spread_pct=None, require_observed=False
+                    qs,
+                    "BUY",
+                    qty=qty_abs,
+                    adverse_ticks=1,
+                    max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                    max_spread_pct=None,
+                    require_observed=False,
                 )
                 sw_w = sweep_l5_book_for_qty(
-                    qw, "SELL", qty=qty_abs, adverse_ticks=1, max_spread_pct=None, require_observed=False
+                    qw,
+                    "SELL",
+                    qty=qty_abs,
+                    adverse_ticks=1,
+                    max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                    max_spread_pct=None,
+                    require_observed=False,
                 )
-                if sw_s.get("ok") and sw_w.get("ok"):
+                if sw_s.get("ok") and sw_w.get("ok") and _quotes_within_skew(qs, qw, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS):
                     acc = compute_package_accounting(
                         legs=[
                             OptionLeg(wl["option_type"], float(wl["strike"]), qty_abs, float(wl["entry_price"]), float(sw_w["fill_price"])),
@@ -2540,6 +2818,41 @@ class S205ShadowCollector:
                 FROM option_sniffer_advance_s205_shadow_packages;
                 """
             ).fetchone()
+            clean_epoch_totals = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN state IN ('CLOSED', 'INCOMPLETE_LEG_UNWOUND')
+                              AND (book_id != 'SHADOW_BOOK_A_SPREAD_150' OR session_date >= ?) THEN 1 ELSE 0 END) AS clean_closed_cnt,
+                    COALESCE(SUM(CASE WHEN state IN ('CLOSED', 'INCOMPLETE_LEG_UNWOUND')
+                                       AND (book_id != 'SHADOW_BOOK_A_SPREAD_150' OR session_date >= ?) THEN net_pnl_inr ELSE 0.0 END), 0.0) AS clean_realized_net,
+                    SUM(CASE WHEN state IN ('CLOSED', 'INCOMPLETE_LEG_UNWOUND')
+                              AND book_id = 'SHADOW_BOOK_A_SPREAD_150' AND session_date >= ? THEN 1 ELSE 0 END) AS clean_book_a_cnt,
+                    COALESCE(SUM(CASE WHEN state IN ('CLOSED', 'INCOMPLETE_LEG_UNWOUND')
+                                       AND book_id = 'SHADOW_BOOK_A_SPREAD_150' AND session_date >= ? THEN net_pnl_inr ELSE 0.0 END), 0.0) AS clean_book_a_net,
+                    SUM(CASE WHEN state IN ('CLOSED', 'INCOMPLETE_LEG_UNWOUND')
+                              AND book_id = 'SHADOW_BOOK_A_SPREAD_150' AND session_date < ? THEN 1 ELSE 0 END) AS quarantined_book_a_cnt,
+                    COALESCE(SUM(CASE WHEN state IN ('CLOSED', 'INCOMPLETE_LEG_UNWOUND')
+                                       AND book_id = 'SHADOW_BOOK_A_SPREAD_150' AND session_date < ? THEN net_pnl_inr ELSE 0.0 END), 0.0) AS quarantined_book_a_net
+                FROM option_sniffer_advance_s205_shadow_packages;
+                """,
+                (
+                    CLEAN_BOOK_A_EPOCH_START_DATE,
+                    CLEAN_BOOK_A_EPOCH_START_DATE,
+                    CLEAN_BOOK_A_EPOCH_START_DATE,
+                    CLEAN_BOOK_A_EPOCH_START_DATE,
+                    CLEAN_BOOK_A_EPOCH_START_DATE,
+                    CLEAN_BOOK_A_EPOCH_START_DATE,
+                ),
+            ).fetchone()
+            clean_book_a_sess = int(
+                (
+                    conn.execute(
+                        "SELECT COUNT(DISTINCT session_date) FROM option_sniffer_advance_s205_l5_chain_1m WHERE session_date >= ?;",
+                        (CLEAN_BOOK_A_EPOCH_START_DATE,),
+                    ).fetchone()
+                    or [0]
+                )[0]
+            )
         finally:
             conn.close()
 
@@ -2548,6 +2861,12 @@ class S205ShadowCollector:
         active_res = round(float((totals["active_reserved"] if totals else 0.0) or 0.0), 2)
         init_cap = float(env["initial_capital_inr"])
         curr_eq = round(init_cap + realized_net, 2)
+        clean_closed_cnt = int((clean_epoch_totals["clean_closed_cnt"] if clean_epoch_totals else 0) or 0)
+        clean_realized_net = round(float((clean_epoch_totals["clean_realized_net"] if clean_epoch_totals else 0.0) or 0.0), 2)
+        clean_book_a_cnt = int((clean_epoch_totals["clean_book_a_cnt"] if clean_epoch_totals else 0) or 0)
+        clean_book_a_net = round(float((clean_epoch_totals["clean_book_a_net"] if clean_epoch_totals else 0.0) or 0.0), 2)
+        quar_book_a_cnt = int((clean_epoch_totals["quarantined_book_a_cnt"] if clean_epoch_totals else 0) or 0)
+        quar_book_a_net = round(float((clean_epoch_totals["quarantined_book_a_net"] if clean_epoch_totals else 0.0) or 0.0), 2)
 
         return {
             "protocol_id": self.config["protocol_id"],
@@ -2563,9 +2882,20 @@ class S205ShadowCollector:
                 "closed_shadow_packages": closed_cnt,
                 "min_trades_required": int(horizon["min_forward_trades_for_review"]),
                 "ready_for_go_no_go_review": bool(
-                    sess_cnt >= int(horizon["min_forward_trading_sessions"])
-                    and closed_cnt >= int(horizon["min_forward_trades_for_review"])
+                    clean_book_a_sess >= int(horizon["min_forward_trading_sessions"])
+                    and clean_closed_cnt >= int(horizon["min_forward_trades_for_review"])
                 ),
+            },
+            "clean_post_fix_audit": {
+                "clean_book_a_epoch_start_date": CLEAN_BOOK_A_EPOCH_START_DATE,
+                "clean_book_a_sessions_collected": clean_book_a_sess,
+                "clean_closed_shadow_packages": clean_closed_cnt,
+                "clean_realized_net_pnl_inr": clean_realized_net,
+                "clean_book_a_closed_packages": clean_book_a_cnt,
+                "clean_book_a_realized_net_pnl_inr": clean_book_a_net,
+                "quarantined_pre_fix_book_a_packages": quar_book_a_cnt,
+                "quarantined_pre_fix_book_a_net_pnl_inr": quar_book_a_net,
+                "quarantine_reason": "PRE_2026_11_24_WING_EVICTION_STALE_QUOTE_CONTAMINATION",
             },
             "shadow_account_ledger": {
                 "initial_capital_inr": init_cap,

@@ -448,14 +448,95 @@ class ShadowMirrorExecutor:
         return {}
 
     @staticmethod
-    def _extract_strict_live_bid_ask(quote: Optional[Dict[str, Any]]) -> Tuple[bool, float, float, str]:
+    def _extract_quote_age_ms(quote: Optional[Dict[str, Any]]) -> int:
+        if not isinstance(quote, dict) or not quote:
+            return 999999
+        if quote.get("quote_age_ms") is not None:
+            try:
+                return max(0, int(quote["quote_age_ms"]))
+            except (ValueError, TypeError):
+                return 999999
+        if quote.get("l1_book_age_ms") is not None:
+            try:
+                l1a = int(quote["l1_book_age_ms"])
+                if l1a < 999999:
+                    return max(0, l1a)
+            except (ValueError, TypeError):
+                pass
+        return 0
+
+    def _get_fresh_exit_quote(self, ikey: str, max_age_ms: int = 5000) -> Dict[str, Any]:
+        """
+        Returns a fresh (`<= max_age_ms`) live quote for exit limit-collar pricing.
+        If the cached WebSocket quote is missing, zero/crossed, or stale (`> max_age_ms` — e.g. evicted
+        OTM wing), executes an emergency single-instrument Upstox REST quote query (`is_emergency=True`)
+        so exit limit collars NEVER anchor off a frozen stale price.
+        """
+        q = self._get_quote(ikey)
+        ok_ba, _, _, _ = self._extract_strict_live_bid_ask(q, max_age_ms=max_age_ms)
+        if ok_ba:
+            return q
+
+        if ikey:
+            try:
+                ok_r, sc_r, rdata = self._broker_query(
+                    "/market-quote/quotes",
+                    params={"instrument_key": str(ikey)},
+                    is_emergency=True,
+                )
+                if ok_r and sc_r == 200 and isinstance(rdata, dict):
+                    dmap = rdata.get("data")
+                    if isinstance(dmap, dict) and dmap:
+                        matched: Optional[Dict[str, Any]] = None
+                        colon_ik = str(ikey).replace("|", ":")
+                        pipe_ik = str(ikey).replace(":", "|")
+                        for k, v in dmap.items():
+                            if not isinstance(v, dict):
+                                continue
+                            tok = str(v.get("instrument_token") or k)
+                            if tok in (ikey, colon_ik, pipe_ik) or k in (ikey, colon_ik, pipe_ik):
+                                matched = v
+                                break
+                        if matched is None:
+                            first_v = next(iter(dmap.values()), None)
+                            if isinstance(first_v, dict):
+                                matched = first_v
+                        if isinstance(matched, dict):
+                            buy_d = (matched.get("depth") or {}).get("buy") or []
+                            sell_d = (matched.get("depth") or {}).get("sell") or []
+                            b_px = float((buy_d[0] if buy_d else {}).get("price") or 0.0)
+                            a_px = float((sell_d[0] if sell_d else {}).get("price") or 0.0)
+                            ltp_px = float(matched.get("last_price") or 0.0)
+                            if b_px > 0.0 and a_px >= b_px:
+                                return {
+                                    "instrument_key": str(ikey),
+                                    "bid": b_px,
+                                    "ask": a_px,
+                                    "raw_bid": b_px,
+                                    "raw_ask": a_px,
+                                    "ltp": ltp_px if ltp_px > 0.0 else round(0.5 * (b_px + a_px), 2),
+                                    "quote_age_ms": 0,
+                                    "book_provenance": "EMERGENCY_REST_L1",
+                                }
+            except Exception as exc:
+                logger.warning(f"[ShadowMirrorExecutor] Emergency exit quote REST refresh note ({ikey}): {exc}")
+        return q
+
+    @staticmethod
+    def _extract_strict_live_bid_ask(
+        quote: Optional[Dict[str, Any]],
+        max_age_ms: int = 5000,
+    ) -> Tuple[bool, float, float, str]:
         """
         Fail-closed live quote validator (`.agents/rules/no-data-leakage.md` Rule 4):
-        NEVER invents bid/ask from `ltp` or `entry_price` when quotes are missing, zero (`bid <= 0`),
-        or crossed (`ask < bid`).
+        NEVER invents bid/ask from `ltp` or `entry_price` when quotes are missing, stale,
+        zero (`bid <= 0`), or crossed (`ask < bid`).
         """
         if not isinstance(quote, dict) or not quote:
             return False, 0.0, 0.0, "MISSING_LIVE_QUOTE"
+        q_age = ShadowMirrorExecutor._extract_quote_age_ms(quote)
+        if max_age_ms > 0 and q_age > max_age_ms:
+            return False, 0.0, 0.0, f"STALE_LIVE_QUOTE:{q_age}ms"
         rb_raw = quote.get("raw_bid") if quote.get("raw_bid") is not None else quote.get("bid")
         ra_raw = quote.get("raw_ask") if quote.get("raw_ask") is not None else quote.get("ask")
         if rb_raw is None or ra_raw is None:
@@ -700,7 +781,7 @@ class ShadowMirrorExecutor:
             return {"ok": True, "terminal_confirmed": True, "cum_qty": cum_qty, "avg_fill": cur_avg, "last_oid": stored_oid or None, "reason": ""}
 
         # Step B: Collared execution strictly for remaining `target_total_qty - cum_qty`
-        q_live = self._get_quote(ikey)
+        q_live = self._get_fresh_exit_quote(ikey, max_age_ms=5000)
         bid, ask = self._extract_mtm_or_exit_bid_ask(q_live, fallback_px)
         ref_px = ask if side.upper() == "BUY" else bid
         last_reason = "EXIT_UNFILLED"
@@ -709,6 +790,11 @@ class ShadowMirrorExecutor:
             rem = target_total_qty - cum_qty
             if rem <= 0:
                 break
+            if stg >= 2:
+                q_retry = self._get_fresh_exit_quote(ikey, max_age_ms=2500)
+                if q_retry:
+                    b_r, a_r = self._extract_mtm_or_exit_bid_ask(q_retry, ref_px)
+                    ref_px = a_r if side.upper() == "BUY" else b_r
             lim_px = compute_smart_limit_collar(ref_px, side, stage=stg)
             pl = {
                 "quantity": int(rem),
@@ -2137,15 +2223,24 @@ class ShadowMirrorExecutor:
                 unreal = 0.0
                 c_bid = None
                 c_ask = None
+                w_age_ms: Optional[int] = None
+                s_age_ms: Optional[int] = None
+                quote_stale = False
                 if d["book_id"] == BOOK_ID_SPREAD_A and (w_open > 0 or s_open > 0):
                     legs_u: List[OptionLeg] = []
                     if w_open > 0 and d.get("leg1_entry_fill"):
                         qw = self._get_quote(str(d["leg1_instrument_key"]))
+                        w_age_ms = self._extract_quote_age_ms(qw)
+                        if w_age_ms > 10000:
+                            quote_stale = True
                         wb, _ = self._extract_mtm_or_exit_bid_ask(qw, float(d["leg1_entry_fill"]))
                         c_bid = wb
                         legs_u.append(OptionLeg(str(d["leg1_option_type"]), float(d["leg1_strike"]), w_open, float(d["leg1_entry_fill"]), wb, "MARKET_ORDER"))
                     if s_open > 0 and d.get("leg2_entry_fill"):
                         qs = self._get_quote(str(d["leg2_instrument_key"]))
+                        s_age_ms = self._extract_quote_age_ms(qs)
+                        if s_age_ms > 10000:
+                            quote_stale = True
                         _, sa = self._extract_mtm_or_exit_bid_ask(qs, float(d["leg2_entry_fill"]))
                         c_ask = sa
                         legs_u.append(OptionLeg(str(d["leg2_option_type"]), float(d["leg2_strike"]), -s_open, float(d["leg2_entry_fill"]), sa, "MARKET_ORDER"))
@@ -2155,6 +2250,9 @@ class ShadowMirrorExecutor:
                     tsym = f"{d.get('leg2_trading_symbol') or ''} / +{int(float(d.get('leg1_strike') or 0))}{d.get('leg1_option_type') or ''}"
                 elif d["book_id"] == BOOK_ID_PAID_B and w_open > 0 and d.get("leg1_entry_fill"):
                     ql = self._get_quote(str(d["leg1_instrument_key"]))
+                    w_age_ms = self._extract_quote_age_ms(ql)
+                    if w_age_ms > 10000:
+                        quote_stale = True
                     lb, la = self._extract_mtm_or_exit_bid_ask(ql, float(d["leg1_entry_fill"]))
                     c_bid = lb
                     c_ask = la
@@ -2163,7 +2261,7 @@ class ShadowMirrorExecutor:
                         trade_date=str(d["session_date"]),
                     )
                     unreal = float(acc["net_pnl"])
-                    tsym = str(d.get("leg1_trading_symbol") or "")
+                    tsym = str(d["leg1_trading_symbol"] or "")
                 else:
                     tsym = str(d.get("leg1_trading_symbol") or d.get("direction_label") or "")
 
@@ -2196,6 +2294,9 @@ class ShadowMirrorExecutor:
                         "exit_state": d["state"],
                         "current_bid": c_bid,
                         "current_ask": c_ask,
+                        "wing_quote_age_ms": w_age_ms,
+                        "short_quote_age_ms": s_age_ms,
+                        "quote_stale": quote_stale,
                         "unrealized_pnl": round(unreal, 2),
                         "is_shadow_mirror": True,
                         "created_at": d["created_at"],

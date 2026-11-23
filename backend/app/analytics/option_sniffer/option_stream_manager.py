@@ -92,6 +92,7 @@ class OptionStreamManager:
         """
         open_position_contracts: List[Dict[str, Any]] = []
         try:
+            import json as _json_osm
             conn = OptionDB.get_connection()
             cur = conn.cursor()
             for tbl in ("option_sniffer_paper_trades", "option_sniffer_advance_trades"):
@@ -110,6 +111,7 @@ class OptionStreamManager:
                                 "option_type": row[4] or "CE",
                                 "expiry": row[5] or "",
                                 "lot_size": int(row[6] or 65),
+                                "is_active_position_leg": True,
                             })
                 except Exception:
                     pass
@@ -128,7 +130,61 @@ class OptionStreamManager:
                             "underlying": row[2] or "NIFTY",
                             "option_type": "PE" if "PE" in act_str else "CE",
                             "lot_size": int(row[4] or 65),
+                            "is_active_position_leg": True,
                         })
+            except Exception:
+                pass
+            # Preserve ALL open S205 Shadow legs (crucially including Book A 150pt protective wing!)
+            try:
+                cur.execute(
+                    "SELECT expiry, legs_state_json "
+                    "FROM option_sniffer_advance_s205_shadow_packages "
+                    "WHERE state = 'OPEN'"
+                )
+                for row in cur.fetchall():
+                    exp_s = str(row[0] or "")
+                    ls_obj = _json_osm.loads(row[1] or "{}") if row[1] else {}
+                    for leg_k in ("wing_leg", "short_leg", "long_leg"):
+                        leg_d = ls_obj.get(leg_k)
+                        if isinstance(leg_d, dict) and leg_d.get("instrument_key"):
+                            open_position_contracts.append({
+                                "instrument_key": str(leg_d["instrument_key"]),
+                                "trading_symbol": str(leg_d.get("trading_symbol") or leg_d["instrument_key"]),
+                                "underlying": "NIFTY",
+                                "strike": float(leg_d.get("strike") or 0.0),
+                                "option_type": str(leg_d.get("option_type") or "CE").upper(),
+                                "expiry": str(leg_d.get("expiry") or exp_s),
+                                "lot_size": abs(int(leg_d.get("qty") or 65)) or 65,
+                                "is_active_position_leg": True,
+                            })
+            except Exception:
+                pass
+            # Preserve ALL active Live Shadow Mirror legs (`leg1` protective wing + `leg2` short leg)
+            try:
+                cur.execute(
+                    "SELECT expiry, qty, "
+                    "leg1_instrument_key, leg1_trading_symbol, leg1_strike, leg1_option_type, "
+                    "leg2_instrument_key, leg2_trading_symbol, leg2_strike, leg2_option_type "
+                    "FROM option_advance_live_shadow_packages "
+                    "WHERE state IN ('LEG1_SUBMITTED','LEG2_SUBMITTED','OPEN_HEDGED','OPEN_LONG',"
+                    "'EXITING_SHORT','EXITING_WING','EXITING_LONG','EXIT_RETRY_PENDING')"
+                )
+                for row in cur.fetchall():
+                    exp_m = str(row[0] or "")
+                    qty_m = abs(int(row[1] or 65)) or 65
+                    for idx_base in (2, 6):
+                        ik_m = str(row[idx_base] or "").strip()
+                        if ik_m:
+                            open_position_contracts.append({
+                                "instrument_key": ik_m,
+                                "trading_symbol": str(row[idx_base + 1] or ik_m),
+                                "underlying": "NIFTY",
+                                "strike": float(row[idx_base + 2] or 0.0),
+                                "option_type": str(row[idx_base + 3] or "CE").upper(),
+                                "expiry": exp_m,
+                                "lot_size": qty_m,
+                                "is_active_position_leg": True,
+                            })
             except Exception:
                 pass
             conn.close()
@@ -152,10 +208,10 @@ class OptionStreamManager:
             if not hasattr(self, "_advance_feed_listeners"):
                 self._advance_feed_listeners = []
 
-            # Preserve pinned catastrophe wings or explicitly pinned futures across universe syncs
+            # Preserve pinned catastrophe wings, explicitly pinned futures, or in-flight active position legs across universe syncs
             preserved_pinned = [
                 m for m in self._key_to_contract.values()
-                if m.get("is_catastrophe_wing") or m.get("is_futures")
+                if m.get("is_catastrophe_wing") or m.get("is_futures") or m.get("is_pinned_active_leg")
             ]
 
             new_keys: List[str] = []
@@ -947,6 +1003,146 @@ class OptionStreamManager:
             except Exception:
                 pass
         return pinned
+
+    def unpin_extra_contracts(self, ikeys: List[str]) -> int:
+        """Clears `is_pinned_active_leg` flag once a shadow/live package leg is fully closed."""
+        cleared = 0
+        if not ikeys:
+            return cleared
+        with self._lock:
+            for raw_k in ikeys:
+                ik = str(raw_k or "").strip()
+                meta = self._key_to_contract.get(ik)
+                if isinstance(meta, dict) and meta.get("is_pinned_active_leg"):
+                    meta.pop("is_pinned_active_leg", None)
+                    meta.pop("is_active_position_leg", None)
+                    cleared += 1
+        return cleared
+
+    def fetch_single_quote_emergency_rest(
+        self,
+        ikey: str,
+        max_cache_age_ms: int = 5000,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Emergency single-instrument REST quote refresh (`is_emergency=True`) for protective exits ONLY.
+        Strictly enforces fail-closed bid/ask validation (`raw_bid > 0` and `raw_ask >= raw_bid`) and
+        marks `is_observed_l1_book = False` (`book_provenance = 'EMERGENCY_REST_L1'`) so emergency REST
+        quotes can NEVER spoof WebSocket L5 provenance for new entries.
+        """
+        ik = str(ikey or "").strip()
+        if not ik:
+            return None
+        cached = self.get_option_quote(ik)
+        if isinstance(cached, dict) and cached:
+            c_age = int(cached.get("quote_age_ms") if cached.get("quote_age_ms") is not None else 999999)
+            c_bid = float(cached.get("raw_bid") if cached.get("raw_bid") is not None else (cached.get("bid") or 0.0))
+            c_ask = float(cached.get("raw_ask") if cached.get("raw_ask") is not None else (cached.get("ask") or 0.0))
+            if c_age <= max_cache_age_ms and c_bid > 0.0 and c_ask >= c_bid:
+                return cached
+
+        data_map: Dict[str, Any] = {}
+        try:
+            from app.analytics.option_sniffer.option_live_order_intent import get_order_intent_engine
+            ok, sc, resp_d = get_order_intent_engine()._call_upstox_broker_api(
+                "GET",
+                "/market-quote/quotes",
+                params={"instrument_key": ik},
+                is_emergency=True,
+            )
+            if ok and sc == 200 and isinstance(resp_d, dict):
+                data_map = dict(resp_d.get("data") or {})
+        except Exception as e:
+            logger.warning(f"[OptionStreamManager] Emergency single-quote REST fetch error ({ik}): {e}")
+            return None
+
+        if not data_map:
+            return None
+
+        matched_v: Optional[Dict[str, Any]] = None
+        colon_ik = ik.replace("|", ":")
+        pipe_ik = ik.replace(":", "|")
+        for k, v in data_map.items():
+            if not isinstance(v, dict):
+                continue
+            tok = str(v.get("instrument_token") or k)
+            if tok in (ik, colon_ik, pipe_ik) or k in (ik, colon_ik, pipe_ik):
+                matched_v = v
+                break
+        if matched_v is None:
+            first_v = next(iter(data_map.values()), None)
+            if isinstance(first_v, dict):
+                matched_v = first_v
+        if not isinstance(matched_v, dict):
+            return None
+
+        buy_depth = (matched_v.get("depth") or {}).get("buy") or []
+        sell_depth = (matched_v.get("depth") or {}).get("sell") or []
+        top_bid = buy_depth[0] if buy_depth else {}
+        top_ask = sell_depth[0] if sell_depth else {}
+        bid = float(top_bid.get("price") or 0.0)
+        ask = float(top_ask.get("price") or 0.0)
+        ltp = float(matched_v.get("last_price") or 0.0)
+        # Fail-closed per `.agents/rules/no-data-leakage.md` Rule 4: NEVER invent bid/ask from LTP!
+        if bid <= 0.0 or ask < bid:
+            return None
+        if ltp <= 0.0:
+            ltp = round(0.5 * (bid + ask), 2)
+
+        depth_levels: List[Dict[str, Any]] = []
+        l5_bid_qty = 0
+        l5_ask_qty = 0
+        for lvl_idx in range(min(5, max(len(buy_depth), len(sell_depth)))):
+            b_item = buy_depth[lvl_idx] if lvl_idx < len(buy_depth) else {}
+            s_item = sell_depth[lvl_idx] if lvl_idx < len(sell_depth) else {}
+            bp = float(b_item.get("price") or 0.0)
+            bq = int(b_item.get("quantity") or 0)
+            ap = float(s_item.get("price") or 0.0)
+            aq = int(s_item.get("quantity") or 0)
+            l5_bid_qty += bq
+            l5_ask_qty += aq
+            depth_levels.append({"bid_p": bp, "bid_q": bq, "ask_p": ap, "ask_q": aq})
+
+        now_ms = int(time.time() * 1000)
+        now_iso = datetime.now().isoformat()
+        spread = round(ask - bid, 2)
+        spread_pct = round((spread / ltp) * 100.0, 2) if ltp > 0 else 999.0
+
+        with self._lock:
+            meta = dict(self._key_to_contract.get(ik) or {})
+            existing = dict(self._option_quotes.get(ik) or {})
+            self._option_quotes[ik] = {
+                **existing,
+                "instrument_key": ik,
+                "trading_symbol": meta.get("trading_symbol") or existing.get("trading_symbol") or ik,
+                "underlying": meta.get("underlying") or existing.get("underlying") or "NIFTY",
+                "expiry": meta.get("expiry") or existing.get("expiry") or "",
+                "strike": meta.get("strike") if meta.get("strike") is not None else existing.get("strike"),
+                "option_type": meta.get("option_type") or existing.get("option_type") or "CE",
+                "lot_size": meta.get("lot_size") or existing.get("lot_size") or 65,
+                "ltp": ltp,
+                "bid": bid,
+                "ask": ask,
+                "raw_bid": bid,
+                "raw_ask": ask,
+                "bid_qty": int(top_bid.get("quantity") or 65),
+                "ask_qty": int(top_ask.get("quantity") or 65),
+                "spread": spread,
+                "spread_pct": spread_pct,
+                "l5_bid_qty": l5_bid_qty if l5_bid_qty > 0 else int(top_bid.get("quantity") or 65),
+                "l5_ask_qty": l5_ask_qty if l5_ask_qty > 0 else int(top_ask.get("quantity") or 65),
+                "depth_levels": depth_levels,
+                "is_observed_l1_book": False,
+                "depth_observed_on_tick": False,
+                "book_provenance": "EMERGENCY_REST_L1",
+                "timestamp_ms": now_ms,
+                "local_receipt_ts_ms": now_ms,
+                "quote_timestamp": now_iso,
+                "quote_freshness": "EMERGENCY_REST",
+                "quote_age_ms": 0,
+                "is_valid": bool(ltp > 0 and bid > 0 and ask >= bid),
+            }
+        return self.get_option_quote(ik)
 
     def seed_initial_quotes_from_chain(self, chain_data_list: List[Dict[str, Any]]) -> int:
         """
