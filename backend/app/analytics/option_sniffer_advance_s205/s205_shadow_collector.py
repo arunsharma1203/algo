@@ -247,13 +247,36 @@ def init_shadow_telemetry_tables(db_path: Optional[str] = None) -> None:
 
 SHADOW_EXIT_MAX_QUOTE_AGE_MS: int = 5000
 SHADOW_CROSS_LEG_MAX_SKEW_MS: int = 5000
+SHADOW_EMERGENCY_REST_COOLDOWN_SEC: float = 5.0
+SHADOW_EOD_REST_COOLDOWN_SEC: float = 1.0
 CLEAN_BOOK_A_EPOCH_START_DATE: str = "2026-11-24"
 
 
 def _extract_quote_ts_ms(quote: Optional[Dict[str, Any]]) -> int:
+    """
+    Extracts the epoch-ms timestamp bound strictly to the price/depth payload consumed.
+    Returns 0 when unknown/missing so callers fail closed rather than assuming synchronization.
+    """
     if not isinstance(quote, dict) or not quote:
         return 0
-    for k in ("local_receipt_ts_ms", "timestamp_ms", "l1_book_timestamp_ms"):
+    prov = str(quote.get("book_provenance") or "")
+    has_depth = bool(quote.get("depth_levels"))
+    if prov == "EMERGENCY_REST_L1":
+        key_order: Tuple[str, ...] = ("timestamp_ms", "local_receipt_ts_ms")
+    elif prov == "OBSERVED_V3_L5" or has_depth:
+        l1_ts_raw = int(quote.get("l1_book_timestamp_ms") or 0) if str(quote.get("l1_book_timestamp_ms") or "").lstrip("-").isdigit() else 0
+        l1_age_raw = quote.get("l1_book_age_ms")
+        if l1_age_raw is not None:
+            try:
+                if int(l1_age_raw) == 999999 and l1_ts_raw <= 0:
+                    return 0
+            except (ValueError, TypeError):
+                return 0
+        key_order = ("l1_book_timestamp_ms", "local_receipt_ts_ms", "timestamp_ms")
+    else:
+        key_order = ("l1_book_timestamp_ms", "local_receipt_ts_ms", "timestamp_ms")
+
+    for k in key_order:
         v = quote.get(k)
         if v is not None:
             try:
@@ -270,14 +293,72 @@ def _quotes_within_skew(
     quote_b: Optional[Dict[str, Any]],
     max_skew_ms: int = SHADOW_CROSS_LEG_MAX_SKEW_MS,
 ) -> bool:
-    """Returns False if both quotes carry receipt timestamps that diverge by > max_skew_ms."""
+    """
+    Fail-closed cross-leg synchronization check:
+    Returns False if either quote is missing a valid receipt/book timestamp (`<= 0`)
+    or if the two timestamps diverge by `> max_skew_ms`.
+    """
     if not isinstance(quote_a, dict) or not isinstance(quote_b, dict) or not quote_a or not quote_b:
         return False
     ts_a = _extract_quote_ts_ms(quote_a)
     ts_b = _extract_quote_ts_ms(quote_b)
-    if ts_a > 0 and ts_b > 0 and abs(ts_a - ts_b) > max_skew_ms:
+    if ts_a <= 0 or ts_b <= 0:
         return False
-    return True
+    return abs(ts_a - ts_b) <= max_skew_ms
+
+
+def _resolve_consumed_quote_age_ms(
+    quote: Dict[str, Any],
+    require_observed: bool,
+) -> Optional[int]:
+    """
+    Computes conservative age (ms) of the exact price/depth structure consumed by `sweep_l5_book_for_qty`.
+    Returns `None` when age is missing, sentinel (`>= 999999`), or unparseable — NEVER defaults to 0!
+    """
+    prov = str(quote.get("book_provenance") or "")
+    has_depth = bool(quote.get("depth_levels"))
+
+    q_age: Optional[int] = None
+    if quote.get("quote_age_ms") is not None:
+        try:
+            qa = int(quote["quote_age_ms"])
+            has_q_ts = any(
+                int(quote.get(k) or 0) > 0
+                for k in ("timestamp_ms", "local_receipt_ts_ms", "l1_book_timestamp_ms")
+                if isinstance(quote.get(k), (int, float))
+            )
+            if qa >= 0 and not (qa == 999999 and not has_q_ts):
+                q_age = qa
+        except (ValueError, TypeError):
+            return None
+
+    l1_age: Optional[int] = None
+    if quote.get("l1_book_age_ms") is not None:
+        try:
+            la = int(quote["l1_book_age_ms"])
+            has_l1_ts = isinstance(quote.get("l1_book_timestamp_ms"), (int, float)) and int(quote.get("l1_book_timestamp_ms") or 0) > 0
+            if la >= 0 and not (la == 999999 and not has_l1_ts):
+                l1_age = la
+        except (ValueError, TypeError):
+            return None
+
+    if require_observed:
+        if l1_age is None:
+            return None
+        return max(l1_age, q_age) if q_age is not None else l1_age
+
+    if prov == "EMERGENCY_REST_L1":
+        return q_age
+
+    if has_depth:
+        # Sweeping `depth_levels`: require valid L1/L5 depth age so fresh LTP cannot mask stale depth!
+        if l1_age is None:
+            return None
+        return max(l1_age, q_age) if q_age is not None else l1_age
+
+    if l1_age is not None and q_age is not None:
+        return max(l1_age, q_age)
+    return l1_age if l1_age is not None else q_age
 
 
 def sweep_l5_book_for_qty(
@@ -294,9 +375,9 @@ def sweep_l5_book_for_qty(
     Sweeps the 5-level order book (`depth_levels[0..4]`) for `qty` contracts and applies
     canonical `₹0.05` adverse tick rounding via `options_accounting.round_to_nse_tick`.
 
-    Fails closed (`ok = False`) on synthetic/carried books, stale books (`max_age_ms` enforced
-    independently of `require_observed` whenever `max_age_ms is not None`), crossed quotes,
-    excessive spread (when `max_spread_pct` is set for entries), or cumulative 5-level depth `< qty`.
+    Fails closed (`ok = False`) on synthetic/carried books, unknown/missing quote age
+    (`UNKNOWN_QUOTE_AGE`), stale books (`STALE_L1_BOOK`), crossed quotes, excessive spread,
+    or cumulative 5-level depth `< qty`.
     """
     side_u = str(side or "").upper().strip()
     if side_u not in ("BUY", "SELL"):
@@ -310,11 +391,6 @@ def sweep_l5_book_for_qty(
     is_obs = bool(quote.get("is_observed_l1_book", False))
     depth_obs = bool(quote.get("depth_observed_on_tick", False))
     prov = str(quote.get("book_provenance") or "")
-    age_ms = int(
-        quote["l1_book_age_ms"]
-        if quote.get("l1_book_age_ms") is not None
-        else (quote.get("quote_age_ms") or 0)
-    )
 
     if require_observed:
         if not is_obs or not depth_obs or prov != "OBSERVED_V3_L5":
@@ -323,20 +399,15 @@ def sweep_l5_book_for_qty(
                 "reason": "SYNTHETIC_OR_CARRIED_BOOK_REJECTED",
                 "book_provenance": prov or "UNKNOWN",
             }
-        if max_age_ms is not None and age_ms > max_age_ms:
+
+    eff_age_ms = _resolve_consumed_quote_age_ms(quote, require_observed=require_observed)
+    if max_age_ms is not None:
+        if eff_age_ms is None:
             return {
                 "ok": False,
-                "reason": "STALE_L1_BOOK",
-                "l1_book_age_ms": age_ms,
+                "reason": "UNKNOWN_QUOTE_AGE",
                 "max_age_ms": max_age_ms,
             }
-    elif max_age_ms is not None:
-        if quote.get("quote_age_ms") is not None:
-            eff_age_ms = int(quote["quote_age_ms"])
-        elif quote.get("l1_book_age_ms") is not None and int(quote["l1_book_age_ms"]) < 999999:
-            eff_age_ms = int(quote["l1_book_age_ms"])
-        else:
-            eff_age_ms = 0
         if eff_age_ms > max_age_ms:
             return {
                 "ok": False,
@@ -432,7 +503,7 @@ def sweep_l5_book_for_qty(
         "available_l5_qty": available,
         "spread_pts": round(spread_pts, 2),
         "spread_pct": round(spread_pct, 2),
-        "l1_book_age_ms": age_ms,
+        "l1_book_age_ms": eff_age_ms,
     }
 
 
@@ -467,6 +538,14 @@ class S205ShadowCollector:
         self._daily_kill_triggered: bool = False
         self._daily_kill_reason: str = ""
         self._cooldown_until_epoch: Dict[str, float] = {}
+        self._last_emergency_rest_mono: Dict[str, float] = {}
+        self._last_valid_pkg_mtm_inr: Dict[str, float] = {}
+        self._unpriced_open_count: int = 0
+        self._unpriced_package_ids: List[str] = []
+        self._mtm_visibility_status: str = "COMPLETE"
+        self._last_known_unrealized_inr: float = 0.0
+        self._effective_unrealized_inr: Optional[float] = 0.0
+        self._worst_case_unpriced_exposure_inr: float = 0.0
 
         # Strict intra-bar capital causality (`bar[t].open` before `bar[t].close`):
         # maps `exit_bar_ts -> list of (book_id, cash_reserved_inr)` locked until `bar_ts > exit_bar_ts`.
@@ -524,6 +603,14 @@ class S205ShadowCollector:
             self._daily_kill_reason = ""
             self._locked_until_after_bar.clear()
             self._cooldown_until_epoch.clear()
+            self._last_emergency_rest_mono.clear()
+            self._last_valid_pkg_mtm_inr.clear()
+            self._unpriced_open_count = 0
+            self._unpriced_package_ids = []
+            self._mtm_visibility_status = "COMPLETE"
+            self._last_known_unrealized_inr = 0.0
+            self._effective_unrealized_inr = 0.0
+            self._worst_case_unpriced_exposure_inr = 0.0
 
     def _active_pinned_leg_keys(self) -> set:
         keys = set()
@@ -588,40 +675,80 @@ class S205ShadowCollector:
         cand_quote: Optional[Dict[str, Any]],
         max_age_ms: int = SHADOW_EXIT_MAX_QUOTE_AGE_MS,
         allow_emergency_rest: bool = False,
+        is_eod_urgent: bool = False,
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
-        chk = sweep_l5_book_for_qty(
-            cand_quote,
-            "SELL",
-            qty=1,
-            adverse_ticks=0,
-            max_age_ms=max_age_ms,
-            max_spread_pct=None,
-            require_observed=False,
-        )
-        if chk.get("ok") and isinstance(cand_quote, dict):
-            return cand_quote
+        if not force_refresh:
+            chk = sweep_l5_book_for_qty(
+                cand_quote,
+                "SELL",
+                qty=1,
+                adverse_ticks=0,
+                max_age_ms=max_age_ms,
+                max_spread_pct=None,
+                require_observed=False,
+            )
+            if chk.get("ok") and isinstance(cand_quote, dict):
+                return cand_quote
 
-        if not allow_emergency_rest or not ikey:
+        ik = str(ikey or "").strip()
+        if not allow_emergency_rest or not ik:
             return cand_quote if isinstance(cand_quote, dict) else {}
+
+        # If a newer observed WS quote arrived in OptionStreamManager since `quote_lookup` was built,
+        # validate it via `sweep_l5_book_for_qty` BEFORE burning the per-leg REST cooldown!
+        sm_inst = None
+        if self._sync_advance_db and self._emergency_quote_fetcher is None:
+            try:
+                from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+
+                sm_inst = OptionStreamManager()
+                if not force_refresh and hasattr(sm_inst, "get_option_quote"):
+                    sm_cached = sm_inst.get_option_quote(ik)
+                    chk_sm = sweep_l5_book_for_qty(
+                        sm_cached,
+                        "SELL",
+                        qty=1,
+                        adverse_ticks=0,
+                        max_age_ms=max_age_ms,
+                        max_spread_pct=None,
+                        require_observed=False,
+                    )
+                    if chk_sm.get("ok") and isinstance(sm_cached, dict):
+                        return sm_cached
+            except Exception as exc:
+                logger.debug(f"[S205ShadowCollector] Stream cache check note ({ik}): {exc}")
+
+        cooldown_sec = SHADOW_EOD_REST_COOLDOWN_SEC if is_eod_urgent else SHADOW_EMERGENCY_REST_COOLDOWN_SEC
+        now_mono = time.monotonic()
+        with self._lock:
+            last_mono = self._last_emergency_rest_mono.get(ik)
+            if last_mono is not None and (now_mono - last_mono) < cooldown_sec:
+                return cand_quote if isinstance(cand_quote, dict) else {}
+            self._last_emergency_rest_mono[ik] = now_mono
 
         if self._emergency_quote_fetcher is not None:
             try:
-                q_em = self._emergency_quote_fetcher(str(ikey))
+                q_em = self._emergency_quote_fetcher(ik)
                 if isinstance(q_em, dict) and q_em:
                     return q_em
             except Exception as exc:
-                logger.debug(f"[S205ShadowCollector] Custom emergency quote fetcher note ({ikey}): {exc}")
+                logger.debug(f"[S205ShadowCollector] Custom emergency quote fetcher note ({ik}): {exc}")
 
         if self._sync_advance_db:
             try:
-                from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
-                sm = OptionStreamManager()
-                if hasattr(sm, "fetch_single_quote_emergency_rest"):
-                    q_rest = sm.fetch_single_quote_emergency_rest(str(ikey), max_cache_age_ms=max_age_ms)
+                if sm_inst is None:
+                    from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
+
+                    sm_inst = OptionStreamManager()
+                if hasattr(sm_inst, "fetch_single_quote_emergency_rest"):
+                    # CRITICAL: Always pass `max_cache_age_ms=-1` here because `sm_inst.get_option_quote(ik)`
+                    # already failed `sweep_l5_book_for_qty` above (prevents even a sub-ms `c_age == 0` collision).
+                    q_rest = sm_inst.fetch_single_quote_emergency_rest(ik, max_cache_age_ms=-1)
                     if isinstance(q_rest, dict) and q_rest:
                         return q_rest
             except Exception as exc:
-                logger.debug(f"[S205ShadowCollector] Emergency REST quote fetch note ({ikey}): {exc}")
+                logger.debug(f"[S205ShadowCollector] Emergency REST quote fetch note ({ik}): {exc}")
 
         return cand_quote if isinstance(cand_quote, dict) else {}
 
@@ -1225,11 +1352,15 @@ class S205ShadowCollector:
             )
 
         cap_state = self._active_capital_and_slots(bar_ts, today_s)
-        unrealized_today = self._compute_open_unrealized_pnl(quote_lookup, today_s)
-        if (cap_state["realized_today_inr"] + unrealized_today) <= float(env["max_daily_mtm_kill_inr"]):
+        mtm_eval = self._evaluate_open_unrealized_mtm(
+            quote_lookup, today_s, allow_network=allow_network
+        )
+        unpriced_risk_halt = int(mtm_eval["unpriced_open_count"]) > 0
+        conservative_kill_mtm = float(mtm_eval["conservative_kill_mtm_inr"])
+        if (cap_state["realized_today_inr"] + conservative_kill_mtm) <= float(env["max_daily_mtm_kill_inr"]):
             self._daily_kill_triggered = True
             self._daily_kill_reason = (
-                f"Daily Shadow Kill Active (₹{cap_state['realized_today_inr'] + unrealized_today:,.2f} "
+                f"Daily Shadow Kill Active (₹{cap_state['realized_today_inr'] + conservative_kill_mtm:,.2f} "
                 f"<= ₹{float(env['max_daily_mtm_kill_inr']):,.0f})"
             )
 
@@ -1276,7 +1407,16 @@ class S205ShadowCollector:
             {"name": "CashCap", "passed": bool(sw_b.get("ok") and 0 < outlay_b <= float(cfg_b["max_entry_outlay_inr"])), "current": f"₹{outlay_b:,.0f}" if outlay_b > 0 else "—", "target": f"<=₹{cfg_b['max_entry_outlay_inr']:,.0f}"},
         ]
         passed_cnt_b = sum(1 for g in gates_b if g["passed"])
-        all_b = passed_cnt_b == len(gates_b) and win_ok_b and not self._daily_kill_triggered
+        all_b = passed_cnt_b == len(gates_b) and win_ok_b and not self._daily_kill_triggered and not unpriced_risk_halt
+        state_b = (
+            "HALTED_KILL"
+            if self._daily_kill_triggered
+            else (
+                "HALTED_UNPRICED_RISK"
+                if unpriced_risk_halt
+                else ("WARMUP_0945" if ist_hhmm < 945 else ("WINDOW_CLOSED" if not win_ok_b else ("READY_FIRE" if all_b else "WATCHING")))
+            )
+        )
         readiness_rows.append(
             {
                 "engine_id": cfg_b["book_id"],
@@ -1284,7 +1424,7 @@ class S205ShadowCollector:
                 "book_type": cfg_b["ui_book_type"],
                 "action_badge": cfg_b["action_badge"],
                 "window_ist": cfg_b["window_label"],
-                "state": "HALTED_KILL" if self._daily_kill_triggered else ("WARMUP_0945" if ist_hhmm < 945 else ("WINDOW_CLOSED" if not win_ok_b else ("READY_FIRE" if all_b else "WATCHING"))),
+                "state": state_b,
                 "gates_passed": passed_cnt_b,
                 "gates_total": len(gates_b),
                 "candidate_contract": f"NIFTY {exp_b} {int(atm)}{ot_b}" if exp_b else "—",
@@ -1344,7 +1484,16 @@ class S205ShadowCollector:
             {"name": "StructRisk", "passed": bool(est_struct_loss <= float(env["max_structural_loss_per_package_inr"])), "current": f"₹{est_struct_loss:,.0f}" if est_struct_loss < 900000 else "—", "target": f"<=₹{env['max_structural_loss_per_package_inr']:,.0f}"},
         ]
         passed_cnt_a = sum(1 for g in gates_a if g["passed"])
-        all_a = passed_cnt_a == len(gates_a) and win_ok_a and not self._daily_kill_triggered
+        all_a = passed_cnt_a == len(gates_a) and win_ok_a and not self._daily_kill_triggered and not unpriced_risk_halt
+        state_a = (
+            "HALTED_KILL"
+            if self._daily_kill_triggered
+            else (
+                "HALTED_UNPRICED_RISK"
+                if unpriced_risk_halt
+                else ("WARMUP_0945" if ist_hhmm < 945 else ("WINDOW_CLOSED" if not win_ok_a else ("READY_FIRE" if all_a else "WATCHING")))
+            )
+        )
         readiness_rows.append(
             {
                 "engine_id": cfg_a["book_id"],
@@ -1352,7 +1501,7 @@ class S205ShadowCollector:
                 "book_type": cfg_a["ui_book_type"],
                 "action_badge": cfg_a["action_badge"],
                 "window_ist": cfg_a["window_label"],
-                "state": "HALTED_KILL" if self._daily_kill_triggered else ("WARMUP_0945" if ist_hhmm < 945 else ("WINDOW_CLOSED" if not win_ok_a else ("READY_FIRE" if all_a else "WATCHING"))),
+                "state": state_a,
                 "gates_passed": passed_cnt_a,
                 "gates_total": len(gates_a),
                 "candidate_contract": f"+{int(wing_k)}{ot_a} / -{int(short_k)}{ot_a} ({exp_a})" if exp_a else "—",
@@ -1361,7 +1510,7 @@ class S205ShadowCollector:
             }
         )
 
-        if not execute_new_entries or self._daily_kill_triggered:
+        if not execute_new_entries or self._daily_kill_triggered or unpriced_risk_halt:
             return readiness_rows, opened_pkg_ids, closed_pkgs
 
         # Step B: Execute eligible shadow entries respecting strict `bar[t].open < bar[t].close` capital causality
@@ -1961,20 +2110,51 @@ class S205ShadowCollector:
                 if ikey != l_ik and not is_eod:
                     continue
                 lq = quote_payload if ikey == l_ik else getter(l_ik)
-                if is_eod:
-                    lq = self._resolve_exit_quote(l_ik, lq, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
+                qty_l = abs(int(ls["long_leg"]["qty"]))
                 sw_sell = sweep_l5_book_for_qty(
                     lq,
                     "SELL",
-                    qty=abs(int(ls["long_leg"]["qty"])),
+                    qty=qty_l,
                     adverse_ticks=1,
                     max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
                     max_spread_pct=None,
                     require_observed=False,
                 )
                 if not sw_sell.get("ok"):
+                    lq = self._resolve_exit_quote(
+                        l_ik,
+                        lq,
+                        max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                        allow_emergency_rest=True,
+                        is_eod_urgent=is_eod,
+                    )
+                    sw_sell = sweep_l5_book_for_qty(
+                        lq,
+                        "SELL",
+                        qty=qty_l,
+                        adverse_ticks=1,
+                        max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                        max_spread_pct=None,
+                        require_observed=False,
+                    )
+                if not sw_sell.get("ok"):
                     continue
                 cur_exit_px = float(sw_sell["fill_price"])
+                ll_tick = ls["long_leg"]
+                acc_tick_l = compute_package_accounting(
+                    legs=[
+                        OptionLeg(
+                            ll_tick["option_type"],
+                            float(ll_tick["strike"]),
+                            int(ll_tick["qty"]),
+                            float(ll_tick["entry_price"]),
+                            cur_exit_px,
+                        )
+                    ],
+                    trade_date=pkg["session_date"],
+                )
+                with self._lock:
+                    self._last_valid_pkg_mtm_inr[pid] = float(acc_tick_l["net_pnl"])
                 eff_stop = max(float(ls["hard_stop"]), float(ls.get("ratchet_stop") or 0.0))
                 rsn = ""
                 if is_eod:
@@ -2011,25 +2191,112 @@ class S205ShadowCollector:
                     max_spread_pct=None,
                     require_observed=False,
                 )
-                # Emergency REST quote recovery ONLY for protective exits (`is_eod` or sharp adverse short-leg surge)
-                short_surge_threat = bool(
+                # Cooldown-throttled emergency REST recovery whenever EITHER leg is stale/invalid
+                # (covers stale short leg pre-EOD, stale wing leg, <₹12 credit Hard-SL, and ratchets)
+                if not sw_buy_short.get("ok"):
+                    sq = self._resolve_exit_quote(
+                        s_ik,
+                        sq,
+                        max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                        allow_emergency_rest=True,
+                        is_eod_urgent=is_eod,
+                    )
+                    sw_buy_short = sweep_l5_book_for_qty(
+                        sq,
+                        "BUY",
+                        qty=qty_abs,
+                        adverse_ticks=1,
+                        max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                        max_spread_pct=None,
+                        require_observed=False,
+                    )
+                if not sw_sell_wing.get("ok"):
+                    wq = self._resolve_exit_quote(
+                        w_ik,
+                        wq,
+                        max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                        allow_emergency_rest=True,
+                        is_eod_urgent=is_eod,
+                    )
+                    sw_sell_wing = sweep_l5_book_for_qty(
+                        wq,
+                        "SELL",
+                        qty=qty_abs,
+                        adverse_ticks=1,
+                        max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                        max_spread_pct=None,
+                        require_observed=False,
+                    )
+                if (
                     sw_buy_short.get("ok")
-                    and float(sw_buy_short["fill_price"]) >= float(ls["short_leg"]["entry_price"]) + 12.0
-                )
-                if is_eod or short_surge_threat:
-                    if not sw_buy_short.get("ok"):
-                        sq = self._resolve_exit_quote(s_ik, sq, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
-                        sw_buy_short = sweep_l5_book_for_qty(
-                            sq, "BUY", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                    and sw_sell_wing.get("ok")
+                    and not _quotes_within_skew(sq, wq, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS)
+                ):
+                    ts_s = _extract_quote_ts_ms(sq)
+                    ts_w = _extract_quote_ts_ms(wq)
+                    if ts_s <= 0 or (ts_w > 0 and ts_s <= ts_w):
+                        sq = self._resolve_exit_quote(
+                            s_ik,
+                            sq,
+                            max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                            allow_emergency_rest=True,
+                            is_eod_urgent=is_eod,
+                            force_refresh=True,
                         )
-                    if not sw_sell_wing.get("ok"):
-                        wq = self._resolve_exit_quote(w_ik, wq, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
+                        sw_buy_short = sweep_l5_book_for_qty(
+                            sq,
+                            "BUY",
+                            qty=qty_abs,
+                            adverse_ticks=1,
+                            max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                            max_spread_pct=None,
+                            require_observed=False,
+                        )
+                    if ts_w <= 0 or (ts_s > 0 and ts_w < ts_s):
+                        wq = self._resolve_exit_quote(
+                            w_ik,
+                            wq,
+                            max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                            allow_emergency_rest=True,
+                            is_eod_urgent=is_eod,
+                            force_refresh=True,
+                        )
                         sw_sell_wing = sweep_l5_book_for_qty(
-                            wq, "SELL", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                            wq,
+                            "SELL",
+                            qty=qty_abs,
+                            adverse_ticks=1,
+                            max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                            max_spread_pct=None,
+                            require_observed=False,
                         )
                 if not sw_buy_short.get("ok") or not sw_sell_wing.get("ok"):
                     continue
-                legs_synchronized = _quotes_within_skew(sq, wq, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS)
+                if not _quotes_within_skew(sq, wq, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS):
+                    continue
+                sl_tick = ls["short_leg"]
+                wl_tick = ls["wing_leg"]
+                acc_tick_s = compute_package_accounting(
+                    legs=[
+                        OptionLeg(
+                            wl_tick["option_type"],
+                            float(wl_tick["strike"]),
+                            qty_abs,
+                            float(wl_tick["entry_price"]),
+                            float(sw_sell_wing["fill_price"]),
+                        ),
+                        OptionLeg(
+                            sl_tick["option_type"],
+                            float(sl_tick["strike"]),
+                            -qty_abs,
+                            float(sl_tick["entry_price"]),
+                            float(sw_buy_short["fill_price"]),
+                        ),
+                    ],
+                    trade_date=pkg["session_date"],
+                )
+                with self._lock:
+                    self._last_valid_pkg_mtm_inr[pid] = float(acc_tick_s["net_pnl"])
                 cur_debit = round(float(sw_buy_short["fill_price"]) - float(sw_sell_wing["fill_price"]), 2)
                 hard_debit = float(ls["hard_stop_debit_pts"])
                 r_debit = ls.get("ratchet_max_debit_pts")
@@ -2037,9 +2304,13 @@ class S205ShadowCollector:
                 rsn = ""
                 if is_eod:
                     rsn = "EOD_SQUAREOFF_1515"
-                elif cur_debit >= eff_max_debit and (legs_synchronized or short_surge_threat):
-                    rsn = "SPREAD_RATCHET_STOP_HIT" if (r_debit is not None and float(r_debit) < hard_debit - 0.01 and legs_synchronized) else "SPREAD_HARD_SL_HIT"
-                elif legs_synchronized and cur_debit <= float(ls["target_debit_pts"]):
+                elif cur_debit >= eff_max_debit:
+                    rsn = (
+                        "SPREAD_RATCHET_STOP_HIT"
+                        if (r_debit is not None and float(r_debit) < hard_debit - 0.01)
+                        else "SPREAD_HARD_SL_HIT"
+                    )
+                elif cur_debit <= float(ls["target_debit_pts"]):
                     rsn = "SPREAD_DECAY_TARGET_70PCT"
                 if rsn:
                     c_out = self._close_spread_package(
@@ -2113,8 +2384,14 @@ class S205ShadowCollector:
                         max_spread_pct=None,
                         require_observed=False,
                     )
-                    if not sw_s.get("ok") and need_bar_exit_b and can_rest:
-                        ql = self._resolve_exit_quote(l_ik, ql, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
+                    if not sw_s.get("ok") and can_rest:
+                        ql = self._resolve_exit_quote(
+                            l_ik,
+                            ql,
+                            max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                            allow_emergency_rest=True,
+                            is_eod_urgent=need_bar_exit_b,
+                        )
                         sw_s = sweep_l5_book_for_qty(
                             ql, "SELL", qty=int(ll["qty"]), adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
                         )
@@ -2123,9 +2400,16 @@ class S205ShadowCollector:
                     close_px = float(sw_s["fill_price"])
                     gain_pct = ((close_px - float(ll["entry_price"])) / max(0.05, float(ll["entry_price"]))) * 100.0
 
+                    eff_stop_b = max(float(ls["hard_stop"]), float(ls.get("ratchet_stop") or 0.0))
                     rsn = ""
                     if ist_hhmm >= int(cfg_b["eod_squareoff_hhmm"]):
                         rsn = "EOD_SQUAREOFF_1515"
+                    elif close_px <= eff_stop_b:
+                        rsn = (
+                            "RATCHET_STOP_HIT"
+                            if (ls.get("ratchet_stop") and float(ls["ratchet_stop"]) > float(ls["hard_stop"]) + 0.01)
+                            else "LONG_HARD_SL_HIT"
+                        )
                     elif held_mins >= int(cfg_b["stagnation_mins"]) and gain_pct < float(cfg_b["stagnation_min_gain_pct"]):
                         rsn = "STAGNATION_TIME_STOP"
                     elif vflip_hit:
@@ -2181,24 +2465,82 @@ class S205ShadowCollector:
                         max_spread_pct=None,
                         require_observed=False,
                     )
-                    if need_bar_exit_a and can_rest:
+                    if can_rest:
                         if not sw_bs.get("ok"):
-                            qs = self._resolve_exit_quote(s_ik, qs, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
+                            qs = self._resolve_exit_quote(
+                                s_ik,
+                                qs,
+                                max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                                allow_emergency_rest=True,
+                                is_eod_urgent=need_bar_exit_a,
+                            )
                             sw_bs = sweep_l5_book_for_qty(
                                 qs, "BUY", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
                             )
                         if not sw_sw.get("ok"):
-                            qw = self._resolve_exit_quote(w_ik, qw, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True)
+                            qw = self._resolve_exit_quote(
+                                w_ik,
+                                qw,
+                                max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                                allow_emergency_rest=True,
+                                is_eod_urgent=need_bar_exit_a,
+                            )
                             sw_sw = sweep_l5_book_for_qty(
                                 qw, "SELL", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
                             )
+                        if (
+                            sw_bs.get("ok")
+                            and sw_sw.get("ok")
+                            and not _quotes_within_skew(qs, qw, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS)
+                        ):
+                            ts_s = _extract_quote_ts_ms(qs)
+                            ts_w = _extract_quote_ts_ms(qw)
+                            if ts_s <= 0 or (ts_w > 0 and ts_s <= ts_w):
+                                qs = self._resolve_exit_quote(
+                                    s_ik,
+                                    qs,
+                                    max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                                    allow_emergency_rest=True,
+                                    is_eod_urgent=need_bar_exit_a,
+                                    force_refresh=True,
+                                )
+                                sw_bs = sweep_l5_book_for_qty(
+                                    qs, "BUY", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                                )
+                            if ts_w <= 0 or (ts_s > 0 and ts_w < ts_s):
+                                qw = self._resolve_exit_quote(
+                                    w_ik,
+                                    qw,
+                                    max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                                    allow_emergency_rest=True,
+                                    is_eod_urgent=need_bar_exit_a,
+                                    force_refresh=True,
+                                )
+                                sw_sw = sweep_l5_book_for_qty(
+                                    qw, "SELL", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                                )
                     if not sw_bs.get("ok") or not sw_sw.get("ok"):
+                        continue
+                    if not _quotes_within_skew(qs, qw, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS):
                         continue
                     cur_debit = round(float(sw_bs["fill_price"]) - float(sw_sw["fill_price"]), 2)
 
+                    hard_debit_bar = float(ls["hard_stop_debit_pts"])
+                    r_debit_prev = ls.get("ratchet_max_debit_pts")
+                    eff_max_debit_bar = (
+                        min(hard_debit_bar, float(r_debit_prev)) if r_debit_prev is not None else hard_debit_bar
+                    )
                     rsn = ""
                     if ist_hhmm >= int(cfg_a["eod_squareoff_hhmm"]):
                         rsn = "EOD_SQUAREOFF_1515"
+                    elif cur_debit >= eff_max_debit_bar:
+                        rsn = (
+                            "SPREAD_RATCHET_STOP_HIT"
+                            if (r_debit_prev is not None and float(r_debit_prev) < hard_debit_bar - 0.01)
+                            else "SPREAD_HARD_SL_HIT"
+                        )
+                    elif cur_debit <= float(ls["target_debit_pts"]):
+                        rsn = "SPREAD_DECAY_TARGET_70PCT"
                     elif vflip_hit:
                         rsn = "SPOT_VWAP_FLIP_EXIT"
 
@@ -2208,9 +2550,6 @@ class S205ShadowCollector:
                         )
                         if c_res:
                             closed.append(c_res)
-                        continue
-
-                    if not _quotes_within_skew(qs, qw, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS):
                         continue
 
                     # Strictly Close-Only Spread Decay Ratchet Update!
@@ -2244,6 +2583,14 @@ class S205ShadowCollector:
             if pid not in self._open_packages:
                 return None
             self._open_packages.pop(pid, None)
+            self._last_valid_pkg_mtm_inr.pop(pid, None)
+            if not self._open_packages:
+                self._unpriced_open_count = 0
+                self._unpriced_package_ids = []
+                self._mtm_visibility_status = "COMPLETE"
+                self._last_known_unrealized_inr = 0.0
+                self._effective_unrealized_inr = 0.0
+                self._worst_case_unpriced_exposure_inr = 0.0
 
         ll = pkg["legs_state"]["long_leg"]
         acc = compute_package_accounting(
@@ -2304,6 +2651,14 @@ class S205ShadowCollector:
             if pid not in self._open_packages:
                 return None
             self._open_packages.pop(pid, None)
+            self._last_valid_pkg_mtm_inr.pop(pid, None)
+            if not self._open_packages:
+                self._unpriced_open_count = 0
+                self._unpriced_package_ids = []
+                self._mtm_visibility_status = "COMPLETE"
+                self._last_known_unrealized_inr = 0.0
+                self._effective_unrealized_inr = 0.0
+                self._worst_case_unpriced_exposure_inr = 0.0
 
         ls = pkg["legs_state"]
         wl = ls["wing_leg"]
@@ -2360,16 +2715,37 @@ class S205ShadowCollector:
         self._emit_lifecycle_event("BOOK_A_CLOSE", closed_row)
         return closed_row
 
-    def _compute_open_unrealized_pnl(
-        self, quote_lookup: Dict[Tuple[str, float, str], Dict[str, Any]], session_date: str
-    ) -> float:
-        total = 0.0
+    def _evaluate_open_unrealized_mtm(
+        self,
+        quote_lookup: Dict[Tuple[str, float, str], Dict[str, Any]],
+        session_date: str,
+        allow_network: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Evaluates open-package unrealized MTM with explicit unpriced-exposure state tracking:
+          - Never silently reports `₹0.00` aggregate MTM when open packages fail freshness/skew validation.
+          - Retains last-known adverse MTM (`min(0.0, last_valid_mtm)`) on unpriced packages and prevents
+            positive unrealized gains on other open packages from masking realized/unpriced losses in the
+            daily loss-kill calculation.
+        """
+        can_rest = bool(allow_network or self._emergency_quote_fetcher is not None)
         with self._lock:
             open_list = list(self._open_packages.values())
+
+        priced_pnls: List[float] = []
+        unpriced_ids: List[str] = []
+        unpriced_adverse_mtm: float = 0.0
+        worst_unpriced_exp: float = 0.0
+
         for pkg in open_list:
+            pid = str(pkg["package_id"])
             ls = pkg["legs_state"]
+            pkg_priced = False
+            pkg_pnl = 0.0
+
             if ls.get("mode") == "SINGLE_PAID_LONG":
                 ll = ls["long_leg"]
+                l_ik = str(ll.get("instrument_key") or "")
                 q = quote_lookup.get((str(ll["expiry"])[:10], float(ll["strike"]), str(ll["option_type"]).upper()))
                 sw = sweep_l5_book_for_qty(
                     q,
@@ -2380,15 +2756,32 @@ class S205ShadowCollector:
                     max_spread_pct=None,
                     require_observed=False,
                 )
+                if not sw.get("ok") and can_rest and l_ik:
+                    q = self._resolve_exit_quote(
+                        l_ik, q, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True
+                    )
+                    sw = sweep_l5_book_for_qty(
+                        q,
+                        "SELL",
+                        qty=int(ll["qty"]),
+                        adverse_ticks=1,
+                        max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS,
+                        max_spread_pct=None,
+                        require_observed=False,
+                    )
                 if sw.get("ok"):
                     acc = compute_package_accounting(
                         legs=[OptionLeg(ll["option_type"], float(ll["strike"]), int(ll["qty"]), float(ll["entry_price"]), float(sw["fill_price"]))],
                         trade_date=session_date,
                     )
-                    total += float(acc["net_pnl"])
+                    pkg_pnl = float(acc["net_pnl"])
+                    pkg_priced = True
+
             elif ls.get("mode") == "DEFINED_RISK_CREDIT_SPREAD_150":
                 sl = ls["short_leg"]
                 wl = ls["wing_leg"]
+                s_ik = str(sl.get("instrument_key") or "")
+                w_ik = str(wl.get("instrument_key") or "")
                 qs = quote_lookup.get((str(sl["expiry"])[:10], float(sl["strike"]), str(sl["option_type"]).upper()))
                 qw = quote_lookup.get((str(wl["expiry"])[:10], float(wl["strike"]), str(wl["option_type"]).upper()))
                 qty_abs = abs(int(sl["qty"]))
@@ -2410,6 +2803,39 @@ class S205ShadowCollector:
                     max_spread_pct=None,
                     require_observed=False,
                 )
+                if can_rest:
+                    if not sw_s.get("ok") and s_ik:
+                        qs = self._resolve_exit_quote(
+                            s_ik, qs, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True
+                        )
+                        sw_s = sweep_l5_book_for_qty(
+                            qs, "BUY", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                        )
+                    if not sw_w.get("ok") and w_ik:
+                        qw = self._resolve_exit_quote(
+                            w_ik, qw, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True
+                        )
+                        sw_w = sweep_l5_book_for_qty(
+                            qw, "SELL", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                        )
+                    if sw_s.get("ok") and sw_w.get("ok") and not _quotes_within_skew(qs, qw, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS):
+                        ts_s = _extract_quote_ts_ms(qs)
+                        ts_w = _extract_quote_ts_ms(qw)
+                        if (ts_s <= 0 or (ts_w > 0 and ts_s <= ts_w)) and s_ik:
+                            qs = self._resolve_exit_quote(
+                                s_ik, qs, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True, force_refresh=True
+                            )
+                            sw_s = sweep_l5_book_for_qty(
+                                qs, "BUY", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                            )
+                        if (ts_w <= 0 or (ts_s > 0 and ts_w < ts_s)) and w_ik:
+                            qw = self._resolve_exit_quote(
+                                w_ik, qw, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, allow_emergency_rest=True, force_refresh=True
+                            )
+                            sw_w = sweep_l5_book_for_qty(
+                                qw, "SELL", qty=qty_abs, adverse_ticks=1, max_age_ms=SHADOW_EXIT_MAX_QUOTE_AGE_MS, max_spread_pct=None, require_observed=False
+                            )
+
                 if sw_s.get("ok") and sw_w.get("ok") and _quotes_within_skew(qs, qw, max_skew_ms=SHADOW_CROSS_LEG_MAX_SKEW_MS):
                     acc = compute_package_accounting(
                         legs=[
@@ -2418,8 +2844,58 @@ class S205ShadowCollector:
                         ],
                         trade_date=session_date,
                     )
-                    total += float(acc["net_pnl"])
-        return round(total, 2)
+                    pkg_pnl = float(acc["net_pnl"])
+                    pkg_priced = True
+
+            if pkg_priced:
+                with self._lock:
+                    self._last_valid_pkg_mtm_inr[pid] = pkg_pnl
+                priced_pnls.append(pkg_pnl)
+            else:
+                unpriced_ids.append(pid)
+                worst_unpriced_exp += float(pkg.get("structural_max_loss_inr") or 0.0)
+                with self._lock:
+                    last_valid = float(self._last_valid_pkg_mtm_inr.get(pid, 0.0))
+                unpriced_adverse_mtm += min(0.0, last_valid)
+
+        known_unrealized = round(sum(priced_pnls), 2)
+        unpriced_cnt = len(unpriced_ids)
+        if unpriced_cnt == 0:
+            vis_status = "COMPLETE"
+            effective_unrealized: Optional[float] = known_unrealized
+            conservative_kill_mtm = known_unrealized
+        else:
+            vis_status = "DEGRADED_UNPRICED_OPEN_RISK"
+            effective_unrealized = None
+            conservative_kill_mtm = round(
+                sum(min(0.0, p) for p in priced_pnls) + unpriced_adverse_mtm,
+                2,
+            )
+
+        worst_unpriced_exp = round(worst_unpriced_exp, 2)
+        with self._lock:
+            self._unpriced_open_count = unpriced_cnt
+            self._unpriced_package_ids = list(unpriced_ids)
+            self._mtm_visibility_status = vis_status
+            self._last_known_unrealized_inr = known_unrealized
+            self._effective_unrealized_inr = effective_unrealized
+            self._worst_case_unpriced_exposure_inr = worst_unpriced_exp
+
+        return {
+            "mtm_visibility_status": vis_status,
+            "known_unrealized_inr": known_unrealized,
+            "effective_unrealized_inr": effective_unrealized,
+            "conservative_kill_mtm_inr": conservative_kill_mtm,
+            "unpriced_open_count": unpriced_cnt,
+            "unpriced_package_ids": unpriced_ids,
+            "worst_case_unpriced_exposure_inr": worst_unpriced_exp,
+        }
+
+    def _compute_open_unrealized_pnl(
+        self, quote_lookup: Dict[Tuple[str, float, str], Dict[str, Any]], session_date: str
+    ) -> float:
+        res = self._evaluate_open_unrealized_mtm(quote_lookup, session_date, allow_network=False)
+        return float(res["conservative_kill_mtm_inr"])
 
     # ──────────────────────────────────────────────────────────────────────────
     # 7. SQLITE PERSISTENCE & UI ADVANCE_DB MIRRORING (HARD-AIRGAPPED)
@@ -2908,6 +3384,12 @@ class S205ShadowCollector:
                 "pending_leg2_count": len(self._pending_leg2),
                 "incomplete_leg_unwinds_count": int((totals["unwound_cnt"] if totals else 0) or 0),
                 "daily_kill_triggered": self._daily_kill_triggered,
+                "mtm_visibility_status": self._mtm_visibility_status,
+                "unpriced_open_packages_count": self._unpriced_open_count,
+                "unpriced_package_ids": list(self._unpriced_package_ids),
+                "known_unrealized_mtm_inr": self._last_known_unrealized_inr,
+                "effective_unrealized_mtm_inr": self._effective_unrealized_inr,
+                "worst_case_unpriced_exposure_inr": self._worst_case_unpriced_exposure_inr,
             },
             "telemetry_row_counts": {
                 "l5_chain_1m_rows": chain_rows,
