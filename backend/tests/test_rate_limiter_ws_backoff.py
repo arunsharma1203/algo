@@ -154,8 +154,13 @@ class TestRateLimiterWsBackoff(unittest.TestCase):
                 resp.json.return_value = {"data": {}}
                 return resp
 
+            from datetime import datetime as _dt
+
             with patch.object(uss_mod, "get_stream_service", return_value=fake_svc), patch(
                 "app.analytics.option_sniffer.option_stream_manager.get_stream_service", return_value=fake_svc
+            ), patch(
+                "app.analytics.option_sniffer.option_stream_manager.to_ist_naive",
+                return_value=_dt(2026, 11, 23, 11, 30, 0),
             ), patch("app.data.upstox_provider.get_upstox_token", return_value="tok_live"), patch(
                 "app.data.upstox_provider.upstox_request", side_effect=fake_upstox_req
             ):

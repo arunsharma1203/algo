@@ -1231,6 +1231,10 @@ class OptionStreamManager:
         except Exception:
             ws_connected = False
 
+        now_ist = to_ist_naive()
+        ist_hhmm = now_ist.hour * 100 + now_ist.minute
+        is_market_hours = (now_ist.weekday() < 5) and (914 <= ist_hhmm <= 1531)
+
         with self._lock:
             now_t = time.time()
             now_ms_chk = int(now_t * 1000)
@@ -1253,11 +1257,12 @@ class OptionStreamManager:
                         active_legs_fresh = False
                         break
 
-            effective_interval = (
-                max(base_interval, 60.0)
-                if (not force and ws_streaming_fresh and nifty_fresh and active_legs_fresh and len(self._option_quotes) > 0)
-                else base_interval
-            )
+            if not force and not is_market_hours and len(self._option_quotes) > 0:
+                effective_interval = max(base_interval, 300.0)
+            elif not force and ws_streaming_fresh and nifty_fresh and active_legs_fresh and len(self._option_quotes) > 0:
+                effective_interval = max(base_interval, 60.0)
+            else:
+                effective_interval = base_interval
 
             last_rest = getattr(self, "_last_rest_refresh_time", 0.0)
             if not force and (now_t - last_rest) < effective_interval and len(self._option_quotes) > 0:
