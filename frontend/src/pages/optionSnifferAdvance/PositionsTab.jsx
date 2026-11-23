@@ -33,6 +33,20 @@ function intentStateBadge(state, exitState) {
   return 'bg-indigo-50 text-indigo-800 border-indigo-200';
 }
 
+function formatLegAgeCompact(ageMs) {
+  if (ageMs === null || ageMs === undefined || Number.isNaN(Number(ageMs))) {
+    return 'unk';
+  }
+  const n = Math.max(0, Number(ageMs));
+  if (n >= 60000) {
+    return `${Math.round(n / 60000)}m`;
+  }
+  if (n >= 1000) {
+    return `${(n / 1000).toFixed(1)}s`;
+  }
+  return `${Math.round(n)}ms`;
+}
+
 export default function PositionsTab({
   executionStatus,
   liveStatus,
@@ -61,7 +75,7 @@ export default function PositionsTab({
     const extra = Array.isArray(extraBrokerIntents) ? extraBrokerIntents : [];
     const seen = new Set();
     const out = [];
-    [...recent, ...extra].forEach((row) => {
+    [...brokerPositions, ...recent, ...extra].forEach((row) => {
       const id = row?.order_intent_id;
       if (!id || seen.has(id)) return;
       seen.add(id);
@@ -156,6 +170,16 @@ export default function PositionsTab({
           </div>
         ) : (
           <div className="overflow-x-auto">
+            {Boolean(liveStatus?.pnl_summary?.has_stale_positions) && (
+              <div className="mx-4 mt-3 mb-1 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center gap-2 font-mono">
+                <AlertTriangle size={14} className="text-amber-600 shrink-0" />
+                <span>
+                  STALE LIVE QUOTE ALERT: {liveStatus?.pnl_summary?.stale_positions_count || 1}{' '}
+                  open broker position(s) have stale or unknown leg quote ages (&gt;10s) — displayed
+                  MTM may lag Upstox; new live entries are paused until fresh quotes resume.
+                </span>
+              </div>
+            )}
             <table className="w-full text-left border-collapse text-xs font-mono">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-sans font-semibold uppercase tracking-wide text-slate-600">
@@ -188,7 +212,15 @@ export default function PositionsTab({
                       ? null
                       : intent.exit_state === 'CONFIRMED_FLAT'
                       ? intent.realized_pnl
-                      : activeMatch?.unrealized_pnl;
+                      : activeMatch?.unrealized_pnl ?? intent.unrealized_pnl;
+                  const isOpenRow =
+                    intent.state !== 'CANCELLED' &&
+                    intent.state !== 'REJECTED' &&
+                    intent.exit_state !== 'CONFIRMED_FLAT';
+                  const isStaleLiveQuote =
+                    isOpenRow && Boolean(activeMatch?.quote_stale ?? intent?.quote_stale);
+                  const wingAgeMs = activeMatch?.wing_quote_age_ms ?? intent?.wing_quote_age_ms;
+                  const shortAgeMs = activeMatch?.short_quote_age_ms ?? intent?.short_quote_age_ms;
 
                   return (
                     <tr key={intent.order_intent_id} className="hover:bg-slate-50">
@@ -247,6 +279,8 @@ export default function PositionsTab({
                         className={`py-2.5 px-3 text-right font-semibold whitespace-nowrap ${
                           !hasValidNumber(netPnl)
                             ? 'text-slate-400'
+                            : isStaleLiveQuote
+                            ? 'text-amber-700'
                             : Number(netPnl) > 0
                             ? 'text-emerald-700'
                             : Number(netPnl) < 0
@@ -254,11 +288,25 @@ export default function PositionsTab({
                             : 'text-slate-800'
                         }`}
                       >
-                        {intent.state === 'CANCELLED'
-                          ? 'Cancelled (0 fill)'
-                          : intent.state === 'REJECTED'
-                          ? 'Rejected (0 fill)'
-                          : formatSignedINR(netPnl)}
+                        <div>
+                          {intent.state === 'CANCELLED'
+                            ? 'Cancelled (0 fill)'
+                            : intent.state === 'REJECTED'
+                            ? 'Rejected (0 fill)'
+                            : formatSignedINR(netPnl)}
+                        </div>
+                        {isStaleLiveQuote && (
+                          <div className="mt-0.5 flex flex-col items-end gap-0.5">
+                            <span className="inline-block px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                              STALE QUOTE
+                            </span>
+                            <span className="text-[9px] font-normal text-amber-800">
+                              {hasPositiveNumber(intent.hedge_wing_strike)
+                                ? `W:${formatLegAgeCompact(wingAgeMs)} / S:${formatLegAgeCompact(shortAgeMs)} — check Upstox`
+                                : `Age:${formatLegAgeCompact(wingAgeMs ?? shortAgeMs)} — check Upstox`}
+                            </span>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -313,6 +361,18 @@ export default function PositionsTab({
           <div className="mx-4 mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 font-mono">
             INTERMEDIATE LEG ALERT: {pendingLeg2Count} buy-first protective wing(s) currently
             awaiting Leg-2 short fill (&le; 3,000ms window before automatic wing unwind).
+          </div>
+        )}
+
+        {(shadowTelemetry?.shadow_account_ledger?.unpriced_open_packages_count || 0) > 0 && (
+          <div className="mx-4 mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-center gap-2 font-mono">
+            <AlertTriangle size={14} className="text-amber-600 shrink-0" />
+            <span>
+              UNPRICED OPEN RISK ALERT:{' '}
+              {shadowTelemetry.shadow_account_ledger.unpriced_open_packages_count} shadow package(s)
+              currently have stale or unverified leg quotes — new shadow entries halted until fresh
+              quotes resume.
+            </span>
           </div>
         )}
 

@@ -210,6 +210,8 @@ class AdvanceLiveBridge:
             "armed_for_date": self._armed_for_date,
             "is_session_halted": False,
             "halt_reason": None,
+            "has_stale_positions": False,
+            "stale_positions_count": 0,
             "daily_total_exposure_pnl_inr": 0.0,
             "max_daily_loss_inr": float(MAX_DAILY_COMBINED_LOSS_INR),
         }
@@ -218,6 +220,8 @@ class AdvanceLiveBridge:
             cb = self.get_circuit_breaker_status(today)
             base["is_session_halted"] = bool(cb.get("is_session_halted", False))
             base["halt_reason"] = cb.get("halt_reason")
+            base["has_stale_positions"] = bool(cb.get("has_stale_positions", False))
+            base["stale_positions_count"] = int(cb.get("stale_positions_count") or 0)
             base["daily_total_exposure_pnl_inr"] = float(cb.get("total_exposure_pnl_inr") or 0.0)
             base["max_daily_loss_inr"] = float(cb.get("max_daily_loss_inr") or MAX_DAILY_COMBINED_LOSS_INR)
         return base
@@ -448,11 +452,20 @@ class AdvanceLiveBridge:
                     consec_losses = 0
 
             pos_list = active_positions if active_positions is not None else self.get_active_live_positions()
+            stale_positions_count = sum(1 for pos in pos_list if bool(pos.get("quote_stale")))
+            has_stale_positions = stale_positions_count > 0
+            conservative_unrealized = 0.0
             for pos in pos_list:
                 if str(pos.get("created_at") or "")[:10] == today:
-                    unrealized_pnl += float(pos.get("unrealized_pnl") or 0.0)
+                    u_val = float(pos.get("unrealized_pnl") or 0.0)
+                    unrealized_pnl += u_val
+                    if has_stale_positions or bool(pos.get("quote_stale")):
+                        conservative_unrealized += min(0.0, u_val)
+                    else:
+                        conservative_unrealized += u_val
 
-            total_exposure_pnl = realized_pnl + min(0.0, unrealized_pnl)
+            eff_unrealized_for_cb = min(0.0, conservative_unrealized)
+            total_exposure_pnl = realized_pnl + eff_unrealized_for_cb
             if realized_pnl <= -MAX_DAILY_COMBINED_LOSS_INR:
                 tripped = True
                 realized_tripped = True
@@ -461,7 +474,7 @@ class AdvanceLiveBridge:
                 tripped = True
                 reason = (
                     f"Daily Live Total Exposure Ceiling Reached "
-                    f"(₹{total_exposure_pnl:,.2f} [Realized ₹{realized_pnl:,.2f} + Open MTM ₹{unrealized_pnl:,.2f}] "
+                    f"(₹{total_exposure_pnl:,.2f} [Realized ₹{realized_pnl:,.2f} + Conservative Open MTM ₹{eff_unrealized_for_cb:,.2f}] "
                     f"<= -₹{MAX_DAILY_COMBINED_LOSS_INR:,.2f})"
                 )
 
@@ -490,9 +503,11 @@ class AdvanceLiveBridge:
             "session_date": today,
             "realized_pnl_inr": round(realized_pnl, 2),
             "unrealized_pnl_inr": round(unrealized_pnl, 2),
-            "total_exposure_pnl_inr": round(realized_pnl + min(0.0, unrealized_pnl), 2),
+            "total_exposure_pnl_inr": round(realized_pnl + min(0.0, conservative_unrealized if 'conservative_unrealized' in locals() else unrealized_pnl), 2),
             "max_daily_loss_inr": MAX_DAILY_COMBINED_LOSS_INR,
             "consecutive_losses": consec_losses,
+            "has_stale_positions": bool(locals().get("has_stale_positions", False)),
+            "stale_positions_count": int(locals().get("stale_positions_count", 0)),
             "is_session_halted": tripped,
             "halt_reason": reason,
         }
@@ -2612,6 +2627,20 @@ class AdvanceLiveBridge:
 
                     ikey = pos.get("instrument_key")
                     q = stream_mgr.get_option_quote(ikey) if ikey else None
+                    q_age = ShadowMirrorExecutor._extract_quote_age_ms(q)
+                    hw_ikey = pos.get("hedge_wing_instrument_key")
+                    hw_q = stream_mgr.get_option_quote(hw_ikey) if hw_ikey else None
+                    hw_age = ShadowMirrorExecutor._extract_quote_age_ms(hw_q) if hw_ikey else 0
+                    pos["short_quote_age_ms"] = q_age
+                    pos["wing_quote_age_ms"] = hw_age if hw_ikey else None
+                    pos["quote_stale"] = bool(
+                        qty > 0
+                        and (
+                            q_age is None
+                            or q_age > 10000
+                            or (bool(hw_ikey) and (hw_age is None or hw_age > 10000))
+                        )
+                    )
                     if isinstance(q, dict) and q:
                         raw_bid = float(q.get("bid") or 0.0)
                         raw_ask = float(q.get("ask") or 0.0)
@@ -2648,6 +2677,10 @@ class AdvanceLiveBridge:
                                 pos["unrealized_pnl"] = round(gross - 65.0, 2)
                         elif cltp > 0.0:
                             pos["current_ltp"] = round(cltp, 2)
+                            if qty > 0:
+                                pos["quote_stale"] = True
+                    elif qty > 0:
+                        pos["quote_stale"] = True
             return positions
         except Exception as e:
             logger.debug(f"[AdvanceLiveBridge] Active positions query note: {e}")
@@ -2764,12 +2797,21 @@ class AdvanceLiveBridge:
 
         active = active_positions if active_positions is not None else self.get_active_live_positions()
         unrealized = sum(float(p.get("unrealized_pnl") or 0.0) for p in active)
+        stale_cnt = sum(1 for p in active if bool(p.get("quote_stale")))
+        has_stale = stale_cnt > 0
+        clean_unrealized = sum(
+            float(p.get("unrealized_pnl") or 0.0) for p in active if not bool(p.get("quote_stale"))
+        )
         return {
             "session_date": today,
             "realized_gross_pnl": round(realized_gross, 2),
             "statutory_charges": round(statutory, 2),
             "realized_net_pnl": round(realized_net, 2),
             "unrealized_net_pnl": round(unrealized, 2),
+            "clean_unrealized_net_pnl": round(clean_unrealized, 2),
+            "has_stale_positions": has_stale,
+            "stale_positions_count": stale_cnt,
+            "mtm_visibility_status": "STALE_QUOTE_DEGRADED" if has_stale else "COMPLETE",
             "total_net_pnl": round(realized_net + unrealized, 2),
             "closed_trades_count": closed_count,
             "win_count": wins,

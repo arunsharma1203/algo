@@ -70,6 +70,14 @@ export default function OverviewTab({
       : null;
 
   const shadowLedger = shadowTelemetry?.shadow_account_ledger || null;
+  const shadowMtmDegraded =
+    (shadowLedger?.unpriced_open_packages_count || 0) > 0 ||
+    shadowLedger?.mtm_visibility_status === 'DEGRADED_UNPRICED_OPEN_RISK';
+  const effectiveShadowUnrealized = shadowMtmDegraded
+    ? null
+    : hasValidNumber(shadowLedger?.effective_unrealized_mtm_inr) && openForwardPackages.length > 0
+    ? shadowLedger.effective_unrealized_mtm_inr
+    : openForwardUnrealized;
   const pendingLeg2 = shadowLedger?.pending_leg2_count ?? null;
   const unwoundCount = shadowLedger?.incomplete_leg_unwinds_count ?? null;
 
@@ -488,13 +496,26 @@ export default function OverviewTab({
                 </div>
               </div>
               <div className="bg-white rounded-lg border border-slate-200 p-2.5">
-                <div className="text-[10px] font-sans text-slate-500">Open MTM</div>
-                <div className="text-sm font-bold text-slate-900 mt-0.5">
-                  {formatSignedINR(
-                    hasValidNumber(shCohort?.unrealized_net_pnl_inr)
-                      ? shCohort.unrealized_net_pnl_inr
-                      : openForwardUnrealized
+                <div className="text-[10px] font-sans text-slate-500 flex items-center justify-between gap-1">
+                  <span>Open MTM</span>
+                  {shadowMtmDegraded && (
+                    <span className="px-1 py-0.2 rounded text-[8px] font-mono font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                      UNPRICED MTM
+                    </span>
                   )}
+                </div>
+                <div
+                  className={`text-sm font-bold mt-0.5 ${
+                    shadowMtmDegraded ? 'text-amber-700' : 'text-slate-900'
+                  }`}
+                >
+                  {shadowMtmDegraded
+                    ? UNAVAILABLE_LABEL
+                    : formatSignedINR(
+                        hasValidNumber(shCohort?.unrealized_net_pnl_inr)
+                          ? shCohort.unrealized_net_pnl_inr
+                          : effectiveShadowUnrealized
+                      )}
                 </div>
               </div>
               <div className="bg-white rounded-lg border border-slate-200 p-2.5">
@@ -629,10 +650,21 @@ export default function OverviewTab({
               {formatSignedINR(shadowLedger?.realized_net_pnl_inr)}
             </div>
             <div className="mt-2 space-y-1 text-xs font-mono text-slate-600 tabular-nums">
-              <div className="flex justify-between">
-                <span>Open Unrealized MTM:</span>
-                <span className="font-semibold text-slate-800">
-                  {formatSignedINR(openForwardUnrealized)}
+              <div className="flex justify-between items-center gap-1">
+                <span className="flex items-center gap-1">
+                  <span>Open Unrealized MTM:</span>
+                  {shadowMtmDegraded && (
+                    <span className="px-1 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                      UNPRICED MTM
+                    </span>
+                  )}
+                </span>
+                <span
+                  className={`font-semibold ${
+                    shadowMtmDegraded ? 'text-amber-700' : 'text-slate-800'
+                  }`}
+                >
+                  {formatSignedINR(effectiveShadowUnrealized)}
                 </span>
               </div>
               <div className="flex justify-between">
@@ -680,9 +712,22 @@ export default function OverviewTab({
               {formatSignedINR(liveStatus?.pnl_summary?.realized_net_pnl)}
             </div>
             <div className="mt-2 space-y-1 text-xs font-mono text-slate-600 tabular-nums">
-              <div className="flex justify-between">
-                <span>Broker Unrealized:</span>
-                <span className="font-semibold text-slate-800">
+              <div className="flex justify-between items-center gap-1">
+                <span className="flex items-center gap-1">
+                  <span>Broker Unrealized:</span>
+                  {Boolean(liveStatus?.pnl_summary?.has_stale_positions) && (
+                    <span className="px-1 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                      STALE MTM
+                    </span>
+                  )}
+                </span>
+                <span
+                  className={`font-semibold ${
+                    Boolean(liveStatus?.pnl_summary?.has_stale_positions)
+                      ? 'text-amber-700'
+                      : 'text-slate-800'
+                  }`}
+                >
                   {formatSignedINR(liveStatus?.pnl_summary?.unrealized_net_pnl)}
                 </span>
               </div>
@@ -718,9 +763,15 @@ export default function OverviewTab({
                 <Wallet size={13} className="text-slate-500 shrink-0" />
                 <span>Broker Funds &amp; Margin</span>
               </span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 shrink-0 whitespace-nowrap">
-                Upstox Snapshot
-              </span>
+              {Boolean(liveStatus?.readiness?.readiness_stale) ? (
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-semibold shrink-0 whitespace-nowrap">
+                  STALE CACHE ({Math.round(Number(liveStatus?.readiness?.readiness_cache_age_sec || 0))}s)
+                </span>
+              ) : (
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 shrink-0 whitespace-nowrap">
+                  Upstox Snapshot
+                </span>
+              )}
             </div>
             <div
               className={`text-2xl font-bold font-mono mt-2 tabular-nums ${
@@ -773,11 +824,17 @@ export default function OverviewTab({
                   v6bCohort?.daily_kill_triggered ||
                   liveStatus?.circuit_breaker?.is_session_halted
                     ? 'bg-rose-100 text-rose-800 font-bold'
+                    : shadowMtmDegraded || Boolean(liveStatus?.pnl_summary?.has_stale_positions)
+                    ? 'bg-amber-100 text-amber-900 border border-amber-300 font-bold'
                     : 'bg-slate-100 text-slate-700'
                 }`}
               >
                 {shCohort?.daily_kill_triggered || liveStatus?.circuit_breaker?.is_session_halted
                   ? 'HALTED'
+                  : shadowMtmDegraded
+                  ? 'HALTED (UNPRICED)'
+                  : Boolean(liveStatus?.pnl_summary?.has_stale_positions)
+                  ? 'STALE MTM GUARD'
                   : 'ISOLATED'}
               </span>
             </div>
