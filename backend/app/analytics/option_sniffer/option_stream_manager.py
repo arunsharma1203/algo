@@ -76,6 +76,7 @@ class OptionStreamManager:
         # Telemetry
         self._total_ticks_received: int = 0
         self._last_tick_time: float = 0.0
+        self._last_ws_tick_time: float = 0.0
         self._is_registered_with_streamer: bool = False
 
         self._initialized = True
@@ -345,7 +346,9 @@ class OptionStreamManager:
                 self._advance_feed_listeners = []
 
             self._total_ticks_received += 1
-            self._last_tick_time = time.time()
+            now_ws = time.time()
+            self._last_tick_time = now_ws
+            self._last_ws_tick_time = now_ws
 
             for ikey, feed_obj in feeds.items():
                 if ikey not in self._key_to_contract:
@@ -1210,20 +1213,54 @@ class OptionStreamManager:
         logger.info(f"[OptionStreamManager] Seeded {seeded} option contracts from baseline snapshot.")
         return seeded
 
-    def refresh_quotes_via_rest(self, min_interval_sec: float = 3.5) -> int:
+    def refresh_quotes_via_rest(self, min_interval_sec: float = 3.5, force: bool = False) -> int:
         """
         Direct resilient polling mechanism:
         Fetches live Upstox market quotes (LTP, Bid, Ask, OI, Volume, OHLC)
         for all registered option contracts and underlying index instruments
         in single batch REST calls (/v2/market-quote/quotes).
         Provides 100% resilient real-time quote updates even if WebSocket connection is lost or delayed,
-        while strictly deduplicating concurrent calls to respect Upstox API rate limits.
+        while backing off to a 60s heartbeat when WebSocket V3 and all active position legs are healthy
+        so routine sweeps never exhaust the 1,600 reqs / 30 min Upstox token quota.
         """
-        effective_interval = max(2.5, float(min_interval_sec or 3.5))
+        base_interval = max(2.5, float(min_interval_sec or 3.5))
+        ws_connected = False
+        try:
+            stream_svc = get_stream_service()
+            ws_connected = getattr(stream_svc, "_is_connected", False) is True
+        except Exception:
+            ws_connected = False
+
         with self._lock:
             now_t = time.time()
+            now_ms_chk = int(now_t * 1000)
+            last_ws = float(getattr(self, "_last_ws_tick_time", 0.0) or 0.0)
+            ws_streaming_fresh = ws_connected and (now_t - last_ws) <= 5.0
+
+            nifty_uq = self._underlying_quotes.get("NIFTY") or {}
+            nifty_fresh = bool(
+                nifty_uq.get("spot_ltp", 0) > 0
+                and (now_ms_chk - int(nifty_uq.get("timestamp_ms") or 0)) <= 5000
+            )
+
+            active_legs_fresh = True
+            for ik, meta in self._key_to_contract.items():
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("is_active_position_leg") or meta.get("is_pinned_active_leg"):
+                    qo = self._option_quotes.get(ik)
+                    if not isinstance(qo, dict) or (now_ms_chk - int(qo.get("timestamp_ms") or 0)) > 5000:
+                        active_legs_fresh = False
+                        break
+
+            effective_interval = (
+                max(base_interval, 60.0)
+                if (not force and ws_streaming_fresh and nifty_fresh and active_legs_fresh and len(self._option_quotes) > 0)
+                else base_interval
+            )
+
             last_rest = getattr(self, "_last_rest_refresh_time", 0.0)
-            if (now_t - last_rest) < effective_interval and len(self._option_quotes) > 0:
+            if not force and (now_t - last_rest) < effective_interval and len(self._option_quotes) > 0:
                 return len(self._option_quotes)
             self._last_rest_refresh_time = now_t
             all_keys = list(self._key_to_contract.keys())

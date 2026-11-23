@@ -195,73 +195,125 @@ class OptionLiveAdapter:
                 self._last_readiness_fetch = now
             return readiness
 
-        # 1. Probe Profile & Exchanges
-        t0 = time.time()
-        try:
-            try:
-                get_upstox_limiter().acquire(timeout=2.0)
-            except Exception:
-                pass
-            resp_prof = requests.get(
-                "https://api.upstox.com/v2/user/profile",
-                headers=headers,
-                proxies=proxies,
-                timeout=8.0
-            )
-            readiness["proxy_latency_ms"] = round((time.time() - t0) * 1000, 1)
+        # 1. Probe Profile & Exchanges + 2. Static IP Whitelist
+        # Static profile/IP metadata is cached for 300s per token unless force_refresh=True,
+        # while Funds & Margin refreshes every 15s (cutting routine readiness quota drain by 66%).
+        with self._cache_lock:
+            prof_ip_cache = getattr(self, "_cached_profile_ip", None)
+            prof_ip_ts = float(getattr(self, "_last_profile_ip_fetch", 0.0) or 0.0)
+            prof_ip_tok = str(getattr(self, "_cached_profile_ip_token", "") or "")
+            prev_cached = dict(self._cached_readiness) if self._cached_readiness is not None else None
 
-            if resp_prof.status_code == 200:
-                pdata = resp_prof.json().get("data", {})
-                readiness["token_valid"] = True
-                readiness["user_id"] = pdata.get("user_id", "")
-                readiness["user_name"] = pdata.get("user_name", "")
-                readiness["exchanges"] = pdata.get("exchanges", [])
-                readiness["nfo_enabled"] = "NFO" in readiness["exchanges"]
-            elif resp_prof.status_code == 401:
-                readiness["blockers"].append("Upstox Access Token expired or unauthorized (401).")
-            else:
-                readiness["blockers"].append(f"Profile API returned HTTP {resp_prof.status_code}: {resp_prof.text[:120]}")
-        except Exception as e:
-            readiness["proxy_latency_ms"] = round((time.time() - t0) * 1000, 1)
-            readiness["blockers"].append(f"Profile request failed via proxy: {str(e)}")
+        reuse_prof_ip = bool(
+            not force_refresh
+            and isinstance(prof_ip_cache, dict)
+            and prof_ip_tok == token
+            and prof_ip_cache.get("token_valid")
+            and prof_ip_cache.get("static_ip_matched")
+            and (now - prof_ip_ts) < 300.0
+        )
 
-        # 2. Probe Static IP Whitelist
-        try:
+        if reuse_prof_ip and isinstance(prof_ip_cache, dict):
+            readiness["token_valid"] = True
+            readiness["user_id"] = prof_ip_cache.get("user_id", "")
+            readiness["user_name"] = prof_ip_cache.get("user_name", "")
+            readiness["exchanges"] = list(prof_ip_cache.get("exchanges", []))
+            readiness["nfo_enabled"] = bool(prof_ip_cache.get("nfo_enabled", False))
+            readiness["primary_ip"] = prof_ip_cache.get("primary_ip", "")
+            readiness["secondary_ip"] = prof_ip_cache.get("secondary_ip", "")
+            readiness["static_ip_matched"] = True
+            readiness["proxy_latency_ms"] = float(prof_ip_cache.get("proxy_latency_ms") or 0.0)
+        else:
+            t0 = time.time()
             try:
-                get_upstox_limiter().acquire(timeout=2.0)
-            except Exception:
-                pass
-            resp_ip = requests.get(
-                "https://api.upstox.com/v2/user/ip",
-                headers=headers,
-                proxies=proxies,
-                timeout=8.0
-            )
-            if resp_ip.status_code == 200:
-                idata = resp_ip.json().get("data", {})
-                readiness["primary_ip"] = idata.get("primary_ip", "")
-                readiness["secondary_ip"] = idata.get("secondary_ip", "")
-                if readiness["primary_ip"] == PRIMARY_WHITELISTED_IPV6 or readiness["secondary_ip"] == SECONDARY_WHITELISTED_IPV4:
-                    readiness["static_ip_matched"] = True
+                try:
+                    get_upstox_limiter().acquire(timeout=2.0, is_emergency=bool(force_refresh))
+                except Exception as rl_err:
+                    if not force_refresh and prev_cached is not None:
+                        return prev_cached
+                    raise rl_err
+                resp_prof = requests.get(
+                    "https://api.upstox.com/v2/user/profile",
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=8.0
+                )
+                readiness["proxy_latency_ms"] = round((time.time() - t0) * 1000, 1)
+
+                if resp_prof.status_code == 200:
+                    pdata = resp_prof.json().get("data", {})
+                    readiness["token_valid"] = True
+                    readiness["user_id"] = pdata.get("user_id", "")
+                    readiness["user_name"] = pdata.get("user_name", "")
+                    readiness["exchanges"] = pdata.get("exchanges", [])
+                    readiness["nfo_enabled"] = "NFO" in readiness["exchanges"]
+                elif resp_prof.status_code == 401:
+                    readiness["blockers"].append("Upstox Access Token expired or unauthorized (401).")
                 else:
-                    readiness["blockers"].append(f"Static IP mismatch: primary={readiness['primary_ip']}")
-            else:
-                readiness["blockers"].append(f"Static IP check returned HTTP {resp_ip.status_code}")
-        except Exception as e:
-            readiness["blockers"].append(f"Static IP check failed: {str(e)}")
+                    readiness["blockers"].append(f"Profile API returned HTTP {resp_prof.status_code}: {resp_prof.text[:120]}")
+            except Exception as e:
+                readiness["proxy_latency_ms"] = round((time.time() - t0) * 1000, 1)
+                readiness["blockers"].append(f"Profile request failed via proxy: {str(e)}")
+
+            try:
+                try:
+                    get_upstox_limiter().acquire(timeout=2.0, is_emergency=bool(force_refresh))
+                except Exception as rl_err:
+                    if not force_refresh and prev_cached is not None:
+                        return prev_cached
+                    raise rl_err
+                resp_ip = requests.get(
+                    "https://api.upstox.com/v2/user/ip",
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=8.0
+                )
+                if resp_ip.status_code == 200:
+                    idata = resp_ip.json().get("data", {})
+                    readiness["primary_ip"] = idata.get("primary_ip", "")
+                    readiness["secondary_ip"] = idata.get("secondary_ip", "")
+                    if readiness["primary_ip"] == PRIMARY_WHITELISTED_IPV6 or readiness["secondary_ip"] == SECONDARY_WHITELISTED_IPV4:
+                        readiness["static_ip_matched"] = True
+                    else:
+                        readiness["blockers"].append(f"Static IP mismatch: primary={readiness['primary_ip']}")
+                else:
+                    readiness["blockers"].append(f"Static IP check returned HTTP {resp_ip.status_code}")
+            except Exception as e:
+                readiness["blockers"].append(f"Static IP check failed: {str(e)}")
+
+            if readiness["token_valid"] and readiness["static_ip_matched"]:
+                with self._cache_lock:
+                    self._cached_profile_ip = {
+                        "token_valid": True,
+                        "user_id": readiness["user_id"],
+                        "user_name": readiness["user_name"],
+                        "exchanges": list(readiness["exchanges"]),
+                        "nfo_enabled": readiness["nfo_enabled"],
+                        "primary_ip": readiness["primary_ip"],
+                        "secondary_ip": readiness["secondary_ip"],
+                        "static_ip_matched": True,
+                        "proxy_latency_ms": readiness["proxy_latency_ms"],
+                    }
+                    self._last_profile_ip_fetch = now
+                    self._cached_profile_ip_token = token
 
         # 3. Probe Funds & Margin
+        t_m0 = time.time()
         try:
             try:
-                get_upstox_limiter().acquire(timeout=2.0)
-            except Exception:
-                pass
+                get_upstox_limiter().acquire(timeout=2.0, is_emergency=bool(force_refresh))
+            except Exception as rl_err:
+                if not force_refresh and prev_cached is not None:
+                    return prev_cached
+                raise rl_err
             resp_margin = requests.get(
                 "https://api.upstox.com/v2/user/get-funds-and-margin",
                 headers=headers,
                 proxies=proxies,
                 timeout=8.0
             )
+            if reuse_prof_ip:
+                readiness["proxy_latency_ms"] = round((time.time() - t_m0) * 1000, 1)
             if resp_margin.status_code == 200:
                 mdata = resp_margin.json().get("data", {})
                 eq_data = mdata.get("equity", {})
