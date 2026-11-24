@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 import importlib.util
 import os
+import statistics
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 # Load pure indicator functions from `s205_meta_model.py` without evaluating
@@ -46,6 +47,7 @@ from app.analytics.option_sniffer_v2.v2_config import (
     IST_TZ,
     bar_open_label_from_ms,
     ist_hhmm_from_ms,
+    parse_ist_timestamp_ms,
 )
 from app.analytics.option_sniffer_v2.v2_data_contract import (
     check_spot_futures_sync,
@@ -66,6 +68,11 @@ def compute_causal_bar_indicators(completed_bars: List[Dict[str, Any]]) -> Dict[
     Shared single indicator builder for Forward & Replay from finalized session 1m bars.
     Fails closed (`None`) during indicator warmup rather than substituting synthetic proxies.
     """
+    completed_bars = [
+        b
+        for b in completed_bars
+        if "09:15" <= str(b.get("bar_open_ts") or "")[11:16] <= "15:29"
+    ]
     n = len(completed_bars)
     if n == 0:
         return {
@@ -178,6 +185,7 @@ class V2UnifiedEventEngine:
 
         # Intraday quotes & references (strict NIFTY identity only)
         self.open_basis_ref: Optional[Dict[str, Any]] = None
+        self.open_basis_samples: List[Dict[str, Any]] = []
         self.latest_spot_q: Optional[Dict[str, Any]] = None
         self.latest_fut_q: Optional[Dict[str, Any]] = None
         self.latest_vix_q: Optional[Dict[str, Any]] = None
@@ -202,13 +210,32 @@ class V2UnifiedEventEngine:
         dt = last_ck["session_date"]
         self.session_date = dt
         self.open_basis_ref = last_ck.get("open_basis_ref")
+        self.open_basis_samples = []
+        if isinstance(self.open_basis_ref, dict) and self.open_basis_ref.get("ok"):
+            pts = self.open_basis_ref.get("sample_basis_pts")
+            if isinstance(pts, list) and pts:
+                for p_val in pts:
+                    self.open_basis_samples.append({**self.open_basis_ref, "basis_pts": float(p_val)})
+            elif self.open_basis_ref.get("basis_pts") is not None:
+                self.open_basis_samples.append(dict(self.open_basis_ref))
         self.last_usable_event_ts_ms = int(last_ck.get("last_event_ts_ms") or 0)
         self.last_finalized_bar_open_ts = last_ck.get("last_bar_open_ts")
         self.session_started_from_open = bool(last_ck.get("session_started_from_open"))
         self.sequence_gap_count = int(last_ck.get("sequence_gap_count") or 0)
         self.overflow_drop_count = int(last_ck.get("overflow_drop_count") or 0)
         bars = self.store.load_completed_bars(self.run_mode, self.cfg_hash, session_date=dt)
-        self.completed_bars = [dict(b) for b in bars]
+        self.completed_bars = [
+            dict(b)
+            for b in bars
+            if "09:15" <= str(b.get("bar_open_ts") or "")[11:16] <= "15:29"
+        ]
+        if self.completed_bars:
+            self.last_finalized_bar_open_ts = self.completed_bars[-1]["bar_open_ts"]
+        elif self.last_finalized_bar_open_ts and not (
+            "09:15" <= str(self.last_finalized_bar_open_ts)[11:16] <= "15:29"
+        ):
+            self.last_finalized_bar_open_ts = None
+            self.sequence_gap_count = 0
         self.last_indicators = compute_causal_bar_indicators(self.completed_bars)
 
         snaps = self.store.load_daily_snapshots(self.run_mode, self.cfg_hash)
@@ -244,6 +271,7 @@ class V2UnifiedEventEngine:
         self.overflow_drop_count = 0
         self.post_session_ignored_count = 0
         self.open_basis_ref = None
+        self.open_basis_samples = []
         self.latest_spot_q = None
         self.latest_fut_q = None
         self.latest_vix_q = None
@@ -349,6 +377,22 @@ class V2UnifiedEventEngine:
         bar_open_ts = b["bar_open_ts"]
         bar_open_ms = int(b["bar_open_ms"])
         bar_close_ms = int(b["bar_close_ms"])
+        bar_open_hhmm = int(b["bar_open_hhmm"])
+        decision_ts_ms = max(bar_close_ms, int(b["max_avail_ts_ms"]))
+        dec_hhmm = ist_hhmm_from_ms(decision_ts_ms)
+
+        if bar_open_hhmm < 915 or dec_hhmm < 915:
+            return {
+                "status": "PRE_SESSION_IGNORED",
+                "bar_open_ts": bar_open_ts,
+                "decision_ts_ms": decision_ts_ms,
+            }
+
+        if not allow_post_session and dec_hhmm > 1530:
+            # Post-session EOD batch flush (e.g. 19:41 IST) cannot trigger retroactive trading or cutoffs
+            self.sequence_gap_count += 1
+            self._persist_session_snapshot_locked(dt)
+            return {"status": "POST_SESSION_FLUSH_IGNORED", "bar_open_ts": bar_open_ts, "decision_ts_ms": decision_ts_ms}
 
         # Detect minute discontinuity vs previous finalized bar in same session
         if self.last_finalized_bar_open_ts and self.last_finalized_bar_open_ts[:10] == dt:
@@ -358,14 +402,6 @@ class V2UnifiedEventEngine:
                 self.sequence_gap_count += int((bar_open_ms - prev_ms) // 60_000) - 1
 
         self.last_finalized_bar_open_ts = bar_open_ts
-        decision_ts_ms = max(bar_close_ms, int(b["max_avail_ts_ms"]))
-        dec_hhmm = ist_hhmm_from_ms(decision_ts_ms)
-
-        if not allow_post_session and dec_hhmm > 1530:
-            # Post-session EOD batch flush (e.g. 19:41 IST) cannot trigger retroactive trading or cutoffs
-            self.sequence_gap_count += 1
-            self._persist_session_snapshot_locked(dt)
-            return {"status": "POST_SESSION_FLUSH_IGNORED", "bar_open_ts": bar_open_ts, "decision_ts_ms": decision_ts_ms}
 
         row_bar = {
             "run_mode": self.run_mode,
@@ -387,22 +423,44 @@ class V2UnifiedEventEngine:
         ind = compute_causal_bar_indicators(self.completed_bars)
         self.last_indicators = ind
         self.last_decision_ts_ms = decision_ts_ms
-        bar_open_hhmm = int(b["bar_open_hhmm"])
-        eval_hhmm = ist_hhmm_from_ms(decision_ts_ms)
+        eval_hhmm = dec_hhmm
         if eval_hhmm < 915 or eval_hhmm > 1530:
             return {"status": "OUTSIDE_REGULAR_SESSION", "bar_open_ts": bar_open_ts}
 
-        # Open basis reference window strictly on bars opening during 09:15..09:29 (decisions <= 09:30)
-        if self.open_basis_ref is None and 915 <= bar_open_hhmm <= 929 and self.latest_spot_q and self.latest_fut_q:
+        # Open basis reference window across 09:15..09:29 using causal median of synchronized
+        # Spot/Futures observations (immune to 09:15 opening auction noise & mid-session roll).
+        if (
+            915 <= bar_open_hhmm <= 929
+            and self.latest_spot_q
+            and self.latest_fut_q
+            and not (isinstance(self.open_basis_ref, dict) and self.open_basis_ref.get("ok") is False)
+        ):
+            expected_open_contract = self.open_basis_samples[0] if self.open_basis_samples else None
             chk = check_spot_futures_sync(
                 self.latest_spot_q,
                 self.latest_fut_q,
                 max_skew_ms=int(self.cfg["quote_hygiene"]["max_spot_fut_sync_skew_ms"]),
                 max_age_ms=int(self.cfg["quote_hygiene"]["max_entry_quote_age_ms"]),
                 now_ms=decision_ts_ms,
+                expected_fut_contract=expected_open_contract,
             )
             if chk.get("ok"):
-                self.open_basis_ref = chk
+                self.open_basis_samples.append(chk)
+                pts_list = [float(s["basis_pts"]) for s in self.open_basis_samples]
+                med_pts = round(float(statistics.median(pts_list)), 4)
+                self.open_basis_ref = {
+                    **chk,
+                    "basis_pts": med_pts,
+                    "sample_count": len(pts_list),
+                    "sample_basis_pts": pts_list,
+                    "aggregation": "MEDIAN_0915_0929",
+                }
+            elif chk.get("reason") == "FUTURES_CONTRACT_ROLLED_MID_SESSION":
+                self.open_basis_ref = {
+                    "ok": False,
+                    "verifiable": True,
+                    "reason": "FUTURES_CONTRACT_ROLLED_MID_SESSION",
+                }
             elif chk.get("verifiable") is False:
                 self.unverifiable_basis_events += 1
 
@@ -690,7 +748,7 @@ class V2UnifiedEventEngine:
             if (
                 self.building_bar is not None
                 and avail_ms >= int(self.building_bar["bar_close_ms"])
-                and ist_hhmm_from_ms(int(self.building_bar["max_avail_ts_ms"])) <= 1530
+                and 915 <= ist_hhmm_from_ms(int(self.building_bar["max_avail_ts_ms"])) <= 1530
             ):
                 finalized_result = self._finalize_building_bar_and_decide(
                     trigger_ts_ms=avail_ms,
@@ -703,6 +761,24 @@ class V2UnifiedEventEngine:
             self.total_post_session_ignored_count += 1
             return finalized_result or {
                 "status": "POST_SESSION_FLUSH_IGNORED",
+                "availability_ts_ms": avail_ms,
+            }
+
+        if avail_hhmm < 915:
+            if (
+                self.building_bar is not None
+                and avail_ms >= int(self.building_bar["bar_close_ms"])
+                and 915 <= ist_hhmm_from_ms(int(self.building_bar["max_avail_ts_ms"])) <= 1530
+            ):
+                finalized_result = self._finalize_building_bar_and_decide(
+                    trigger_ts_ms=avail_ms,
+                    allow_post_session=False,
+                    uncertainty_blocks=uncertainty_blocks,
+                )
+            else:
+                finalized_result = None
+            return finalized_result or {
+                "status": "PRE_SESSION_IGNORED",
                 "availability_ts_ms": avail_ms,
             }
 
@@ -726,6 +802,25 @@ class V2UnifiedEventEngine:
 
         # Roll session or finalize previous bar BEFORE applying incoming new-minute tick!
         finalized_result: Optional[Dict[str, Any]] = None
+        if bar_open_hhmm < 915 or bar_open_hhmm > 1529:
+            if (
+                self.building_bar is not None
+                and (
+                    (self.session_date is not None and session_d > self.session_date)
+                    or bar_open_ts > self.building_bar["bar_open_ts"]
+                )
+                and 915 <= ist_hhmm_from_ms(int(self.building_bar["max_avail_ts_ms"])) <= 1530
+            ):
+                finalized_result = self._finalize_building_bar_and_decide(
+                    trigger_ts_ms=avail_ms,
+                    allow_post_session=False,
+                    uncertainty_blocks=uncertainty_blocks,
+                )
+            return finalized_result or {
+                "status": "OUTSIDE_REGULAR_BAR_WINDOW",
+                "bar_open_ts": bar_open_ts,
+            }
+
         if self.session_date is not None and session_d > self.session_date:
             self._roll_session_if_needed(session_d, bar_open_hhmm)
         elif self.session_date is None:
@@ -821,6 +916,124 @@ class V2UnifiedEventEngine:
                     self.building_bar["max_avail_ts_ms"] = max(self.building_bar["max_avail_ts_ms"], avail_ms)
 
         return finalized_result
+
+    def backfill_missing_completed_bars(
+        self,
+        session_date: str,
+        spot_candles_1m: List[Tuple[Any, float, float, float, float]],
+        vix_candles_1m: Optional[List[Tuple[Any, float, float, float, float]]] = None,
+        now_ms: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Strictly causal 1-minute Spot & VIX backfill for late startups or WS reconnect gaps.
+        Only inserts completed candles whose `bar_close_ms <= now_ms` and precedes `building_bar`.
+        """
+        if now_ms <= 0:
+            return {"inserted_count": 0, "reason": "INVALID_NOW_MS"}
+
+        if self.session_date is not None and self.session_date != session_date:
+            return {"inserted_count": 0, "reason": "SESSION_MISMATCH"}
+
+        existing_ts = {b["bar_open_ts"] for b in self.completed_bars}
+        building_open = self.building_bar["bar_open_ts"] if self.building_bar is not None else None
+        candidates: List[Tuple[str, float, float, float, float, int, int]] = []
+        for sc in spot_candles_1m or []:
+            try:
+                s_ms = parse_ist_timestamp_ms(str(sc[0]))
+                s_dt, ts_norm, _, bar_close_ms, s_hhmm = bar_open_label_from_ms(s_ms)
+                o_px = float(sc[1])
+                h_px = float(sc[2])
+                l_px = float(sc[3])
+                c_px = float(sc[4])
+            except Exception:
+                continue
+            if s_dt != session_date or not ("09:15:00" <= ts_norm[11:19] <= "15:29:00"):
+                continue
+            if bar_close_ms > int(now_ms):
+                continue
+            if building_open is not None and ts_norm >= building_open:
+                continue
+            if ts_norm in existing_ts or o_px <= 0.0 or h_px <= 0.0 or l_px <= 0.0 or c_px <= 0.0:
+                continue
+            candidates.append((ts_norm, o_px, h_px, l_px, c_px, bar_close_ms, s_hhmm))
+
+        if self.session_date is None:
+            if not candidates:
+                return {
+                    "inserted_count": 0,
+                    "bars_total": 0,
+                    "orb30_ready": False,
+                    "sequence_gap_count": 0,
+                }
+            earliest_hhmm = min(c[6] for c in candidates)
+            self._roll_session_if_needed(session_date, earliest_hhmm)
+
+        vix_close_by_ts: Dict[str, float] = {}
+        for vc in vix_candles_1m or []:
+            try:
+                v_ms = parse_ist_timestamp_ms(str(vc[0]))
+                v_dt, v_ts, _, v_close_ms, _ = bar_open_label_from_ms(v_ms)
+                v_close = float(vc[4])
+            except Exception:
+                continue
+            if (
+                v_dt == session_date
+                and "09:15:00" <= v_ts[11:19] <= "15:29:00"
+                and v_close_ms <= int(now_ms)
+                and v_close > 0.0
+            ):
+                vix_close_by_ts[v_ts] = v_close
+
+        inserted = 0
+        for ts_norm, o_px, h_px, l_px, c_px, bar_close_ms, _ in candidates:
+            if ts_norm in existing_ts:
+                continue
+
+            row_bar = {
+                "run_mode": self.run_mode,
+                "config_hash": self.cfg_hash,
+                "bar_open_ts": ts_norm,
+                "session_date": session_date,
+                "spot_o": o_px,
+                "spot_h": max(o_px, h_px, l_px, c_px),
+                "spot_l": min(o_px, h_px, l_px, c_px),
+                "spot_c": c_px,
+                "vix_c": vix_close_by_ts.get(ts_norm),
+                "bar_close_ts_ms": bar_close_ms,
+                "decision_ts_ms": bar_close_ms,
+            }
+            self.completed_bars.append(row_bar)
+            existing_ts.add(ts_norm)
+            if self.persist_bars_and_checkpoints:
+                self.store.save_completed_bar(row_bar)
+            inserted += 1
+
+        if inserted > 0:
+            self.completed_bars.sort(key=lambda b: b["bar_open_ts"])
+            self.session_started_from_open = any(
+                b["bar_open_ts"][11:16] == "09:15" for b in self.completed_bars
+            ) or (self.building_bar is not None and int(self.building_bar["bar_open_hhmm"]) == 915)
+
+            gap_cnt = 0
+            prev_ms: Optional[int] = None
+            for cb in self.completed_bars:
+                cur_ms = int(cb["bar_close_ts_ms"]) - 60_000
+                if prev_ms is not None and cur_ms - prev_ms > 60_000:
+                    gap_cnt += int((cur_ms - prev_ms) // 60_000) - 1
+                prev_ms = cur_ms
+            self.sequence_gap_count = gap_cnt
+
+            if self.completed_bars:
+                self.last_finalized_bar_open_ts = self.completed_bars[-1]["bar_open_ts"]
+            self.last_indicators = compute_causal_bar_indicators(self.completed_bars)
+            self._persist_session_snapshot_locked(session_date)
+
+        return {
+            "inserted_count": inserted,
+            "bars_total": len(self.completed_bars),
+            "orb30_ready": bool(self.last_indicators.get("orb30_ready")),
+            "sequence_gap_count": self.sequence_gap_count,
+        }
 
     def flush(self, uncertainty_blocks: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
         """Explicit end-of-stream flush finalizing the final open building bar cleanly."""

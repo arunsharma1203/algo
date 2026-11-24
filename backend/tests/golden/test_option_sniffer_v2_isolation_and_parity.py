@@ -212,11 +212,16 @@ class TestV2OptionSnifferIsolationAndParity(unittest.TestCase):
         diag = option_sniffer_v2_api.get_v2_diagnostics()
 
         self.assertFalse(os.path.exists(cold_db), "Cold-start GET created V2 SQLite file unexpectedly!")
+        self.assertEqual(ov["engine_version"], "2.2.0-causal")
+        self.assertEqual(ov["replay_run_mode"], "REPLAY_V2_2_CAUSAL")
+        self.assertEqual(ov["books"]["V2_BOOK_B_PAID_FLOW"]["max_entry_outlay_inr"], 18500.0)
+        self.assertFalse(ov["books"]["V2_BOOK_A_PROPOSED_O3"]["autonomous_entries_enabled"])
         self.assertEqual(ov["collection_status"]["collector_state"], "COLD_NOT_INITIALIZED")
         self.assertFalse(ov["collection_status"]["db_exists"])
         self.assertFalse(cf["included_in_v2_totals"])
         self.assertEqual(pos["forward_open_positions"], [])
         self.assertIsNotNone(cmp_d["v1_reported_summary"])
+        self.assertIn("archive_limitation_note", cmp_d)
         self.assertIn("phase4_o3_audit", rep)
         self.assertTrue(diag["protected_artifacts_integrity"]["all_unchanged"])
 
@@ -335,7 +340,7 @@ class TestV2OptionSnifferIsolationAndParity(unittest.TestCase):
                     for k in range(5):
                         svc.store.upsert_daily_snapshot(
                             {
-                                "run_mode": "REPLAY_V2_1_CAUSAL",
+                                "run_mode": svc.replay_run_mode,
                                 "config_hash": svc.config_hash,
                                 "session_date": f"2026-11-1{6 + k}",
                                 "sod_equity_inr": 200000.0,

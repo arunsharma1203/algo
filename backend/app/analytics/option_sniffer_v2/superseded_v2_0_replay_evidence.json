@@ -1,9 +1,29 @@
 {
   "evidence_status": "SUPERSEDED_V2_0_NONCAUSAL_SYNTHETIC_SYNC",
-  "superseded_by_version": "2.1.0-causal",
+  "superseded_by_version": "2.2.0-causal",
   "audited_commit": "baa72f775e016d2a25f3e5e1419e7667262756d9",
   "config_hash": "0f972ca95e7ccdc3f11dfe4f7d84834063c1b9f5d4aa569759055fda844d7f9d",
   "ledger_sha256": "52c0cfb5c1e46e87abee21c40d39a0e431017411879e1f895309a7f9729c551a",
+  "prior_versions_lineage": [
+    {
+      "engine_version": "2.0.0",
+      "status": "SUPERSEDED_NONCAUSAL_SYNTHETIC_SYNC",
+      "config_hash": "0f972ca95e7ccdc3f11dfe4f7d84834063c1b9f5d4aa569759055fda844d7f9d",
+      "ledger_sha256": "52c0cfb5c1e46e87abee21c40d39a0e431017411879e1f895309a7f9729c551a",
+      "trade_count": 2,
+      "net_pnl_inr": 9725.02
+    },
+    {
+      "engine_version": "2.1.0-causal",
+      "status": "PRESERVED_PRIOR_PROTOCOL_REPLAY_V2_1_CAUSAL",
+      "config_hash": "bc3bf817be22fa6d6edcd593a0b4bd2c768fce99e73a58a3410f3c1099dd8c8e",
+      "run_mode": "REPLAY_V2_1_CAUSAL",
+      "book_b_max_entry_outlay_inr": 11500.0,
+      "open_basis_aggregation": "FIRST_TICK_0915",
+      "verified_archive_trades": 0,
+      "net_pnl_inr": 0.0
+    }
+  ],
   "reason_superseded": [
     "Used archive bar_ts (bar open) instead of recorded_at/timestamp (earliest bar availability ~60s+ later).",
     "Assigned identical synthetic zero-age timestamps and synthetic NSE_FUT keys to snapshot spot/futures rows that lack separate source timestamps and contract identity in backend/market_data.db.",

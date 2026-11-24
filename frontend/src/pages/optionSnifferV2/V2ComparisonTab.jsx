@@ -7,7 +7,7 @@ function SupersededDisclosure({ superseded }) {
   return (
     <details className="rounded-xl border border-amber-500/40 bg-amber-950/20 p-4 font-mono text-xs">
       <summary className="cursor-pointer font-bold text-amber-300 select-none">
-        Superseded v2.0.0 Evidence Disclosure (Commit baa72f77 · {st.trade_count ?? 2} trades · {fmtSignedInr(st.net_pnl_inr)} — Excluded from v2.1.0 Totals)
+        Superseded v2.0.0 Evidence Disclosure (Commit baa72f77 · {st.trade_count ?? 2} trades · {fmtSignedInr(st.net_pnl_inr)} — Excluded from {superseded.superseded_by_version || 'Active V2'} Totals)
       </summary>
       <div className="mt-3 space-y-2 text-slate-300 border-t border-amber-500/30 pt-3">
         <div>
@@ -34,6 +34,9 @@ export default function V2ComparisonTab({
   counterfactuals,
   counterfactualsMeta,
 }) {
+  const engVer = replayAudit?.engine_version || dailyComparison?.engine_version || overview?.engine_version || '2.2.0-causal';
+  const repMode = replayAudit?.replay_run_mode || dailyComparison?.replay_run_mode || overview?.replay_run_mode || 'REPLAY_V2_2_CAUSAL';
+
   if (mode === 'replay') {
     const repSum = overview?.archive_replay_summary || dailyComparison?.v2_replay_summary;
     const outcome = replayAudit?.causal_verification_outcome;
@@ -54,7 +57,7 @@ export default function V2ComparisonTab({
         <div className="rounded-xl border border-purple-500/40 bg-slate-900/80 p-4 space-y-2.5">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <span className="text-xs font-bold uppercase tracking-wider text-purple-300">
-              Causal Replay v2.1.0-causal (`REPLAY_V2_1_CAUSAL`) — Archive Availability Outcome
+              Causal Replay v{engVer} (`{repMode}`) — Archive Availability Outcome
             </span>
             <span className="text-[11px] px-2 py-0.5 rounded bg-purple-950 text-purple-200 border border-purple-500/40">
               Verified Basis Trades: {outcome ? outcome.verified_futures_basis_trades : repSum ? repSum.trade_count : 'Unavailable'}
@@ -133,7 +136,7 @@ export default function V2ComparisonTab({
           <div className="rounded-xl border border-slate-700/80 bg-slate-900/70 p-4 space-y-2.5">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <span className="text-xs font-bold uppercase text-slate-200">
-                Book B Single-Factor Causal Attribution (`REPLAY_V2_1_CAUSAL`)
+                Book B Single-Factor Causal Attribution (`{repMode}`)
               </span>
               <span className="text-[11px] text-slate-400">
                 2x Charges: {fmtSignedInr(sens.stress_2x_charges?.net_pnl_inr)} • Ex-Best: {fmtSignedInr(sens.ex_best_session?.net_pnl_inr)}
@@ -204,10 +207,20 @@ export default function V2ComparisonTab({
           </div>
         </div>
         <div className="rounded-xl border border-purple-500/40 bg-slate-900/70 p-4">
-          <div className="text-[10px] text-purple-300 uppercase">V2 Causal Replay (v2.1.0-causal)</div>
-          <div className="text-lg font-bold text-slate-100 mt-1">{v2RepSum ? fmtSignedInr(v2RepSum.net_pnl_inr) : 'Unavailable'}</div>
+          <div className="text-[10px] text-purple-300 uppercase">V2 Causal Replay (v{engVer})</div>
+          <div className="text-lg font-bold text-slate-100 mt-1">
+            {v2RepSum
+              ? Number(v2RepSum.trade_count || 0) === 0
+                ? '0 Verified (Archive)'
+                : fmtSignedInr(v2RepSum.net_pnl_inr)
+              : 'Unavailable'}
+          </div>
           <div className="text-[11px] text-slate-300 mt-1">
-            {v2RepSum ? `${v2RepSum.trade_count ?? 0} verified trades • Fail-closed on missing ts` : 'Unavailable'}
+            {v2RepSum
+              ? Number(v2RepSum.trade_count || 0) === 0
+                ? '₹0.00 realized • Archive lacks Spot/Fut ts (Live stream OK)'
+                : `${v2RepSum.trade_count} verified trades`
+              : 'Unavailable'}
           </div>
         </div>
         <div className="rounded-xl border border-sky-500/40 bg-slate-900/70 p-4">
@@ -215,7 +228,9 @@ export default function V2ComparisonTab({
           <div className="text-lg font-bold text-emerald-400 mt-1">{v2FwdSum ? fmtSignedInr(v2FwdSum.net_pnl_inr) : 'Unavailable'}</div>
           <div className="text-[11px] text-slate-300 mt-1">
             {v2FwdSum
-              ? `${v2FwdSum.trade_count ?? 0} trades • MTM DD ${fmtInr(v2FwdSum.intraday_mtm_dd_inr)} (${fmtPct(v2FwdSum.intraday_mtm_dd_pct_peak)} peak)`
+              ? Number(v2FwdSum.trade_count || 0) === 0
+                ? '0 closed trades yet • Ready for 10:15–13:00 IST live session'
+                : `${v2FwdSum.trade_count ?? 0} trades • MTM DD ${fmtInr(v2FwdSum.intraday_mtm_dd_inr)} (${fmtPct(v2FwdSum.intraday_mtm_dd_pct_peak)} peak)`
               : 'Unavailable'}
           </div>
         </div>
@@ -245,22 +260,31 @@ export default function V2ComparisonTab({
                 </tr>
               </thead>
               <tbody>
-                {dailyRows.map((d) => (
-                  <tr key={d.session_date} className="border-b border-slate-800/80 text-slate-200">
-                    <td className="py-2 pr-3 whitespace-nowrap">{d.session_date}</td>
-                    <td className={`py-2 pr-3 text-right ${Number(d.v1_reported_net_pnl_inr) >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
-                      {fmtSignedInr(d.v1_reported_net_pnl_inr)}
-                    </td>
-                    <td className="py-2 pr-3 text-right">
-                      {d.v1_reported_trades} ({d.v1_stale_wing_contaminated_count})
-                    </td>
-                    <td className="py-2 pr-3 text-right">{fmtSignedInr(d.v2_replay_net_pnl_inr)}</td>
-                    <td className="py-2 pr-3 text-right">{d.v2_replay_trades ?? 'Unavailable'}</td>
-                    <td className="py-2 text-[11px] text-amber-300 break-words">
-                      {d.verification_outcome || d.v2_session_state || 'REPLAY_NOT_RUN'}
-                    </td>
-                  </tr>
-                ))}
+                {dailyRows.map((d) => {
+                  const isUnverifiable = d.verification_outcome === 'INSUFFICIENT_SOURCE_TS_OR_CONTRACT_EVIDENCE';
+                  return (
+                    <tr key={d.session_date} className="border-b border-slate-800/80 text-slate-200">
+                      <td className="py-2 pr-3 whitespace-nowrap">{d.session_date}</td>
+                      <td className={`py-2 pr-3 text-right ${Number(d.v1_reported_net_pnl_inr) >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                        {fmtSignedInr(d.v1_reported_net_pnl_inr)}
+                      </td>
+                      <td className="py-2 pr-3 text-right">
+                        {d.v1_reported_trades} ({d.v1_stale_wing_contaminated_count})
+                      </td>
+                      <td className="py-2 pr-3 text-right text-slate-400">
+                        {isUnverifiable ? '— (Unverifiable)' : fmtSignedInr(d.v2_replay_net_pnl_inr)}
+                      </td>
+                      <td className="py-2 pr-3 text-right">
+                        {isUnverifiable ? '0 verified' : (d.v2_replay_trades ?? 'Unavailable')}
+                      </td>
+                      <td className="py-2 text-[11px] text-amber-300 break-words">
+                        {isUnverifiable
+                          ? 'ARCHIVE_LACKS_SOURCE_TS (Live Stream OK)'
+                          : (d.verification_outcome || d.v2_session_state || 'REPLAY_NOT_RUN')}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

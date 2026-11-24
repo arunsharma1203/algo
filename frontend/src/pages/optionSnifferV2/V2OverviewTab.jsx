@@ -148,7 +148,12 @@ export default function V2OverviewTab({ overview, overviewMeta, positions, posit
               <tbody>
                 {bookRows.map((b) => (
                   <tr key={b.book_id} className="border-b border-slate-800/80 align-top text-slate-200">
-                    <td className="py-2.5 pr-3 font-semibold text-white min-w-[170px]">{b.book_label}</td>
+                    <td className="py-2.5 pr-3 font-semibold text-white min-w-[200px]">
+                      <div>{b.book_label}</div>
+                      {b.config_summary && (
+                        <div className="text-[11px] font-normal text-slate-400 mt-0.5">{b.config_summary}</div>
+                      )}
+                    </td>
                     <td className="py-2.5 pr-3 whitespace-nowrap">
                       <span
                         className={`px-2 py-0.5 rounded text-[10px] border ${
@@ -237,7 +242,7 @@ export default function V2OverviewTab({ overview, overviewMeta, positions, posit
           {!hyg ? (
             <div className="text-slate-400">Unavailable</div>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               <div className="p-2 rounded bg-slate-950/60 border border-slate-800">
                 <div className="text-[10px] text-slate-400">Spot / Fut Age</div>
                 <div className="text-slate-100 font-semibold">
@@ -248,6 +253,32 @@ export default function V2OverviewTab({ overview, overviewMeta, positions, posit
                 <div className="text-[10px] text-slate-400">Spot-Fut Skew</div>
                 <div className="text-slate-100 font-semibold">
                   {hyg.spot_fut_sync?.skew_ms != null ? `${hyg.spot_fut_sync.skew_ms} ms` : 'Unavailable'}
+                </div>
+              </div>
+              <div className="p-2 rounded bg-slate-950/60 border border-slate-800">
+                <div className="text-[10px] text-slate-400">Open Basis Ref</div>
+                <div
+                  className={`font-semibold ${
+                    hyg.open_basis_reference?.ok
+                      ? 'text-emerald-300'
+                      : hyg.open_basis_reference && hyg.open_basis_reference.ok === false
+                        ? 'text-rose-300'
+                        : 'text-amber-300'
+                  }`}
+                >
+                  {hyg.open_basis_reference?.ok
+                    ? `Median ${Number(hyg.open_basis_reference.basis_pts) >= 0 ? '+' : ''}${Number(hyg.open_basis_reference.basis_pts).toFixed(1)}pt (${hyg.open_basis_samples_count || 1}m)`
+                    : hyg.open_basis_reference && hyg.open_basis_reference.ok === false
+                      ? `BLOCKED: ${hyg.open_basis_reference.reason || 'INVALID_OPEN_BASIS'}`
+                      : 'Awaiting 09:15–09:29'}
+                </div>
+              </div>
+              <div className="p-2 rounded bg-slate-950/60 border border-slate-800">
+                <div className="text-[10px] text-slate-400">ORB30 / 1m Bars</div>
+                <div className={`font-semibold ${hyg.orb30_ready ? 'text-emerald-300' : 'text-amber-300'}`}>
+                  {hyg.orb30_ready
+                    ? `READY (${hyg.completed_bars_today ?? 0}m)`
+                    : `Warmup (${hyg.completed_bars_today ?? 0}m)`}
                 </div>
               </div>
               <div className="p-2 rounded bg-slate-950/60 border border-slate-800">

@@ -236,8 +236,8 @@ class TestV2ComprehensiveSuite(unittest.TestCase):
         fut_q_rolled = {"instrument_key": "NSE_FO|NIFTY_FUT_DEC", "underlying": "NIFTY", "trading_symbol": "NIFTY FUT 31 DEC 26", "expiry": "2026-12-31", "fut_ltp": 25920.0, "exchange_ltt_ms": ts, "local_receipt_ts_ms": ts, "source_ts_proven": True}
         ce_atm = _mk_contract("NSE_FO|CE25800", 25800.0, "CE", exp)
         ce_otm = _mk_contract("NSE_FO|CE25850", 25850.0, "CE", exp)
-        q_atm_exp = _mk_obs_quote("NSE_FO|CE25800", 210.0, 211.0, ts, strike=25800.0, ot="CE", expiry=exp)
-        q_otm_ok = _mk_obs_quote("NSE_FO|CE25850", 160.0, 161.0, ts, strike=25850.0, ot="CE", expiry=exp)
+        q_atm_exp = _mk_obs_quote("NSE_FO|CE25800", 300.0, 301.0, ts, strike=25800.0, ot="CE", expiry=exp)
+        q_otm_ok = _mk_obs_quote("NSE_FO|CE25850", 260.0, 261.0, ts, strike=25850.0, ot="CE", expiry=exp)
 
         rolled_res = evaluate_book_b_entry_signal(
             self.cfg, "2026-11-19", "2026-11-19 10:45:00", 1045, ts, 25810.0, 25790.0, 25800.0, 25740.0, 26.0, 0.36,
@@ -443,7 +443,7 @@ class TestV2ComprehensiveSuite(unittest.TestCase):
             self.assertEqual(cf["cf1_summary"]["unresolved_count"], 3)
 
             rep1 = run_v2_replay_and_attribution(v1_conn, self.store, self.cfg, self.cfg_hash)
-            self.assertEqual(rep1["replay_run_mode"], "REPLAY_V2_1_CAUSAL")
+            self.assertEqual(rep1["replay_run_mode"], "REPLAY_V2_2_CAUSAL")
             self.assertEqual(rep1["causal_verification_outcome"]["verified_futures_basis_trades"], 0)
             self.assertGreater(rep1["causal_verification_outcome"]["unverifiable_basis_events"], 1000)
             self.assertGreaterEqual(rep1["causal_verification_outcome"]["late_events_rejected"], 22)
@@ -756,6 +756,320 @@ class TestV2ComprehensiveSuite(unittest.TestCase):
             v1_exit_bar_ts="2026-11-23 10:18:00",
         )
         self.assertEqual(r_flip["cf_exit_reason"], "CF1_SPOT_VWAP_FLIP_EXIT")
+
+    def test_14_median_open_basis_rejects_0915_auction_outlier_and_recovers_from_db(self) -> None:
+        t0 = parse_ist_timestamp_ms("2026-11-20T09:15:00+05:30")
+        assert t0 is not None
+        eng = V2UnifiedEventEngine(self.cfg, self.cfg_hash, self.store, self.sim, run_mode="FORWARD_PAPER", persist_bars_and_checkpoints=True)
+        # 09:15 has extreme opening auction noise (-20.0 pt); 09:16..09:19 are tight [+22, +24, +25, +26]
+        basis_vals = [-20.0, 22.0, 24.0, 25.0, 26.0]
+        with self.store.writer_session():
+            for m, b_pt in enumerate(basis_vals):
+                ts_m = t0 + m * 60_000 + 57_000
+                eng.ingest_event("INDEX", "NIFTY", {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": 25800.0, "exchange_ltt_ms": ts_m, "source_ts_proven": True}, availability_ts_ms=ts_m)
+                eng.ingest_event("FUTURES", "NIFTY", {"instrument_key": "NSE_FO|NIFTYFUT_D", "underlying": "NIFTY", "trading_symbol": "NIFTY FUT 29 DEC 26", "expiry": "2026-12-29", "fut_ltp": 25800.0 + b_pt, "exchange_ltt_ms": ts_m, "source_ts_proven": True}, availability_ts_ms=ts_m)
+                eng.ingest_event("BAR_CLOSE_CHECK", "CLOCK", {"availability_ts_ms": t0 + (m + 1) * 60_000}, availability_ts_ms=t0 + (m + 1) * 60_000)
+
+        self.assertIsNotNone(eng.open_basis_ref)
+        self.assertTrue(eng.open_basis_ref["ok"])
+        self.assertEqual(eng.open_basis_ref["sample_count"], 5)
+        self.assertEqual(eng.open_basis_ref["basis_pts"], 24.0)  # Outlier -20 cleanly rejected by median!
+
+        # Recover into fresh store/engine instance and add 09:20 (+28.0) -> 6-sample median = (24 + 25)/2 = 24.5
+        sim2 = V2PaperSimulator(self.cfg, self.cfg_hash, self.store, run_mode="FORWARD_PAPER")
+        sim2.recover_state_from_db()
+        eng2 = V2UnifiedEventEngine(self.cfg, self.cfg_hash, self.store, sim2, run_mode="FORWARD_PAPER", persist_bars_and_checkpoints=True)
+        self.assertEqual(len(eng2.open_basis_samples), 5)
+        ts_5 = t0 + 5 * 60_000 + 57_000
+        with self.store.writer_session():
+            eng2.ingest_event("INDEX", "NIFTY", {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": 25800.0, "exchange_ltt_ms": ts_5, "source_ts_proven": True}, availability_ts_ms=ts_5)
+            eng2.ingest_event("FUTURES", "NIFTY", {"instrument_key": "NSE_FO|NIFTYFUT_D", "underlying": "NIFTY", "trading_symbol": "NIFTY FUT 29 DEC 26", "expiry": "2026-12-29", "fut_ltp": 25828.0, "exchange_ltt_ms": ts_5, "source_ts_proven": True}, availability_ts_ms=ts_5)
+            eng2.ingest_event("BAR_CLOSE_CHECK", "CLOCK", {"availability_ts_ms": t0 + 6 * 60_000}, availability_ts_ms=t0 + 6 * 60_000)
+        self.assertEqual(eng2.open_basis_ref["sample_count"], 6)
+        self.assertEqual(eng2.open_basis_ref["basis_pts"], 24.5)
+
+        # Mid-window futures contract roll must fail closed
+        ts_6 = t0 + 6 * 60_000 + 57_000
+        with self.store.writer_session():
+            eng2.ingest_event("INDEX", "NIFTY", {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": 25800.0, "exchange_ltt_ms": ts_6, "source_ts_proven": True}, availability_ts_ms=ts_6)
+            eng2.ingest_event("FUTURES", "NIFTY", {"instrument_key": "NSE_FO|NIFTYFUT_JAN", "underlying": "NIFTY", "trading_symbol": "NIFTY FUT 25 JAN 27", "expiry": "2027-01-25", "fut_ltp": 25910.0, "exchange_ltt_ms": ts_6, "source_ts_proven": True}, availability_ts_ms=ts_6)
+            eng2.ingest_event("BAR_CLOSE_CHECK", "CLOCK", {"availability_ts_ms": t0 + 7 * 60_000}, availability_ts_ms=t0 + 7 * 60_000)
+        self.assertFalse(eng2.open_basis_ref["ok"])
+        self.assertEqual(eng2.open_basis_ref["reason"], "FUTURES_CONTRACT_ROLLED_MID_SESSION")
+
+    def test_15_causal_intraday_spot_backfill_heals_late_0918_startup_without_lookahead(self) -> None:
+        from datetime import datetime
+        from app.analytics.option_sniffer_v2.v2_config import IST_TZ
+
+        t_base = parse_ist_timestamp_ms("2026-11-20T09:15:00+05:30")
+        assert t_base is not None
+        mock_spot_candles = []
+        mock_vix_candles = []
+        for m in range(32):  # 09:15 .. 09:46 inclusive (30 completed before 09:45:20 + 09:45 in-flight + 09:46 future!)
+            hh = 9 + (15 + m) // 60
+            mm = (15 + m) % 60
+            ts_str = f"2026-11-20T{hh:02d}:{mm:02d}:00+05:30"
+            px = 25400.0 + m * 2.0
+            mock_spot_candles.append([ts_str, px, px + 3.0, px - 2.0, px + 1.0, 0])
+            mock_vix_candles.append([ts_str, 17.5, 17.6, 17.4, 17.5, 0])
+
+        def _fetcher(ikey: str) -> list:
+            return mock_spot_candles if "Nifty 50" in ikey else mock_vix_candles
+
+        svc = OptionSnifferV2Service(db_path=self.db_path, intraday_candle_fetcher_fn=_fetcher)
+        try:
+            svc.start_parallel_collector(stream_manager=None, run_archive_warmup=False, spawn_worker=False)
+            # Late start: only push 09:44:20 tick (missed 09:15..09:43!) and evaluate at 09:45:20 IST
+            ts_0944 = parse_ist_timestamp_ms("2026-11-20T09:44:20+05:30")
+            assert ts_0944 is not None
+            svc.on_live_feed_events([("INDEX", "NIFTY", {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": 25459.0, "availability_ts_ms": ts_0944})])
+            svc.process_queued_events(now_dt=datetime(2026, 11, 20, 9, 45, 20, tzinfo=IST_TZ))
+
+            self.assertEqual(len(svc.unified_engine.completed_bars), 30)
+            self.assertEqual(svc.unified_engine.completed_bars[0]["bar_open_ts"], "2026-11-20 09:15:00")
+            self.assertEqual(svc.unified_engine.completed_bars[-1]["bar_open_ts"], "2026-11-20 09:44:00")
+            self.assertEqual(svc.unified_engine.sequence_gap_count, 0)
+            self.assertTrue(svc.unified_engine.session_started_from_open)
+            self.assertTrue(svc.unified_engine.last_indicators["orb30_ready"])
+
+            ov = svc.get_overview()
+            self.assertEqual(ov["feed_hygiene"]["completed_bars_today"], 30)
+            self.assertTrue(ov["feed_hygiene"]["orb30_ready"])
+        finally:
+            svc.stop_v2_only()
+            svc.store.close()
+
+    def test_16_v2_dte2_watchlist_additive_pinning_on_t1_friday_and_zero_pin_when_v1_covers(self) -> None:
+        from datetime import datetime
+        from app.analytics.option_sniffer_v2.v2_config import IST_TZ
+        from tests.golden.test_option_sniffer_v2_isolation_and_parity import _make_isolated_stream_manager
+
+        mgr = _make_isolated_stream_manager()
+        # Part A: Friday 2026-11-20 -> V1 only tracks 2026-11-23 (T-1, DTE=1), leaving DTE>=2 empty!
+        with mgr._lock:
+            mgr._key_to_contract["NSE_FO|V1_T1_CE"] = {
+                "instrument_key": "NSE_FO|V1_T1_CE",
+                "trading_symbol": "NIFTY 25400 CE 23 NOV 26",
+                "underlying": "NIFTY",
+                "expiry": "2026-11-23",
+                "strike": 25400.0,
+                "option_type": "CE",
+                "lot_size": 65,
+            }
+            mgr._v1_core_chain_keys.add("NSE_FO|V1_T1_CE")
+
+        cat = []
+        for stk in (25350.0, 25400.0, 25450.0, 25500.0):
+            for ot in ("CE", "PE"):
+                cat.append({
+                    "instrument_key": f"NSE_FO|DEC01_{int(stk)}_{ot}",
+                    "trading_symbol": f"NIFTY {int(stk)} {ot} 01 DEC 26",
+                    "underlying_symbol": "NIFTY",
+                    "expiry": "2026-12-01",
+                    "strike_price": stk,
+                    "instrument_type": ot,
+                    "lot_size": 65,
+                })
+
+        svc = OptionSnifferV2Service(db_path=self.db_path, contract_catalog_fn=lambda: cat)
+        try:
+            svc.start_parallel_collector(stream_manager=mgr, run_archive_warmup=False, spawn_worker=False)
+            ts_1015 = parse_ist_timestamp_ms("2026-11-20T10:15:30+05:30")
+            svc.on_live_feed_events([("INDEX", "NIFTY", {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": 25405.0, "availability_ts_ms": ts_1015})])
+            svc.process_queued_events(now_dt=datetime(2026, 11, 20, 10, 15, 30, tzinfo=IST_TZ))
+
+            wl_keys = set(svc.subscription_registry.snapshot_status()["v2_owned_only_keys"])
+            self.assertEqual(len(wl_keys), 6)
+            self.assertIn("NSE_FO|DEC01_25350_CE", wl_keys)
+            self.assertIn("NSE_FO|DEC01_25450_PE", wl_keys)
+            self.assertIn(("2026-12-01", 25400.0, "CE"), svc.unified_engine.opt_contracts)
+            self.assertIn("NSE_FO|V1_T1_CE", mgr._key_to_contract)
+
+            # Spot moves to 25455 -> drops 25350, retains 25400 & 25450, adds 25500
+            ts_1017 = parse_ist_timestamp_ms("2026-11-20T10:17:30+05:30")
+            svc.on_live_feed_events([("INDEX", "NIFTY", {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": 25455.0, "availability_ts_ms": ts_1017})])
+            svc.process_queued_events(now_dt=datetime(2026, 11, 20, 10, 17, 30, tzinfo=IST_TZ))
+            wl_keys_2 = set(svc.subscription_registry.snapshot_status()["v2_owned_only_keys"])
+            self.assertEqual(len(wl_keys_2), 6)
+            self.assertNotIn("NSE_FO|DEC01_25350_CE", wl_keys_2)
+            self.assertIn("NSE_FO|DEC01_25500_CE", wl_keys_2)
+
+            # After 13:05 window closes -> watchlist released automatically, V1 key untouched
+            svc.process_queued_events(now_dt=datetime(2026, 11, 20, 13, 10, 0, tzinfo=IST_TZ))
+            self.assertEqual(svc.subscription_registry.snapshot_status()["v2_owned_only_keys"], [])
+            self.assertIn("NSE_FO|V1_T1_CE", mgr._key_to_contract)
+
+            # Part B: When V1 ALREADY subscribes all 6 ATM+/-50 strikes -> 0 V2 pins added!
+            with mgr._lock:
+                for c in cat:
+                    if c["strike_price"] in (25400.0, 25450.0, 25500.0):
+                        mgr._key_to_contract[c["instrument_key"]] = {
+                            "instrument_key": c["instrument_key"],
+                            "trading_symbol": c["trading_symbol"],
+                            "underlying": "NIFTY",
+                            "expiry": "2026-12-01",
+                            "strike": c["strike_price"],
+                            "option_type": c["instrument_type"],
+                            "lot_size": 65,
+                        }
+                        mgr._v1_core_chain_keys.add(c["instrument_key"])
+            svc._last_dte2_pin_check_epoch = 0.0
+            ts_1020 = parse_ist_timestamp_ms("2026-11-20T10:20:30+05:30")
+            svc.on_live_feed_events([("INDEX", "NIFTY", {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": 25455.0, "availability_ts_ms": ts_1020})])
+            svc.process_queued_events(now_dt=datetime(2026, 11, 20, 10, 20, 30, tzinfo=IST_TZ))
+            self.assertEqual(svc.subscription_registry.snapshot_status()["v2_owned_only_keys"], [])
+        finally:
+            svc.stop_v2_only()
+            svc.store.close()
+
+    def test_17_cash_cap_18500_allows_4dte_entry_while_clamping_planned_stop_to_1800(self) -> None:
+        ts = parse_ist_timestamp_ms("2026-11-25T10:45:00+05:30")
+        assert ts is not None
+        exp = "2026-12-01"  # 4 trading DTE from 2026-11-25
+        spot_q = {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": 25360.0, "exchange_ltt_ms": ts, "local_receipt_ts_ms": ts, "source_ts_proven": True}
+        fut_q = {"instrument_key": "NSE_FO|58875", "underlying": "NIFTY", "trading_symbol": "NIFTY FUT 29 DEC 26", "expiry": "2026-12-29", "fut_ltp": 25545.0, "exchange_ltt_ms": ts, "local_receipt_ts_ms": ts, "source_ts_proven": True}
+        open_ref = {"ok": True, "fut_instrument_key": "NSE_FO|58875", "fut_expiry": "2026-12-29", "basis_pts": 180.0, "sample_count": 15}
+        ce_atm = _mk_contract("NSE_FO|CE25350", 25350.0, "CE", exp)
+        # Outlay = (271.0 + 0.05) * 65 = Rs 17,618.25 -> passes new Rs 18,500 CashCap!
+        q_atm = _mk_obs_quote("NSE_FO|CE25350", 269.0, 271.0, ts, strike=25350.0, ot="CE", expiry=exp)
+
+        sig = evaluate_book_b_entry_signal(
+            self.cfg, "2026-11-25", "2026-11-25 10:45:00", 1045, ts, 25360.0, 25340.0, 25350.0, 25300.0, 26.0, 0.36,
+            spot_q, fut_q, open_ref, [exp],
+            {(exp, 25350.0, "CE"): ce_atm},
+            {(exp, 25350.0, "CE"): q_atm},
+        )
+        self.assertTrue(sig["passed"])
+        self.assertFalse(sig["used_single_otm_fallback"])
+
+        op = self.sim.open_book_b_paid_long("sig_4dte", "V2_FROZEN_COMBINED", "2026-11-25", "2026-11-25 10:45:00", ts, ce_atm, q_atm, 25360.0, sig["basis_meta"])
+        self.assertTrue(op["ok"])
+        pkg = self.sim.open_packages[op["package_id"]]
+        self.assertGreater(pkg["reserved_capital_inr"], 17000.0)
+        self.assertLessEqual(pkg["reserved_capital_inr"], 18500.0)
+        self.assertLessEqual(pkg["planned_loss_inr"], 1800.0)
+        ll = pkg["legs_state"]["long_leg"]
+        self.assertLessEqual((ll["entry_price"] - pkg["legs_state"]["hard_stop"]) * ll["qty"], 1800.0)
+
+    def test_18_pre_0915_midnight_and_preopen_ticks_rejected_without_gap_or_db_pollution(self):
+        import os
+        import tempfile
+        from app.analytics.option_sniffer_v2.v2_config import (
+            load_v2_preregistration,
+            parse_ist_timestamp_ms,
+        )
+        from app.analytics.option_sniffer_v2.v2_ledger_db import V2LedgerStore
+        from app.analytics.option_sniffer_v2.v2_paper_simulator import V2PaperSimulator
+        from app.analytics.option_sniffer_v2.v2_unified_engine import (
+            V2UnifiedEventEngine,
+            compute_causal_bar_indicators,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg, cfg_hash = load_v2_preregistration()
+            store = V2LedgerStore(os.path.join(tmp_dir, "v2_pre0915.db"))
+            sim = V2PaperSimulator(cfg, cfg_hash, store, run_mode="FORWARD_PAPER")
+            eng = V2UnifiedEventEngine(
+                cfg,
+                cfg_hash,
+                store,
+                sim,
+                run_mode="FORWARD_PAPER",
+                persist_bars_and_checkpoints=True,
+            )
+
+            pre_ticks = [
+                ("INDEX", "NIFTY_SPOT", {"spot_ltp": 25349.65, "instrument_key": "NSE_INDEX|Nifty 50"}, "2026-11-25 00:01:26"),
+                ("INDEX", "NIFTY_SPOT", {"spot_ltp": 25360.0, "instrument_key": "NSE_INDEX|Nifty 50"}, "2026-11-25 09:07:30"),
+                ("INDEX", "INDIA_VIX", {"spot_ltp": 17.7, "instrument_key": "NSE_INDEX|India VIX"}, "2026-11-25 09:14:50"),
+                ("INDEX", "NIFTY_SPOT", {"spot_ltp": 25365.0, "instrument_key": "NSE_INDEX|Nifty 50"}, "2026-11-25 09:14:55"),
+            ]
+            for kind, key, payload, ts_str in pre_ticks:
+                ms = parse_ist_timestamp_ms(ts_str)
+                res = eng.ingest_event(kind, key, {**payload, "availability_ts_ms": ms}, availability_ts_ms=ms)
+                self.assertEqual(res.get("status"), "PRE_SESSION_IGNORED")
+
+            bf_pre = eng.backfill_missing_completed_bars(
+                "2026-11-25",
+                [("2026-11-25 09:14:00", 25350.0, 25360.0, 25340.0, 25355.0)],
+                now_ms=parse_ist_timestamp_ms("2026-11-25 09:14:55"),
+            )
+            self.assertEqual(bf_pre["inserted_count"], 0)
+            self.assertIsNone(eng.session_date)
+            self.assertIsNone(eng.building_bar)
+            self.assertIsNone(eng.latest_spot_q)
+            self.assertIsNone(eng.latest_vix_q)
+            self.assertEqual(len(eng.completed_bars), 0)
+            self.assertEqual(eng.sequence_gap_count, 0)
+            self.assertEqual(
+                store.load_completed_bars("FORWARD_PAPER", cfg_hash, session_date="2026-11-25"),
+                [],
+            )
+
+            # Regular market open at 09:15 followed by 09:16 cleanly finalizes 09:15 with zero gaps
+            t_915 = parse_ist_timestamp_ms("2026-11-25 09:15:05")
+            eng.ingest_event(
+                "INDEX",
+                "NIFTY_SPOT",
+                {"spot_ltp": 25370.0, "instrument_key": "NSE_INDEX|Nifty 50", "availability_ts_ms": t_915},
+                availability_ts_ms=t_915,
+            )
+            t_916 = parse_ist_timestamp_ms("2026-11-25 09:16:02")
+            eng.ingest_event(
+                "INDEX",
+                "NIFTY_SPOT",
+                {"spot_ltp": 25375.0, "instrument_key": "NSE_INDEX|Nifty 50", "availability_ts_ms": t_916},
+                availability_ts_ms=t_916,
+            )
+            self.assertEqual(eng.session_date, "2026-11-25")
+            self.assertTrue(eng.session_started_from_open)
+            self.assertEqual(eng.sequence_gap_count, 0)
+            self.assertEqual(len(eng.completed_bars), 1)
+            self.assertEqual(eng.completed_bars[0]["bar_open_ts"], "2026-11-25 09:15:00")
+            db_bars = store.load_completed_bars("FORWARD_PAPER", cfg_hash, session_date="2026-11-25")
+            self.assertEqual(len(db_bars), 1)
+            self.assertEqual(db_bars[0]["bar_open_ts"], "2026-11-25 09:15:00")
+
+            # Verify indicator filter ignores any hypothetical stray non-session bar
+            ind = compute_causal_bar_indicators(
+                [
+                    {"bar_open_ts": "2026-11-25 00:01:00", "spot_h": 25349.65, "spot_l": 25349.65, "spot_c": 25349.65},
+                    db_bars[0],
+                ]
+            )
+            self.assertEqual(ind["bars_count"], 1)
+
+            # Verify 15:30:05 closes 15:29 cleanly without opening a 15:30 building bar
+            store_eod = V2LedgerStore(os.path.join(tmp_dir, "v2_eod.db"))
+            sim_eod = V2PaperSimulator(cfg, cfg_hash, store_eod, run_mode="FORWARD_PAPER")
+            eng_eod = V2UnifiedEventEngine(
+                cfg,
+                cfg_hash,
+                store_eod,
+                sim_eod,
+                run_mode="FORWARD_PAPER",
+                persist_bars_and_checkpoints=True,
+            )
+            t_1529 = parse_ist_timestamp_ms("2026-11-25 15:29:05")
+            eng_eod.ingest_event(
+                "INDEX",
+                "NIFTY_SPOT",
+                {"spot_ltp": 25400.0, "instrument_key": "NSE_INDEX|Nifty 50", "availability_ts_ms": t_1529},
+                availability_ts_ms=t_1529,
+            )
+            t_1530 = parse_ist_timestamp_ms("2026-11-25 15:30:05")
+            res_eod = eng_eod.ingest_event(
+                "INDEX",
+                "NIFTY_SPOT",
+                {"spot_ltp": 25402.0, "instrument_key": "NSE_INDEX|Nifty 50", "availability_ts_ms": t_1530},
+                availability_ts_ms=t_1530,
+            )
+            self.assertEqual(res_eod.get("bar_open_ts"), "2026-11-25 15:29:00")
+            self.assertIsNone(eng_eod.building_bar)
+            self.assertEqual(len(eng_eod.completed_bars), 1)
+            self.assertEqual(eng_eod.completed_bars[0]["bar_open_ts"], "2026-11-25 15:29:00")
+            store.close()
+            store_eod.close()
 
 
 if __name__ == "__main__":

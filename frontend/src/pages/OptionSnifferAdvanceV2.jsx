@@ -113,7 +113,7 @@ export default function OptionSnifferAdvanceV2() {
             PAPER ONLY
           </span>
           <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
-            {ov?.engine_version || 'v2.1.0-causal'}
+            {ov?.engine_version || 'v2.2.0-causal'}
           </span>
         </div>
 

@@ -488,8 +488,8 @@ def run_event_stream_replay(
 
         return {
             "run_mode": run_mode,
-            "engine_version": cfg.get("engine_version", "2.1.0-causal"),
-            "data_version": cfg.get("schema_version", "2.1.0"),
+            "engine_version": cfg.get("engine_version", "2.2.0-causal"),
+            "data_version": cfg.get("schema_version", "2.2.0"),
             "stats": stats,
             "daily_records": daily_records,
             "closed_trades": closed_trades,
@@ -522,7 +522,8 @@ def run_v2_replay_and_attribution(
     separately without overwriting history or mutating thresholds.
     """
     dataset = _load_causal_archive_events(v1_ro_conn)
-    canonical_mode = str(cfg.get("replay_run_mode") or "REPLAY_V2_1_CAUSAL")
+    canonical_mode = str(cfg.get("replay_run_mode") or "REPLAY_V2_2_CAUSAL")
+    mode_tag = canonical_mode.replace("REPLAY_", "").replace("_CAUSAL", "") or "V2_2"
 
     v2_frozen_params = {
         "variant_code": "V2_FROZEN_COMBINED",
@@ -629,7 +630,7 @@ def run_v2_replay_and_attribution(
             cfg=cfg,
             cfg_hash=cfg_hash,
             store=store,
-            run_mode=f"ABLATION_V2_1_{spec['variant_code']}",
+            run_mode=f"ABLATION_{mode_tag}_{spec['variant_code']}",
             book_b_params=spec,
             prior_daily_nifty_by_date=dataset["prior_daily_nifty"],
             fsp_by_expiry=dataset["fsp_by_expiry"],
@@ -668,7 +669,7 @@ def run_v2_replay_and_attribution(
         cfg=cfg,
         cfg_hash=cfg_hash,
         store=store,
-        run_mode="STRESS_V2_1_2X_CHARGES",
+        run_mode=f"STRESS_{mode_tag}_2X_CHARGES",
         book_b_params=v2_frozen_params,
         cost_multiplier=2.0,
         prior_daily_nifty_by_date=dataset["prior_daily_nifty"],
@@ -680,7 +681,7 @@ def run_v2_replay_and_attribution(
         cfg=cfg,
         cfg_hash=cfg_hash,
         store=store,
-        run_mode="STRESS_V2_1_2X_SLIPPAGE",
+        run_mode=f"STRESS_{mode_tag}_2X_SLIPPAGE",
         book_b_params=v2_frozen_params,
         extra_adverse_slippage_ticks=1,
         prior_daily_nifty_by_date=dataset["prior_daily_nifty"],
@@ -692,7 +693,7 @@ def run_v2_replay_and_attribution(
         cfg=cfg,
         cfg_hash=cfg_hash,
         store=store,
-        run_mode="STRESS_V2_1_BOOK_A_STRICT",
+        run_mode=f"STRESS_{mode_tag}_BOOK_A_STRICT",
         book_b_params=v2_frozen_params,
         enable_book_a_opt_in=True,
         prior_daily_nifty_by_date=dataset["prior_daily_nifty"],
@@ -790,7 +791,7 @@ def run_v2_replay_and_attribution(
     superseded = load_superseded_v2_0_evidence()
 
     return {
-        "engine_version": cfg.get("engine_version", "2.1.0-causal"),
+        "engine_version": cfg.get("engine_version", "2.2.0-causal"),
         "replay_run_mode": canonical_mode,
         "causal_verification_outcome": {
             "verified_futures_basis_trades": len(canonical["closed_trades"]),

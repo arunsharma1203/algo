@@ -284,20 +284,21 @@ export function getV2FixtureBundle(fixtureMode) {
     service_name: 'V2 Option Sniffer',
     package: 'option_sniffer_v2',
     protocol_id: 'OPTION_SNIFFER_V2_ISOLATED_PAPER_V1',
-    engine_version: '2.1.0-causal',
-    replay_run_mode: 'REPLAY_V2_1_CAUSAL',
+    engine_version: '2.2.0-causal',
+    replay_run_mode: 'REPLAY_V2_2_CAUSAL',
     config_hash: '0f972ca95e7ccdc3f11dfe4f7d84834063c1b9f5d4aa569759055fda844d7f9d',
     simulation_mode: true,
     live_capable_by_config: false,
     execution_adapter: 'LOCAL_PAPER_SIMULATOR_ONLY',
     result_boundary_notice:
-      'DEVELOPMENT TEST FIXTURE: FORWARD_PAPER and REPLAY_V2_1_CAUSAL strictly separated; V1 counterfactuals excluded.',
+      'DEVELOPMENT TEST FIXTURE: FORWARD_PAPER and REPLAY_V2_2_CAUSAL strictly separated; V1 counterfactuals excluded.',
     collection_status: collectionStatus,
     active_alerts: activeAlerts,
     book_status_rows: [
       {
         book_id: 'V2_BOOK_A_PROPOSED_O3',
         book_label: 'Book A (Phase-4 O3 T-1->T0 Credit Spread)',
+        config_summary: 'Disabled (T-1 Mondays only • Unverified 15m vs L5 O3 spec)',
         enabled: false,
         eligibility: 'DISABLED_UNVERIFIED',
         current_position: isUnresolved ? 'PUT_CREDIT_SPREAD_100W' : 'NONE',
@@ -308,7 +309,8 @@ export function getV2FixtureBundle(fixtureMode) {
       },
       {
         book_id: 'V2_BOOK_B_PAID_FLOW',
-        book_label: 'Book B (Paid Convexity Flow: dBasis + 10:15-13:00)',
+        book_label: 'Book B (Paid Convexity Flow: Median Open-Basis + 10:15-13:00)',
+        config_summary: 'CashCap Rs18,500 (+1-OTM) • Max Planned SL Rs1,800 • 1015-1300 IST',
         enabled: true,
         eligibility: isUnresolved ? 'BLOCKED_UNPRICED' : isHealthy ? 'ELIGIBLE' : 'NO_SIGNAL_TODAY',
         current_position: 'NONE',
@@ -336,7 +338,7 @@ export function getV2FixtureBundle(fixtureMode) {
       intraday_mtm_dd_pct_peak: 0.0,
       peak_capital_used_inr: 0.0,
       persisted_sessions: 6,
-      replay_run_mode: 'REPLAY_V2_1_CAUSAL',
+      replay_run_mode: 'REPLAY_V2_2_CAUSAL',
       canonical_ledger_sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
     },
     superseded_v2_0_replay: {
@@ -380,6 +382,10 @@ export function getV2FixtureBundle(fixtureMode) {
       spot_age_ms: isNoTrades ? null : isUnresolved ? 49500 : 180,
       futures_age_ms: isNoTrades ? null : isUnresolved ? 49800 : 210,
       spot_fut_sync: { ok: isHealthy, skew_ms: isHealthy ? 30 : null, reason: isHealthy ? 'SYNCED' : 'UNAVAILABLE_OR_STALE' },
+      open_basis_reference: isHealthy ? { ok: true, basis_pts: 24.5, sample_count: 15, aggregation: 'MEDIAN_0915_0929' } : null,
+      open_basis_samples_count: isHealthy ? 15 : 0,
+      completed_bars_today: isHealthy ? 140 : 0,
+      orb30_ready: isHealthy,
     },
     optional_collateral_reporting: {
       forward_paper: {
@@ -399,8 +405,8 @@ export function getV2FixtureBundle(fixtureMode) {
 
   const positionsData = {
     simulation_mode: true,
-    engine_version: '2.1.0-causal',
-    replay_run_mode: 'REPLAY_V2_1_CAUSAL',
+    engine_version: '2.2.0-causal',
+    replay_run_mode: 'REPLAY_V2_2_CAUSAL',
     forward_open_positions: openPositions,
     forward_closed_trades: fwdTrade,
     forward_fills: fwdTrade[0]?.fills || [],
@@ -409,8 +415,8 @@ export function getV2FixtureBundle(fixtureMode) {
   };
 
   const dailyComparisonData = {
-    engine_version: '2.1.0-causal',
-    replay_run_mode: 'REPLAY_V2_1_CAUSAL',
+    engine_version: '2.2.0-causal',
+    replay_run_mode: 'REPLAY_V2_2_CAUSAL',
     v1_reported_summary: { trade_count: 8, net_pnl_inr: 16281.11, profit_factor: 11.714, peak_capital_used_inr: 51196.75, closed_dd_inr: 806.84 },
     v2_replay_summary: overviewData.archive_replay_summary,
     v2_forward_paper_summary: fwdStats,
@@ -450,8 +456,8 @@ export function getV2FixtureBundle(fixtureMode) {
   };
 
   const replayAuditData = {
-    engine_version: '2.1.0-causal',
-    replay_run_mode: 'REPLAY_V2_1_CAUSAL',
+    engine_version: '2.2.0-causal',
+    replay_run_mode: 'REPLAY_V2_2_CAUSAL',
     causal_verification_outcome: {
       verified_futures_basis_trades: 0,
       unverifiable_basis_events: 2250,

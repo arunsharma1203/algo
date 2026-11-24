@@ -1,9 +1,10 @@
 {
   "protocol_id": "OPTION_SNIFFER_V2_ISOLATED_PAPER_V1",
-  "schema_version": "2.1.0",
-  "engine_version": "2.1.0-causal",
-  "replay_run_mode": "REPLAY_V2_1_CAUSAL",
-  "supersedes_protocol_sha256": "0f972ca95e7ccdc3f11dfe4f7d84834063c1b9f5d4aa569759055fda844d7f9d",
+  "schema_version": "2.2.0",
+  "engine_version": "2.2.0-causal",
+  "replay_run_mode": "REPLAY_V2_2_CAUSAL",
+  "supersedes_protocol_sha256": "bc3bf817be22fa6d6edcd593a0b4bd2c768fce99e73a58a3410f3c1099dd8c8e",
+  "prior_superseded_protocol_sha256": "0f972ca95e7ccdc3f11dfe4f7d84834063c1b9f5d4aa569759055fda844d7f9d",
   "created_date": "2026-11-24",
   "simulation_mode": true,
   "live_capable_by_config": false,
@@ -34,7 +35,7 @@
     "bounded_ingress_queue_max": 4096,
     "ws_total_soft_cap": 1400,
     "v1_reserved_ws_headroom": 100,
-    "max_v2_additive_pins": 8
+    "max_v2_additive_pins": 12
   },
   "books": {
     "V2_BOOK_A_PROPOSED_O3": {
@@ -67,7 +68,7 @@
     "V2_BOOK_B_PAID_FLOW": {
       "book_id": "V2_BOOK_B_PAID_FLOW",
       "ui_book_type": "LONG_BOOK_BUY",
-      "label": "V2 Book B: Paid Convexity Flow (Delta-Basis, 10:15-13:00, min(20%, Rs1800))",
+      "label": "V2 Book B: Paid Convexity Flow (Median Open-Basis, 10:15-13:00, CashCap Rs18.5k, min(20%, Rs1800))",
       "verification_status": "FROZEN_PAPER_HYPOTHESIS",
       "autonomous_entries_enabled": true,
       "lot_count": 1,
@@ -77,11 +78,12 @@
       "entry_window_end_hhmm": 1300,
       "open_basis_ref_window_start_hhmm": 915,
       "open_basis_ref_window_end_hhmm": 930,
+      "open_basis_ref_aggregation": "MEDIAN_0915_0929",
       "min_intraday_basis_change_abs_pts": 3.0,
       "min_adx14": 22.0,
       "min_er20": 0.32,
       "min_l5_obi": 0.05,
-      "max_entry_outlay_inr": 11500.0,
+      "max_entry_outlay_inr": 18500.0,
       "allow_single_otm_step_on_cash_cap_only": true,
       "otm_step_pts": 50.0,
       "planned_loss_max_pct_of_outlay": 20.0,

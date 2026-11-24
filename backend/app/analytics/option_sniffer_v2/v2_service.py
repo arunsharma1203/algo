@@ -20,16 +20,22 @@ import logging
 import os
 import threading
 import time
+import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from app.analytics.option_sniffer_v2.v2_book_b_engine import reconcile_v1_book_b_stop_and_overshoot
 from app.analytics.option_sniffer_v2.v2_collateral_report import compute_optional_collateral_report
 from app.analytics.option_sniffer_v2.v2_config import (
     EXISTING_V2_SYSTEMS_INVENTORY,
+    bar_open_label_from_ms,
     format_ist_iso,
+    is_nse_trading_session,
     load_v2_preregistration,
+    parse_ist_timestamp_ms,
     to_ist_aware,
+    trading_sessions_between,
 )
+from app.data.database import is_testing_environment
 from app.analytics.option_sniffer_v2.v2_counterfactual_v1 import (
     run_v1_counterfactual_audit,
     summarize_counterfactual_rows,
@@ -98,11 +104,22 @@ class OptionSnifferV2Service:
     Never interferes with V1/V6B execution, rate limiters, WebSocket sockets, or `market_data.db`.
     """
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        intraday_candle_fetcher_fn: Optional[Callable[[str], List[Any]]] = None,
+        contract_catalog_fn: Optional[Callable[[], List[Dict[str, Any]]]] = None,
+    ) -> None:
         self._op_lock = threading.RLock()
         self.config, self.config_hash = load_v2_preregistration()
-        self.replay_run_mode: str = str(self.config.get("replay_run_mode") or "REPLAY_V2_1_CAUSAL")
-        self.engine_version: str = str(self.config.get("engine_version") or "2.1.0-causal")
+        self.replay_run_mode: str = str(self.config.get("replay_run_mode") or "REPLAY_V2_2_CAUSAL")
+        self.engine_version: str = str(self.config.get("engine_version") or "2.2.0-causal")
+        self.intraday_candle_fetcher_fn = intraday_candle_fetcher_fn
+        self.contract_catalog_fn = contract_catalog_fn
+        self._last_intraday_backfill_epoch: float = 0.0
+        self._last_dte2_pin_check_epoch: float = 0.0
+        self._last_dte2_pin_atm: float = 0.0
+        self._dte2_watchlist_pkg_id: str = "__V2_BOOK_B_DTE2_WATCHLIST__"
 
         # Never auto-create DB file during cold init / GET!
         self.store = V2LedgerStore(db_path=db_path, auto_create=False)
@@ -392,6 +409,269 @@ class OptionSnifferV2Service:
             except Exception as exc:
                 logger.warning(f"[V2] Worker batch error: {exc}")
 
+    def _default_fetch_intraday_1m_candles(self, instrument_key: str) -> List[Any]:
+        """Fetches intraday 1m index candles through the shared Upstox rate limiter."""
+        try:
+            from app.data.upstox_provider import UPSTOX_BASE_URL, get_upstox_token, upstox_request
+
+            token = get_upstox_token()
+            if not token:
+                return []
+            enc = urllib.parse.quote(str(instrument_key), safe="")
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+            url = f"{UPSTOX_BASE_URL}/historical-candle/intraday/{enc}/1minute"
+            res = upstox_request("GET", url, headers=headers, timeout=6.0)
+            if res.status_code == 200:
+                return list((res.json().get("data") or {}).get("candles") or [])
+        except Exception as exc:
+            logger.debug(f"[V2] Intraday 1m candle backfill skipped ({instrument_key}): {exc}")
+        return []
+
+    def _default_fetch_nifty_option_catalog(self) -> List[Dict[str, Any]]:
+        """Reads cached NIFTY option contract master via shared OptionContractDiscovery."""
+        try:
+            from app.analytics.option_sniffer.option_contract_discovery import OptionContractDiscovery
+
+            return list(OptionContractDiscovery.fetch_raw_contracts("NIFTY", force_refresh=False) or [])
+        except Exception as exc:
+            logger.debug(f"[V2] NIFTY option catalog read skipped: {exc}")
+            return []
+
+    def _maybe_backfill_intraday_spot_bars_locked(
+        self,
+        now_ms: int,
+        inside_writer_session: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Causal 1m Spot & VIX backfill for late logins or morning restarts so ORB30/ADX/ER
+        recover cleanly without lookahead (`bar_close_ms <= now_ms` strictly enforced).
+        """
+        fetcher = self.intraday_candle_fetcher_fn
+        enabled = (fetcher is not None) or (
+            self._listener_attached
+            and self._is_stream_mgr_active(self._stream_mgr_ref)
+            and not is_testing_environment()
+        )
+        if not enabled or now_ms <= 0:
+            return None
+
+        session_d, _, _, _, now_hhmm = bar_open_label_from_ms(now_ms)
+        if not is_nse_trading_session(session_d) or not (916 <= now_hhmm <= 1530):
+            return None
+        if self.unified_engine.session_date not in (None, session_d):
+            return None
+
+        open_915_ms = parse_ist_timestamp_ms(f"{session_d}T09:15:00+05:30")
+        expected_completed = max(0, (int(now_ms) - open_915_ms) // 60_000)
+        if expected_completed < 1:
+            return None
+
+        bars = self.unified_engine.completed_bars if self.unified_engine.session_date == session_d else []
+        has_0915 = any(b["bar_open_ts"][11:16] == "09:15" for b in bars)
+        needs_bf = (not has_0915) or (len(bars) < expected_completed) or (self.unified_engine.sequence_gap_count > 0)
+        if not needs_bf:
+            return None
+
+        now_epoch = time.time()
+        if fetcher is None and self._last_intraday_backfill_epoch > 0.0 and (now_epoch - self._last_intraday_backfill_epoch) < 60.0:
+            return None
+        self._last_intraday_backfill_epoch = now_epoch
+
+        fn = fetcher or self._default_fetch_intraday_1m_candles
+        spot_raw = fn("NSE_INDEX|Nifty 50") or []
+        vix_raw = fn("NSE_INDEX|India VIX") or []
+
+        def _parse_rows(rows: List[Any]) -> List[Tuple[Any, float, float, float, float]]:
+            out: List[Tuple[Any, float, float, float, float]] = []
+            for r in rows:
+                try:
+                    if isinstance(r, (list, tuple)) and len(r) >= 5:
+                        out.append((r[0], float(r[1]), float(r[2]), float(r[3]), float(r[4])))
+                except Exception:
+                    continue
+            return out
+
+        spot_tuples = _parse_rows(spot_raw)
+        vix_tuples = _parse_rows(vix_raw)
+        if not spot_tuples:
+            return None
+
+        if inside_writer_session:
+            res_bf = self.unified_engine.backfill_missing_completed_bars(
+                session_d, spot_tuples, vix_tuples, now_ms=now_ms
+            )
+        else:
+            self.store.ensure_initialized()
+            with self.store.writer_session():
+                res_bf = self.unified_engine.backfill_missing_completed_bars(
+                    session_d, spot_tuples, vix_tuples, now_ms=now_ms
+                )
+
+        if int(res_bf.get("sequence_gap_count", 1) or 0) == 0 and int(res_bf.get("inserted_count") or 0) > 0:
+            self.feed_consumer.clear_uncertainty("MINUTE_BAR_GAP_")
+        return res_bf
+
+    def _maybe_ensure_book_b_dte2_watchlist_pins_locked(self, now_ms: int) -> None:
+        """
+        Ensures Book B's earliest `DTE >= 2` ATM +/- 50 strikes are passively streamed when
+        V1's universe only tracks a `T-1`/`T-0` expiry (e.g., Friday before Monday expiry).
+        """
+        cat_fn = self.contract_catalog_fn
+        enabled = (cat_fn is not None) or (
+            self._listener_attached
+            and self._is_stream_mgr_active(self._stream_mgr_ref)
+            and not is_testing_environment()
+        )
+        if not enabled or now_ms <= 0:
+            return
+
+        mgr = self._stream_mgr_ref
+        session_d, _, _, _, now_hhmm = bar_open_label_from_ms(now_ms)
+        if not is_nse_trading_session(session_d) or now_hhmm > 1305:
+            # Release Book B watchlist pins after 13:05 entry window closes
+            self.subscription_registry.sync_for_package(
+                package_id=self._dte2_watchlist_pkg_id,
+                contracts=[],
+                stream_manager=mgr,
+                existing_stream_keys_fn=self._existing_v1_stream_keys,
+                subscribe_additive_fn=self._subscribe_v2_only_additive,
+                unpin_v2_only_fn=self._unpin_v2_only_keys,
+            )
+            return
+        if now_hhmm < 915:
+            return
+
+        spot_px = float(
+            (self.unified_engine.latest_spot_q or {}).get("spot_ltp")
+            or self.unified_engine.last_indicators.get("spot_close")
+            or 0.0
+        )
+        if spot_px <= 0.0:
+            return
+        atm = round(spot_px / 50.0) * 50.0
+
+        now_epoch = time.time()
+        if (
+            self._last_dte2_pin_check_epoch > 0.0
+            and abs(atm - self._last_dte2_pin_atm) < 50.0
+            and (now_epoch - self._last_dte2_pin_check_epoch) < 60.0
+        ):
+            return
+        self._last_dte2_pin_check_epoch = now_epoch
+        self._last_dte2_pin_atm = atm
+
+        min_dte = int(self.config["books"]["V2_BOOK_B_PAID_FLOW"]["min_trading_dte"])
+        max_dte = int(self.config["books"]["V2_BOOK_B_PAID_FLOW"].get("max_trading_dte", 12))
+        target_strikes = (atm - 50.0, atm, atm + 50.0)
+
+        v1_covered_by_tuple: Dict[Tuple[str, float, str], Dict[str, Any]] = {}
+        if mgr is not None and hasattr(mgr, "_lock") and hasattr(mgr, "_key_to_contract"):
+            with mgr._lock:
+                for _, meta in (mgr._key_to_contract or {}).items():
+                    if not isinstance(meta, dict):
+                        continue
+                    if meta.get("v2_owned_only") or meta.get("is_futures") or meta.get("is_underlying"):
+                        continue
+                    if str(meta.get("underlying") or "").upper() != "NIFTY":
+                        continue
+                    exp_s = str(meta.get("expiry") or "").strip()[:10]
+                    ot_s = str(meta.get("option_type") or "").upper().strip()
+                    try:
+                        stk_f = float(meta.get("strike") or 0.0)
+                    except (TypeError, ValueError):
+                        stk_f = 0.0
+                    if exp_s and ot_s in ("CE", "PE") and stk_f > 0.0:
+                        v1_covered_by_tuple[(exp_s, stk_f, ot_s)] = dict(meta)
+
+        v1_dte2_expiries = sorted(
+            {
+                exp
+                for (exp, _, _) in v1_covered_by_tuple.keys()
+                if exp >= session_d and min_dte <= trading_sessions_between(session_d, exp) <= max_dte
+            }
+        )
+        if v1_dte2_expiries:
+            v1_exp = v1_dte2_expiries[0]
+            if all((v1_exp, k, ot) in v1_covered_by_tuple for k in target_strikes for ot in ("CE", "PE")):
+                # V1 already covers all 6 strikes of earliest DTE >= 2 expiry -> 0 V2 pins needed!
+                self.subscription_registry.sync_for_package(
+                    package_id=self._dte2_watchlist_pkg_id,
+                    contracts=[],
+                    stream_manager=mgr,
+                    existing_stream_keys_fn=self._existing_v1_stream_keys,
+                    subscribe_additive_fn=self._subscribe_v2_only_additive,
+                    unpin_v2_only_fn=self._unpin_v2_only_keys,
+                )
+                return
+
+        raw_catalog = cat_fn() if cat_fn is not None else self._default_fetch_nifty_option_catalog()
+        if not raw_catalog:
+            return
+
+        catalog_by_tuple: Dict[Tuple[str, float, str], Dict[str, Any]] = {}
+        default_lot = int(self.config["account_envelope"]["lot_size_default_nifty"])
+        for item in raw_catalog:
+            if not isinstance(item, dict):
+                continue
+            exp_s = str(item.get("expiry") or "").strip()[:10]
+            ot_s = str(item.get("instrument_type") or item.get("option_type") or "").upper().strip()
+            ik = str(item.get("instrument_key") or "").strip()
+            if not ik or not exp_s or exp_s < session_d or ot_s not in ("CE", "PE"):
+                continue
+            try:
+                stk_f = float(
+                    item.get("strike_price") if item.get("strike_price") is not None else (item.get("strike") or 0.0)
+                )
+            except (TypeError, ValueError):
+                continue
+            if stk_f <= 0.0:
+                continue
+            u_val = str(item.get("underlying_symbol") or item.get("underlying") or "NIFTY").upper().strip()
+            if u_val != "NIFTY":
+                continue
+            catalog_by_tuple[(exp_s, stk_f, ot_s)] = {
+                "instrument_key": ik,
+                "trading_symbol": str(item.get("trading_symbol") or f"NIFTY {int(stk_f)} {ot_s} {exp_s}"),
+                "underlying": "NIFTY",
+                "expiry": exp_s,
+                "strike": stk_f,
+                "option_type": ot_s,
+                "lot_size": int(item.get("lot_size") or default_lot),
+            }
+
+        cand_expiries = sorted(
+            {
+                exp
+                for (exp, _, _) in catalog_by_tuple.keys()
+                if exp >= session_d and min_dte <= trading_sessions_between(session_d, exp) <= max_dte
+            }
+        )
+        if not cand_expiries:
+            return
+        target_exp = cand_expiries[0]
+
+        missing_contracts: List[Dict[str, Any]] = []
+        for k in target_strikes:
+            for ot in ("CE", "PE"):
+                tup = (target_exp, k, ot)
+                if tup in v1_covered_by_tuple:
+                    continue
+                if tup in catalog_by_tuple:
+                    missing_contracts.append(catalog_by_tuple[tup])
+
+        res_sync = self.subscription_registry.sync_for_package(
+            package_id=self._dte2_watchlist_pkg_id,
+            contracts=missing_contracts,
+            stream_manager=mgr,
+            existing_stream_keys_fn=self._existing_v1_stream_keys,
+            subscribe_additive_fn=self._subscribe_v2_only_additive,
+            unpin_v2_only_fn=self._unpin_v2_only_keys,
+        )
+        skipped = set(res_sync.get("skipped_due_to_v1_headroom", []))
+        for c in missing_contracts:
+            if c["instrument_key"] not in skipped:
+                self.unified_engine.opt_contracts[(c["expiry"], float(c["strike"]), c["option_type"])] = dict(c)
+
     def process_queued_events(
         self,
         now_dt: Optional[datetime] = None,
@@ -408,6 +688,7 @@ class OptionSnifferV2Service:
 
         if not batch:
             with self._op_lock:
+                res_bar = None
                 bb = self.unified_engine.building_bar
                 if bb is not None and now_ms >= int(bb["bar_close_ms"]):
                     with self.store.writer_session():
@@ -418,8 +699,9 @@ class OptionSnifferV2Service:
                             availability_ts_ms=now_ms,
                             uncertainty_blocks=self.feed_consumer.get_health_metrics()["uncertainty_blocks"],
                         )
-                    return {"processed": 0, "bar_evaluated": bool(res_bar), "result": res_bar}
-            return {"processed": 0, "bar_evaluated": False}
+                self._maybe_backfill_intraday_spot_bars_locked(now_ms, inside_writer_session=False)
+                self._maybe_ensure_book_b_dte2_watchlist_pins_locked(now_ms)
+                return {"processed": 0, "bar_evaluated": bool(res_bar), "result": res_bar}
 
         with self._op_lock:
             self.store.ensure_initialized()
@@ -463,8 +745,12 @@ class OptionSnifferV2Service:
                         last_bar_res = res_ev
 
                 if (
-                    now_dt is not None
-                    and self.unified_engine.building_bar is not None
+                    self.unified_engine.building_bar is not None
+                    and (
+                        now_dt is not None
+                        or self.unified_engine.building_bar["session_date"]
+                        == bar_open_label_from_ms(now_ms)[0]
+                    )
                     and now_ms >= int(self.unified_engine.building_bar["bar_close_ms"])
                 ):
                     close_res = self.unified_engine.ingest_event(
@@ -476,6 +762,18 @@ class OptionSnifferV2Service:
                     )
                     if close_res is not None:
                         last_bar_res = close_res
+
+                ref_now_ms = (
+                    now_ms
+                    if now_dt is not None
+                    else (
+                        prepared[-1][0]
+                        if (self.intraday_candle_fetcher_fn is not None or self.contract_catalog_fn is not None)
+                        else now_ms
+                    )
+                )
+                self._maybe_backfill_intraday_spot_bars_locked(ref_now_ms, inside_writer_session=True)
+                self._maybe_ensure_book_b_dte2_watchlist_pins_locked(ref_now_ms)
 
             if self.simulator.is_booking_halted():
                 self.collector_state = "DEGRADED_BOOKING_FAULT"
@@ -513,7 +811,7 @@ class OptionSnifferV2Service:
     def run_and_persist_archive_audit(self, v1_db_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Explicit command / control action to run read-only causal archive replay & V1 counterfactuals
-        and persist into V2's isolated SQLite DB (`run_mode='REPLAY_V2_1_CAUSAL'`).
+        and persist into V2's isolated SQLite DB (under `self.replay_run_mode`).
         """
         self.store.ensure_initialized()
         v1_conn = open_v1_readonly_db(v1_db_path)
@@ -702,6 +1000,12 @@ class OptionSnifferV2Service:
             "futures_age_ms": fut_age,
             "spot_fut_sync": sync_res,
             "open_basis_reference": self.unified_engine.open_basis_ref,
+            "open_basis_samples_count": int(
+                (self.unified_engine.open_basis_ref or {}).get("sample_count")
+                or (1 if (self.unified_engine.open_basis_ref or {}).get("ok") else 0)
+            ),
+            "completed_bars_today": len(self.unified_engine.completed_bars),
+            "orb30_ready": bool(self.unified_engine.last_indicators.get("orb30_ready")),
             "foreign_instrument_rejected_count": self.unified_engine.foreign_instrument_rejected_count,
             "unverifiable_basis_events": self.unified_engine.unverifiable_basis_events,
             "late_event_count": self.unified_engine.late_event_count,
@@ -845,6 +1149,7 @@ class OptionSnifferV2Service:
             {
                 "book_id": cfg_a["book_id"],
                 "book_label": "Book A (Phase-4 O3 T-1->T0 Credit Spread)",
+                "config_summary": "Disabled (T-1 Mondays only • Unverified 15m vs L5 O3 spec)",
                 "enabled": False,
                 "eligibility": "DISABLED_UNVERIFIED",
                 "eligibility_reason": "BLOCKED_UNVERIFIED_O3_SPEC_CONFLICT (Phase-4 O3 uses 15m Open[t+1], 70% decay, 100pt grid vs V2 50% / 50pt draft).",
@@ -855,7 +1160,12 @@ class OptionSnifferV2Service:
             },
             {
                 "book_id": cfg_b["book_id"],
-                "book_label": "Book B (Paid Convexity Flow: dBasis + 10:15-13:00)",
+                "book_label": "Book B (Paid Convexity Flow: Median Open-Basis + 10:15-13:00)",
+                "config_summary": (
+                    f"CashCap Rs{int(float(cfg_b['max_entry_outlay_inr'])):,} (+1-OTM) • "
+                    f"Max Planned SL Rs{int(float(cfg_b['planned_loss_max_inr'])):,} • "
+                    f"{int(cfg_b['entry_window_start_hhmm']):04d}-{int(cfg_b['entry_window_end_hhmm']):04d} IST"
+                ),
                 "enabled": True,
                 "eligibility": (
                     "HALTED_BOOKING_FAULT"
@@ -934,7 +1244,7 @@ class OptionSnifferV2Service:
             "live_capable_by_config": False,
             "execution_adapter": self.config["execution_adapter"],
             "result_boundary_notice": (
-                "FORWARD_PAPER and REPLAY_V2_1_CAUSAL metrics are strictly separated. "
+                f"FORWARD_PAPER and {self.replay_run_mode} metrics are strictly separated. "
                 "V1 counterfactuals and superseded v2.0.0 runs are excluded from all V2 totals."
             ),
             "collection_status": col_status,
@@ -947,7 +1257,7 @@ class OptionSnifferV2Service:
                 },
                 "V2_BOOK_B_PAID_FLOW": {
                     **self.config["books"]["V2_BOOK_B_PAID_FLOW"],
-                    "status_banner": "ACTIVE PAPER HYPOTHESIS (dBasis + 10:15-13:00 + 20%/Rs1800 + 1-OTM)",
+                    "status_banner": "ACTIVE PAPER HYPOTHESIS (Median Open-Basis + 10:15-13:00 + CashCap Rs18.5k + 20%/Rs1800 + 1-OTM)",
                 },
             },
             "forward_paper_summary": {
@@ -1072,6 +1382,16 @@ class OptionSnifferV2Service:
             for dt in all_dates:
                 vr = v1_by_dt.get(dt, {})
                 rr = rep_by_dt.get(dt, {})
+                rep_trades = rr.get("closed_trades")
+                v_outcome = (
+                    "REPLAY_NOT_YET_RUN"
+                    if not rr
+                    else (
+                        "INSUFFICIENT_SOURCE_TS_OR_CONTRACT_EVIDENCE"
+                        if int(rep_trades or 0) == 0
+                        else "VERIFIED"
+                    )
+                )
                 daily_comp.append(
                     {
                         "session_date": dt,
@@ -1085,12 +1405,18 @@ class OptionSnifferV2Service:
                         "v2_replay_intraday_min_eq_inr": rr.get("intraday_min_mtm_equity_inr"),
                         "v2_session_state": rr.get("session_state"),
                         "result_origin": self.replay_run_mode if rr else "REPLAY_NOT_YET_RUN",
+                        "verification_outcome": v_outcome,
                     }
                 )
 
         return {
             "engine_version": self.engine_version,
             "replay_run_mode": self.replay_run_mode,
+            "archive_limitation_note": (
+                "Historical V1 archive snapshots (2026-11-16..2026-11-23) lack separate Spot/Futures "
+                "source timestamps and Futures contract metadata, so strict causal archive replay records "
+                "0 verified basis trades; live streaming populates those fields continuously."
+            ),
             "v1_reported_summary": v1["summary"],
             "v2_replay_summary": _compute_series_stats(
                 [p for p in rep_pkgs if p["state"] not in OPEN_EXPOSURE_STATES],

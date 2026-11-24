@@ -256,8 +256,8 @@ def run_reproducible_audit(
 
         return {
             "protocol_id": cfg["protocol_id"],
-            "engine_version": cfg.get("engine_version", "2.1.0-causal"),
-            "replay_run_mode": cfg.get("replay_run_mode", "REPLAY_V2_1_CAUSAL"),
+            "engine_version": cfg.get("engine_version", "2.2.0-causal"),
+            "replay_run_mode": cfg.get("replay_run_mode", "REPLAY_V2_2_CAUSAL"),
             "config_hash": cfg_hash,
             "v1_db_readonly_untouched": v1_sha_before == v1_sha_after,
             "v1_db_sha256": v1_sha_after,

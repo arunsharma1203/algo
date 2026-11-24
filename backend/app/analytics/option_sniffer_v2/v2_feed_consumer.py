@@ -176,6 +176,58 @@ class V2SubscriptionRegistry:
             unpin_v2_only_fn(released)
         return released
 
+    def sync_for_package(
+        self,
+        package_id: str,
+        contracts: List[Dict[str, Any]],
+        stream_manager: Any = None,
+        existing_stream_keys_fn: Optional[Callable[[], Set[str]]] = None,
+        subscribe_additive_fn: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        unpin_v2_only_fn: Optional[Callable[[List[str]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Differentially syncs refs & exclusive pins for `package_id` without dropping overlapping keys."""
+        desired_keys = {
+            str(c.get("instrument_key") or "").strip()
+            for c in contracts
+            if isinstance(c, dict) and str(c.get("instrument_key") or "").strip()
+        }
+        to_release_candidates: List[str] = []
+        released_local: List[str] = []
+        with self._lock:
+            stale_empty: List[str] = []
+            for ik, pkgs in self._v2_refs.items():
+                if package_id in pkgs and ik not in desired_keys:
+                    pkgs.discard(package_id)
+                    if not pkgs:
+                        stale_empty.append(ik)
+            for ik in stale_empty:
+                self._v2_refs.pop(ik, None)
+                to_release_candidates.append(ik)
+                if ik in self._v2_owned_only_keys:
+                    self._v2_owned_only_keys.discard(ik)
+                    released_local.append(ik)
+
+        released_from_stream: List[str] = []
+        if stream_manager is not None and hasattr(stream_manager, "release_owned_pins") and to_release_candidates:
+            res_rel = stream_manager.release_owned_pins("V2", to_release_candidates)
+            released_from_stream = list(res_rel.get("released_from_stream", []))
+        elif released_local and unpin_v2_only_fn is not None:
+            unpin_v2_only_fn(released_local)
+            released_from_stream = released_local
+
+        acq = (
+            self.acquire_for_package(
+                package_id=package_id,
+                contracts=contracts,
+                stream_manager=stream_manager,
+                existing_stream_keys_fn=existing_stream_keys_fn,
+                subscribe_additive_fn=subscribe_additive_fn,
+            )
+            if contracts
+            else {"pinned_v2_only": [], "reused_v1_keys": [], "skipped_due_to_v1_headroom": []}
+        )
+        return {**acq, "released_v2_only": released_from_stream}
+
     def yield_under_pressure(
         self,
         stream_manager: Any = None,
@@ -287,6 +339,7 @@ class V2BoundedFeedConsumer:
                     payload.get("exchange_ltt_ms")
                     or payload.get("l1_book_timestamp_ms")
                     or payload.get("timestamp_ms")
+                    or payload.get("availability_ts_ms")
                     or now_ms
                 )
                 dedup_k = build_event_dedup_key(str(kind), ikey, ex_ts, payload)
