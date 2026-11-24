@@ -444,6 +444,30 @@ class TestV2OptionSnifferIsolationAndParity(unittest.TestCase):
         mgr.release_owned_pins("V2", ["NSE_FO|SHARED_25800CE"])
         self.assertNotIn("NSE_FO|SHARED_25800CE", mgr._pin_owners_by_key)
 
+        # Verify _get_stream_manager attaches to __new__-based OptionStreamManager singleton cleanly & detects _is_registered_with_streamer
+        OptionStreamManagerCls = _import_option_stream_manager()
+        prev_inst = getattr(OptionStreamManagerCls, "_instance", None)
+        try:
+            delattr_needed = hasattr(OptionStreamManagerCls, "get_instance")
+            self.assertFalse(delattr_needed)
+            mgr._is_registered_with_streamer = True
+            del mgr.is_running
+            OptionStreamManagerCls._instance = mgr
+            svc = OptionSnifferV2Service(db_path=self.v2_db)
+            resolved_mgr = svc._get_stream_manager()
+            self.assertIs(resolved_mgr, mgr)
+            start_res = svc.start_parallel_collector(stream_manager=None, run_archive_warmup=False, spawn_worker=False)
+            self.assertTrue(start_res["listener_attached"])
+            self.assertEqual(start_res["collector_state"], "PARALLEL_LIVE_COLLECTION_ACTIVE")
+            self.assertIn(svc.on_live_feed_events, mgr._advance_feed_listeners)
+            ov_state = svc.get_overview()["collection_status"]["collector_state"]
+            self.assertEqual(ov_state, "IDLE_NO_RECENT_EVENTS")
+            svc.stop_v2_only()
+            self.assertNotIn(svc.on_live_feed_events, mgr._advance_feed_listeners)
+            svc.store.close()
+        finally:
+            OptionStreamManagerCls._instance = prev_inst
+
 
 if __name__ == "__main__":
     unittest.main()

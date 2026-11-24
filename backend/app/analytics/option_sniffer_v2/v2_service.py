@@ -156,10 +156,21 @@ class OptionSnifferV2Service:
         try:
             from app.analytics.option_sniffer.option_stream_manager import OptionStreamManager
 
-            return OptionStreamManager.get_instance()
+            if hasattr(OptionStreamManager, "get_instance"):
+                return OptionStreamManager.get_instance()
+            return OptionStreamManager()
         except Exception as exc:
-            logger.debug(f"[V2] OptionStreamManager import unavailable: {exc}")
+            logger.debug(f"[V2] OptionStreamManager unavailable: {exc}")
             return None
+
+    @staticmethod
+    def _is_stream_mgr_active(mgr: Any) -> bool:
+        if mgr is None:
+            return False
+        return bool(
+            getattr(mgr, "is_running", False)
+            or getattr(mgr, "_is_registered_with_streamer", False)
+        )
 
     def _active_stream_mgr(self) -> Any:
         return self._stream_mgr_ref or self._get_stream_manager()
@@ -266,7 +277,7 @@ class OptionSnifferV2Service:
                 except Exception as exc:
                     logger.warning(f"[V2] Passive listener registration failed: {exc}")
 
-            is_stream_live = bool(mgr is not None and getattr(mgr, "is_running", False))
+            is_stream_live = self._is_stream_mgr_active(mgr)
             if self.simulator.is_booking_halted():
                 self.collector_state = "DEGRADED_BOOKING_FAULT"
                 self.collector_detail = f"Booking halt latched: {self.simulator.booking_fault}"
@@ -482,7 +493,7 @@ class OptionSnifferV2Service:
             self.store.ensure_initialized()
             res = self.simulator.reconcile_after_booking_fault()
             if not self.simulator.is_booking_halted():
-                is_live = bool(self._stream_mgr_ref is not None and getattr(self._stream_mgr_ref, "is_running", False))
+                is_live = self._is_stream_mgr_active(self._stream_mgr_ref)
                 if self._listener_attached:
                     self.collector_state = "PARALLEL_LIVE_COLLECTION_ACTIVE" if is_live else "STANDBY_STREAM_INACTIVE"
                     self.collector_detail = "Paper booking fault reconciled from ledger; collector restored."
@@ -725,7 +736,7 @@ class OptionSnifferV2Service:
             if receiving_usable:
                 eff_state = "ACTIVE_RECEIVING_DATA"
                 eff_detail = f"Receiving fresh events (last usable event {last_evt_ist})."
-            elif getattr(self._stream_mgr_ref, "is_running", False):
+            elif self._is_stream_mgr_active(self._stream_mgr_ref):
                 eff_state = "IDLE_NO_RECENT_EVENTS"
                 eff_detail = "Listener attached to running stream, but no recent usable NIFTY events received."
             else:
