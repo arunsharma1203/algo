@@ -21,6 +21,7 @@ import ConsensusScanner from './pages/ConsensusScanner';
 import OptionSniffer from './pages/OptionSniffer';
 import OptionSnifferAdvance from './pages/OptionSnifferAdvance';
 import TradeAgent from './pages/TradeAgent';
+const OptionSnifferAdvanceV2 = React.lazy(() => import('./pages/OptionSnifferAdvanceV2'));
 import { LiveIndicatorProvider } from './context/LiveIndicatorContext';
 import { API_BASE } from './services/api';
 import ErrorBoundary from './components/common/ErrorBoundary';
@@ -317,6 +318,7 @@ function App() {
               </div>
               <LinkItem collapsed={sidebarCollapsed} to="/option-sniffer" aliases={['/option-buying', '/options-sniffer', '/options', '/option-f']} icon={Radio} label="Option Sniffer" onClick={() => setMobileNavOpen(false)} />
               <LinkItem collapsed={sidebarCollapsed} to="/option-sniffer-advance" aliases={['/option-advance', '/options-advance']} icon={Zap} label="Option Sniffer Advance" onClick={() => setMobileNavOpen(false)} />
+              <LinkItem collapsed={sidebarCollapsed} to="/option-sniffer-advance-v2" aliases={['/v2-option-sniffer']} icon={ShieldCheck} label="V2 Option Sniffer" onClick={() => setMobileNavOpen(false)} />
 
 
               <div className="mt-auto pt-6">
@@ -410,6 +412,22 @@ function App() {
                   <Route path="/option-sniffer-advance" element={<OptionSnifferAdvance />} />
                   <Route path="/option-advance" element={<OptionSnifferAdvance />} />
                   <Route path="/options-advance" element={<OptionSnifferAdvance />} />
+                  <Route
+                    path="/option-sniffer-advance-v2"
+                    element={
+                      <React.Suspense fallback={<div className="p-8 text-gray-400 font-mono text-sm">Loading V2 Option Sniffer (Paper Sandbox)...</div>}>
+                        <OptionSnifferAdvanceV2 />
+                      </React.Suspense>
+                    }
+                  />
+                  <Route
+                    path="/v2-option-sniffer"
+                    element={
+                      <React.Suspense fallback={<div className="p-8 text-gray-400 font-mono text-sm">Loading V2 Option Sniffer (Paper Sandbox)...</div>}>
+                        <OptionSnifferAdvanceV2 />
+                      </React.Suspense>
+                    }
+                  />
                   <Route path="/trade-agent" element={<TradeAgent />} />
                   <Route path="/agent" element={<TradeAgent />} />
                   <Route path="/sentinel" element={<TradeAgent />} />

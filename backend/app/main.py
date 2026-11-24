@@ -348,6 +348,14 @@ def on_startup():
     except Exception as e:
         logger.warning(f"Option Sniffer Advance S2_05 startup warning: {e}")
 
+    # Start V2 Option Sniffer passive parallel experiment (100% Paper-Only, Isolated SQLite)
+    try:
+        from app.analytics.option_sniffer_v2.v2_service import get_option_sniffer_v2_service
+        get_option_sniffer_v2_service().start_parallel_collector(run_archive_warmup=True)
+        logger.info("✅ V2 Option Sniffer passive fan-out collector started (PAPER SANDBOX ONLY).")
+    except Exception as e:
+        logger.warning(f"V2 Option Sniffer startup warning: {e}")
+
     # Reconcile Upstox Broker State & Active Live Order Intents on Startup
     try:
         from app.analytics.option_sniffer.option_live_adapter import get_option_live_adapter
@@ -380,6 +388,14 @@ def on_shutdown():
         logger.info("🛑 Option Sniffer Advance S2_05 surveillance daemon stopped.")
     except Exception as e:
         logger.warning(f"Option Sniffer Advance shutdown warning: {e}")
+
+    try:
+        from app.analytics.option_sniffer_v2 import v2_service
+        if v2_service._SERVICE_INSTANCE is not None:
+            v2_service._SERVICE_INSTANCE.stop_v2_only()
+            logger.info("🛑 V2 Option Sniffer passive fan-out collector stopped cleanly.")
+    except Exception as e:
+        logger.warning(f"V2 Option Sniffer shutdown warning: {e}")
 
     try:
         from app.data.upstox_stream_service import get_stream_service
@@ -634,6 +650,8 @@ app.include_router(option_sniffer_router)
 
 from app.api.option_sniffer_advance_api import router as option_sniffer_advance_router
 app.include_router(option_sniffer_advance_router)
+from app.api.option_sniffer_v2_api import router as option_sniffer_v2_router
+app.include_router(option_sniffer_v2_router)
 
 try:
     from app.api.trade_agent import router as trade_agent_router

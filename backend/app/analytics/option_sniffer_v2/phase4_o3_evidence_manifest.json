@@ -1,0 +1,120 @@
+{
+  "source_artifact_dir": "/Users/arunsharma/.gemini/antigravity/brain/4ff3d070-948e-47ad-a692-5a1d62bb4f76/scratch/phase4_options_discovery",
+  "phase4_db_path": "/private/tmp/phase4_options_cache/nifty_options.sqlite",
+  "phase4_db_sha256": "28f8a2a1bfc6613a9583d25406fa12e19695167eaedaebac464d4587817bfcd3",
+  "phase4_db_currently_present_on_disk": false,
+  "phase4_cache_purge_note": "The sealed 84-expiry SQLite cache resided in OS volatile /private/tmp and was cleaned up after Phase-4 completion on 2026-11-19. Not re-fetched during shared/live operation to avoid Upstox REST contention with V1.",
+  "sealed_at_ist": "2026-11-19T09:05:01.626044+05:30",
+  "locked_at_utc": "2026-11-19T04:00:45Z",
+  "fill_basis": "CANDLE_CALIBRATED_SIM_15M_OPEN_T_PLUS_1_NOT_L5_DEPTH",
+  "completed_expiries": 84,
+  "min_expiry": "2025-04-17",
+  "max_expiry": "2026-11-17",
+  "total_contracts": 4012,
+  "lot_size_distribution": {
+    "65": 2404,
+    "75": 1608
+  },
+  "tick_size_distribution": {
+    "0.05": 4012
+  },
+  "total_option_15m_bars": 668139,
+  "nonzero_volume_bars": 662911,
+  "distinct_option_sessions": 398,
+  "atm_straddle_coverage_pct": 99.71,
+  "prior_parameter_search_accounting": {
+    "n_phase1_prior": 75,
+    "n_v3_structural_dof": 14,
+    "n_m2_exact": 22,
+    "n_phase3_exact": 12,
+    "n_prior_before_phase4": 123,
+    "n_phase4_exact": 12,
+    "n_cumulative": 135
+  },
+  "additional_28_earlier_expiries": {
+    "total_upstox_expiries_listed": 112,
+    "completed_expiries": 84,
+    "unfetched_earlier_expiries_count": 28,
+    "approx_window": "2024-10-03..2025-04-09",
+    "reason_unfetched": "Hard 09:05:00 IST REST cutoff reached before fetching oldest 28 expiries.",
+    "untouched_status": "NOT_UNTOUCHED_KNOWN_MACRO_REGIME_STRESS_TEST_ONLY",
+    "reason_not_untouched": "The Oct 2024-Feb 2025 NIFTY correction window was already inspected in Phase-2/Phase-3 index discovery; any backtest on those 28 expiries must be labelled REGIME_STRESS_TEST_NOT_UNTOUCHED_OOS."
+  },
+  "winner_label": "O3_PeakTheta_100w_VIX1p05_Trend",
+  "winner_config_hash": "5b7455b48c2426823f0482b69f293470f53fbc62f998438363dfae6a1b00fb4d",
+  "winner_config": {
+    "family": "O3",
+    "hold_mode": "t1_to_t0_1445",
+    "entry_dte": 1,
+    "width": 100,
+    "short_offset": 50,
+    "min_credit_pts": 30.0,
+    "vix_cap_mult": 1.05,
+    "vrp_min": 0.0,
+    "decay_tgt": 0.7,
+    "stop_mult": 1.65,
+    "max_struct_loss": 4800.0
+  },
+  "exact_phase4_recovered_rules": {
+    "short_strike_formula": "atm_100 = round(spot_15m_close / 100) * 100; PE -> atm_100 - 50 (wing -100), CE -> atm_100 + 50 (wing +100)",
+    "trend_formula": "Bull PE when spot_15m_close >= prev_completed_daily_sma20 AND spot_15m_close >= intraday_equal_weighted_15m_tp_vwap; Bear CE when spot_15m_close < prev_completed_daily_sma20 AND spot_15m_close < intraday_equal_weighted_15m_tp_vwap",
+    "credit_floor_formula": "signal bar bar-close diff >= 30.0 pts; Next-bar open fill collapse floor >= 0.85 * 30.0 = 25.5 pts",
+    "stop_formula": "close-only 15m bar check: stop_debit = entry_spread_pts * 1.65; breakeven ratchet tightens stop to entry_spread_pts once curr_deb <= 0.55 * entry_spread_pts",
+    "decay_target_formula": "curr_deb <= (1 - 0.70) * entry_spread_pts (70% credit capture target)",
+    "bar_convention": "Signal at 15m bar_close_ts (13:30..15:00 IST), executed at Open[t+1] (no entry if next bar is expiry >= 14:15)",
+    "entry_count_and_cooldown": "Max 1 open spread, max 1 trade opened per calendar day, 2-bar (30m) post-exit cooldown",
+    "order_timeout_and_leg2_abort": "Single-bar check: Leg-2 abort only in leg2_abort_stress when short leg missing/0-vol or (Open-Low)/Open >= 8% or credit < 25.5 pts",
+    "dte_definition": "weekday_dte(date, expiry) == 1 (Mon-Fri count ignoring NSE weekday holidays!)",
+    "vix_definition": "current 15m VIX <= 1.05 * mean(last 10 completed daily INDIA_VIX closes strictly prior to session date)",
+    "lot_size_primary_vs_sensitivity": "Primary uses fixed 65 qty + Apr-2026 0.15% STT across all 84 expiries; hist_lot_and_tariff variant uses contract lot_size (75 before Dec-2025 roll, 65 after) + historical effective-dated STT."
+  },
+  "fold_calendar": [
+    {"tag": "Train_1", "n_expiries": 19, "first_expiry": "2025-04-17", "last_expiry": "2025-08-21", "embargo_prev_expiry": null, "n_eval_dates": 91, "start_date": "2025-04-11", "end_date": "2025-08-21"},
+    {"tag": "VAL_1", "n_expiries": 11, "first_expiry": "2025-09-02", "last_expiry": "2025-11-11", "embargo_prev_expiry": "2025-08-28", "n_eval_dates": 49, "start_date": "2025-08-29", "end_date": "2025-11-11"},
+    {"tag": "VAL_2", "n_expiries": 12, "first_expiry": "2025-11-25", "last_expiry": "2026-02-10", "embargo_prev_expiry": "2025-11-18", "n_eval_dates": 58, "start_date": "2025-11-19", "end_date": "2026-02-10"},
+    {"tag": "VAL_3", "n_expiries": 12, "first_expiry": "2026-02-24", "last_expiry": "2026-05-12", "embargo_prev_expiry": "2026-02-17", "n_eval_dates": 54, "start_date": "2026-02-18", "end_date": "2026-05-12"},
+    {"tag": "HOLDOUT", "n_expiries": 25, "first_expiry": "2026-06-02", "last_expiry": "2026-11-17", "embargo_prev_expiry": "2026-05-26", "n_eval_dates": 119, "start_date": "2026-05-27", "end_date": "2026-11-17"}
+  ],
+  "o3_recorded_results": {
+    "baseline_1x": {
+      "Train_1": {"net_pnl_inr": 4290.44, "gross_pnl_inr": 5031.0, "total_cost_inr": 740.56, "closed_trades": 7, "sr_ann": 2.4035, "max_dd_pct": 1.22},
+      "VAL_1": {"net_pnl_inr": -209.83, "gross_pnl_inr": -104.0, "total_cost_inr": 105.83, "closed_trades": 1, "sr_ann": -2.8027, "max_dd_pct": 0.21},
+      "VAL_2": {"net_pnl_inr": 4432.21, "gross_pnl_inr": 4849.0, "total_cost_inr": 416.79, "closed_trades": 4, "sr_ann": 3.3795, "max_dd_pct": 0.4},
+      "VAL_3": {"net_pnl_inr": 2869.37, "gross_pnl_inr": 3454.75, "total_cost_inr": 585.38, "closed_trades": 5, "sr_ann": 1.1425, "max_dd_pct": 5.18},
+      "HOLDOUT": {"net_pnl_inr": 412.14, "gross_pnl_inr": 1066.0, "total_cost_inr": 653.86, "closed_trades": 6, "sr_ann": 0.1868, "sr_excess_ann": -0.9669, "max_dd_pct": 4.94},
+      "Pooled_OOS": {"net_pnl_inr": 7503.89, "gross_pnl_inr": 9265.75, "total_cost_inr": 1761.86, "closed_trades": 16, "trade_wr_pct": 62.5, "trade_pf": 1.847, "sr_ann": 1.0166, "sr_excess_ann": 0.0657, "max_dd_pct": 4.98, "worst_overnight_gap_inr": -1735.58, "worst_trade_loss_inr": -4097.31},
+      "Continuous_All": {"net_pnl_inr": 13187.39, "closed_trades": 24, "sr_ann": 1.3725, "max_dd_pct": 4.79}
+    },
+    "stress_2x": {
+      "HOLDOUT": {"net_pnl_inr": -479.61, "closed_trades": 6, "sr_ann": -0.1592},
+      "Pooled_OOS": {"net_pnl_inr": 2007.01, "gross_pnl_inr": 5326.75, "total_cost_inr": 3319.74, "closed_trades": 15, "trade_pf": 1.173, "sr_ann": 0.2924, "max_dd_pct": 5.4},
+      "Continuous_All": {"net_pnl_inr": 2798.24, "closed_trades": 21, "sr_ann": 0.312}
+    },
+    "hist_lot_and_tariff": {
+      "Pooled_OOS": {"net_pnl_inr": 8002.55, "gross_pnl_inr": 9755.25, "total_cost_inr": 1752.7, "closed_trades": 16, "sr_ann": 1.0668},
+      "Continuous_All": {"net_pnl_inr": 14467.75, "closed_trades": 24, "sr_ann": 1.4532}
+    }
+  },
+  "monthly_rows_from_csv": [
+    {"month": "2025-04", "fold_tag": "Train_1", "closed_trades": 3, "gross_pnl_inr": 796.25, "total_cost_inr": 316.99, "net_pnl_inr": 479.26},
+    {"month": "2025-05", "fold_tag": "Train_1", "closed_trades": 1, "gross_pnl_inr": -370.5, "total_cost_inr": 111.13, "net_pnl_inr": -481.63},
+    {"month": "2025-06", "fold_tag": "Train_1", "closed_trades": 1, "gross_pnl_inr": 1478.75, "total_cost_inr": 104.38, "net_pnl_inr": 1374.37},
+    {"month": "2025-07", "fold_tag": "Train_1", "closed_trades": 1, "gross_pnl_inr": 1524.25, "total_cost_inr": 103.59, "net_pnl_inr": 1420.66},
+    {"month": "2025-08", "fold_tag": "Train_1/VAL_1", "closed_trades": 1, "gross_pnl_inr": 1602.25, "total_cost_inr": 104.47, "net_pnl_inr": 1497.78},
+    {"month": "2025-09", "fold_tag": "VAL_1", "closed_trades": 0, "gross_pnl_inr": 0.0, "total_cost_inr": 0.0, "net_pnl_inr": 0.0},
+    {"month": "2025-10", "fold_tag": "VAL_1", "closed_trades": 1, "gross_pnl_inr": -104.0, "total_cost_inr": 105.83, "net_pnl_inr": -209.83},
+    {"month": "2025-11", "fold_tag": "VAL_1/VAL_2", "closed_trades": 0, "gross_pnl_inr": 0.0, "total_cost_inr": 0.0, "net_pnl_inr": 0.0},
+    {"month": "2025-12", "fold_tag": "VAL_2", "closed_trades": 3, "gross_pnl_inr": 3285.75, "total_cost_inr": 312.0, "net_pnl_inr": 2973.75},
+    {"month": "2026-01", "fold_tag": "VAL_2", "closed_trades": 0, "gross_pnl_inr": 0.0, "total_cost_inr": 0.0, "net_pnl_inr": 0.0},
+    {"month": "2026-02", "fold_tag": "VAL_2/VAL_3", "closed_trades": 1, "gross_pnl_inr": 2416.68, "total_cost_inr": 104.79, "net_pnl_inr": 2311.89},
+    {"month": "2026-03", "fold_tag": "VAL_3", "closed_trades": 1, "gross_pnl_inr": 1350.07, "total_cost_inr": 107.07, "net_pnl_inr": 1243.0},
+    {"month": "2026-04", "fold_tag": "VAL_3", "closed_trades": 3, "gross_pnl_inr": -975.0, "total_cost_inr": 370.66, "net_pnl_inr": -1345.66},
+    {"month": "2026-05", "fold_tag": "HOLDOUT/VAL_3", "closed_trades": 1, "gross_pnl_inr": 2226.25, "total_cost_inr": 107.65, "net_pnl_inr": 2118.6},
+    {"month": "2026-06", "fold_tag": "HOLDOUT", "closed_trades": 2, "gross_pnl_inr": 3526.25, "total_cost_inr": 212.52, "net_pnl_inr": 3313.73},
+    {"month": "2026-07", "fold_tag": "HOLDOUT", "closed_trades": 2, "gross_pnl_inr": -3276.0, "total_cost_inr": 224.85, "net_pnl_inr": -3500.85},
+    {"month": "2026-08", "fold_tag": "HOLDOUT", "closed_trades": 0, "gross_pnl_inr": -593.86, "total_cost_inr": 0.0, "net_pnl_inr": -593.86},
+    {"month": "2026-09", "fold_tag": "HOLDOUT", "closed_trades": 2, "gross_pnl_inr": 1409.61, "total_cost_inr": 216.49, "net_pnl_inr": 1193.12},
+    {"month": "2026-10", "fold_tag": "HOLDOUT", "closed_trades": 0, "gross_pnl_inr": 0.0, "total_cost_inr": 0.0, "net_pnl_inr": 0.0},
+    {"month": "2026-11", "fold_tag": "HOLDOUT", "closed_trades": 0, "gross_pnl_inr": 0.0, "total_cost_inr": 0.0, "net_pnl_inr": 0.0}
+  ]
+}
