@@ -130,3 +130,9 @@ def post_v2_run_archive_replay() -> Dict[str, Any]:
 def post_v2_shutdown_only() -> Dict[str, Any]:
     """Explicit operator action to detach ONLY V2 passive listener and V2-owned pins without stopping V1."""
     return get_option_sniffer_v2_service().stop_v2_only()
+
+
+@router.post("/control/reconcile-booking-fault")
+def post_v2_reconcile_booking_fault() -> Dict[str, Any]:
+    """Explicit operator action to reconcile paper ledger and clear latched booking fault (paper only)."""
+    return get_option_sniffer_v2_service().reconcile_booking_fault()

@@ -51,6 +51,42 @@ def make_stable_id(prefix: str, *parts: Any) -> str:
     return f"{prefix}_{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
 
 
+def compute_chronological_drawdown(
+    marked_equity_series: List[float],
+    starting_capital_inr: float = 200000.0,
+) -> Dict[str, Any]:
+    """
+    Computes true chronological peak-to-trough maximum drawdown across all observed marked equity points.
+    Reports rupee DD, % of preregistered starting capital, and % of running peak equity.
+    """
+    start_cap = max(1.0, float(starting_capital_inr))
+    peak = start_cap
+    max_dd = 0.0
+    max_dd_pct_peak = 0.0
+    for val in marked_equity_series:
+        v = float(val)
+        if v > peak:
+            peak = v
+        dd = round(peak - v, 2)
+        if dd > max_dd:
+            max_dd = dd
+        pct_p = round(100.0 * dd / max(1.0, peak), 2)
+        if pct_p > max_dd_pct_peak:
+            max_dd_pct_peak = pct_p
+    return {
+        "running_peak_equity_inr": round(peak, 2),
+        "max_dd_inr": round(max_dd, 2),
+        "max_dd_pct_of_starting_capital": round(100.0 * max_dd / start_cap, 2),
+        "max_dd_pct_of_peak_equity": round(max_dd_pct_peak, 2),
+    }
+
+
+def _append_timeline(pkg: Dict[str, Any], ts_ms: int, bar_ts: str, event: str, detail: str) -> List[Dict[str, Any]]:
+    cur = list(pkg.get("events_timeline") or [])
+    cur.append({"ts_ms": int(ts_ms), "bar_ts": str(bar_ts), "event": str(event), "detail": str(detail)})
+    return cur
+
+
 class V2PaperSimulator:
     """
     Deterministic, paper-only multi-book options execution & mark-to-market state machine.
@@ -81,6 +117,9 @@ class V2PaperSimulator:
         self.starting_capital_inr = float(env["starting_capital_inr"])
         self.realized_equity_inr: float = self.starting_capital_inr
         self.reserved_capital_inr: float = 0.0
+        self.running_peak_equity_inr: float = self.starting_capital_inr
+        self.max_mtm_dd_inr: float = 0.0
+        self.equity_seq_no: int = 0
 
         self.open_packages: Dict[str, Dict[str, Any]] = {}
         self.locked_until_after_bar: Dict[str, List[Tuple[str, float]]] = {}
@@ -91,15 +130,25 @@ class V2PaperSimulator:
         self.peak_reserved_by_date: Dict[str, float] = {}
         self.subscription_evicted_keys: set[str] = set()
         self._all_pkgs_by_id: Dict[str, Dict[str, Any]] = {}
+        self.booking_fault: Optional[Dict[str, Any]] = None
+        self.blocked_books_due_to_fault: set[str] = set()
 
         self.recover_state_from_db()
 
     def recover_state_from_db(self) -> Dict[str, Any]:
-        """Restores exact realized equity, reserved cash, open/pending/unresolved packages from V2 DB."""
+        """Restores exact equity, reserves, packages, drawdown peak/trough, kills, cooldowns, and bar locks."""
         with self._lock:
             self.open_packages.clear()
             self.seen_signal_ids.clear()
             self._all_pkgs_by_id.clear()
+            self.daily_kill_triggered_by_date.clear()
+            self.cooldown_until_ms.clear()
+            self.locked_until_after_bar.clear()
+            self.intraday_min_equity_by_date.clear()
+            self.peak_reserved_by_date.clear()
+            self.booking_fault = None
+            self.blocked_books_due_to_fault.clear()
+
             entries = self.store.load_ledger_entries(self.run_mode, self.config_hash)
             if entries:
                 last_e = entries[-1]
@@ -118,11 +167,128 @@ class V2PaperSimulator:
                     self.open_packages[pkg["package_id"]] = pkg
                     sum_open_res += float(pkg.get("reserved_capital_inr") or 0.0)
             self.reserved_capital_inr = round(sum_open_res, 2)
+
+            eq_curve = self.store.load_equity_curve(self.run_mode, self.config_hash)
+            if eq_curve:
+                last_pt = eq_curve[-1]
+                self.equity_seq_no = int(last_pt["seq_no"])
+                self.running_peak_equity_inr = float(last_pt["running_peak_equity_inr"])
+                self.max_mtm_dd_inr = max(float(pt["drawdown_inr"]) for pt in eq_curve)
+            else:
+                self.equity_seq_no = 0
+                self.running_peak_equity_inr = max(self.starting_capital_inr, self.realized_equity_inr)
+                self.max_mtm_dd_inr = 0.0
+
+            ckpts = self.store.load_runtime_checkpoints(self.run_mode, self.config_hash)
+            for ck in ckpts:
+                dt_c = ck["session_date"]
+                if ck.get("daily_kill_reason"):
+                    self.daily_kill_triggered_by_date[dt_c] = str(ck["daily_kill_reason"])
+                for bid, ts_u in (ck.get("cooldown") or {}).items():
+                    self.cooldown_until_ms[str(bid)] = max(self.cooldown_until_ms.get(str(bid), 0), int(ts_u))
+                for b_k, items in (ck.get("bar_locks") or {}).items():
+                    self.locked_until_after_bar[str(b_k)] = [(str(x[0]), float(x[1])) for x in items]
+                self.intraday_min_equity_by_date[dt_c] = float(ck.get("intraday_min_mtm_equity_inr") or self.realized_equity_inr)
+                self.peak_reserved_by_date[dt_c] = float(ck.get("peak_reserved_inr") or self.reserved_capital_inr)
+                self.running_peak_equity_inr = max(self.running_peak_equity_inr, float(ck.get("running_peak_equity_inr") or self.starting_capital_inr))
+                self.max_mtm_dd_inr = max(self.max_mtm_dd_inr, float(ck.get("max_mtm_dd_inr") or 0.0))
+                if ck.get("booking_fault"):
+                    self.booking_fault = ck["booking_fault"]
+                    self.blocked_books_due_to_fault.add(str(ck["booking_fault"].get("book_id") or "PORTFOLIO"))
+
             return {
                 "recovered_open_count": len(self.open_packages),
                 "realized_equity_inr": self.realized_equity_inr,
                 "reserved_capital_inr": self.reserved_capital_inr,
+                "running_peak_equity_inr": self.running_peak_equity_inr,
+                "max_mtm_dd_inr": self.max_mtm_dd_inr,
             }
+
+    def _build_equity_point(
+        self,
+        session_date: str,
+        ts_ms: int,
+        event_kind: str,
+        realized_eq: float,
+        conservative_mtm: float,
+    ) -> Dict[str, Any]:
+        marked_eq = round(realized_eq + conservative_mtm, 2)
+        new_peak = max(self.running_peak_equity_inr, marked_eq)
+        cur_dd = round(max(0.0, new_peak - marked_eq), 2)
+        self.running_peak_equity_inr = new_peak
+        if cur_dd > self.max_mtm_dd_inr:
+            self.max_mtm_dd_inr = cur_dd
+        self.equity_seq_no += 1
+        return {
+            "run_mode": self.run_mode,
+            "config_hash": self.config_hash,
+            "seq_no": self.equity_seq_no,
+            "session_date": session_date,
+            "ts_ms": int(ts_ms),
+            "event_kind": str(event_kind),
+            "realized_equity_inr": round(realized_eq, 2),
+            "conservative_mtm_inr": round(conservative_mtm, 2),
+            "marked_equity_inr": marked_eq,
+            "running_peak_equity_inr": round(self.running_peak_equity_inr, 2),
+            "drawdown_inr": cur_dd,
+        }
+
+    def _commit_atomic_or_fault(
+        self,
+        book_id: str,
+        op_name: str,
+        decision_ts_ms: int,
+        intents: List[Dict[str, Any]],
+        fills: List[Dict[str, Any]],
+        pkg_upsert: Optional[Dict[str, Any]],
+        ledger_entry: Optional[Dict[str, Any]],
+        equity_point: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        """Executes atomic SQLite commit; latches booking fault & blocks future entries on DB error."""
+        try:
+            ok = self.store.execute_atomic_transition(
+                intents, fills, pkg_upsert, ledger_entry, equity_point=equity_point
+            )
+            if not ok:
+                return False, "DUPLICATE_LEDGER_TRANSITION"
+            return True, None
+        except Exception as exc:
+            self.booking_fault = {
+                "fault_ts_ms": int(decision_ts_ms),
+                "book_id": str(book_id),
+                "operation": str(op_name),
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            self.blocked_books_due_to_fault.add(str(book_id))
+            self.blocked_books_due_to_fault.add("PORTFOLIO")
+            return False, f"BOOKING_FAILURE_HALTED:{type(exc).__name__}"
+
+    def reconcile_after_booking_fault(self) -> Dict[str, Any]:
+        """Re-synchronizes memory from SQLite and clears booking fault only after clean DB reload."""
+        with self._lock:
+            rec = self.recover_state_from_db()
+            self.booking_fault = None
+            self.blocked_books_due_to_fault.clear()
+            return {"ok": True, **rec}
+
+    def is_booking_halted(self, book_id: Optional[str] = None) -> bool:
+        with self._lock:
+            if not self.booking_fault:
+                return False
+            if "PORTFOLIO" in self.blocked_books_due_to_fault:
+                return True
+            if book_id and book_id in self.blocked_books_due_to_fault:
+                return True
+            return True
+
+    def current_open_conservative_mtm(self) -> float:
+        tot = 0.0
+        for p in self.open_packages.values():
+            if p.get("is_unpriced_exposure"):
+                tot += -abs(float(p.get("structural_max_loss_inr") or 0.0))
+            else:
+                tot += float(p.get("last_mark_net_pnl_inr") or 0.0)
+        return round(tot, 2)
 
     def mark_key_evicted(self, instrument_key: str) -> None:
         with self._lock:
@@ -207,6 +373,8 @@ class V2PaperSimulator:
         allow_partial_lot: bool = False,
     ) -> Dict[str, Any]:
         with self._lock:
+            if self.is_booking_halted(self.config["books"]["V2_BOOK_B_PAID_FLOW"]["book_id"]):
+                return {"ok": False, "reason": "BLOCKED_BY_BOOKING_FAULT", "fault": self.booking_fault}
             if signal_id in self.seen_signal_ids:
                 return {"ok": False, "reason": "DUPLICATE_SIGNAL_SUPPRESSED"}
 
@@ -358,6 +526,16 @@ class V2PaperSimulator:
                 "unpriced_since_ts_ms": None,
                 "last_mark_net_pnl_inr": 0.0,
                 "last_mark_ts_ms": decision_ts_ms,
+                "last_reliable_mark_net_inr": 0.0,
+                "last_reliable_mark_ts_ms": decision_ts_ms,
+                "events_timeline": [
+                    {
+                        "ts_ms": int(decision_ts_ms),
+                        "bar_ts": str(bar_ts),
+                        "event": "OPEN_BOOK_B",
+                        "detail": f"Bought {filled_qty} {contract.get('trading_symbol') or contract['instrument_key']} @ Rs {entry_px:.2f} (SL Rs {hard_stop_px:.2f})",
+                    }
+                ],
                 "transition_seq": 1,
             }
             ledger_entry = {
@@ -374,9 +552,11 @@ class V2PaperSimulator:
                 "realized_equity_after_inr": self.realized_equity_inr,
                 "reserved_after_inr": new_reserved,
             }
-            committed = self.store.execute_atomic_transition([intent_row], [fill_row], pkg_row, ledger_entry)
+            committed, err_rsn = self._commit_atomic_or_fault(
+                cfg_b["book_id"], "OPEN_BOOK_B", decision_ts_ms, [intent_row], [fill_row], pkg_row, ledger_entry
+            )
             if not committed:
-                return {"ok": False, "reason": "DUPLICATE_LEDGER_TRANSITION"}
+                return {"ok": False, "reason": err_rsn}
 
             self.reserved_capital_inr = new_reserved
             self.open_packages[pkg_id] = pkg_row
@@ -407,6 +587,8 @@ class V2PaperSimulator:
         allow_partial_lot: bool = True,
     ) -> Dict[str, Any]:
         with self._lock:
+            if self.is_booking_halted(self.config["books"]["V2_BOOK_A_PROPOSED_O3"]["book_id"]):
+                return {"ok": False, "reason": "BLOCKED_BY_BOOKING_FAULT", "fault": self.booking_fault}
             if signal_id in self.seen_signal_ids:
                 return {"ok": False, "reason": "DUPLICATE_SIGNAL_SUPPRESSED"}
 
@@ -553,6 +735,16 @@ class V2PaperSimulator:
                 "unpriced_since_ts_ms": None,
                 "last_mark_net_pnl_inr": 0.0,
                 "last_mark_ts_ms": decision_ts_ms,
+                "last_reliable_mark_net_inr": 0.0,
+                "last_reliable_mark_ts_ms": decision_ts_ms,
+                "events_timeline": [
+                    {
+                        "ts_ms": int(decision_ts_ms),
+                        "bar_ts": str(bar_ts),
+                        "event": "LEG1_HEDGE_BUY",
+                        "detail": f"Confirmed wing {confirmed_qty} @ Rs {wing_px:.2f} (pending Leg-2 short)",
+                    }
+                ],
                 "transition_seq": 1,
             }
             ledger_entry = {
@@ -569,8 +761,11 @@ class V2PaperSimulator:
                 "realized_equity_after_inr": self.realized_equity_inr,
                 "reserved_after_inr": new_reserved,
             }
-            if not self.store.execute_atomic_transition([intent_row], [fill_row], pkg_row, ledger_entry):
-                return {"ok": False, "reason": "DUPLICATE_LEDGER_TRANSITION"}
+            committed, err_rsn = self._commit_atomic_or_fault(
+                cfg_a["book_id"], "LEG1_HEDGE_OPEN", decision_ts_ms, [intent_row], [fill_row], pkg_row, ledger_entry
+            )
+            if not committed:
+                return {"ok": False, "reason": err_rsn}
 
             self.reserved_capital_inr = new_reserved
             self.open_packages[pkg_id] = pkg_row
@@ -622,7 +817,7 @@ class V2PaperSimulator:
             timed_out = decision_ts_ms >= int(ls["deadline_ts_ms"])
             sw_s: Dict[str, Any] = {"ok": False, "reason": "LEG2_TIMEOUT"}
             skew_ok, skew_ms, skew_reason = check_cross_leg_skew(
-                short_quote, wing_quote, max_skew_ms=int(hyg["max_cross_leg_skew_ms"])
+                short_quote, wing_quote, max_skew_ms=int(hyg["max_cross_leg_skew_ms"]), require_depth_ts=True
             )
             if not timed_out:
                 if not skew_ok and short_quote is not None and wing_quote is not None:
@@ -728,6 +923,9 @@ class V2PaperSimulator:
                         "legs_state": ls,
                         "structural_max_loss_inr": struct_loss,
                         "planned_loss_inr": round((hard_stop_debit - net_credit) * confirmed_qty, 2),
+                        "events_timeline": _append_timeline(
+                            pkg, decision_ts_ms, bar_ts, "LEG2_SHORT_SELL", f"Sold {confirmed_qty} @ Rs {short_px:.2f}; credit={net_credit:.2f}pt"
+                        ),
                         "transition_seq": seq,
                     }
                     le = {
@@ -744,7 +942,11 @@ class V2PaperSimulator:
                         "realized_equity_after_inr": self.realized_equity_inr,
                         "reserved_after_inr": self.reserved_capital_inr,
                     }
-                    self.store.execute_atomic_transition([intent_row], [fill_row], pkg_upd, le)
+                    committed, err_rsn = self._commit_atomic_or_fault(
+                        pkg["book_id"], "LEG2_SHORT_CONFIRMED", decision_ts_ms, [intent_row], [fill_row], pkg_upd, le
+                    )
+                    if not committed:
+                        return {"ok": False, "reason": err_rsn}
                     self.open_packages[package_id] = pkg_upd
                     self._all_pkgs_by_id[package_id] = pkg_upd
                     return {"ok": True, "state": "OPEN", "package_id": package_id, "net_credit_pts": net_credit}
@@ -763,6 +965,7 @@ class V2PaperSimulator:
                 now_ms=decision_ts_ms,
                 max_spread_pct=None,
                 require_observed_l5=False,
+                allow_fresh_l1_only=True,
                 allow_partial_lot_multiples=False,
             )
             seq = int(pkg["transition_seq"]) + 1
@@ -776,6 +979,9 @@ class V2PaperSimulator:
                     "is_unpriced_exposure": 1,
                     "unpriced_reason": f"HEDGE_UNWIND_BLOCKED:{sw_unwind.get('reason')}",
                     "unpriced_since_ts_ms": pkg.get("unpriced_since_ts_ms") or decision_ts_ms,
+                    "events_timeline": _append_timeline(
+                        pkg, decision_ts_ms, bar_ts, "HEDGE_ONLY_EXPOSURE_OPEN", f"Unwind blocked ({sw_unwind.get('reason')})"
+                    ),
                     "transition_seq": seq,
                 }
                 le_h = {
@@ -792,7 +998,11 @@ class V2PaperSimulator:
                     "realized_equity_after_inr": self.realized_equity_inr,
                     "reserved_after_inr": self.reserved_capital_inr,
                 }
-                self.store.execute_atomic_transition([], [], pkg_hold, le_h)
+                committed_h, err_h = self._commit_atomic_or_fault(
+                    pkg["book_id"], "HEDGE_ONLY_HOLD", decision_ts_ms, [], [], pkg_hold, le_h
+                )
+                if not committed_h:
+                    return {"ok": False, "reason": err_h}
                 self.open_packages[package_id] = pkg_hold
                 self._all_pkgs_by_id[package_id] = pkg_hold
                 return {"ok": False, "state": "HEDGE_ONLY_EXPOSURE_OPEN", "package_id": package_id, "reason": reject_reason}
@@ -807,8 +1017,8 @@ class V2PaperSimulator:
             )
             net_pnl = float(acc["net_pnl"])
             res_rel = -float(pkg["reserved_capital_inr"])
-            self.realized_equity_inr = round(self.realized_equity_inr + net_pnl, 2)
-            self.reserved_capital_inr = round(max(0.0, self.reserved_capital_inr + res_rel), 2)
+            new_realized = round(self.realized_equity_inr + net_pnl, 2)
+            new_reserved = round(max(0.0, self.reserved_capital_inr + res_rel), 2)
 
             unw_intent_id = make_stable_id("osv2_int", package_id, "WING_UNWIND", "SELL")
             unw_fill_id = make_stable_id("osv2_fil", unw_intent_id, sw_unwind["ts_ms"])
@@ -864,11 +1074,22 @@ class V2PaperSimulator:
                 "total_friction_inr": float(acc["total_friction"]),
                 "net_pnl_inr": net_pnl,
                 "entry_day_mtm_pnl_inr": net_pnl,
+                "last_reliable_mark_net_inr": net_pnl,
+                "last_reliable_mark_ts_ms": decision_ts_ms,
                 "is_unpriced_exposure": 0,
                 "unpriced_reason": None,
                 "unpriced_since_ts_ms": None,
+                "events_timeline": _append_timeline(
+                    pkg, decision_ts_ms, bar_ts, "HEDGE_UNWOUND_CLOSE", f"Unwound wing @ Rs {unwind_px:.2f} ({reject_reason})"
+                ),
                 "transition_seq": seq,
             }
+            other_open_mtm = sum(
+                (-abs(float(p.get("structural_max_loss_inr") or 0.0)) if p.get("is_unpriced_exposure") else float(p.get("last_mark_net_pnl_inr") or 0.0))
+                for pid_o, p in self.open_packages.items()
+                if pid_o != package_id
+            )
+            eq_pt_unw = self._build_equity_point(session_date, decision_ts_ms, "HEDGE_UNWOUND_CLOSE", new_realized, other_open_mtm)
             le_c = {
                 "entry_id": make_stable_id("osv2_le", package_id, seq, "HEDGE_UNWOUND_CLOSE"),
                 "package_id": package_id,
@@ -880,10 +1101,16 @@ class V2PaperSimulator:
                 "event_type": "HEDGE_UNWOUND_CLOSE",
                 "cash_delta_inr": net_pnl,
                 "reserved_delta_inr": res_rel,
-                "realized_equity_after_inr": self.realized_equity_inr,
-                "reserved_after_inr": self.reserved_capital_inr,
+                "realized_equity_after_inr": new_realized,
+                "reserved_after_inr": new_reserved,
             }
-            self.store.execute_atomic_transition([intent_row], [fill_row], pkg_closed, le_c)
+            committed_u, err_u = self._commit_atomic_or_fault(
+                pkg["book_id"], "HEDGE_UNWOUND_CLOSE", decision_ts_ms, [intent_row], [fill_row], pkg_closed, le_c, equity_point=eq_pt_unw
+            )
+            if not committed_u:
+                return {"ok": False, "reason": err_u}
+            self.realized_equity_inr = new_realized
+            self.reserved_capital_inr = new_reserved
             self.open_packages.pop(package_id, None)
             self._all_pkgs_by_id[package_id] = pkg_closed
             self.locked_until_after_bar.setdefault(bar_ts, []).append((pkg["book_id"], float(pkg["reserved_capital_inr"])))
@@ -946,6 +1173,7 @@ class V2PaperSimulator:
                         now_ms=decision_ts_ms,
                         max_spread_pct=None,
                         require_observed_l5=False,
+                        allow_fresh_l1_only=True,
                     )
                     if not sw.get("ok"):
                         return self._mark_unresolved_or_unpriced(pkg, decision_ts_ms, str(sw.get("reason") or "EXIT_QUOTE_UNAVAILABLE"), bar_ts)
@@ -968,10 +1196,6 @@ class V2PaperSimulator:
                     if sl:
                         legs.append(OptionLeg(sl["option_type"], float(sl["strike"]), -w_qty, float(sl["entry_price"]), exit_mode="CASH_SETTLED_EXPIRY", settlement_spot=float(settlement_fsp_spot), lot_size=lot_sz))
                 else:
-                    if sl is not None:
-                        skew_ok, _, skew_reason = check_cross_leg_skew(long_or_wing_quote, short_quote, max_skew_ms=int(hyg["max_cross_leg_skew_ms"]))
-                        if not skew_ok:
-                            return self._mark_unresolved_or_unpriced(pkg, decision_ts_ms, skew_reason, bar_ts)
                     sw_w = sweep_observed_l5_book(
                         quote=long_or_wing_quote,
                         side="SELL",
@@ -982,6 +1206,7 @@ class V2PaperSimulator:
                         now_ms=decision_ts_ms,
                         max_spread_pct=None,
                         require_observed_l5=False,
+                        allow_fresh_l1_only=True,
                     )
                     if not sw_w.get("ok"):
                         return self._mark_unresolved_or_unpriced(pkg, decision_ts_ms, f"WING_EXIT_{sw_w.get('reason')}", bar_ts)
@@ -996,9 +1221,19 @@ class V2PaperSimulator:
                             now_ms=decision_ts_ms,
                             max_spread_pct=None,
                             require_observed_l5=False,
+                            allow_fresh_l1_only=True,
                         )
                         if not sw_s.get("ok"):
                             return self._mark_unresolved_or_unpriced(pkg, decision_ts_ms, f"SHORT_EXIT_{sw_s.get('reason')}", bar_ts)
+                        skew_ok, _, skew_reason = check_cross_leg_skew(
+                            long_or_wing_quote,
+                            short_quote,
+                            max_skew_ms=int(hyg["max_cross_leg_skew_ms"]),
+                            consumed_ts_a=sw_w.get("consumed_ts_ms"),
+                            consumed_ts_b=sw_s.get("consumed_ts_ms"),
+                        )
+                        if not skew_ok:
+                            return self._mark_unresolved_or_unpriced(pkg, decision_ts_ms, skew_reason, bar_ts)
                         s_ex = float(sw_s["fill_price"])
                         iid_s = make_stable_id("osv2_int", package_id, "SHORT_EXIT", "BUY")
                         fid_s = make_stable_id("osv2_fil", iid_s, sw_s["ts_ms"])
@@ -1034,8 +1269,8 @@ class V2PaperSimulator:
                 expiry_intraday = round(net - (entry_day_mtm + overnight_gap), 2)
 
             res_rel = -float(pkg["reserved_capital_inr"])
-            self.realized_equity_inr = round(self.realized_equity_inr + net, 2)
-            self.reserved_capital_inr = round(max(0.0, self.reserved_capital_inr + res_rel), 2)
+            new_realized = round(self.realized_equity_inr + net, 2)
+            new_reserved = round(max(0.0, self.reserved_capital_inr + res_rel), 2)
 
             pkg_closed = {
                 **pkg,
@@ -1062,8 +1297,19 @@ class V2PaperSimulator:
                 "unpriced_since_ts_ms": None,
                 "last_mark_net_pnl_inr": net,
                 "last_mark_ts_ms": decision_ts_ms,
+                "last_reliable_mark_net_inr": net,
+                "last_reliable_mark_ts_ms": decision_ts_ms,
+                "events_timeline": _append_timeline(
+                    pkg, decision_ts_ms, bar_ts, f"EXIT_{exit_reason}", f"Gross {gross:+.2f} - Fric {float(acc['total_friction']):.2f} = Net {net:+.2f}"
+                ),
                 "transition_seq": seq,
             }
+            other_open_mtm = sum(
+                (-abs(float(p.get("structural_max_loss_inr") or 0.0)) if p.get("is_unpriced_exposure") else float(p.get("last_mark_net_pnl_inr") or 0.0))
+                for pid_o, p in self.open_packages.items()
+                if pid_o != package_id
+            )
+            eq_pt_c = self._build_equity_point(session_date, decision_ts_ms, f"CLOSE_{exit_reason}", new_realized, other_open_mtm)
             le = {
                 "entry_id": make_stable_id("osv2_le", package_id, seq, "CLOSE_PACKAGE"),
                 "package_id": package_id,
@@ -1075,10 +1321,16 @@ class V2PaperSimulator:
                 "event_type": "CLOSE_PACKAGE",
                 "cash_delta_inr": net,
                 "reserved_delta_inr": res_rel,
-                "realized_equity_after_inr": self.realized_equity_inr,
-                "reserved_after_inr": self.reserved_capital_inr,
+                "realized_equity_after_inr": new_realized,
+                "reserved_after_inr": new_reserved,
             }
-            self.store.execute_atomic_transition(intents, fills, pkg_closed, le)
+            committed_c, err_c = self._commit_atomic_or_fault(
+                pkg["book_id"], f"CLOSE_{exit_reason}", decision_ts_ms, intents, fills, pkg_closed, le, equity_point=eq_pt_c
+            )
+            if not committed_c:
+                return {"ok": False, "reason": err_c}
+            self.realized_equity_inr = new_realized
+            self.reserved_capital_inr = new_reserved
             self.open_packages.pop(package_id, None)
             self._all_pkgs_by_id[package_id] = pkg_closed
             self.locked_until_after_bar.setdefault(bar_ts, []).append((pkg["book_id"], float(pkg["reserved_capital_inr"])))
@@ -1100,20 +1352,33 @@ class V2PaperSimulator:
         reason: str,
         bar_ts: str,
     ) -> Dict[str, Any]:
-        """Never manufactures an exit or profit when closing quotes fail: persists unresolved state."""
+        """Never manufactures an exit or profit when closing quotes fail: persists unresolved state & last reliable mark."""
         new_state = pkg["state"]
         if (pkg.get("expiry") or "") <= bar_ts[:10] and bar_ts[11:16] >= "14:45":
             new_state = "UNRESOLVED_EXPOSURE_PAST_1445"
         seq = int(pkg["transition_seq"]) + 1
+        last_rel_net = pkg.get("last_reliable_mark_net_inr")
+        if last_rel_net is None:
+            last_rel_net = pkg.get("last_mark_net_pnl_inr")
+        last_rel_ts = pkg.get("last_reliable_mark_ts_ms") or pkg.get("last_mark_ts_ms") or pkg.get("entry_ts_ms")
         upd = {
             **pkg,
             "state": new_state,
             "is_unpriced_exposure": 1,
             "unpriced_reason": reason,
             "unpriced_since_ts_ms": pkg.get("unpriced_since_ts_ms") or decision_ts_ms,
+            "last_reliable_mark_net_inr": last_rel_net,
+            "last_reliable_mark_ts_ms": last_rel_ts,
+            "events_timeline": _append_timeline(
+                pkg, decision_ts_ms, bar_ts, new_state, f"Exit/valuation retained open: {reason}"
+            ),
             "transition_seq": seq,
         }
-        self.store.execute_atomic_transition([], [], upd, None)
+        committed_m, err_m = self._commit_atomic_or_fault(
+            pkg["book_id"], f"UNRESOLVED_{reason}", decision_ts_ms, [], [], upd, None
+        )
+        if not committed_m:
+            return {"ok": False, "state": pkg["state"], "package_id": pkg["package_id"], "reason": err_m}
         self.open_packages[pkg["package_id"]] = upd
         self._all_pkgs_by_id[pkg["package_id"]] = upd
         return {"ok": False, "state": new_state, "package_id": pkg["package_id"], "reason": reason}
@@ -1128,9 +1393,9 @@ class V2PaperSimulator:
         is_eod_bar: bool = False,
     ) -> Dict[str, Any]:
         """
-        Marks all open packages strictly from fresh synchronized executable quotes.
-        Retains open exposure on missing/stale/skewed/evicted quotes and computes conservative MTM
-        (charging full structural max loss on unpriced packages so risk kill & MTM DD cannot be masked).
+        Marks all open packages strictly from fresh synchronized executable liquidity.
+        Retains open exposure + last reliable mark/age on missing/stale/skewed/carried/evicted quotes
+        and charges structural max loss conservatively to chronological drawdown.
         """
         with self._lock:
             hyg = self.config["quote_hygiene"]
@@ -1150,7 +1415,11 @@ class V2PaperSimulator:
                     if wl["instrument_key"] in self.subscription_evicted_keys:
                         unpriced_reason = "LEG_SUBSCRIPTION_EVICTED"
                     else:
-                        sw = sweep_observed_l5_book(wq, "SELL", int(wl["qty"]), int(wl["lot_size"]), self._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]), now_ms, max_spread_pct=None, require_observed_l5=False)
+                        sw = sweep_observed_l5_book(
+                            wq, "SELL", int(wl["qty"]), int(wl["lot_size"]),
+                            self._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]),
+                            now_ms, max_spread_pct=None, require_observed_l5=False, allow_fresh_l1_only=True,
+                        )
                         if not sw.get("ok"):
                             unpriced_reason = str(sw.get("reason"))
                         else:
@@ -1162,7 +1431,11 @@ class V2PaperSimulator:
                         unpriced_reason = "LEG_SUBSCRIPTION_EVICTED"
                     else:
                         lq = quote_by_ikey.get(ll["instrument_key"])
-                        sw = sweep_observed_l5_book(lq, "SELL", int(ll["qty"]), int(ll["lot_size"]), self._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]), now_ms, max_spread_pct=None, require_observed_l5=False)
+                        sw = sweep_observed_l5_book(
+                            lq, "SELL", int(ll["qty"]), int(ll["lot_size"]),
+                            self._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]),
+                            now_ms, max_spread_pct=None, require_observed_l5=False, allow_fresh_l1_only=True,
+                        )
                         if not sw.get("ok"):
                             unpriced_reason = str(sw.get("reason"))
                         else:
@@ -1175,7 +1448,11 @@ class V2PaperSimulator:
                         unpriced_reason = "LEG_SUBSCRIPTION_EVICTED"
                     elif sl is None:
                         wq = quote_by_ikey.get(wl["instrument_key"])
-                        sw_w = sweep_observed_l5_book(wq, "SELL", int(wl["qty"]), int(wl["lot_size"]), self._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]), now_ms, max_spread_pct=None, require_observed_l5=False)
+                        sw_w = sweep_observed_l5_book(
+                            wq, "SELL", int(wl["qty"]), int(wl["lot_size"]),
+                            self._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]),
+                            now_ms, max_spread_pct=None, require_observed_l5=False, allow_fresh_l1_only=True,
+                        )
                         if not sw_w.get("ok"):
                             unpriced_reason = str(sw_w.get("reason"))
                         else:
@@ -1184,16 +1461,29 @@ class V2PaperSimulator:
                     else:
                         wq = quote_by_ikey.get(wl["instrument_key"])
                         sq = quote_by_ikey.get(sl["instrument_key"])
-                        skew_ok, _, skew_rsn = check_cross_leg_skew(wq, sq, max_skew_ms=int(hyg["max_cross_leg_skew_ms"]))
-                        if not skew_ok:
-                            unpriced_reason = skew_rsn
+                        sw_w = sweep_observed_l5_book(
+                            wq, "SELL", int(wl["qty"]), int(wl["lot_size"]),
+                            self._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]),
+                            now_ms, max_spread_pct=None, require_observed_l5=False, allow_fresh_l1_only=True,
+                        )
+                        sw_s = sweep_observed_l5_book(
+                            sq, "BUY", abs(int(sl["qty"])), int(sl["lot_size"]),
+                            self._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]),
+                            now_ms, max_spread_pct=None, require_observed_l5=False, allow_fresh_l1_only=True,
+                        )
+                        if not sw_w.get("ok"):
+                            unpriced_reason = f"WING_{sw_w.get('reason')}"
+                        elif not sw_s.get("ok"):
+                            unpriced_reason = f"SHORT_{sw_s.get('reason')}"
                         else:
-                            sw_w = sweep_observed_l5_book(wq, "SELL", int(wl["qty"]), int(wl["lot_size"]), self._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]), now_ms, max_spread_pct=None, require_observed_l5=False)
-                            sw_s = sweep_observed_l5_book(sq, "BUY", abs(int(sl["qty"])), int(sl["lot_size"]), self._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]), now_ms, max_spread_pct=None, require_observed_l5=False)
-                            if not sw_w.get("ok"):
-                                unpriced_reason = f"WING_{sw_w.get('reason')}"
-                            elif not sw_s.get("ok"):
-                                unpriced_reason = f"SHORT_{sw_s.get('reason')}"
+                            skew_ok, _, skew_rsn = check_cross_leg_skew(
+                                wq, sq,
+                                max_skew_ms=int(hyg["max_cross_leg_skew_ms"]),
+                                consumed_ts_a=sw_w.get("consumed_ts_ms"),
+                                consumed_ts_b=sw_s.get("consumed_ts_ms"),
+                            )
+                            if not skew_ok:
+                                unpriced_reason = skew_rsn
                             else:
                                 acc = self._apply_cost_multiplier(
                                     compute_package_accounting(
@@ -1230,21 +1520,30 @@ class V2PaperSimulator:
                         "unpriced_since_ts_ms": None,
                         "last_mark_net_pnl_inr": round(net_mark, 2),
                         "last_mark_ts_ms": now_ms,
+                        "last_reliable_mark_net_inr": round(net_mark, 2),
+                        "last_reliable_mark_ts_ms": now_ms,
                     }
                     self.open_packages[pid] = upd
                     self._all_pkgs_by_id[pid] = upd
                     if self.run_mode == "FORWARD_PAPER" or is_opening_bar or is_eod_bar or int(pkg.get("is_unpriced_exposure") or 0) != 0:
-                        self.store.execute_atomic_transition([], [], upd, None)
+                        self._commit_atomic_or_fault(pkg["book_id"], "MARK_OPEN", now_ms, [], [], upd, None)
                 else:
                     since_ms = pkg.get("unpriced_since_ts_ms") or now_ms
                     age_unpriced = max(0, now_ms - int(since_ms))
                     worst_loss = -abs(float(pkg.get("structural_max_loss_inr") or 0.0))
                     conservative_mtm += worst_loss
+                    last_rel_net = pkg.get("last_reliable_mark_net_inr")
+                    if last_rel_net is None:
+                        last_rel_net = pkg.get("last_mark_net_pnl_inr")
+                    last_rel_ts = pkg.get("last_reliable_mark_ts_ms") or pkg.get("last_mark_ts_ms") or pkg.get("entry_ts_ms")
+                    last_rel_age = max(0, now_ms - int(last_rel_ts)) if last_rel_ts else age_unpriced
                     upd = {
                         **pkg,
                         "is_unpriced_exposure": 1,
                         "unpriced_reason": unpriced_reason or "UNPRICED_UNKNOWN",
                         "unpriced_since_ts_ms": since_ms,
+                        "last_reliable_mark_net_inr": last_rel_net,
+                        "last_reliable_mark_ts_ms": last_rel_ts,
                     }
                     self.open_packages[pid] = upd
                     self._all_pkgs_by_id[pid] = upd
@@ -1255,24 +1554,42 @@ class V2PaperSimulator:
                         or int(pkg.get("is_unpriced_exposure") or 0) != 1
                         or pkg.get("unpriced_reason") != upd["unpriced_reason"]
                     ):
-                        self.store.execute_atomic_transition([], [], upd, None)
+                        self._commit_atomic_or_fault(pkg["book_id"], "MARK_UNPRICED", now_ms, [], [], upd, None)
                     unpriced_details.append(
                         {
                             "package_id": pid,
+                            "book_id": pkg["book_id"],
                             "reason": upd["unpriced_reason"],
                             "unpriced_age_ms": age_unpriced,
+                            "last_reliable_mark_net_inr": last_rel_net,
+                            "last_reliable_mark_ts_ms": last_rel_ts,
+                            "last_reliable_mark_age_ms": last_rel_age,
                             "worst_case_risk_inr": worst_loss,
                         }
                     )
 
-            cur_mtm_eq = round(self.realized_equity_inr + conservative_mtm, 2)
-            prev_min = self.intraday_min_equity_by_date.get(session_date, self.realized_equity_inr)
+            eq_pt = self._build_equity_point(session_date, now_ms, "BAR_MTM", self.realized_equity_inr, conservative_mtm)
+            if self.run_mode == "FORWARD_PAPER" or self.open_packages:
+                try:
+                    self.store.append_equity_point(eq_pt)
+                except Exception as exc_eq:
+                    self.booking_fault = {
+                        "fault_ts_ms": int(now_ms),
+                        "book_id": "PORTFOLIO",
+                        "operation": "APPEND_EQUITY_POINT",
+                        "error": f"{type(exc_eq).__name__}: {exc_eq}",
+                    }
+                    self.blocked_books_due_to_fault.add("PORTFOLIO")
+            cur_mtm_eq = float(eq_pt["marked_equity_inr"])
+            prev_min = self.intraday_min_equity_by_date.get(session_date, cur_mtm_eq)
             self.intraday_min_equity_by_date[session_date] = min(prev_min, cur_mtm_eq)
             return {
                 "realized_equity_inr": self.realized_equity_inr,
                 "priced_unrealized_mtm_inr": round(priced_mtm, 2),
                 "conservative_unrealized_mtm_inr": round(conservative_mtm, 2),
                 "conservative_mtm_equity_inr": cur_mtm_eq,
+                "running_peak_equity_inr": self.running_peak_equity_inr,
+                "max_mtm_dd_inr": self.max_mtm_dd_inr,
                 "unpriced_count": len(unpriced_details),
                 "unpriced_details": unpriced_details,
                 "open_count": len(self.open_packages),

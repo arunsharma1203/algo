@@ -1,0 +1,40 @@
+{
+  "evidence_status": "SUPERSEDED_V2_0_NONCAUSAL_SYNTHETIC_SYNC",
+  "superseded_by_version": "2.1.0-causal",
+  "audited_commit": "baa72f775e016d2a25f3e5e1419e7667262756d9",
+  "config_hash": "0f972ca95e7ccdc3f11dfe4f7d84834063c1b9f5d4aa569759055fda844d7f9d",
+  "ledger_sha256": "52c0cfb5c1e46e87abee21c40d39a0e431017411879e1f895309a7f9729c551a",
+  "reason_superseded": [
+    "Used archive bar_ts (bar open) instead of recorded_at/timestamp (earliest bar availability ~60s+ later).",
+    "Assigned identical synthetic zero-age timestamps and synthetic NSE_FUT keys to snapshot spot/futures rows that lack separate source timestamps and contract identity in backend/market_data.db.",
+    "Used archived S205 ADX/ER snapshot strings and non-chronological MTM peak/trough tracking."
+  ],
+  "superseded_stats": {
+    "trade_count": 2,
+    "gross_pnl_inr": 9886.5,
+    "total_charges_inr": 161.48,
+    "net_pnl_inr": 9725.02,
+    "intraday_mtm_dd_inr": 10927.93,
+    "peak_capital_used_inr": 10855.0
+  },
+  "superseded_trades": [
+    {
+      "package_id": "osv2_pkg_7e17c055d8d89c2f",
+      "session_date": "2026-11-17",
+      "symbol": "NIFTY 25500 CE 23 NOV 26",
+      "entry_bar_ts": "2026-11-17 11:10:00",
+      "exit_bar_ts": "2026-11-17 12:43:00",
+      "exit_reason": "CLOSE_ONLY_RATCHET_STOP",
+      "net_pnl_inr": 981.28
+    },
+    {
+      "package_id": "osv2_pkg_63dd1db191ace403",
+      "session_date": "2026-11-19",
+      "symbol": "NIFTY 25300 CE 23 NOV 26",
+      "entry_bar_ts": "2026-11-19 10:49:00",
+      "exit_bar_ts": "2026-11-19 15:15:00",
+      "exit_reason": "EOD_SQUAREOFF_1515",
+      "net_pnl_inr": 8743.74
+    }
+  ]
+}

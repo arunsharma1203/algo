@@ -10,11 +10,17 @@ Isolation guarantees:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import os
 from typing import Any, Dict, Iterable, Optional, Set, Tuple
+try:
+    from zoneinfo import ZoneInfo
+
+    IST_TZ = ZoneInfo("Asia/Kolkata")
+except Exception:
+    IST_TZ = timezone(timedelta(hours=5, minutes=30))
 
 _V2_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_V2_PREREG_PATH = os.path.join(_V2_DIR, "V2_PREREGISTRATION_V1.json")
@@ -191,9 +197,53 @@ def resolve_contract_lot_size(expiry_s: str, contract_meta_lot: Optional[int] = 
     return 65
 
 
-def to_ist_naive(dt_val: Optional[datetime] = None) -> datetime:
+def to_ist_aware(dt_val: Optional[datetime] = None) -> datetime:
+    """Returns timezone-aware Asia/Kolkata datetime."""
     if dt_val is None:
-        return datetime.now()
-    if getattr(dt_val, "tzinfo", None) is not None:
-        return dt_val.replace(tzinfo=None)
-    return dt_val
+        return datetime.now(IST_TZ)
+    if getattr(dt_val, "tzinfo", None) is None:
+        return dt_val.replace(tzinfo=IST_TZ)
+    return dt_val.astimezone(IST_TZ)
+
+
+def to_ist_naive(dt_val: Optional[datetime] = None) -> datetime:
+    return to_ist_aware(dt_val).replace(tzinfo=None)
+
+
+def parse_ist_timestamp_ms(ts_str: str) -> int:
+    """Parses ISO or 'YYYY-MM-DD HH:MM:SS(.ffffff)' as explicit Asia/Kolkata epoch-ms."""
+    raw = str(ts_str or "").strip()
+    if not raw:
+        raise ValueError("Empty timestamp string")
+    norm = raw.replace(" ", "T")
+    dt = datetime.fromisoformat(norm)
+    return int(to_ist_aware(dt).timestamp() * 1000)
+
+
+def format_ist_iso(ts_ms: int) -> str:
+    """Formats epoch-ms cleanly as ISO-8601 Asia/Kolkata string (+05:30)."""
+    dt = datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=IST_TZ)
+    return dt.isoformat()
+
+
+def ist_hhmm_from_ms(ts_ms: int) -> int:
+    dt = datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=IST_TZ)
+    return dt.hour * 100 + dt.minute
+
+
+def bar_open_label_from_ms(ts_ms: int) -> Tuple[str, str, int, int, int]:
+    """
+    Given event epoch-ms, returns the bar [bar_open_ms, bar_close_ms) in IST:
+    `(session_date, bar_open_ts_str, bar_open_ms, bar_close_ms, bar_open_hhmm)`.
+    """
+    dt = datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=IST_TZ)
+    dt_floor = dt.replace(second=0, microsecond=0)
+    bar_open_ms = int(dt_floor.timestamp() * 1000)
+    bar_close_ms = bar_open_ms + 60_000
+    return (
+        dt_floor.strftime("%Y-%m-%d"),
+        dt_floor.strftime("%Y-%m-%d %H:%M:00"),
+        bar_open_ms,
+        bar_close_ms,
+        dt_floor.hour * 100 + dt_floor.minute,
+    )

@@ -327,14 +327,20 @@ def manage_open_book_a_on_bar(
     # Normal intraday close-only stop / breakeven ratchet / 50% credit target
     if sl is None:
         return None
-    skew_ok, _, _ = check_cross_leg_skew(wq, sq, max_skew_ms=int(hyg["max_cross_leg_skew_ms"]))
-    if not skew_ok:
-        return None
     w_qty = int(wl["qty"])
     lot_sz = int(wl["lot_size"])
-    sw_w = sweep_observed_l5_book(wq, "SELL", w_qty, lot_sz, sim._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]), decision_ts_ms, max_spread_pct=None, require_observed_l5=False)
-    sw_s = sweep_observed_l5_book(sq, "BUY", w_qty, lot_sz, sim._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]), decision_ts_ms, max_spread_pct=None, require_observed_l5=False)
+    sw_w = sweep_observed_l5_book(wq, "SELL", w_qty, lot_sz, sim._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]), decision_ts_ms, max_spread_pct=None, require_observed_l5=False, allow_fresh_l1_only=True)
+    sw_s = sweep_observed_l5_book(sq, "BUY", w_qty, lot_sz, sim._effective_slippage_ticks(), int(hyg["max_exit_quote_age_ms"]), decision_ts_ms, max_spread_pct=None, require_observed_l5=False, allow_fresh_l1_only=True)
     if not sw_w.get("ok") or not sw_s.get("ok"):
+        return None
+    skew_ok, _, _ = check_cross_leg_skew(
+        wq,
+        sq,
+        max_skew_ms=int(hyg["max_cross_leg_skew_ms"]),
+        consumed_ts_a=sw_w.get("consumed_ts_ms"),
+        consumed_ts_b=sw_s.get("consumed_ts_ms"),
+    )
+    if not skew_ok:
         return None
 
     cur_debit = round(float(sw_s["fill_price"]) - float(sw_w["fill_price"]), 2)
@@ -351,6 +357,7 @@ def manage_open_book_a_on_bar(
         ls["best_close_credit_decay_pts"] = min(float(ls.get("best_close_credit_decay_pts") or init_credit), max(0.05, cur_debit))
         upd = {**pkg, "legs_state": ls}
         sim.open_packages[pkg["package_id"]] = upd
+        sim._all_pkgs_by_id[pkg["package_id"]] = upd
         sim.store.execute_atomic_transition([], [], upd, None)
 
     eff_stop = min(hard_debit, float(ratchet_debit)) if ratchet_debit is not None else hard_debit

@@ -35,6 +35,7 @@ def build_event_dedup_key(
         f"{payload.get('ltp') or payload.get('spot_ltp') or payload.get('fut_ltp')}|"
         f"{payload.get('raw_bid') or payload.get('bid')}|"
         f"{payload.get('raw_ask') or payload.get('ask')}|"
+        f"{payload.get('depth_timestamp_ms') or payload.get('l1_timestamp_ms') or payload.get('l1_book_timestamp_ms') or 0}|"
         f"{payload.get('volume') or payload.get('fut_volume_vtt') or 0}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
@@ -77,13 +78,37 @@ class V2SubscriptionRegistry:
         self,
         package_id: str,
         contracts: List[Dict[str, Any]],
+        stream_manager: Any = None,
         existing_stream_keys_fn: Optional[Callable[[], Set[str]]] = None,
         subscribe_additive_fn: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Records V2 package reference counts for required keys. Only subscribes additively if
-        not already monitored by V1 AND within V1-reserved WebSocket capacity headroom.
+        Records V2 package reference counts for required keys. Uses single-lock atomic owner-aware
+        acquisition on `stream_manager` when available, otherwise respects `existing_stream_keys_fn` headroom.
         """
+        if stream_manager is not None and hasattr(stream_manager, "acquire_owned_pins"):
+            res = stream_manager.acquire_owned_pins(
+                owner="V2",
+                contracts=contracts,
+                max_owner_pins=self.max_v2_additive_pins,
+                soft_cap=self.ws_total_soft_cap,
+                v1_headroom=self.v1_reserved_headroom,
+            )
+            with self._lock:
+                for c in contracts:
+                    ik = str(c.get("instrument_key") or "").strip()
+                    if not ik or ik in res.get("skipped_due_to_headroom", []):
+                        continue
+                    self._evicted_v2_keys.discard(ik)
+                    self._v2_refs.setdefault(ik, set()).add(package_id)
+                for ik in res.get("pinned_exclusively", []):
+                    self._v2_owned_only_keys.add(ik)
+            return {
+                "pinned_v2_only": res.get("pinned_exclusively", []),
+                "reused_v1_keys": res.get("reused_existing_keys", []),
+                "skipped_due_to_v1_headroom": res.get("skipped_due_to_headroom", []),
+            }
+
         existing = existing_stream_keys_fn() if existing_stream_keys_fn else set()
         to_pin: List[Dict[str, Any]] = []
         skipped_headroom: List[str] = []
@@ -124,9 +149,11 @@ class V2SubscriptionRegistry:
     def release_for_package(
         self,
         package_id: str,
+        stream_manager: Any = None,
         unpin_v2_only_fn: Optional[Callable[[List[str]], None]] = None,
     ) -> List[str]:
-        """Releases V2 package refs; removes only `v2_owned_only` keys whose refcount hits zero."""
+        """Atomically releases V2 package refs; never strips V1 protection or V1-acquired keys."""
+        to_release_candidates: List[str] = []
         released: List[str] = []
         with self._lock:
             empty_keys: List[str] = []
@@ -136,22 +163,40 @@ class V2SubscriptionRegistry:
                     empty_keys.append(ik)
             for ik in empty_keys:
                 self._v2_refs.pop(ik, None)
+                to_release_candidates.append(ik)
                 if ik in self._v2_owned_only_keys:
                     self._v2_owned_only_keys.discard(ik)
                     released.append(ik)
+
+        if stream_manager is not None and hasattr(stream_manager, "release_owned_pins") and to_release_candidates:
+            res = stream_manager.release_owned_pins("V2", to_release_candidates)
+            return list(res.get("released_from_stream", []))
+
         if released and unpin_v2_only_fn is not None:
             unpin_v2_only_fn(released)
         return released
 
     def yield_under_pressure(
         self,
+        stream_manager: Any = None,
         unpin_v2_only_fn: Optional[Callable[[List[str]], None]] = None,
         v1_active_keys: Optional[Set[str]] = None,
     ) -> List[str]:
         """
-        V2 yields first under subscription or limiter pressure: drops ONLY `v2_owned_only` keys
+        V2 yields first under subscription or limiter pressure: drops ONLY exclusively V2-owned keys
         not needed by V1, and records evicted keys so open V2 packages flag unpriced exposure.
         """
+        if stream_manager is not None and hasattr(stream_manager, "yield_owner_pins_under_pressure"):
+            victims = list(stream_manager.yield_owner_pins_under_pressure("V2"))
+            with self._lock:
+                for ik in victims:
+                    self._v2_owned_only_keys.discard(ik)
+                    if ik in self._v2_refs:
+                        self._evicted_v2_keys.add(ik)
+                if victims:
+                    self._pressure_yield_count += 1
+            return victims
+
         v1_keys = v1_active_keys or set()
         with self._lock:
             victims = sorted(ik for ik in self._v2_owned_only_keys if ik not in v1_keys)
@@ -171,9 +216,17 @@ class V2SubscriptionRegistry:
 
     def release_all_v2_owned(
         self,
+        stream_manager: Any = None,
         unpin_v2_only_fn: Optional[Callable[[List[str]], None]] = None,
     ) -> List[str]:
         """Clean V2-only shutdown helper: releases strictly V2-owned pins, never V1 pins."""
+        if stream_manager is not None and hasattr(stream_manager, "release_owned_pins"):
+            res = stream_manager.release_owned_pins("V2", None)
+            with self._lock:
+                self._v2_owned_only_keys.clear()
+                self._v2_refs.clear()
+            return list(res.get("released_from_stream", []))
+
         with self._lock:
             keys = sorted(self._v2_owned_only_keys)
             self._v2_owned_only_keys.clear()
@@ -260,6 +313,7 @@ class V2BoundedFeedConsumer:
                     self._dropped_overflow_count += 1
                     self._uncertainty_reasons.add("UNCERTAINTY_QUEUE_OVERFLOW")
 
+                avail_ms = int(payload.get("availability_ts_ms") or now_ms)
                 self._queue.append(
                     {
                         "dedup_key": dedup_k,
@@ -268,6 +322,7 @@ class V2BoundedFeedConsumer:
                         "instrument_key": ikey,
                         "exchange_ts_ms": ex_ts,
                         "receipt_ts_ms": now_ms,
+                        "availability_ts_ms": avail_ms,
                         "enqueued_perf_ns": time.perf_counter_ns(),
                         "sequence_flag": seq_flag,
                         "config_hash": self.config_hash,

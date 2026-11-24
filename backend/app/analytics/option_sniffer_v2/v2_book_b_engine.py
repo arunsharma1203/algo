@@ -61,6 +61,7 @@ from app.analytics.option_sniffer_v2.v2_data_contract import (
     check_cross_leg_skew,
     check_spot_futures_sync,
     sweep_observed_l5_book,
+    validate_nifty_option_identity,
 )
 from app.analytics.option_sniffer_v2.v2_paper_simulator import V2PaperSimulator
 
@@ -181,7 +182,9 @@ def compute_weekly_synthetic_basis_pts(
     """
     if spot_close <= 0 or atm_strike <= 0 or not atm_ce_quote or not atm_pe_quote:
         return None
-    skew_ok, _, _ = check_cross_leg_skew(atm_ce_quote, atm_pe_quote, max_skew_ms=max_skew_ms)
+    if not validate_nifty_option_identity(atm_ce_quote)[0] or not validate_nifty_option_identity(atm_pe_quote)[0]:
+        return None
+    skew_ok, _, _ = check_cross_leg_skew(atm_ce_quote, atm_pe_quote, max_skew_ms=max_skew_ms, require_depth_ts=False)
     if not skew_ok:
         return None
     ce_bid = float(atm_ce_quote.get("raw_bid") or atm_ce_quote.get("bid") or 0.0)
@@ -202,11 +205,11 @@ def evaluate_book_b_entry_signal(
     ist_hhmm: int,
     decision_ts_ms: int,
     spot_close: float,
-    spot_vwap: float,
+    spot_vwap: Optional[float],
     orb30_h: Optional[float],
     orb30_l: Optional[float],
-    adx14: float,
-    er20: float,
+    adx14: Optional[float],
+    er20: Optional[float],
     spot_quote: Optional[Dict[str, Any]],
     fut_quote: Optional[Dict[str, Any]],
     open_basis_ref: Optional[Dict[str, Any]],
@@ -235,13 +238,13 @@ def evaluate_book_b_entry_signal(
     win_end = int(window_end_override if window_end_override is not None else cfg_b["entry_window_end_hhmm"])
     win_ok = win_start <= ist_hhmm <= win_end
 
-    if orb30_h is None or orb30_l is None:
+    if orb30_h is None or orb30_l is None or orb30_h <= 0 or orb30_l <= 0 or spot_close <= 0 or not spot_vwap or spot_vwap <= 0:
         return {
             "book_id": cfg_b["book_id"],
             "candidate_variant": variant_code,
             "passed": False,
             "state": "WARMUP",
-            "reject_reason": "ORB30_INCOMPLETE",
+            "reject_reason": "ORB30_OR_VWAP_INCOMPLETE",
             "gates": [],
         }
 
@@ -273,6 +276,7 @@ def evaluate_book_b_entry_signal(
         max_skew_ms=int(hyg["max_spot_fut_sync_skew_ms"]),
         max_age_ms=int(hyg["max_entry_quote_age_ms"]),
         now_ms=decision_ts_ms,
+        expected_fut_contract=open_basis_ref if use_basis_delta else None,
     )
     basis_ok = False
     basis_reason = "UNCHECKED"
@@ -287,10 +291,13 @@ def evaluate_book_b_entry_signal(
             basis_reason = f"SynW={syn_weekly_basis:+.1f}pt"
     elif use_basis_delta:
         if not open_basis_ref or not open_basis_ref.get("ok"):
-            basis_reason = "MISSING_OPEN_BASIS_REF"
+            basis_reason = str((open_basis_ref or {}).get("reason") or "MISSING_OPEN_BASIS_REF")
         elif not sync_fut.get("ok"):
             basis_reason = str(sync_fut.get("reason"))
-        elif sync_fut["fut_instrument_key"] != open_basis_ref.get("fut_instrument_key"):
+        elif (
+            sync_fut["fut_instrument_key"] != open_basis_ref.get("fut_instrument_key")
+            or sync_fut.get("fut_expiry") != open_basis_ref.get("fut_expiry")
+        ):
             basis_reason = "FUTURES_CONTRACT_ROLLED_MID_SESSION"
         else:
             delta_basis = round(float(sync_fut["basis_pts"]) - float(open_basis_ref["basis_pts"]), 4)
@@ -306,13 +313,21 @@ def evaluate_book_b_entry_signal(
             basis_reason = f"rawBasis={raw_b:+.1f}pt"
 
     er_min = float(min_er_override if min_er_override is not None else cfg_b["min_er20"])
-    adx_ok = bool(adx14 >= float(cfg_b["min_adx14"]) and er20 >= er_min)
+    if adx14 is None or er20 is None:
+        adx_ok = False
+        adx_cur = "WARMUP"
+    else:
+        adx_ok = bool(float(adx14) >= float(cfg_b["min_adx14"]) and float(er20) >= er_min)
+        adx_cur = f"{float(adx14):.1f}/{float(er20):.2f}"
 
     def _eval_strike(k_val: float) -> Dict[str, Any]:
         meta = contracts_lookup.get((target_exp or "", k_val, ot)) if target_exp else None
         q = quote_lookup.get((target_exp or "", k_val, ot)) if target_exp else None
         if not meta or not q:
             return {"ok": False, "l5_ok": False, "cash_ok": False, "reason": "MISSING_CONTRACT_OR_QUOTE", "outlay": 0.0}
+        id_ok, id_rsn = validate_nifty_option_identity(meta)
+        if not id_ok:
+            return {"ok": False, "l5_ok": False, "cash_ok": False, "reason": id_rsn, "outlay": 0.0}
         lot_sz = int(meta["lot_size"])
         sw = sweep_observed_l5_book(
             quote=q,
@@ -368,7 +383,7 @@ def evaluate_book_b_entry_signal(
         {"name": "Window", "passed": win_ok, "current": f"{ist_hhmm:04d}", "target": f"{win_start:04d}..{win_end:04d}"},
         {"name": "ORB30+VWAP", "passed": dir_ok, "current": f"{spot_close:.1f}", "target": f">{orb30_h:.0f} or <{orb30_l:.0f}"},
         {"name": "BasisGate", "passed": basis_ok, "current": basis_reason, "target": ">=+3 / <=-3" if use_basis_delta else "abs>=5"},
-        {"name": "ADX/ER", "passed": adx_ok, "current": f"{adx14:.1f}/{er20:.2f}", "target": f">={cfg_b['min_adx14']:.0f}/{er_min:.2f}"},
+        {"name": "ADX/ER", "passed": adx_ok, "current": adx_cur, "target": f">={cfg_b['min_adx14']:.0f}/{er_min:.2f}"},
         {"name": "ObsL5Depth", "passed": bool(chosen_eval.get("l5_ok")), "current": chosen_eval.get("reason", "NA"), "target": f">=1lot & OBI>={cfg_b['min_l5_obi']:.2f}"},
         {"name": "CashCap", "passed": bool(chosen_eval.get("cash_ok")), "current": f"Rs{chosen_eval.get('outlay', 0):,.0f}", "target": f"<=Rs{cfg_b['max_entry_outlay_inr']:,.0f}"},
     ]
@@ -431,6 +446,7 @@ def manage_open_book_b_on_bar(
         now_ms=decision_ts_ms,
         max_spread_pct=None,
         require_observed_l5=False,
+        allow_fresh_l1_only=True,
     )
     if not sw.get("ok"):
         if ist_hhmm >= int(cfg_b["eod_squareoff_hhmm"]):

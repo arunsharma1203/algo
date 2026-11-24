@@ -1,6 +1,9 @@
 {
   "protocol_id": "OPTION_SNIFFER_V2_ISOLATED_PAPER_V1",
-  "schema_version": "2.0.0",
+  "schema_version": "2.1.0",
+  "engine_version": "2.1.0-causal",
+  "replay_run_mode": "REPLAY_V2_1_CAUSAL",
+  "supersedes_protocol_sha256": "0f972ca95e7ccdc3f11dfe4f7d84834063c1b9f5d4aa569759055fda844d7f9d",
   "created_date": "2026-11-24",
   "simulation_mode": true,
   "live_capable_by_config": false,

@@ -198,7 +198,7 @@ def run_reproducible_audit(
             benchmark_db = os.path.join(td_ctx.name, "osv2_bench_parity.db")
             set_v2_test_db_override(v2_db_path)
 
-        store1 = V2LedgerStore(v2_db_path)
+        store1 = V2LedgerStore(v2_db_path, auto_create=True)
         v1_conn = open_v1_readonly_db(v1_path)
         try:
             o3 = load_phase4_o3_audit_report()
@@ -209,7 +209,7 @@ def run_reproducible_audit(
             # Second independent fresh replay proving bit-for-bit identical canonical digest
             if not persist_runtime_v2_db:
                 set_v2_test_db_override(v2_db_path_2)
-                store2 = V2LedgerStore(v2_db_path_2)
+                store2 = V2LedgerStore(v2_db_path_2, auto_create=True)
             else:
                 store2 = store1
             rep2 = run_v2_replay_and_attribution(v1_conn, store2, cfg, cfg_hash)
@@ -256,6 +256,8 @@ def run_reproducible_audit(
 
         return {
             "protocol_id": cfg["protocol_id"],
+            "engine_version": cfg.get("engine_version", "2.1.0-causal"),
+            "replay_run_mode": cfg.get("replay_run_mode", "REPLAY_V2_1_CAUSAL"),
             "config_hash": cfg_hash,
             "v1_db_readonly_untouched": v1_sha_before == v1_sha_after,
             "v1_db_sha256": v1_sha_after,
@@ -266,6 +268,9 @@ def run_reproducible_audit(
                 "exact_twice_replay_match": sha1 == sha2,
                 "max_gross_minus_friction_diff_inr": max_arith_diff,
             },
+            "causal_verification_outcome": rep1["causal_verification_outcome"],
+            "archive_timing_evidence": rep1["archive_timing_evidence"],
+            "superseded_v2_0_replay": rep1["superseded_v2_0_replay"],
             "phase4_o3_audit": o3,
             "v1_book_b_overshoot_audit": overshoot,
             "canonical_ledger_trades": ledger_trades,
@@ -305,7 +310,9 @@ def main() -> int:
             json.dump(res, fh, indent=2, sort_keys=True)
 
     print("=== V2 OPTION SNIFFER REPRODUCIBLE AUDIT ===")
-    print(f"Protocol: {res['protocol_id']} | Config SHA-256: {res['config_hash']}")
+    print(f"Protocol: {res['protocol_id']} | Engine: {res['engine_version']} | Mode: {res['replay_run_mode']} | Config SHA-256: {res['config_hash']}")
+    print(f"Causal Verification Outcome: {res['causal_verification_outcome']}")
+    print(f"Superseded v2.0.0 Evidence: {res['superseded_v2_0_replay'].get('evidence_status')} (commit={res['superseded_v2_0_replay'].get('audited_commit')}, sha256={res['superseded_v2_0_replay'].get('ledger_sha256')})")
     print(f"V1 DB Read-Only Untouched: {res['v1_db_readonly_untouched']} (SHA-256={res['v1_db_sha256'][:16]}...)")
     print(
         f"Twice-Replay SHA-256 Match: {res['determinism']['exact_twice_replay_match']} "

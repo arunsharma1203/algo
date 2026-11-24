@@ -6,20 +6,25 @@ Guarantees:
     or an isolated test database override).
   - Never opens or migrates `backend/market_data.db` in read-write mode; V1 reads
     strictly use SQLite URI `?mode=ro` + `PRAGMA query_only = ON`.
-  - Persists signals, order intents, fills, package state transitions, atomic ledger cash/reserve
-    deltas, daily snapshots, and strictly segregated V1 counterfactual rows.
+  - Thread-owned SQLite connections (`check_same_thread=True` ALWAYS enforced; zero
+    cross-thread shared `sqlite3.Connection`), short transactions, and cold-start read
+    methods never create the DB file or execute writes.
+  - Persists signals, order intents, fills, package state transitions, atomic ledger
+    cash/reserve deltas, completed 1m bars, equity curve points, runtime risk checkpoints,
+    daily session qualification snapshots, and strictly segregated V1 counterfactual rows.
 """
 
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 import sqlite3
 import tempfile
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from app.data.database import get_canonical_db_path, is_testing_environment
 
@@ -69,7 +74,7 @@ def get_v2_db_path() -> str:
     return _DEFAULT_V2_DB_PATH
 
 
-def get_v2_connection(db_path: Optional[str] = None, timeout: float = 15.0) -> sqlite3.Connection:
+def validate_v2_target_path(db_path: Optional[str] = None) -> str:
     target = os.path.abspath(db_path or get_v2_db_path())
     v1_canon = os.path.abspath(get_canonical_db_path())
     if target == v1_canon:
@@ -80,10 +85,25 @@ def get_v2_connection(db_path: Optional[str] = None, timeout: float = 15.0) -> s
         raise V2DatabaseIsolationError(
             "FATAL: Test execution attempted to write to runtime V2 DB without isolated override."
         )
+    return target
+
+
+def get_v2_connection(db_path: Optional[str] = None, timeout: float = 15.0) -> sqlite3.Connection:
+    """Opens a thread-owned read-write SQLite connection (`check_same_thread=True` preserved)."""
+    target = validate_v2_target_path(db_path)
     os.makedirs(os.path.dirname(target), exist_ok=True)
-    conn = sqlite3.connect(target, timeout=timeout, isolation_level=None)
+    conn = sqlite3.connect(target, timeout=timeout, isolation_level=None, check_same_thread=True)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON;")
+    return conn
+
+
+def get_v2_readonly_connection(db_path: str, timeout: float = 10.0) -> sqlite3.Connection:
+    """Opens a short-lived strictly read-only handle (`?mode=ro` + `PRAGMA query_only = ON`) without creating files."""
+    resolved = os.path.abspath(db_path)
+    conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True, timeout=timeout, check_same_thread=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON;")
     return conn
 
 
@@ -92,16 +112,22 @@ def open_v1_readonly_db(v1_db_path: Optional[str] = None, timeout: float = 10.0)
     resolved = os.path.abspath(v1_db_path or get_canonical_db_path())
     if not os.path.exists(resolved):
         raise FileNotFoundError(f"V1 read-only database not found: {resolved}")
-    conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True, timeout=timeout)
+    conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True, timeout=timeout, check_same_thread=True)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only = ON;")
     return conn
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, col_name: str, col_def: str) -> None:
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table});").fetchall()}
+    if col_name not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_def};")
+
+
 def init_v2_tables(db_path: Optional[str] = None) -> str:
     """Initializes dedicated `osv2_*` schema in V2's isolated SQLite database."""
     with _DB_INIT_LOCK:
-        target = db_path or get_v2_db_path()
+        target = validate_v2_target_path(db_path)
         conn = get_v2_connection(target)
         try:
             conn.execute("PRAGMA journal_mode=WAL;")
@@ -222,6 +248,9 @@ def init_v2_tables(db_path: Optional[str] = None) -> str:
                     unpriced_since_ts_ms INTEGER,
                     last_mark_net_pnl_inr REAL,
                     last_mark_ts_ms INTEGER,
+                    last_reliable_mark_net_inr REAL,
+                    last_reliable_mark_ts_ms INTEGER,
+                    events_timeline_json TEXT,
                     transition_seq INTEGER NOT NULL DEFAULT 0
                 );
 
@@ -257,7 +286,66 @@ def init_v2_tables(db_path: Optional[str] = None) -> str:
                     open_overnight_packages INTEGER NOT NULL,
                     unresolved_exposure_count INTEGER NOT NULL,
                     net_pnl_inr REAL NOT NULL,
+                    session_state TEXT NOT NULL DEFAULT 'PARTIAL_SESSION',
+                    running_peak_equity_inr REAL NOT NULL DEFAULT 200000.0,
+                    max_mtm_dd_inr REAL NOT NULL DEFAULT 0.0,
+                    max_mtm_dd_pct_start REAL NOT NULL DEFAULT 0.0,
+                    max_mtm_dd_pct_peak REAL NOT NULL DEFAULT 0.0,
+                    gap_count INTEGER NOT NULL DEFAULT 0,
+                    overflow_count INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(run_mode, config_hash, session_date)
+                );
+
+                CREATE TABLE IF NOT EXISTS osv2_completed_bars_1m (
+                    run_mode TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    bar_open_ts TEXT NOT NULL,
+                    session_date TEXT NOT NULL,
+                    spot_o REAL NOT NULL,
+                    spot_h REAL NOT NULL,
+                    spot_l REAL NOT NULL,
+                    spot_c REAL NOT NULL,
+                    vix_c REAL,
+                    bar_close_ts_ms INTEGER NOT NULL,
+                    decision_ts_ms INTEGER NOT NULL,
+                    PRIMARY KEY(run_mode, config_hash, bar_open_ts)
+                );
+
+                CREATE TABLE IF NOT EXISTS osv2_runtime_checkpoints (
+                    run_mode TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    session_date TEXT NOT NULL,
+                    updated_ts_ms INTEGER NOT NULL,
+                    daily_kill_reason TEXT,
+                    cooldown_json TEXT NOT NULL DEFAULT '{}',
+                    bar_locks_json TEXT NOT NULL DEFAULT '{}',
+                    open_basis_ref_json TEXT,
+                    last_event_ts_ms INTEGER NOT NULL DEFAULT 0,
+                    last_bar_open_ts TEXT,
+                    session_started_from_open INTEGER NOT NULL DEFAULT 0,
+                    sequence_gap_count INTEGER NOT NULL DEFAULT 0,
+                    overflow_drop_count INTEGER NOT NULL DEFAULT 0,
+                    booking_fault_json TEXT,
+                    running_peak_equity_inr REAL NOT NULL DEFAULT 200000.0,
+                    max_mtm_dd_inr REAL NOT NULL DEFAULT 0.0,
+                    intraday_min_mtm_equity_inr REAL NOT NULL DEFAULT 200000.0,
+                    peak_reserved_inr REAL NOT NULL DEFAULT 0.0,
+                    PRIMARY KEY(run_mode, config_hash, session_date)
+                );
+
+                CREATE TABLE IF NOT EXISTS osv2_equity_curve (
+                    run_mode TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    seq_no INTEGER NOT NULL,
+                    session_date TEXT NOT NULL,
+                    ts_ms INTEGER NOT NULL,
+                    event_kind TEXT NOT NULL,
+                    realized_equity_inr REAL NOT NULL,
+                    conservative_mtm_inr REAL NOT NULL,
+                    marked_equity_inr REAL NOT NULL,
+                    running_peak_equity_inr REAL NOT NULL,
+                    drawdown_inr REAL NOT NULL,
+                    PRIMARY KEY(run_mode, config_hash, seq_no)
                 );
 
                 CREATE TABLE IF NOT EXISTS osv2_counterfactual_v1 (
@@ -278,136 +366,205 @@ def init_v2_tables(db_path: Optional[str] = None) -> str:
                 );
                 """
             )
+            # Idempotent additive migrations for older V2 DBs
+            _ensure_column(conn, "osv2_packages", "last_reliable_mark_net_inr", "REAL")
+            _ensure_column(conn, "osv2_packages", "last_reliable_mark_ts_ms", "INTEGER")
+            _ensure_column(conn, "osv2_packages", "events_timeline_json", "TEXT")
+            _ensure_column(conn, "osv2_daily_snapshots", "session_state", "TEXT NOT NULL DEFAULT 'PARTIAL_SESSION'")
+            _ensure_column(conn, "osv2_daily_snapshots", "running_peak_equity_inr", "REAL NOT NULL DEFAULT 200000.0")
+            _ensure_column(conn, "osv2_daily_snapshots", "max_mtm_dd_inr", "REAL NOT NULL DEFAULT 0.0")
+            _ensure_column(conn, "osv2_daily_snapshots", "max_mtm_dd_pct_start", "REAL NOT NULL DEFAULT 0.0")
+            _ensure_column(conn, "osv2_daily_snapshots", "max_mtm_dd_pct_peak", "REAL NOT NULL DEFAULT 0.0")
+            _ensure_column(conn, "osv2_daily_snapshots", "gap_count", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(conn, "osv2_daily_snapshots", "overflow_count", "INTEGER NOT NULL DEFAULT 0")
             return target
         finally:
             conn.close()
 
 
 class V2LedgerStore:
-    """Thread-safe atomic SQLite repository for Option Sniffer V2 state and reproducible ledger."""
+    """
+    Thread-safe SQLite repository enforcing thread-owned connections (`check_same_thread=True`),
+    short transactions, cold-start non-creating reads, and serialized atomic writes.
+    """
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
-        self._lock = threading.RLock()
-        self.db_path = init_v2_tables(db_path)
-        self._conn: Optional[sqlite3.Connection] = None
+    def __init__(self, db_path: Optional[str] = None, auto_create: bool = False) -> None:
+        self._write_lock = threading.RLock()
+        self._lock = self._write_lock
+        self._thread_local = threading.local()
+        self.db_path = validate_v2_target_path(db_path)
+        self._schema_ready: bool = False
+        if auto_create or os.path.exists(self.db_path):
+            self.ensure_initialized()
+
+    def db_exists(self) -> bool:
+        return os.path.exists(self.db_path)
+
+    def ensure_initialized(self) -> str:
+        with self._write_lock:
+            self.db_path = validate_v2_target_path(self.db_path)
+            if not self._schema_ready or not os.path.exists(self.db_path):
+                init_v2_tables(self.db_path)
+                self._schema_ready = True
+            return self.db_path
+
+    ensure_schema = ensure_initialized
 
     def connect(self) -> sqlite3.Connection:
+        """Explicit thread-owned writable connection (initializes schema if needed)."""
+        self.ensure_initialized()
         return get_v2_connection(self.db_path)
 
-    def _txn_conn(self) -> sqlite3.Connection:
-        """Returns persistent connection guarded by `self._lock` for fast atomic transactions."""
-        if self._conn is None:
-            self._conn = get_v2_connection(self.db_path)
-        return self._conn
+    def _connect_readonly_if_exists(self) -> Optional[sqlite3.Connection]:
+        if not os.path.exists(self.db_path):
+            return None
+        return get_v2_readonly_connection(self.db_path)
+
+    @contextmanager
+    def writer_session(self) -> Iterator[None]:
+        """
+        Optional thread-local connection scope for single-thread replays so batched writes
+        avoid open/close churn WITHOUT ever sharing a SQLite connection across threads.
+        """
+        self.ensure_initialized()
+        prev = getattr(self._thread_local, "writer_conn", None)
+        if prev is not None:
+            yield
+            return
+        conn = get_v2_connection(self.db_path)
+        self._thread_local.writer_conn = conn
+        try:
+            yield
+        finally:
+            self._thread_local.writer_conn = None
+            conn.close()
+
+    @contextmanager
+    def _write_conn(self) -> Iterator[sqlite3.Connection]:
+        """Yields a thread-owned read-write connection under `_write_lock` and closes non-scoped handles cleanly."""
+        self.ensure_initialized()
+        scoped = getattr(self._thread_local, "writer_conn", None)
+        if scoped is not None:
+            yield scoped
+            return
+        conn = get_v2_connection(self.db_path)
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def close(self) -> None:
-        with self._lock:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                finally:
-                    self._conn = None
+        """Closes any thread-local writer session handle on the calling thread."""
+        scoped = getattr(self._thread_local, "writer_conn", None)
+        if scoped is not None:
+            self._thread_local.writer_conn = None
+            scoped.close()
 
     def clear_run_mode(self, run_mode: str, config_hash: Optional[str] = None) -> None:
         """Clears only non-forward replay/test rows for deterministic re-runs."""
         if run_mode == "FORWARD_PAPER":
             raise ValueError("Refusing to bulk-clear live FORWARD_PAPER ledger rows.")
-        with self._lock:
-            conn = self._txn_conn()
-            try:
-                conn.execute("BEGIN IMMEDIATE;")
-                for tbl in (
-                    "osv2_events_ingest",
-                    "osv2_fills",
-                    "osv2_order_intents",
-                    "osv2_ledger_entries",
-                    "osv2_packages",
-                    "osv2_signals",
-                    "osv2_daily_snapshots",
-                ):
-                    if config_hash:
-                        conn.execute(
-                            f"DELETE FROM {tbl} WHERE run_mode = ? AND config_hash = ?;",
-                            (run_mode, config_hash),
-                        )
-                    else:
-                        conn.execute(f"DELETE FROM {tbl} WHERE run_mode = ?;", (run_mode,))
-                conn.execute("COMMIT;")
-            except Exception:
-                conn.execute("ROLLBACK;")
-                raise
+        with self._write_lock:
+            if not os.path.exists(self.db_path):
+                return
+            with self._write_conn() as conn:
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
+                    for tbl in (
+                        "osv2_events_ingest",
+                        "osv2_fills",
+                        "osv2_order_intents",
+                        "osv2_ledger_entries",
+                        "osv2_packages",
+                        "osv2_signals",
+                        "osv2_daily_snapshots",
+                        "osv2_completed_bars_1m",
+                        "osv2_runtime_checkpoints",
+                        "osv2_equity_curve",
+                    ):
+                        if config_hash:
+                            conn.execute(
+                                f"DELETE FROM {tbl} WHERE run_mode = ? AND config_hash = ?;",
+                                (run_mode, config_hash),
+                            )
+                        else:
+                            conn.execute(f"DELETE FROM {tbl} WHERE run_mode = ?;", (run_mode,))
+                    conn.execute("COMMIT;")
+                except Exception:
+                    conn.execute("ROLLBACK;")
+                    raise
 
     def record_signal_idempotent(self, row: Dict[str, Any]) -> bool:
-        with self._lock:
-            conn = self._txn_conn()
-            try:
-                conn.execute("BEGIN IMMEDIATE;")
-                cur = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO osv2_signals (
-                        signal_id, run_mode, config_hash, session_date, bar_ts, decision_ts_ms,
-                        book_id, candidate_variant, direction, status, reject_reason,
-                        gates_json, provenance_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """,
-                    (
-                        row["signal_id"],
-                        row["run_mode"],
-                        row["config_hash"],
-                        row["session_date"],
-                        row["bar_ts"],
-                        int(row["decision_ts_ms"]),
-                        row["book_id"],
-                        row["candidate_variant"],
-                        row["direction"],
-                        row["status"],
-                        row.get("reject_reason"),
-                        json.dumps(row["gates"], sort_keys=True),
-                        json.dumps(row["provenance"], sort_keys=True),
-                    ),
-                )
-                conn.execute("COMMIT;")
-                return cur.rowcount > 0
-            except Exception:
-                conn.execute("ROLLBACK;")
-                raise
+        with self._write_lock:
+            with self._write_conn() as conn:
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
+                    cur = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO osv2_signals (
+                            signal_id, run_mode, config_hash, session_date, bar_ts, decision_ts_ms,
+                            book_id, candidate_variant, direction, status, reject_reason,
+                            gates_json, provenance_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        (
+                            row["signal_id"],
+                            row["run_mode"],
+                            row["config_hash"],
+                            row["session_date"],
+                            row["bar_ts"],
+                            int(row["decision_ts_ms"]),
+                            row["book_id"],
+                            row["candidate_variant"],
+                            row["direction"],
+                            row["status"],
+                            row.get("reject_reason"),
+                            json.dumps(row["gates"], sort_keys=True),
+                            json.dumps(row["provenance"], sort_keys=True),
+                        ),
+                    )
+                    conn.execute("COMMIT;")
+                    return cur.rowcount > 0
+                except Exception:
+                    conn.execute("ROLLBACK;")
+                    raise
 
     def persist_ingest_events(self, envelopes: List[Dict[str, Any]], run_mode: str, decision_ts_ms: int) -> int:
         if not envelopes:
             return 0
-        with self._lock:
-            conn = self._txn_conn()
-            inserted = 0
-            try:
-                conn.execute("BEGIN IMMEDIATE;")
-                for env in envelopes:
-                    cur = conn.execute(
-                        """
-                        INSERT OR IGNORE INTO osv2_events_ingest (
-                            event_dedup_key, run_mode, config_hash, instrument_key,
-                            event_kind, exchange_ts_ms, receipt_ts_ms, decision_ts_ms,
-                            sequence_flag, payload_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                        """,
-                        (
-                            env["dedup_key"],
-                            run_mode,
-                            env["config_hash"],
-                            env["instrument_key"],
-                            env["kind"],
-                            int(env["exchange_ts_ms"]),
-                            int(env["receipt_ts_ms"]),
-                            int(decision_ts_ms),
-                            env["sequence_flag"],
-                            json.dumps(env["payload"], sort_keys=True, default=str),
-                        ),
-                    )
-                    inserted += max(0, cur.rowcount)
-                conn.execute("COMMIT;")
-                return inserted
-            except Exception:
-                conn.execute("ROLLBACK;")
-                raise
+        with self._write_lock:
+            with self._write_conn() as conn:
+                inserted = 0
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
+                    for env in envelopes:
+                        cur = conn.execute(
+                            """
+                            INSERT OR IGNORE INTO osv2_events_ingest (
+                                event_dedup_key, run_mode, config_hash, instrument_key,
+                                event_kind, exchange_ts_ms, receipt_ts_ms, decision_ts_ms,
+                                sequence_flag, payload_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            """,
+                            (
+                                env["dedup_key"],
+                                run_mode,
+                                env["config_hash"],
+                                env["instrument_key"],
+                                env["kind"],
+                                int(env["exchange_ts_ms"]),
+                                int(env["receipt_ts_ms"]),
+                                int(decision_ts_ms),
+                                env["sequence_flag"],
+                                json.dumps(env["payload"], sort_keys=True, default=str),
+                            ),
+                        )
+                        inserted += max(0, cur.rowcount)
+                    conn.execute("COMMIT;")
+                    return inserted
+                except Exception:
+                    conn.execute("ROLLBACK;")
+                    raise
 
     def execute_atomic_transition(
         self,
@@ -415,274 +572,424 @@ class V2LedgerStore:
         fills: List[Dict[str, Any]],
         package_upsert: Optional[Dict[str, Any]],
         ledger_entry: Optional[Dict[str, Any]],
+        equity_point: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
-        Atomically commits intent + fill + package state + idempotent ledger entry inside
-        a single `BEGIN IMMEDIATE` SQLite transaction. Returns False if ledger_entry already exists.
+        Atomically commits intent + fill + package state + idempotent ledger entry + optional equity curve point
+        inside a single `BEGIN IMMEDIATE` SQLite transaction. Returns False if ledger_entry already exists.
         """
-        with self._lock:
-            conn = self._txn_conn()
-            try:
-                conn.execute("BEGIN IMMEDIATE;")
-                if ledger_entry is not None:
-                    cur_le = conn.execute(
-                        """
-                        INSERT OR IGNORE INTO osv2_ledger_entries (
-                            entry_id, package_id, transition_seq, run_mode, config_hash,
-                            ts_ms, session_date, event_type, cash_delta_inr, reserved_delta_inr,
-                            realized_equity_after_inr, reserved_after_inr
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                        """,
-                        (
-                            ledger_entry["entry_id"],
-                            ledger_entry["package_id"],
-                            int(ledger_entry["transition_seq"]),
-                            ledger_entry["run_mode"],
-                            ledger_entry["config_hash"],
-                            int(ledger_entry["ts_ms"]),
-                            ledger_entry["session_date"],
-                            ledger_entry["event_type"],
-                            float(ledger_entry["cash_delta_inr"]),
-                            float(ledger_entry["reserved_delta_inr"]),
-                            float(ledger_entry["realized_equity_after_inr"]),
-                            float(ledger_entry["reserved_after_inr"]),
-                        ),
-                    )
-                    if cur_le.rowcount == 0:
-                        conn.execute("ROLLBACK;")
-                        return False
-
-                for it in intents:
-                    conn.execute(
-                        """
-                        INSERT INTO osv2_order_intents (
-                            intent_id, signal_id, package_id, run_mode, config_hash, leg_role,
-                            instrument_key, side, target_qty, limit_price, filled_qty,
-                            state, reject_reason, created_ts_ms, updated_ts_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(intent_id) DO UPDATE SET
-                            filled_qty=excluded.filled_qty,
-                            state=excluded.state,
-                            reject_reason=excluded.reject_reason,
-                            updated_ts_ms=excluded.updated_ts_ms;
-                        """,
-                        (
-                            it["intent_id"],
-                            it["signal_id"],
-                            it["package_id"],
-                            it["run_mode"],
-                            it["config_hash"],
-                            it["leg_role"],
-                            it["instrument_key"],
-                            it["side"],
-                            int(it["target_qty"]),
-                            it.get("limit_price"),
-                            int(it.get("filled_qty") or 0),
-                            it["state"],
-                            it.get("reject_reason"),
-                            int(it["created_ts_ms"]),
-                            int(it["updated_ts_ms"]),
-                        ),
-                    )
-
-                for fl in fills:
-                    conn.execute(
-                        """
-                        INSERT OR IGNORE INTO osv2_fills (
-                            fill_id, intent_id, package_id, run_mode, config_hash,
-                            instrument_key, side, qty, fill_price, raw_top_price, vwap_raw,
-                            slippage_pts, fill_fidelity, exchange_ts_ms, receipt_ts_ms, decision_ts_ms
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                        """,
-                        (
-                            fl["fill_id"],
-                            fl["intent_id"],
-                            fl["package_id"],
-                            fl["run_mode"],
-                            fl["config_hash"],
-                            fl["instrument_key"],
-                            fl["side"],
-                            int(fl["qty"]),
-                            float(fl["fill_price"]),
-                            float(fl["raw_top_price"]),
-                            float(fl["vwap_raw"]),
-                            float(fl["slippage_pts"]),
-                            fl["fill_fidelity"],
-                            int(fl["exchange_ts_ms"]),
-                            int(fl["receipt_ts_ms"]),
-                            int(fl["decision_ts_ms"]),
-                        ),
-                    )
-
-                if package_upsert is not None:
-                    p = package_upsert
-                    conn.execute(
-                        """
-                        INSERT INTO osv2_packages (
-                            package_id, signal_id, run_mode, config_hash, book_id,
-                            candidate_variant, session_date, expiry, state, fill_fidelity,
-                            direction_label, entry_bar_ts, entry_ts_ms, leg2_confirmed_ts_ms,
-                            exit_bar_ts, exit_ts_ms, exit_reason, legs_json, accounting_json,
-                            reserved_capital_inr, structural_max_loss_inr, planned_loss_inr,
-                            actual_gross_fill_loss_inr, slippage_and_gap_overshoot_inr,
-                            gross_pnl_inr, brokerage_inr, stt_inr, statutory_charges_inr,
-                            total_friction_inr, net_pnl_inr, entry_day_mtm_pnl_inr,
-                            overnight_gap_pnl_inr, expiry_intraday_pnl_inr, worst_gap_loss_inr,
-                            is_unpriced_exposure, unpriced_reason, unpriced_since_ts_ms,
-                            last_mark_net_pnl_inr, last_mark_ts_ms, transition_seq
-                        ) VALUES (
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        with self._write_lock:
+            with self._write_conn() as conn:
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
+                    if ledger_entry is not None:
+                        cur_le = conn.execute(
+                            """
+                            INSERT OR IGNORE INTO osv2_ledger_entries (
+                                entry_id, package_id, transition_seq, run_mode, config_hash,
+                                ts_ms, session_date, event_type, cash_delta_inr, reserved_delta_inr,
+                                realized_equity_after_inr, reserved_after_inr
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            """,
+                            (
+                                ledger_entry["entry_id"],
+                                ledger_entry["package_id"],
+                                int(ledger_entry["transition_seq"]),
+                                ledger_entry["run_mode"],
+                                ledger_entry["config_hash"],
+                                int(ledger_entry["ts_ms"]),
+                                ledger_entry["session_date"],
+                                ledger_entry["event_type"],
+                                float(ledger_entry["cash_delta_inr"]),
+                                float(ledger_entry["reserved_delta_inr"]),
+                                float(ledger_entry["realized_equity_after_inr"]),
+                                float(ledger_entry["reserved_after_inr"]),
+                            ),
                         )
-                        ON CONFLICT(package_id) DO UPDATE SET
-                            state=excluded.state,
-                            leg2_confirmed_ts_ms=excluded.leg2_confirmed_ts_ms,
-                            exit_bar_ts=excluded.exit_bar_ts,
-                            exit_ts_ms=excluded.exit_ts_ms,
-                            exit_reason=excluded.exit_reason,
-                            legs_json=excluded.legs_json,
-                            accounting_json=excluded.accounting_json,
-                            reserved_capital_inr=excluded.reserved_capital_inr,
-                            structural_max_loss_inr=excluded.structural_max_loss_inr,
-                            planned_loss_inr=excluded.planned_loss_inr,
-                            actual_gross_fill_loss_inr=excluded.actual_gross_fill_loss_inr,
-                            slippage_and_gap_overshoot_inr=excluded.slippage_and_gap_overshoot_inr,
-                            gross_pnl_inr=excluded.gross_pnl_inr,
-                            brokerage_inr=excluded.brokerage_inr,
-                            stt_inr=excluded.stt_inr,
-                            statutory_charges_inr=excluded.statutory_charges_inr,
-                            total_friction_inr=excluded.total_friction_inr,
-                            net_pnl_inr=excluded.net_pnl_inr,
-                            entry_day_mtm_pnl_inr=excluded.entry_day_mtm_pnl_inr,
-                            overnight_gap_pnl_inr=excluded.overnight_gap_pnl_inr,
-                            expiry_intraday_pnl_inr=excluded.expiry_intraday_pnl_inr,
-                            worst_gap_loss_inr=excluded.worst_gap_loss_inr,
-                            is_unpriced_exposure=excluded.is_unpriced_exposure,
-                            unpriced_reason=excluded.unpriced_reason,
-                            unpriced_since_ts_ms=excluded.unpriced_since_ts_ms,
-                            last_mark_net_pnl_inr=excluded.last_mark_net_pnl_inr,
-                            last_mark_ts_ms=excluded.last_mark_ts_ms,
-                            transition_seq=excluded.transition_seq;
+                        if cur_le.rowcount == 0:
+                            conn.execute("ROLLBACK;")
+                            return False
+
+                    for it in intents:
+                        conn.execute(
+                            """
+                            INSERT INTO osv2_order_intents (
+                                intent_id, signal_id, package_id, run_mode, config_hash, leg_role,
+                                instrument_key, side, target_qty, limit_price, filled_qty,
+                                state, reject_reason, created_ts_ms, updated_ts_ms
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(intent_id) DO UPDATE SET
+                                filled_qty=excluded.filled_qty,
+                                state=excluded.state,
+                                reject_reason=excluded.reject_reason,
+                                updated_ts_ms=excluded.updated_ts_ms;
+                            """,
+                            (
+                                it["intent_id"],
+                                it["signal_id"],
+                                it["package_id"],
+                                it["run_mode"],
+                                it["config_hash"],
+                                it["leg_role"],
+                                it["instrument_key"],
+                                it["side"],
+                                int(it["target_qty"]),
+                                it.get("limit_price"),
+                                int(it.get("filled_qty") or 0),
+                                it["state"],
+                                it.get("reject_reason"),
+                                int(it["created_ts_ms"]),
+                                int(it["updated_ts_ms"]),
+                            ),
+                        )
+
+                    for fl in fills:
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO osv2_fills (
+                                fill_id, intent_id, package_id, run_mode, config_hash,
+                                instrument_key, side, qty, fill_price, raw_top_price, vwap_raw,
+                                slippage_pts, fill_fidelity, exchange_ts_ms, receipt_ts_ms, decision_ts_ms
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            """,
+                            (
+                                fl["fill_id"],
+                                fl["intent_id"],
+                                fl["package_id"],
+                                fl["run_mode"],
+                                fl["config_hash"],
+                                fl["instrument_key"],
+                                fl["side"],
+                                int(fl["qty"]),
+                                float(fl["fill_price"]),
+                                float(fl["raw_top_price"]),
+                                float(fl["vwap_raw"]),
+                                float(fl["slippage_pts"]),
+                                fl["fill_fidelity"],
+                                int(fl["exchange_ts_ms"]),
+                                int(fl["receipt_ts_ms"]),
+                                int(fl["decision_ts_ms"]),
+                            ),
+                        )
+
+                    if package_upsert is not None:
+                        p = package_upsert
+                        conn.execute(
+                            """
+                            INSERT INTO osv2_packages (
+                                package_id, signal_id, run_mode, config_hash, book_id,
+                                candidate_variant, session_date, expiry, state, fill_fidelity,
+                                direction_label, entry_bar_ts, entry_ts_ms, leg2_confirmed_ts_ms,
+                                exit_bar_ts, exit_ts_ms, exit_reason, legs_json, accounting_json,
+                                reserved_capital_inr, structural_max_loss_inr, planned_loss_inr,
+                                actual_gross_fill_loss_inr, slippage_and_gap_overshoot_inr,
+                                gross_pnl_inr, brokerage_inr, stt_inr, statutory_charges_inr,
+                                total_friction_inr, net_pnl_inr, entry_day_mtm_pnl_inr,
+                                overnight_gap_pnl_inr, expiry_intraday_pnl_inr, worst_gap_loss_inr,
+                                is_unpriced_exposure, unpriced_reason, unpriced_since_ts_ms,
+                                last_mark_net_pnl_inr, last_mark_ts_ms,
+                                last_reliable_mark_net_inr, last_reliable_mark_ts_ms,
+                                events_timeline_json, transition_seq
+                            ) VALUES (
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            )
+                            ON CONFLICT(package_id) DO UPDATE SET
+                                state=excluded.state,
+                                leg2_confirmed_ts_ms=excluded.leg2_confirmed_ts_ms,
+                                exit_bar_ts=excluded.exit_bar_ts,
+                                exit_ts_ms=excluded.exit_ts_ms,
+                                exit_reason=excluded.exit_reason,
+                                legs_json=excluded.legs_json,
+                                accounting_json=excluded.accounting_json,
+                                reserved_capital_inr=excluded.reserved_capital_inr,
+                                structural_max_loss_inr=excluded.structural_max_loss_inr,
+                                planned_loss_inr=excluded.planned_loss_inr,
+                                actual_gross_fill_loss_inr=excluded.actual_gross_fill_loss_inr,
+                                slippage_and_gap_overshoot_inr=excluded.slippage_and_gap_overshoot_inr,
+                                gross_pnl_inr=excluded.gross_pnl_inr,
+                                brokerage_inr=excluded.brokerage_inr,
+                                stt_inr=excluded.stt_inr,
+                                statutory_charges_inr=excluded.statutory_charges_inr,
+                                total_friction_inr=excluded.total_friction_inr,
+                                net_pnl_inr=excluded.net_pnl_inr,
+                                entry_day_mtm_pnl_inr=excluded.entry_day_mtm_pnl_inr,
+                                overnight_gap_pnl_inr=excluded.overnight_gap_pnl_inr,
+                                expiry_intraday_pnl_inr=excluded.expiry_intraday_pnl_inr,
+                                worst_gap_loss_inr=excluded.worst_gap_loss_inr,
+                                is_unpriced_exposure=excluded.is_unpriced_exposure,
+                                unpriced_reason=excluded.unpriced_reason,
+                                unpriced_since_ts_ms=excluded.unpriced_since_ts_ms,
+                                last_mark_net_pnl_inr=excluded.last_mark_net_pnl_inr,
+                                last_mark_ts_ms=excluded.last_mark_ts_ms,
+                                last_reliable_mark_net_inr=excluded.last_reliable_mark_net_inr,
+                                last_reliable_mark_ts_ms=excluded.last_reliable_mark_ts_ms,
+                                events_timeline_json=excluded.events_timeline_json,
+                                transition_seq=excluded.transition_seq;
+                            """,
+                            (
+                                p["package_id"],
+                                p["signal_id"],
+                                p["run_mode"],
+                                p["config_hash"],
+                                p["book_id"],
+                                p["candidate_variant"],
+                                p["session_date"],
+                                p["expiry"],
+                                p["state"],
+                                p["fill_fidelity"],
+                                p["direction_label"],
+                                p["entry_bar_ts"],
+                                int(p["entry_ts_ms"]),
+                                p.get("leg2_confirmed_ts_ms"),
+                                p.get("exit_bar_ts"),
+                                p.get("exit_ts_ms"),
+                                p.get("exit_reason"),
+                                json.dumps(p["legs_state"], sort_keys=True),
+                                json.dumps(p.get("accounting"), sort_keys=True) if p.get("accounting") is not None else None,
+                                float(p.get("reserved_capital_inr") or 0.0),
+                                float(p.get("structural_max_loss_inr") or 0.0),
+                                float(p.get("planned_loss_inr") or 0.0),
+                                float(p.get("actual_gross_fill_loss_inr") or 0.0),
+                                float(p.get("slippage_and_gap_overshoot_inr") or 0.0),
+                                float(p.get("gross_pnl_inr") or 0.0),
+                                float(p.get("brokerage_inr") or 0.0),
+                                float(p.get("stt_inr") or 0.0),
+                                float(p.get("statutory_charges_inr") or 0.0),
+                                float(p.get("total_friction_inr") or 0.0),
+                                float(p.get("net_pnl_inr") or 0.0),
+                                float(p.get("entry_day_mtm_pnl_inr") or 0.0),
+                                float(p.get("overnight_gap_pnl_inr") or 0.0),
+                                float(p.get("expiry_intraday_pnl_inr") or 0.0),
+                                float(p.get("worst_gap_loss_inr") or 0.0),
+                                int(p.get("is_unpriced_exposure") or 0),
+                                p.get("unpriced_reason"),
+                                p.get("unpriced_since_ts_ms"),
+                                p.get("last_mark_net_pnl_inr"),
+                                p.get("last_mark_ts_ms"),
+                                p.get("last_reliable_mark_net_inr"),
+                                p.get("last_reliable_mark_ts_ms"),
+                                json.dumps(p.get("events_timeline") or [], sort_keys=True),
+                                int(p.get("transition_seq") or 0),
+                            ),
+                        )
+
+                    if equity_point is not None:
+                        ep = equity_point
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO osv2_equity_curve (
+                                run_mode, config_hash, seq_no, session_date, ts_ms, event_kind,
+                                realized_equity_inr, conservative_mtm_inr, marked_equity_inr,
+                                running_peak_equity_inr, drawdown_inr
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            """,
+                            (
+                                ep["run_mode"],
+                                ep["config_hash"],
+                                int(ep["seq_no"]),
+                                ep["session_date"],
+                                int(ep["ts_ms"]),
+                                ep["event_kind"],
+                                float(ep["realized_equity_inr"]),
+                                float(ep["conservative_mtm_inr"]),
+                                float(ep["marked_equity_inr"]),
+                                float(ep["running_peak_equity_inr"]),
+                                float(ep["drawdown_inr"]),
+                            ),
+                        )
+                    conn.execute("COMMIT;")
+                    return True
+                except Exception:
+                    conn.execute("ROLLBACK;")
+                    raise
+
+    def append_equity_point(self, ep: Dict[str, Any]) -> None:
+        with self._write_lock:
+            with self._write_conn() as conn:
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO osv2_equity_curve (
+                            run_mode, config_hash, seq_no, session_date, ts_ms, event_kind,
+                            realized_equity_inr, conservative_mtm_inr, marked_equity_inr,
+                            running_peak_equity_inr, drawdown_inr
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                         """,
                         (
-                            p["package_id"],
-                            p["signal_id"],
-                            p["run_mode"],
-                            p["config_hash"],
-                            p["book_id"],
-                            p["candidate_variant"],
-                            p["session_date"],
-                            p["expiry"],
-                            p["state"],
-                            p["fill_fidelity"],
-                            p["direction_label"],
-                            p["entry_bar_ts"],
-                            int(p["entry_ts_ms"]),
-                            p.get("leg2_confirmed_ts_ms"),
-                            p.get("exit_bar_ts"),
-                            p.get("exit_ts_ms"),
-                            p.get("exit_reason"),
-                            json.dumps(p["legs_state"], sort_keys=True),
-                            json.dumps(p.get("accounting"), sort_keys=True) if p.get("accounting") is not None else None,
-                            float(p.get("reserved_capital_inr") or 0.0),
-                            float(p.get("structural_max_loss_inr") or 0.0),
-                            float(p.get("planned_loss_inr") or 0.0),
-                            float(p.get("actual_gross_fill_loss_inr") or 0.0),
-                            float(p.get("slippage_and_gap_overshoot_inr") or 0.0),
-                            float(p.get("gross_pnl_inr") or 0.0),
-                            float(p.get("brokerage_inr") or 0.0),
-                            float(p.get("stt_inr") or 0.0),
-                            float(p.get("statutory_charges_inr") or 0.0),
-                            float(p.get("total_friction_inr") or 0.0),
-                            float(p.get("net_pnl_inr") or 0.0),
-                            float(p.get("entry_day_mtm_pnl_inr") or 0.0),
-                            float(p.get("overnight_gap_pnl_inr") or 0.0),
-                            float(p.get("expiry_intraday_pnl_inr") or 0.0),
-                            float(p.get("worst_gap_loss_inr") or 0.0),
-                            int(p.get("is_unpriced_exposure") or 0),
-                            p.get("unpriced_reason"),
-                            p.get("unpriced_since_ts_ms"),
-                            p.get("last_mark_net_pnl_inr"),
-                            p.get("last_mark_ts_ms"),
-                            int(p.get("transition_seq") or 0),
+                            ep["run_mode"],
+                            ep["config_hash"],
+                            int(ep["seq_no"]),
+                            ep["session_date"],
+                            int(ep["ts_ms"]),
+                            ep["event_kind"],
+                            float(ep["realized_equity_inr"]),
+                            float(ep["conservative_mtm_inr"]),
+                            float(ep["marked_equity_inr"]),
+                            float(ep["running_peak_equity_inr"]),
+                            float(ep["drawdown_inr"]),
                         ),
                     )
-                conn.execute("COMMIT;")
-                return True
-            except Exception:
-                conn.execute("ROLLBACK;")
-                raise
+                    conn.execute("COMMIT;")
+                except Exception:
+                    conn.execute("ROLLBACK;")
+                    raise
+
+    def save_completed_bar(self, row: Dict[str, Any]) -> None:
+        with self._write_lock:
+            with self._write_conn() as conn:
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO osv2_completed_bars_1m (
+                            run_mode, config_hash, bar_open_ts, session_date,
+                            spot_o, spot_h, spot_l, spot_c, vix_c, bar_close_ts_ms, decision_ts_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        (
+                            row["run_mode"],
+                            row["config_hash"],
+                            row["bar_open_ts"],
+                            row["session_date"],
+                            float(row["spot_o"]),
+                            float(row["spot_h"]),
+                            float(row["spot_l"]),
+                            float(row["spot_c"]),
+                            float(row["vix_c"]) if row.get("vix_c") is not None else None,
+                            int(row["bar_close_ts_ms"]),
+                            int(row["decision_ts_ms"]),
+                        ),
+                    )
+                    conn.execute("COMMIT;")
+                except Exception:
+                    conn.execute("ROLLBACK;")
+                    raise
+
+    def save_runtime_checkpoint(self, row: Dict[str, Any]) -> None:
+        with self._write_lock:
+            with self._write_conn() as conn:
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO osv2_runtime_checkpoints (
+                            run_mode, config_hash, session_date, updated_ts_ms,
+                            daily_kill_reason, cooldown_json, bar_locks_json,
+                            open_basis_ref_json, last_event_ts_ms, last_bar_open_ts,
+                            session_started_from_open, sequence_gap_count, overflow_drop_count,
+                            booking_fault_json, running_peak_equity_inr, max_mtm_dd_inr,
+                            intraday_min_mtm_equity_inr, peak_reserved_inr
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        (
+                            row["run_mode"],
+                            row["config_hash"],
+                            row["session_date"],
+                            int(row["updated_ts_ms"]),
+                            row.get("daily_kill_reason"),
+                            json.dumps(row.get("cooldown") or {}, sort_keys=True),
+                            json.dumps(row.get("bar_locks") or {}, sort_keys=True),
+                            json.dumps(row["open_basis_ref"], sort_keys=True) if row.get("open_basis_ref") is not None else None,
+                            int(row.get("last_event_ts_ms") or 0),
+                            row.get("last_bar_open_ts"),
+                            int(bool(row.get("session_started_from_open", False))),
+                            int(row.get("sequence_gap_count") or 0),
+                            int(row.get("overflow_drop_count") or 0),
+                            json.dumps(row["booking_fault"], sort_keys=True) if row.get("booking_fault") is not None else None,
+                            float(row.get("running_peak_equity_inr") or 200000.0),
+                            float(row.get("max_mtm_dd_inr") or 0.0),
+                            float(row.get("intraday_min_mtm_equity_inr") or 200000.0),
+                            float(row.get("peak_reserved_inr") or 0.0),
+                        ),
+                    )
+                    conn.execute("COMMIT;")
+                except Exception:
+                    conn.execute("ROLLBACK;")
+                    raise
 
     def upsert_daily_snapshot(self, row: Dict[str, Any]) -> None:
-        with self._lock:
-            conn = self._txn_conn()
-            try:
-                conn.execute("BEGIN IMMEDIATE;")
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO osv2_daily_snapshots (
-                        run_mode, config_hash, session_date, sod_equity_inr,
-                        eod_realized_equity_inr, eod_mtm_equity_inr, intraday_min_mtm_equity_inr,
-                        peak_reserved_capital_inr, closed_trades, open_overnight_packages,
-                        unresolved_exposure_count, net_pnl_inr
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """,
-                    (
-                        row["run_mode"],
-                        row["config_hash"],
-                        row["session_date"],
-                        float(row["sod_equity_inr"]),
-                        float(row["eod_realized_equity_inr"]),
-                        float(row["eod_mtm_equity_inr"]),
-                        float(row["intraday_min_mtm_equity_inr"]),
-                        float(row["peak_reserved_capital_inr"]),
-                        int(row["closed_trades"]),
-                        int(row["open_overnight_packages"]),
-                        int(row["unresolved_exposure_count"]),
-                        float(row["net_pnl_inr"]),
-                    ),
-                )
-                conn.execute("COMMIT;")
-            except Exception:
-                conn.execute("ROLLBACK;")
-                raise
-
-    def replace_counterfactuals(self, rows: List[Dict[str, Any]]) -> None:
-        with self._lock:
-            conn = self._txn_conn()
-            try:
-                conn.execute("BEGIN IMMEDIATE;")
-                conn.execute("DELETE FROM osv2_counterfactual_v1;")
-                for r in rows:
+        with self._write_lock:
+            with self._write_conn() as conn:
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
                     conn.execute(
                         """
-                        INSERT INTO osv2_counterfactual_v1 (
-                            cf_id, experiment_code, v1_package_id, session_date, book_id,
-                            v1_reported_net_inr, cf_status, cf_exit_bar_ts, cf_exit_reason,
-                            cf_gross_pnl_inr, cf_charges_inr, cf_net_pnl_inr,
-                            included_in_v2_totals, detail_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?);
+                        INSERT OR REPLACE INTO osv2_daily_snapshots (
+                            run_mode, config_hash, session_date, sod_equity_inr,
+                            eod_realized_equity_inr, eod_mtm_equity_inr, intraday_min_mtm_equity_inr,
+                            peak_reserved_capital_inr, closed_trades, open_overnight_packages,
+                            unresolved_exposure_count, net_pnl_inr,
+                            session_state, running_peak_equity_inr, max_mtm_dd_inr,
+                            max_mtm_dd_pct_start, max_mtm_dd_pct_peak, gap_count, overflow_count
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                         """,
                         (
-                            r["cf_id"],
-                            r["experiment_code"],
-                            r["v1_package_id"],
-                            r["session_date"],
-                            r["book_id"],
-                            float(r["v1_reported_net_inr"]),
-                            r["cf_status"],
-                            r.get("cf_exit_bar_ts"),
-                            r.get("cf_exit_reason"),
-                            r.get("cf_gross_pnl_inr"),
-                            r.get("cf_charges_inr"),
-                            r.get("cf_net_pnl_inr"),
-                            json.dumps(r.get("detail") or {}, sort_keys=True),
+                            row["run_mode"],
+                            row["config_hash"],
+                            row["session_date"],
+                            float(row["sod_equity_inr"]),
+                            float(row["eod_realized_equity_inr"]),
+                            float(row["eod_mtm_equity_inr"]),
+                            float(row["intraday_min_mtm_equity_inr"]),
+                            float(row["peak_reserved_capital_inr"]),
+                            int(row["closed_trades"]),
+                            int(row["open_overnight_packages"]),
+                            int(row["unresolved_exposure_count"]),
+                            float(row["net_pnl_inr"]),
+                            str(row.get("session_state") or "PARTIAL_SESSION"),
+                            float(row.get("running_peak_equity_inr") or row["eod_mtm_equity_inr"]),
+                            float(row.get("max_mtm_dd_inr") or 0.0),
+                            float(row.get("max_mtm_dd_pct_start") or 0.0),
+                            float(row.get("max_mtm_dd_pct_peak") or 0.0),
+                            int(row.get("gap_count") or 0),
+                            int(row.get("overflow_count") or 0),
                         ),
                     )
-                conn.execute("COMMIT;")
-            except Exception:
-                conn.execute("ROLLBACK;")
-                raise
+                    conn.execute("COMMIT;")
+                except Exception:
+                    conn.execute("ROLLBACK;")
+                    raise
+
+    def replace_counterfactuals(self, rows: List[Dict[str, Any]]) -> None:
+        with self._write_lock:
+            with self._write_conn() as conn:
+                try:
+                    conn.execute("BEGIN IMMEDIATE;")
+                    conn.execute("DELETE FROM osv2_counterfactual_v1;")
+                    for r in rows:
+                        conn.execute(
+                            """
+                            INSERT INTO osv2_counterfactual_v1 (
+                                cf_id, experiment_code, v1_package_id, session_date, book_id,
+                                v1_reported_net_inr, cf_status, cf_exit_bar_ts, cf_exit_reason,
+                                cf_gross_pnl_inr, cf_charges_inr, cf_net_pnl_inr,
+                                included_in_v2_totals, detail_json
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?);
+                            """,
+                            (
+                                r["cf_id"],
+                                r["experiment_code"],
+                                r["v1_package_id"],
+                                r["session_date"],
+                                r["book_id"],
+                                float(r["v1_reported_net_inr"]),
+                                r["cf_status"],
+                                r.get("cf_exit_bar_ts"),
+                                r.get("cf_exit_reason"),
+                                r.get("cf_gross_pnl_inr"),
+                                r.get("cf_charges_inr"),
+                                r.get("cf_net_pnl_inr"),
+                                json.dumps(r.get("detail") or {}, sort_keys=True),
+                            ),
+                        )
+                    conn.execute("COMMIT;")
+                except Exception:
+                    conn.execute("ROLLBACK;")
+                    raise
+
+    # ── COLD-START SAFE READ-ONLY QUERIES (NEVER CREATE DB FILE) ─────────────
 
     def load_packages(
         self,
@@ -690,8 +997,10 @@ class V2LedgerStore:
         config_hash: Optional[str] = None,
         states: Optional[Tuple[str, ...]] = None,
     ) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._txn_conn()
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return []
+        try:
             clauses: List[str] = []
             params: List[Any] = []
             if run_mode:
@@ -714,12 +1023,17 @@ class V2LedgerStore:
                 d = dict(r)
                 d["legs_state"] = json.loads(d.pop("legs_json") or "{}")
                 d["accounting"] = json.loads(d["accounting_json"]) if d.get("accounting_json") else None
+                d["events_timeline"] = json.loads(d.pop("events_timeline_json") or "[]")
                 out.append(d)
             return out
+        finally:
+            conn.close()
 
     def load_ledger_entries(self, run_mode: Optional[str] = None, config_hash: Optional[str] = None) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._txn_conn()
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return []
+        try:
             clauses: List[str] = []
             params: List[Any] = []
             if run_mode:
@@ -734,14 +1048,18 @@ class V2LedgerStore:
                 params,
             ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
 
     def load_daily_snapshots(
         self,
         run_mode: Optional[str] = None,
         config_hash: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._txn_conn()
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return []
+        try:
             clauses: List[str] = []
             params: List[Any] = []
             if run_mode:
@@ -756,10 +1074,80 @@ class V2LedgerStore:
                 params,
             ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def load_completed_bars(
+        self,
+        run_mode: str,
+        config_hash: str,
+        session_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return []
+        try:
+            if session_date:
+                rows = conn.execute(
+                    "SELECT * FROM osv2_completed_bars_1m WHERE run_mode = ? AND config_hash = ? AND session_date = ? ORDER BY bar_open_ts ASC;",
+                    (run_mode, config_hash, session_date),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM osv2_completed_bars_1m WHERE run_mode = ? AND config_hash = ? ORDER BY bar_open_ts ASC;",
+                    (run_mode, config_hash),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def load_runtime_checkpoints(
+        self,
+        run_mode: str,
+        config_hash: str,
+    ) -> List[Dict[str, Any]]:
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT * FROM osv2_runtime_checkpoints WHERE run_mode = ? AND config_hash = ? ORDER BY session_date ASC;",
+                (run_mode, config_hash),
+            ).fetchall()
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                d = dict(r)
+                d["cooldown"] = json.loads(d.pop("cooldown_json") or "{}")
+                d["bar_locks"] = json.loads(d.pop("bar_locks_json") or "{}")
+                d["open_basis_ref"] = json.loads(d["open_basis_ref_json"]) if d.get("open_basis_ref_json") else None
+                d["booking_fault"] = json.loads(d["booking_fault_json"]) if d.get("booking_fault_json") else None
+                out.append(d)
+            return out
+        finally:
+            conn.close()
+
+    def load_equity_curve(
+        self,
+        run_mode: str,
+        config_hash: str,
+    ) -> List[Dict[str, Any]]:
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT * FROM osv2_equity_curve WHERE run_mode = ? AND config_hash = ? ORDER BY seq_no ASC;",
+                (run_mode, config_hash),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
 
     def load_counterfactuals(self, experiment_code: Optional[str] = None) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._txn_conn()
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return []
+        try:
             if experiment_code:
                 rows = conn.execute(
                     "SELECT * FROM osv2_counterfactual_v1 WHERE experiment_code = ? ORDER BY session_date ASC, v1_package_id ASC;",
@@ -775,6 +1163,8 @@ class V2LedgerStore:
                 d["detail"] = json.loads(d.pop("detail_json") or "{}")
                 out.append(d)
             return out
+        finally:
+            conn.close()
 
     def load_signals(
         self,
@@ -782,8 +1172,10 @@ class V2LedgerStore:
         config_hash: Optional[str] = None,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._txn_conn()
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return []
+        try:
             clauses: List[str] = []
             params: List[Any] = []
             if run_mode:
@@ -804,14 +1196,18 @@ class V2LedgerStore:
                 d["provenance"] = json.loads(d.pop("provenance_json") or "{}")
                 out.append(d)
             return out
+        finally:
+            conn.close()
 
     def load_fills(
         self,
         run_mode: Optional[str] = None,
         config_hash: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        with self._lock:
-            conn = self._txn_conn()
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return []
+        try:
             clauses: List[str] = []
             params: List[Any] = []
             if run_mode:
@@ -826,11 +1222,15 @@ class V2LedgerStore:
                 params,
             ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
 
-    def compute_canonical_ledger_digest(self, run_mode: str, config_hash: str) -> str:
-        """Deterministic SHA-256 of packages + ledger_entries + fills + daily_snapshots for replay proof."""
-        with self._lock:
-            conn = self._txn_conn()
+    def compute_canonical_ledger_digest(self, run_mode: str, config_hash: str) -> Optional[str]:
+        """Deterministic SHA-256 of packages + ledger_entries + fills + daily_snapshots; returns None if DB absent."""
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return None
+        try:
             pkgs = [
                 dict(r)
                 for r in conn.execute(
@@ -881,7 +1281,8 @@ class V2LedgerStore:
                     """
                     SELECT session_date, sod_equity_inr, eod_realized_equity_inr, eod_mtm_equity_inr,
                            intraday_min_mtm_equity_inr, peak_reserved_capital_inr, closed_trades,
-                           open_overnight_packages, unresolved_exposure_count, net_pnl_inr
+                           open_overnight_packages, unresolved_exposure_count, net_pnl_inr,
+                           session_state, running_peak_equity_inr, max_mtm_dd_inr
                     FROM osv2_daily_snapshots
                     WHERE run_mode = ? AND config_hash = ?
                     ORDER BY session_date ASC;
@@ -895,3 +1296,5 @@ class V2LedgerStore:
                 separators=(",", ":"),
             )
             return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        finally:
+            conn.close()

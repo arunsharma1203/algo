@@ -208,11 +208,24 @@ class OptionStreamManager:
                 self._futures_quotes = {}
             if not hasattr(self, "_advance_feed_listeners"):
                 self._advance_feed_listeners = []
+            self._ensure_pin_registry_locked()
 
-            # Preserve pinned catastrophe wings, explicitly pinned futures, or in-flight active position legs across universe syncs
+            v1_core = set()
+            for c in list(contracts) + open_position_contracts + futures_contracts:
+                ik_core = c.get("instrument_key")
+                if ik_core:
+                    v1_core.add(ik_core)
+            self._v1_core_chain_keys = v1_core
+
+            # Preserve pinned catastrophe wings, explicitly pinned futures, active position legs, or owner-pinned keys across universe syncs
             preserved_pinned = [
                 m for m in self._key_to_contract.values()
-                if m.get("is_catastrophe_wing") or m.get("is_futures") or m.get("is_pinned_active_leg")
+                if (
+                    m.get("is_catastrophe_wing")
+                    or m.get("is_futures")
+                    or m.get("is_pinned_active_leg")
+                    or bool(self._pin_owners_by_key.get(str(m.get("instrument_key") or "")))
+                )
             ]
 
             new_keys: List[str] = []
@@ -221,7 +234,15 @@ class OptionStreamManager:
                 ikey = c.get("instrument_key")
                 if not ikey:
                     continue
-                updated_key_to_contract[ikey] = c
+                if ikey in updated_key_to_contract:
+                    prev_m = updated_key_to_contract[ikey]
+                    merged = {**prev_m, **c}
+                    for kflag in ("is_catastrophe_wing", "is_futures", "is_pinned_active_leg", "is_active_position_leg"):
+                        if prev_m.get(kflag) or c.get(kflag):
+                            merged[kflag] = True
+                    updated_key_to_contract[ikey] = merged
+                else:
+                    updated_key_to_contract[ikey] = dict(c)
                 tsym = c.get("trading_symbol")
                 if tsym:
                     self._symbol_to_key[tsym] = ikey
@@ -509,6 +530,13 @@ class OptionStreamManager:
                 depth_observed_on_tick = bool(
                     has_raw_top_book and depth_levels and (l5_bid_qty > 0 or l5_ask_qty > 0)
                 )
+                observed_rungs_on_tick = [
+                    dict(lvl)
+                    for lvl in depth_levels
+                    if (lvl.get("bid_p", 0.0) > 0.0 and lvl.get("bid_q", 0) > 0)
+                    or (lvl.get("ask_p", 0.0) > 0.0 and lvl.get("ask_q", 0) > 0)
+                ]
+                carried_depth_rungs = False
 
                 # Preserve real order book depth or exact exchange LTP if partial tick omits top-of-book,
                 # while strictly tagging book provenance so shadow execution fails closed on synthetic/carried books.
@@ -537,6 +565,7 @@ class OptionStreamManager:
                     l5_bid_qty = int(prev_q.get("l5_bid_qty") or bid_qty)
                     l5_ask_qty = int(prev_q.get("l5_ask_qty") or ask_qty)
                     used_carried = True
+                    carried_depth_rungs = True
 
                 if has_raw_top_book:
                     book_provenance = "OBSERVED_V3_L5"
@@ -547,6 +576,19 @@ class OptionStreamManager:
                 else:
                     book_provenance = "SYNTHETIC_LTP_FALLBACK"
                     l1_book_timestamp_ms = int(prev_q.get("l1_book_timestamp_ms") or 0)
+
+                # Separate true depth rung timestamp from L1 top-of-book timestamp (additive provenance for V2)
+                if observed_rungs_on_tick and not carried_depth_rungs:
+                    depth_timestamp_ms = now_ms
+                    depth_exchange_ts_ms = ltt
+                else:
+                    depth_timestamp_ms = int(prev_q.get("depth_timestamp_ms") or prev_q.get("l1_book_timestamp_ms") or 0)
+                    depth_exchange_ts_ms = int(prev_q.get("depth_exchange_ts_ms") or 0)
+
+                l1_observed_on_tick = bool(has_raw_top_book)
+                l1_bid_qty_observed = int(bid_qty) if has_raw_top_book else 0
+                l1_ask_qty_observed = int(ask_qty) if has_raw_top_book else 0
+                l1_timestamp_ms = now_ms if has_raw_top_book else int(prev_q.get("l1_timestamp_ms") or 0)
 
                 book_obi_l5 = round((l5_bid_qty - l5_ask_qty) / max(1, l5_bid_qty + l5_ask_qty), 4) if (l5_bid_qty + l5_ask_qty) > 0 else 0.0
                 book_obi_total = round((tbq - tsq) / max(1.0, tbq + tsq), 4) if (tbq + tsq) > 0 else book_obi_l5
@@ -592,6 +634,14 @@ class OptionStreamManager:
                     "book_obi_l5": book_obi_l5,
                     "book_obi_total": book_obi_total,
                     "depth_levels": depth_levels,
+                    "observed_rungs_on_tick": observed_rungs_on_tick,
+                    "depth_rungs_carried": carried_depth_rungs,
+                    "depth_timestamp_ms": depth_timestamp_ms,
+                    "depth_exchange_ts_ms": depth_exchange_ts_ms,
+                    "l1_observed_on_tick": l1_observed_on_tick,
+                    "l1_bid_qty_observed": l1_bid_qty_observed,
+                    "l1_ask_qty_observed": l1_ask_qty_observed,
+                    "l1_timestamp_ms": l1_timestamp_ms,
                     "is_observed_l1_book": has_raw_top_book,
                     "depth_observed_on_tick": depth_observed_on_tick,
                     "book_provenance": book_provenance,
@@ -981,19 +1031,66 @@ class OptionStreamManager:
             if listener not in self._advance_feed_listeners:
                 self._advance_feed_listeners.append(listener)
 
-    def pin_extra_contracts(self, contracts: List[Dict[str, Any]]) -> List[str]:
-        """Pins Futures or far-OTM Catastrophe Wings into OptionStreamManager & WebSocket V3."""
+    def _ensure_pin_registry_locked(self) -> None:
+        if not hasattr(self, "_pin_owners_by_key"):
+            self._pin_owners_by_key: Dict[str, Set[str]] = {}
+        if not hasattr(self, "_v1_core_chain_keys"):
+            self._v1_core_chain_keys: Set[str] = set()
+
+    def _is_v1_protected_locked(self, ikey: str) -> bool:
+        self._ensure_pin_registry_locked()
+        owners = self._pin_owners_by_key.get(ikey) or set()
+        if "V1" in owners or ikey in self._v1_core_chain_keys:
+            return True
+        meta = self._key_to_contract.get(ikey)
+        if not isinstance(meta, dict):
+            return False
+        if (
+            meta.get("is_catastrophe_wing")
+            or meta.get("is_futures")
+            or meta.get("is_underlying")
+            or meta.get("is_active_position_leg")
+        ):
+            return True
+        if meta.get("is_pinned_active_leg") and not meta.get("v2_owned_only"):
+            return True
+        return False
+
+    def pin_extra_contracts(self, contracts: List[Dict[str, Any]], owner: str = "V1") -> List[str]:
+        """Pins Futures or far-OTM Catastrophe Wings into OptionStreamManager & WebSocket V3 atomically with owner tracking."""
         pinned: List[str] = []
         if not contracts:
             return pinned
+        owner_u = str(owner or "V1").upper().strip()
         with self._lock:
+            self._ensure_pin_registry_locked()
             for c in contracts:
                 if not isinstance(c, dict):
                     continue
                 ikey = str(c.get("instrument_key") or "").strip()
                 if not ikey:
                     continue
-                self._key_to_contract[ikey] = dict(c)
+                owners = self._pin_owners_by_key.setdefault(ikey, set())
+                owners.add(owner_u)
+                prev = self._key_to_contract.get(ikey)
+                if isinstance(prev, dict):
+                    merged = {**prev, **c}
+                    for kflag in ("is_catastrophe_wing", "is_futures", "is_underlying", "is_pinned_active_leg", "is_active_position_leg"):
+                        if prev.get(kflag) or c.get(kflag):
+                            merged[kflag] = True
+                    if owners - {"V2"}:
+                        merged.pop("v2_owned_only", None)
+                    self._key_to_contract[ikey] = merged
+                else:
+                    row_c = dict(c)
+                    if owner_u == "V2" and not (
+                        row_c.get("is_catastrophe_wing")
+                        or row_c.get("is_futures")
+                        or row_c.get("is_pinned_active_leg")
+                        or row_c.get("is_active_position_leg")
+                    ):
+                        row_c["v2_owned_only"] = True
+                    self._key_to_contract[ikey] = row_c
                 tsym = c.get("trading_symbol")
                 if tsym:
                     self._symbol_to_key[str(tsym)] = ikey
@@ -1007,20 +1104,166 @@ class OptionStreamManager:
                 pass
         return pinned
 
-    def unpin_extra_contracts(self, ikeys: List[str]) -> int:
-        """Clears `is_pinned_active_leg` flag once a shadow/live package leg is fully closed."""
+    def unpin_extra_contracts(self, ikeys: List[str], owner: str = "V1") -> int:
+        """Clears owner pin atomically under `_lock`; never strips V1 protection when non-V1 owner releases."""
         cleared = 0
         if not ikeys:
             return cleared
+        owner_u = str(owner or "V1").upper().strip()
         with self._lock:
+            self._ensure_pin_registry_locked()
             for raw_k in ikeys:
                 ik = str(raw_k or "").strip()
+                if not ik:
+                    continue
+                owners = self._pin_owners_by_key.get(ik)
+                if owners is not None:
+                    owners.discard(owner_u)
+                    if not owners:
+                        self._pin_owners_by_key.pop(ik, None)
                 meta = self._key_to_contract.get(ik)
-                if isinstance(meta, dict) and meta.get("is_pinned_active_leg"):
+                if not isinstance(meta, dict):
+                    continue
+                if self._is_v1_protected_locked(ik):
+                    # V2 or secondary owner release MUST NOT clear V1 flags
+                    continue
+                if meta.get("is_pinned_active_leg"):
                     meta.pop("is_pinned_active_leg", None)
                     meta.pop("is_active_position_leg", None)
                     cleared += 1
+                remaining = self._pin_owners_by_key.get(ik) or set()
+                if not remaining and meta.get("v2_owned_only"):
+                    self._key_to_contract.pop(ik, None)
+                    cleared += 1
         return cleared
+
+    def acquire_owned_pins(
+        self,
+        owner: str,
+        contracts: List[Dict[str, Any]],
+        max_owner_pins: int = 8,
+        soft_cap: int = 1400,
+        v1_headroom: int = 100,
+    ) -> Dict[str, Any]:
+        """Atomic single-lock owner-aware pin acquisition respecting V1 headroom."""
+        owner_u = str(owner or "V2").upper().strip()
+        to_pin: List[Dict[str, Any]] = []
+        reused: List[str] = []
+        skipped_headroom: List[str] = []
+        with self._lock:
+            self._ensure_pin_registry_locked()
+            current_owner_keys = {
+                ik for ik, own in self._pin_owners_by_key.items() if owner_u in own
+            }
+            for c in contracts:
+                if not isinstance(c, dict):
+                    continue
+                ik = str(c.get("instrument_key") or "").strip()
+                if not ik:
+                    continue
+                already_present = ik in self._key_to_contract
+                v1_prot = self._is_v1_protected_locked(ik)
+                if already_present and v1_prot:
+                    self._pin_owners_by_key.setdefault(ik, set()).add(owner_u)
+                    reused.append(ik)
+                    continue
+                if ik in current_owner_keys:
+                    reused.append(ik)
+                    continue
+                projected_total = len(self._key_to_contract) + len(to_pin) + 1
+                if (
+                    len(current_owner_keys) + len(to_pin) >= int(max_owner_pins)
+                    or projected_total + int(v1_headroom) > int(soft_cap)
+                ):
+                    skipped_headroom.append(ik)
+                    continue
+                tagged = dict(c)
+                if owner_u == "V2" and not already_present:
+                    tagged["v2_owned_only"] = True
+                else:
+                    tagged.pop("v2_owned_only", None)
+                self._pin_owners_by_key.setdefault(ik, set()).add(owner_u)
+                self._key_to_contract[ik] = tagged
+                tsym = c.get("trading_symbol")
+                if tsym:
+                    self._symbol_to_key[str(tsym)] = ik
+                to_pin.append(tagged)
+                current_owner_keys.add(ik)
+
+        if to_pin:
+            try:
+                stream_svc = get_stream_service()
+                if hasattr(stream_svc, "subscribe_additional_keys"):
+                    stream_svc.subscribe_additional_keys([c["instrument_key"] for c in to_pin])
+            except Exception:
+                pass
+
+        return {
+            "owner": owner_u,
+            "pinned_exclusively": [c["instrument_key"] for c in to_pin],
+            "reused_existing_keys": reused,
+            "skipped_due_to_headroom": skipped_headroom,
+        }
+
+    def release_owned_pins(
+        self,
+        owner: str,
+        ikeys: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Atomic single-lock owner-aware pin release; preserves keys held by V1 or any other owner."""
+        owner_u = str(owner or "V2").upper().strip()
+        released_from_stream: List[str] = []
+        retained_for_other_owner: List[str] = []
+        with self._lock:
+            self._ensure_pin_registry_locked()
+            targets = (
+                [str(k or "").strip() for k in ikeys if str(k or "").strip()]
+                if ikeys is not None
+                else sorted(ik for ik, own in self._pin_owners_by_key.items() if owner_u in own)
+            )
+            for ik in targets:
+                owners = self._pin_owners_by_key.get(ik)
+                if owners is not None:
+                    owners.discard(owner_u)
+                    if not owners:
+                        self._pin_owners_by_key.pop(ik, None)
+                remaining = set(self._pin_owners_by_key.get(ik) or ())
+                if self._is_v1_protected_locked(ik) or bool(remaining):
+                    retained_for_other_owner.append(ik)
+                    continue
+                meta = self._key_to_contract.get(ik)
+                if isinstance(meta, dict) and meta.get("v2_owned_only"):
+                    self._key_to_contract.pop(ik, None)
+                    released_from_stream.append(ik)
+                elif owner_u == "V1" and isinstance(meta, dict) and meta.get("is_pinned_active_leg"):
+                    meta.pop("is_pinned_active_leg", None)
+                    meta.pop("is_active_position_leg", None)
+                    released_from_stream.append(ik)
+        return {
+            "owner": owner_u,
+            "released_from_stream": released_from_stream,
+            "retained_for_other_owner": retained_for_other_owner,
+        }
+
+    def yield_owner_pins_under_pressure(self, owner: str = "V2") -> List[str]:
+        """Evicts exclusively `owner`-owned keys first under capacity/rate pressure without touching V1."""
+        owner_u = str(owner or "V2").upper().strip()
+        yielded: List[str] = []
+        with self._lock:
+            self._ensure_pin_registry_locked()
+            candidates = sorted(
+                ik for ik, own in self._pin_owners_by_key.items() if owner_u in own
+            )
+            for ik in candidates:
+                if self._is_v1_protected_locked(ik):
+                    continue
+                owners = self._pin_owners_by_key.get(ik) or set()
+                if owners - {owner_u}:
+                    continue
+                self._pin_owners_by_key.pop(ik, None)
+                self._key_to_contract.pop(ik, None)
+                yielded.append(ik)
+        return yielded
 
     def fetch_single_quote_emergency_rest(
         self,
