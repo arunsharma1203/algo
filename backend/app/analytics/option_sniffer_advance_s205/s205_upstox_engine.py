@@ -25,6 +25,7 @@ import uuid
 from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.analytics.nse_holidays import is_trading_day
 from app.analytics.common.options_accounting import (
     OptionLeg,
     compute_package_accounting,
@@ -74,6 +75,19 @@ S205_BOOK_LIMITS: Dict[str, Tuple[int, int]] = {
 }
 S205_COOLDOWN_SECONDS: int = 15 * 60  # 15 minutes (15 bars) post-exit cooldown
 S205_CATASTROPHE_WING_OFFSET_PTS: float = 450.0
+
+# Regular NSE F&O sessions. NSE/FAOP/71777, /72262 (election), /72352 (Budget).
+_FO_CLOSURES_2026 = frozenset({
+    "01-15", "01-26", "03-03", "03-26", "03-31", "04-03", "04-14", "05-01",
+    "05-28", "06-26", "09-14", "10-02", "10-20", "11-10", "11-24", "12-25",
+})
+
+
+def _is_regular_session(day: date) -> bool:
+    if day.year == 2026:
+        return day == date(2026, 2, 1) or (day.weekday() < 5 and day.isoformat()[5:] not in _FO_CLOSURES_2026)
+    return is_trading_day(day)
+
 
 _HW_INSTRUMENT_KEYS: Dict[str, str] = {
     "RELIANCE": "NSE_EQ|INE002A01018",
@@ -311,7 +325,7 @@ class S205UpstoxOrchestrator:
         """Ingests real-time WebSocket V3 index, futures, and option ticks into 1m session bars."""
         now_dt = to_ist_naive()
         t_cur = now_dt.time()
-        if t_cur < dt_time(9, 15) or t_cur > dt_time(15, 30):
+        if not _is_regular_session(now_dt.date()) or t_cur < dt_time(9, 15) or t_cur > dt_time(15, 30):
             return
 
         bar_ts = now_dt.strftime("%Y-%m-%d %H:%M:00")
@@ -685,6 +699,8 @@ class S205UpstoxOrchestrator:
         ikey: str,
         quote_payload: Dict[str, Any],
         now_dt: Optional[datetime] = None,
+        *,
+        hard_stop_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Sub-second WebSocket tick guard for open `V6B_*` positions:
@@ -693,13 +709,18 @@ class S205UpstoxOrchestrator:
           - NEVER arms a new ratchet from intrabar highs/lows (preserves 100% close-only ratchet integrity).
         """
         now_dt = to_ist_naive(now_dt)
+        if not _is_regular_session(now_dt.date()):
+            return []
         sm_guard = OptionStreamManager()
         shadow_closed = self._shadow_collector.on_observed_tick(
             ikey,
             quote_payload,
             quote_lookup_by_ikey=sm_guard.get_option_quote,
             now_dt=now_dt,
+            hard_stop_only=hard_stop_only,
         )
+        if hard_stop_only:
+            return shadow_closed
         closed_out: List[Dict[str, Any]] = list(shadow_closed)
         open_trades = [
             t for t in (AdvanceDB.get_open_trades() or [])
@@ -1007,6 +1028,12 @@ class S205UpstoxOrchestrator:
         t0 = time.perf_counter()
         now_dt = to_ist_naive(now_dt)
         today_s = now_dt.strftime("%Y-%m-%d")
+        if not _is_regular_session(now_dt.date()):
+            return {
+                "status": "MARKET_CLOSED", "engine_version": "S2_05_UPSTOX_V3",
+                "evaluated_bar_ts": None, "opened_trades": [], "closed_trades": 0,
+                "duration_ms": 0.0,
+            }
         self._ensure_prior_day_and_intraday_backfill(now_dt, allow_network=allow_network)
 
         sm = OptionStreamManager()
@@ -1413,7 +1440,9 @@ class S205UpstoxOrchestrator:
         while self._is_running:
             try:
                 now_dt = to_ist_naive()
-                if dt_time(9, 14) <= now_dt.time() <= dt_time(15, 31):
+                if not _is_regular_session(now_dt.date()):
+                    wait_s = 15.0
+                elif dt_time(9, 14) <= now_dt.time() <= dt_time(15, 31):
                     self.run_surveillance_sweep(now_dt=now_dt, allow_network=True)
                     wait_s = max(0.25, min(2.0, 60.05 - (now_dt.second + now_dt.microsecond / 1e6)))
                 else:
@@ -1441,7 +1470,11 @@ class S205UpstoxOrchestrator:
 
         sh_summary = self._shadow_collector.get_summary()
         sh_kill = bool((sh_summary.get("shadow_account_ledger") or {}).get("daily_kill_triggered"))
-        if self._daily_kill_triggered and sh_kill:
+        regular_session = _is_regular_session(now_dt.date())
+        if not regular_session:
+            phase, phase_label = "MARKET_CLOSED", "NSE REGULAR SESSION CLOSED"
+            sec_to_next_bar = 0
+        elif self._daily_kill_triggered and sh_kill:
             phase, phase_label = "HALTED_DAILY_KILL", "BOTH COHORTS DAILY -₹3,500 MTM KILL ACTIVE (FLATTENED)"
         elif hhmm < 915:
             phase, phase_label = "PRE_MARKET", "PRE-MARKET STANDBY (NSE OPENS 09:15 IST)"
@@ -1577,7 +1610,7 @@ class S205UpstoxOrchestrator:
                 "active_nifty_contracts": len(nifty_opts),
                 "indicators": self._latest_context_summary,
             },
-            "engine_readiness": list(self._latest_engine_readiness),
+            "engine_readiness": list(self._latest_engine_readiness) if regular_session else [],
             "shadow_telemetry": sh_summary,
             "cohort_comparison": cohort_comp,
         }
@@ -1628,7 +1661,7 @@ class S205UpstoxOrchestrator:
             "simulation_only": True,
             "mode": "PAPER_SANDBOX_DUAL_BOOK",
             "is_running": self._is_running,
-            "is_trading_window": dt_time(9, 15) <= now_dt.time() <= dt_time(15, 15) and now_dt.weekday() < 5,
+            "is_trading_window": dt_time(9, 15) <= now_dt.time() <= dt_time(15, 15) and _is_regular_session(now_dt.date()),
             "cutoff_time": "15:15 IST",
             "total_sweeps": self._sweep_count,
             "sweep_count": self._sweep_count,

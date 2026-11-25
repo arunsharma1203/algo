@@ -34,6 +34,21 @@ logger = logging.getLogger(__name__)
 _PREV_OSM_INSTANCE = getattr(globals().get("OptionStreamManager"), "_instance", None)
 
 
+def _rest_snapshot_ms(value: Any, received_ms: int) -> int:
+    """Upstox full-quote feed timestamp (distinct from last_trade_time)."""
+    try:
+        if str(value).isdigit():
+            stamp = int(value)
+        else:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return 0
+            stamp = int(parsed.timestamp() * 1000)
+        return stamp if 0 < stamp <= received_ms else 0
+    except (ValueError, OverflowError, OSError):
+        return 0
+
+
 class OptionStreamManager:
     """
     Singleton manager maintaining real-time quotes, Greeks, order book depth,
@@ -663,7 +678,7 @@ class OptionStreamManager:
 
                 self._option_quotes[ikey] = quote_payload
                 adv_events.append(("OPTION", ikey, dict(quote_payload)))
-                if quote_payload["is_valid"]:
+                if quote_payload["is_valid"] or (ltp > 0 and depth_observed_on_tick and spread_pct > MAX_SPREAD_PCT):
                     quotes_to_guard.append((ikey, dict(quote_payload)))
 
             adv_listeners = list(self._advance_feed_listeners)
@@ -694,9 +709,15 @@ class OptionStreamManager:
             from app.analytics.option_sniffer_advance_s205.s205_upstox_engine import get_s205_orchestrator_if_loaded
             s205_orch = get_s205_orchestrator_if_loaded()
             if s205_orch is not None:
-                s205_orch.evaluate_subsecond_tick_guard(ikey, quote_payload)
+                if quote_payload.get("spread_pct", 0.0) > MAX_SPREAD_PCT:
+                    s205_orch.evaluate_subsecond_tick_guard(ikey, quote_payload, hard_stop_only=True)
+                else:
+                    s205_orch.evaluate_subsecond_tick_guard(ikey, quote_payload)
         except Exception as s205_te:
             logger.debug(f"[OptionStreamManager] S2_05 tick protective guard note for {ikey}: {s205_te}")
+
+        if quote_payload.get("spread_pct", 0.0) > MAX_SPREAD_PCT:
+            return
 
         # 0B. Evaluate legacy V2.0 sub-second tick protective guards only if non-V6B open trades exist
         try:
@@ -1667,6 +1688,20 @@ class OptionStreamManager:
                             depth_levels.append({"bid_p": bp, "bid_q": bq, "ask_p": ap, "ask_q": aq})
 
                         existing_quote = self._option_quotes.get(matched_key) or {}
+                        received_ms = int(time.time() * 1000)
+                        snapshot_ms = _rest_snapshot_ms(v.get("timestamp"), received_ms)
+                        raw_bid, raw_ask = bid, ask
+                        has_book = bid > 0 and ask >= bid and bid_qty > 0 and ask_qty > 0
+                        book_ms = snapshot_ms if has_book else 0
+                        prior_book_ms = int(existing_quote.get("l1_book_timestamp_ms") or 0)
+                        # Replace prices and provenance together. A slower poll must never
+                        # erase a newer book or displace WS depth received during the request.
+                        recent_ws_book = (
+                            existing_quote.get("book_provenance") == "OBSERVED_V3_L5"
+                            and received_ms - prior_book_ms <= 1500
+                        )
+                        if recent_ws_book or (prior_book_ms and (book_ms <= prior_book_ms or prior_book_ms >= now_ms)):
+                            continue
                         if bid <= 0 and ltp > 0:
                             prev_bid = float(existing_quote.get("bid") or 0.0)
                             bid = prev_bid if (prev_bid > 0 and abs(prev_bid - ltp) / ltp <= 0.03) else ltp
@@ -1741,15 +1776,24 @@ class OptionStreamManager:
                             "book_obi_l5": book_obi_l5,
                             "book_obi_total": book_obi_total,
                             "depth_levels": depth_levels,
+                            "raw_bid": raw_bid,
+                            "raw_ask": raw_ask,
+                            "book_provenance": "REST_BATCH_DEPTH" if book_ms else "REST_UNVERIFIED_BOOK",
+                            "l1_book_timestamp_ms": book_ms,
+                            "l1_book_age_ms": received_ms - book_ms if book_ms else 999999,
+                            "depth_timestamp_ms": book_ms,
+                            "local_receipt_ts_ms": received_ms,
+                            "is_observed_l1_book": False,
+                            "depth_observed_on_tick": False,
                             "iv": iv,
                             "delta": delta,
                             "gamma": float(existing_quote.get("gamma") or 0.0),
                             "theta": float(existing_quote.get("theta") or 0.0),
                             "vega": float(existing_quote.get("vega") or 0.0),
-                            "timestamp_ms": now_ms,
+                            "timestamp_ms": snapshot_ms or now_ms,
                             "quote_timestamp": now_iso,
                             "quote_freshness": "REAL_TIME",
-                            "quote_age_ms": 0,
+                            "quote_age_ms": received_ms - (snapshot_ms or now_ms),
                             "is_valid": bool(ltp > 0 and bid > 0 and ask >= bid and spread_pct <= MAX_SPREAD_PCT),
                         }
                         updated_count += 1

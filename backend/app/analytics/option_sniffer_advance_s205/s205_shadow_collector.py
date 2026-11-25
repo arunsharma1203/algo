@@ -392,6 +392,9 @@ def sweep_l5_book_for_qty(
     depth_obs = bool(quote.get("depth_observed_on_tick", False))
     prov = str(quote.get("book_provenance") or "")
 
+    if prov == "REST_UNVERIFIED_BOOK":
+        return {"ok": False, "reason": "UNVERIFIED_REST_BOOK"}
+
     if require_observed:
         if not is_obs or not depth_obs or prov != "OBSERVED_V3_L5":
             return {
@@ -2063,6 +2066,8 @@ class S205ShadowCollector:
         quote_payload: Dict[str, Any],
         quote_lookup_by_ikey: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
         now_dt: Optional[datetime] = None,
+        *,
+        hard_stop_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Sub-second WebSocket tick handler:
@@ -2073,14 +2078,21 @@ class S205ShadowCollector:
         """
         now_dt = _to_ist_naive_safe(now_dt)
         now_ms = int(quote_payload.get("local_receipt_ts_ms") or int(time.time() * 1000))
-        self._flush_due_fade_probes(ikey, quote_payload, now_ms)
+        if hard_stop_only:
+            # The dispatch queue is outside the stream lock. Recheck the age at use.
+            age_ms = int(time.time() * 1000) - int(quote_payload.get("l1_book_timestamp_ms") or 0)
+            if not 0 <= age_ms <= SHADOW_EXIT_MAX_QUOTE_AGE_MS:
+                return []
+            quote_payload = dict(quote_payload, l1_book_age_ms=age_ms, quote_age_ms=age_ms)
+        else:
+            self._flush_due_fade_probes(ikey, quote_payload, now_ms)
 
         closed_events: List[Dict[str, Any]] = []
         getter = quote_lookup_by_ikey or (lambda k: quote_payload if k == ikey else None)
 
         # 1. Check pending Leg-2 buy-first spreads
         with self._lock:
-            pending_ids = list(self._pending_leg2.keys())
+            pending_ids = [] if hard_stop_only else list(self._pending_leg2.keys())
         for pid in pending_ids:
             with self._lock:
                 p_obj = self._pending_leg2.get(pid)
@@ -2097,7 +2109,7 @@ class S205ShadowCollector:
                     closed_events.append(res_p)
 
         # 2. Check open shadow packages for Hard-SL, Fixed Decay TP, or 15:15 EOD
-        is_eod = now_dt.time() >= dt_time(15, 15)
+        is_eod = not hard_stop_only and now_dt.time() >= dt_time(15, 15)
         with self._lock:
             open_list = list(self._open_packages.values())
 
@@ -2157,7 +2169,9 @@ class S205ShadowCollector:
                     self._last_valid_pkg_mtm_inr[pid] = float(acc_tick_l["net_pnl"])
                 eff_stop = max(float(ls["hard_stop"]), float(ls.get("ratchet_stop") or 0.0))
                 rsn = ""
-                if is_eod:
+                if hard_stop_only:
+                    rsn = "LONG_HARD_SL_HIT" if cur_exit_px <= float(ls["hard_stop"]) else ""
+                elif is_eod:
                     rsn = "EOD_SQUAREOFF_1515"
                 elif cur_exit_px <= eff_stop:
                     rsn = "RATCHET_STOP_HIT" if (ls.get("ratchet_stop") and float(ls["ratchet_stop"]) > float(ls["hard_stop"]) + 0.01) else "LONG_HARD_SL_HIT"
@@ -2302,7 +2316,9 @@ class S205ShadowCollector:
                 r_debit = ls.get("ratchet_max_debit_pts")
                 eff_max_debit = min(hard_debit, float(r_debit)) if r_debit is not None else hard_debit
                 rsn = ""
-                if is_eod:
+                if hard_stop_only:
+                    rsn = "SPREAD_HARD_SL_HIT" if cur_debit >= hard_debit else ""
+                elif is_eod:
                     rsn = "EOD_SQUAREOFF_1515"
                 elif cur_debit >= eff_max_debit:
                     rsn = (
