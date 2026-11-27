@@ -13,9 +13,50 @@ export default function V2ObservabilityPanel({ overview, diagnostics, opportunit
   const opps = opportunities?.rows || [];
   const statusSummary = opportunities?.summary_by_status || {};
   const openBasisFails = overview?.open_basis_fail_summary || {};
+  const arb = overview?.regime_arbitration || null;
 
   return (
     <div className="space-y-4 mt-4">
+      {arb && (
+        <div className="rounded-2xl border border-indigo-500/40 bg-indigo-950/15 p-4 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-indigo-300">
+              <Layers className="w-4 h-4" />
+              Causal Multi-Book Regime Arbitrator (`v2_regime_arbitrator`)
+            </div>
+            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-900/50 text-indigo-200 border border-indigo-500/30">
+              {arb.regime_code} • Preferred: {arb.preferred_book || 'NONE'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+            <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
+              <div className="text-[10px] text-slate-400">Nearest Trading DTE</div>
+              <div className="font-semibold text-slate-100">{arb.nearest_trading_dte ?? '—'} ({arb.nearest_expiry || '—'})</div>
+            </div>
+            <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
+              <div className="text-[10px] text-slate-400">Anti-Self-Hedge Gate</div>
+              <div className="font-semibold text-emerald-300">
+                Bull: {arb.allowed_bull ? 'OPEN' : 'LOCKED'} / Bear: {arb.allowed_bear ? 'OPEN' : 'LOCKED'}
+              </div>
+            </div>
+            <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
+              <div className="text-[10px] text-slate-400">Breakout / ADX+ER</div>
+              <div className="font-semibold text-slate-100">
+                {arb.is_orb_breakout ? 'ORB_BREAK' : 'RANGE'} / {arb.trend_strength_ok ? 'PASS' : 'LOW'}
+              </div>
+            </div>
+            <div className="rounded-lg bg-slate-950/70 border border-slate-800 p-2">
+              <div className="text-[10px] text-slate-400">Book A / Book B Active</div>
+              <div className="font-semibold text-slate-100">
+                {arb.book_a_enabled ? 'ON' : 'OFF (DTE<=4 Research)'} / {arb.book_b_enabled ? 'ON' : 'OFF'}
+              </div>
+            </div>
+          </div>
+          <div className="text-[11px] text-slate-400">
+            {arb.reason} <span className="text-amber-300/90">• {arb.governance_note}</span>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="rounded-2xl border border-slate-700/80 bg-slate-900/75 p-4 space-y-2.5">
           <div className="flex items-center justify-between">

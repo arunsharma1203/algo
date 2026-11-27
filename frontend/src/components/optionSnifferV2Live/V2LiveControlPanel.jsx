@@ -147,8 +147,9 @@ export default function V2LiveControlPanel({ paperOpenCount = 0 }) {
               </span>
             </div>
             <div className="text-[11px] text-slate-400 mt-0.5">
-              Separate SQLite ledger (`option_sniffer_advance_v2_live.db`) • Boots disarmed • Daily Live Net:{' '}
-              <span className="text-slate-200 font-semibold">{fmtInr(liveStatus?.daily_realized_net_inr)}</span>
+              Separate SQLite ledger (`option_sniffer_advance_v2_live.db`) • Boots disarmed • Realized:{' '}
+              <span className="text-slate-200 font-semibold">{fmtInr(liveStatus?.daily_realized_net_inr)}</span> • Live Open MTM:{' '}
+              <span className="text-slate-200 font-semibold">{fmtInr(liveStatus?.daily_unrealized_mtm_inr)}</span>
             </div>
           </div>
         </div>

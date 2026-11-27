@@ -158,6 +158,8 @@ class OptionSnifferV2Service:
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
         self._archive_thread: Optional[threading.Thread] = None
+        self._lifecycle_lock = threading.RLock()
+        self._lifecycle_listeners: List[Callable[[Dict[str, Any]], None]] = []
 
         self.unified_engine = V2UnifiedEventEngine(
             cfg=self.config,
@@ -169,6 +171,7 @@ class OptionSnifferV2Service:
             on_package_opened_cb=self._on_package_opened,
             on_package_closed_cb=self._on_package_closed,
             on_skew_sample_cb=self.feed_consumer.record_skew_sample,
+            on_lifecycle_event_cb=self._dispatch_lifecycle_event,
         )
 
         # Cached read-only archive report populated only by explicit CLI/control actions
@@ -261,6 +264,28 @@ class OptionSnifferV2Service:
                                 ktc.pop(k, None)
         except Exception as exc:
             logger.warning(f"[V2] V2-only unpin cleanup warning: {exc}")
+
+    def register_lifecycle_listener(self, listener: Callable[[Dict[str, Any]], None]) -> None:
+        """Registers a strictly passive observer for FORWARD_PAPER lifecycle events."""
+        with self._lifecycle_lock:
+            if listener not in self._lifecycle_listeners:
+                self._lifecycle_listeners.append(listener)
+
+    def unregister_lifecycle_listener(self, listener: Callable[[Dict[str, Any]], None]) -> None:
+        with self._lifecycle_lock:
+            if listener in self._lifecycle_listeners:
+                self._lifecycle_listeners.remove(listener)
+
+    def _dispatch_lifecycle_event(self, event: Dict[str, Any]) -> None:
+        if not isinstance(event, dict) or event.get("run_mode") != "FORWARD_PAPER":
+            return
+        with self._lifecycle_lock:
+            listeners = list(self._lifecycle_listeners)
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception as exc:
+                logger.error(f"[V2] Isolated lifecycle listener error (paper engine unaffected): {exc}")
 
     def _on_package_opened(self, package_id: str, contracts: List[Dict[str, Any]]) -> None:
         mgr = self._stream_mgr_ref
@@ -1313,6 +1338,7 @@ class OptionSnifferV2Service:
                 "canonical_ledger_sha256": self.store.compute_canonical_ledger_digest("FORWARD_PAPER", self.config_hash),
             },
             "opportunity_summary": opp_counts,
+            "regime_arbitration": self.unified_engine.latest_regime_arbitration,
             "open_basis_fail_summary": self.unified_engine.open_basis_fail_counts,
             "stress_kill_warnings_by_date": self.unified_engine.stress_kill_warnings_by_date,
             "archive_replay_summary": {

@@ -203,19 +203,35 @@ export default function V2LiveArmModal({ isOpen, onClose, liveStatus, paperOpenC
           </div>
 
           <div>
+            <div className="rounded-xl border border-cyan-500/40 bg-cyan-950/25 p-3 mb-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-bold uppercase tracking-wide text-cyan-200">
+                  Human Confirmation Interlock Code
+                </div>
+                <div className="text-[11px] text-slate-300 mt-0.5">
+                  Type the 4-digit session code shown here to confirm intentional human arming. Rotates after arm/disarm.
+                </div>
+              </div>
+              <div
+                data-testid="v2-live-session-pin"
+                className="px-3.5 py-2 rounded-lg border border-cyan-400/50 bg-slate-950 font-mono text-lg font-extrabold tracking-[0.25em] text-cyan-200 select-all shrink-0"
+              >
+                {liveStatus?.current_pin || '----'}
+              </div>
+            </div>
             <label className="block text-xs font-semibold text-slate-300 mb-1">
-              Enter Backend Session 4-Digit Security PIN
+              Type 4-Digit Human Confirmation Code
             </label>
             <div className="relative">
               <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
-                type="password"
+                type="text"
                 inputMode="numeric"
                 maxLength={4}
                 value={pin}
                 onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
-                placeholder="4-digit PIN from backend console"
-                className="w-full rounded-lg border border-slate-700 bg-slate-900 pl-9 pr-3 py-2 text-sm tracking-widest text-slate-100"
+                placeholder="Enter 4-digit code shown above"
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 pl-9 pr-3 py-2 text-sm font-mono tracking-widest text-slate-100"
               />
             </div>
           </div>

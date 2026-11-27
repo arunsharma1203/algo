@@ -254,11 +254,12 @@ def evaluate_book_b_entry_signal(
     ot = "CE" if (is_bull or (not is_bear and spot_close >= spot_vwap)) else "PE"
 
     target_exp: Optional[str] = None
+    max_tdte = int(cfg_b.get("max_trading_dte", 12))
     for exp_s in sorted(set(expiries)):
         if exp_s < session_date:
             continue
         tdte = trading_sessions_between(session_date, exp_s, observed_sessions=observed_sessions, extra_holidays=extra_holidays)
-        if tdte >= int(cfg_b["min_trading_dte"]):
+        if int(cfg_b["min_trading_dte"]) <= tdte <= max_tdte:
             target_exp = exp_s
             break
 

@@ -33,8 +33,10 @@ from app.analytics.option_sniffer_v2.v2_book_b_engine import (
 )
 from app.analytics.option_sniffer_v2.v2_config import (
     load_v2_preregistration,
+    parse_ist_timestamp_ms,
     trading_sessions_between,
 )
+from app.analytics.option_sniffer_v2.v2_data_contract import sweep_observed_l5_book
 from app.analytics.option_sniffer_v2.v2_o3_reproducer import (
     BOOK_A_SPEC_CONFLICTS,
     load_phase4_o3_audit_report,
@@ -327,9 +329,7 @@ def run_full_research_audit(
             chain_by_bar: Dict[str, Dict[Tuple[str, float, str], Dict[str, Any]]] = defaultdict(dict)
             exps_dt: set[str] = set()
             for cr in v1c.execute(
-                "SELECT bar_ts, instrument_key, trading_symbol, expiry, strike, option_type, "
-                "raw_bid, raw_ask, l5_ask_qty, book_obi_l5, is_observed_l1_book "
-                "FROM option_sniffer_advance_s205_l5_chain_1m WHERE session_date=? ORDER BY bar_ts ASC;",
+                "SELECT * FROM option_sniffer_advance_s205_l5_chain_1m WHERE session_date=? ORDER BY bar_ts ASC;",
                 (dt,),
             ).fetchall():
                 dcr = dict(cr)
@@ -337,7 +337,27 @@ def run_full_research_audit(
                 exps_dt.add(dcr["expiry"])
 
             valid_exps = sorted(e for e in exps_dt if e > dt)
-            target_exp = next((e for e in valid_exps if trading_sessions_between(dt, e) >= 2), None) or (valid_exps[0] if valid_exps else None)
+            target_exp = next((e for e in valid_exps if 2 <= trading_sessions_between(dt, e) <= 12), None)
+            if target_exp is None:
+                l5_session_opps.append(
+                    {
+                        "session_date": dt,
+                        "window_bucket": "NO_ELIGIBLE_DTE2_12_CONTRACT",
+                        "bar_ts": None,
+                        "contract": None,
+                        "entry_price": 0.0,
+                        "adx14": None,
+                        "er20": None,
+                        "delta_basis_pts": None,
+                        "l5_obi": None,
+                        "failed_gates": ["NO_DTE_2_TO_12_CONTRACT_IN_V1_L5_TABLE"],
+                        "quote_status": "UNVERIFIED_MISSING_2DTE_L5_CHAIN",
+                        "counterfactual_net_1x_inr": None,
+                        "counterfactual_exit": None,
+                    }
+                )
+                gate_fail_counts["UNVERIFIED_MISSING_2DTE_L5_CHAIN"] += 1
+                continue
 
             first_by_win: Dict[str, Any] = {}
             vwaps: List[float] = []
@@ -365,32 +385,67 @@ def run_full_research_audit(
                 dbasis = round(raw_b - open_basis_med, 2) if (raw_b is not None and open_basis_med is not None) else None
                 adx = ind_i["adx14"]
                 er = ind_i["er20"]
+                bar_dec_ms = parse_ist_timestamp_ms(bts) + 60_000
 
                 def _eval_q(qrow: Optional[Dict[str, Any]]) -> Tuple[bool, str, float, float, Optional[float]]:
                     if not qrow:
                         return False, "MISSING_QUOTE", 0.0, 0.0, None
-                    bid = float(qrow["raw_bid"] or 0.0)
-                    ask = float(qrow["raw_ask"] or 0.0)
-                    if bid <= 0 or ask < bid or not qrow["is_observed_l1_book"]:
-                        return False, "UNEXECUTABLE_QUOTE", 0.0, 0.0, None
-                    sp_pct = (ask - bid) / ask * 100.0
-                    obi_v = float(qrow["book_obi_l5"] if qrow["book_obi_l5"] is not None else -999.0)
-                    l5_ask = int(qrow["l5_ask_qty"] or 0)
-                    epx_v = round_to_nse_tick(ask + 0.05, mode="adverse_buy")
+                    depth_lvl = json.loads(qrow.get("depth_json") or "[]")
+                    age_ms_v = int(qrow.get("l1_book_age_ms") or 0)
+                    q_dict = {
+                        "instrument_key": qrow.get("instrument_key"),
+                        "raw_bid": qrow.get("raw_bid"),
+                        "raw_ask": qrow.get("raw_ask"),
+                        "bid": qrow.get("raw_bid"),
+                        "ask": qrow.get("raw_ask"),
+                        "bid_qty": qrow.get("bid_qty"),
+                        "ask_qty": qrow.get("ask_qty"),
+                        "l5_bid_qty": qrow.get("l5_bid_qty"),
+                        "l5_ask_qty": qrow.get("l5_ask_qty"),
+                        "book_obi_l5": qrow.get("book_obi_l5"),
+                        "depth_levels": depth_lvl,
+                        "is_observed_l1_book": bool(qrow.get("is_observed_l1_book")),
+                        "depth_observed_on_tick": bool(qrow.get("depth_observed_on_tick")),
+                        "depth_rungs_carried": False,
+                        "book_provenance": qrow.get("book_provenance") or "OBSERVED_V3_L5",
+                        "l1_book_timestamp_ms": bar_dec_ms - age_ms_v,
+                        "depth_timestamp_ms": bar_dec_ms - age_ms_v,
+                    }
+                    sw = sweep_observed_l5_book(
+                        quote=q_dict,
+                        side="BUY",
+                        target_qty=_LOT,
+                        lot_size=_LOT,
+                        adverse_ticks=int(cfg["quote_hygiene"]["adverse_latency_ticks"]),
+                        max_age_ms=int(cfg["quote_hygiene"]["max_entry_quote_age_ms"]),
+                        now_ms=bar_dec_ms,
+                        max_spread_pct=float(cfg["quote_hygiene"]["max_primary_spread_pct"]),
+                        require_observed_l5=bool(cfg["quote_hygiene"]["require_observed_l5_book_for_entry"]),
+                    )
+                    obi_v = float(qrow["book_obi_l5"]) if qrow.get("book_obi_l5") is not None else -999.0
+                    if not sw.get("ok"):
+                        return False, str(sw.get("reason") or "L5_LIQ_FAILED"), 0.0, 0.0, (obi_v if qrow.get("book_obi_l5") is not None else None)
+                    epx_v = float(sw["fill_price"])
                     outlay_v = round(epx_v * _LOT, 2)
-                    if sp_pct > 1.5 or l5_ask < _LOT:
-                        return False, f"L5_LIQ(sp={sp_pct:.2f}%)", epx_v, outlay_v, obi_v
-                    return True, "OK", epx_v, outlay_v, obi_v
+                    return True, "OK", epx_v, outlay_v, (obi_v if qrow.get("book_obi_l5") is not None else None)
 
                 q = chain_by_bar.get(bts, {}).get((target_exp, atm, ot)) if target_exp else None
                 q_ok, q_rsn, epx, outlay, obi = _eval_q(q)
                 chosen_k = atm
-                if q_ok and outlay > 18500.0 and target_exp:
+                atm_obi_ok = bool(q_ok and obi is not None and obi >= 0.05)
+                if (
+                    target_exp
+                    and (1015 <= hhmm <= 1300)
+                    and (adx is not None and adx >= 22.0)
+                    and (er is not None and er >= 0.32)
+                    and (dbasis is not None and ((dbasis >= 3.0) if is_bull else (dbasis <= -3.0)))
+                    and atm_obi_ok
+                    and outlay > 18500.0
+                ):
                     otm_k = (atm + 50.0) if ot == "CE" else (atm - 50.0)
                     q2 = chain_by_bar.get(bts, {}).get((target_exp, otm_k, ot))
                     q2_ok, q2_rsn, epx2, outlay2, obi2 = _eval_q(q2)
-                    if q2_ok:
-                        q_ok, q_rsn, epx, outlay, obi, chosen_k, q = q2_ok, q2_rsn, epx2, outlay2, obi2, otm_k, q2
+                    q_ok, q_rsn, epx, outlay, obi, chosen_k, q = q2_ok, q2_rsn, epx2, outlay2, obi2, otm_k, q2
 
                 fails: List[str] = []
                 if not (1015 <= hhmm <= 1300):
@@ -420,7 +475,7 @@ def run_full_research_audit(
                 if not fails and "FIRST_V2_PASS" not in first_by_win:
                     first_by_win["FIRST_V2_PASS"] = opp
 
-            # Recompute full-session vwaps up to bar close for clean counterfactual exit simulation
+            # Recompute causal prefix vwaps up to bar close for clean counterfactual exit simulation
             full_vwaps: List[float] = []
             tp_s = 0.0
             for idx_b, bb in enumerate(bars, 1):
@@ -454,13 +509,13 @@ def run_full_research_audit(
                         eff_sl = max(hard_sl, rstop) if rstop else hard_sl
                         scj = float(bj["spot_c"])
                         vwj = full_vwaps[j]
-                        vflip = held >= 4 and ((is_bull and scj < vwj - 15.0) or ((not is_bull) and scj > vwj + 15.0))
+                        vflip = held >= 4 and ((is_bull and scj < vwj - 18.0) or ((not is_bull) and scj > vwj + 18.0))
                         rsn = ""
                         if hhmmj >= 1515 or j == len(bars) - 1:
                             rsn = "EOD_1515"
                         elif sell_px <= eff_sl:
                             rsn = "RATCHET" if (rstop and rstop > hard_sl + 0.01) else "HARD_SL"
-                        elif held >= 35 and gain_pct < 3.0:
+                        elif held >= 35 and gain_pct < 4.0:
                             rsn = "STAG_35M"
                         elif vflip:
                             rsn = "VFLIP"
@@ -471,7 +526,6 @@ def run_full_research_audit(
                             cf_exit = f"{rsn}@{hmj}"
                             break
                         best_px = max(best_px, sell_px)
-                        fav = (best_px - epx) / epx * 100.0
                         rstop = compute_close_only_long_ratchet(epx, best_px, rstop, [(12, 0, 2), (22, 0, 10), (35, 0, 22), (50, 0, 35), (70, 0, 52)])
                 rec = {
                     "session_date": dt, "window_bucket": bkt, "bar_ts": bts, "contract": f"{int(k)}{ot}",
@@ -530,7 +584,7 @@ def run_full_research_audit(
                         sl_pct = round(max(6.0, min(20.0, (1800.0 / max(1.0, outlay)) * 100.0)), 2)
                         hard_stop = round_to_nse_tick(b_ent * (1.0 - sl_pct / 100.0), mode="adverse_buy")
                         stag_m = int(stag_override if stag_override is not None else 35)
-                        vf_pts = 15.0
+                        vf_pts = 18.0
                     else:
                         sl_pct = round(max(6.0, min(22.0, (2200.0 / max(1.0, outlay)) * 100.0)), 2)
                         hard_stop = round_to_nse_tick(b_ent * (1.0 - sl_pct / 100.0), mode="adverse_sell")
@@ -558,7 +612,7 @@ def run_full_research_audit(
                             rsn = "EOD_1515"
                         elif bs <= eff_stop:
                             rsn = "RATCHET" if (rstop and rstop > hard_stop + 0.01) else "HARD_SL"
-                        elif held >= stag_m and gain_pct < 3.0:
+                        elif held >= stag_m and gain_pct < 4.0:
                             rsn = f"STAG_{stag_m}M"
                         elif vflip:
                             rsn = "VWAP_FLIP"
@@ -707,6 +761,92 @@ def run_full_research_audit(
                 ]:
                     book_a_variants[lbl] = _full_stats([_eval_a(e, tgt, rm) for e in eps_a if e["dte"] <= mdte])
 
+                # Multi-book causal regime arbitrator candidates (N_trials += 4 -> 170)
+                eps_a_by_dt = {e["dt"]: e for e in eps_a}
+                eps_b_by_dt = {e["dt"]: e for e in eps_b}
+                all_ep_dts = sorted(set(eps_a_by_dt.keys()) | set(eps_b_by_dt.keys()))
+
+                def _full_with_2x_folds(trs: List[Dict[str, Any]]) -> Dict[str, Any]:
+                    base = _full_stats(trs)
+                    base["folds_2x"] = {
+                        f: _summarize([t for t in trs if _get_fold_59(t["exp"]) == f], "net2x")
+                        for f in ("TRAIN", "VAL", "PREVIOUSLY_INSPECTED_HOLDOUT")
+                    }
+                    return base
+
+                arb_bk_b_trs = [x for x in (_eval_b(e, "STEP_RATCHET", "V2", 35) for e in eps_b) if x]
+                arb_bk_a_dte4_trs = [x for x in (_eval_a(e, 0.70, "R0") for e in eps_a if e["dte"] <= 4) if x]
+
+                arb0_fcfs: List[Dict[str, Any]] = []
+                arb1_theta_dte2: List[Dict[str, Any]] = []
+                arb2_vix_switch: List[Dict[str, Any]] = []
+                arb3_dual_nonconflicting: List[Dict[str, Any]] = []
+                for sdt in all_ep_dts:
+                    ea = eps_a_by_dt.get(sdt)
+                    eb = eps_b_by_dt.get(sdt)
+                    ta_all = _eval_a(ea, 0.70, "R0") if ea else None
+                    ta_dte4 = ta_all if (ea and ea["dte"] <= 4) else None
+                    tb = _eval_b(eb, "STEP_RATCHET", "V2", 35) if eb else None
+
+                    # ARB0: 1-slot Naive FCFS across all DTEs
+                    if ea and eb and ta_all and tb:
+                        if ea["ent_ts"] <= eb["ent_ts"]:
+                            arb0_fcfs.append(ta_all)
+                            if ta_all["exit_hm"] < eb["ent_ts"]:
+                                arb0_fcfs.append(tb)
+                        else:
+                            arb0_fcfs.append(tb)
+                            if tb["exit_hm"] < ea["ent_ts"]:
+                                arb0_fcfs.append(ta_all)
+                    elif ta_all:
+                        arb0_fcfs.append(ta_all)
+                    elif tb:
+                        arb0_fcfs.append(tb)
+
+                    # ARB1: 1-slot Theta DTE<=2 else Convexity
+                    if ea and ea["dte"] <= 2 and ta_all:
+                        arb1_theta_dte2.append(ta_all)
+                        if tb and eb and ta_all["exit_hm"] < eb["ent_ts"]:
+                            arb1_theta_dte2.append(tb)
+                    elif tb:
+                        arb1_theta_dte2.append(tb)
+                        if ta_dte4 and eb and tb["exit_hm"] < ea["ent_ts"]:
+                            arb1_theta_dte2.append(ta_dte4)
+                    elif ta_dte4:
+                        arb1_theta_dte2.append(ta_dte4)
+
+                    # ARB2: 1-slot VIX Regime Switch (VIX <= 14.5 -> Theta DTE<=4 else Book B)
+                    vix_d = vix_by_dt.get(sdt, 15.0)
+                    if ta_dte4 and (vix_d <= 14.5 or tb is None):
+                        arb2_vix_switch.append(ta_dte4)
+                    elif tb:
+                        arb2_vix_switch.append(tb)
+
+                    # ARB3: 2-slot Dual Non-Conflicting DTE<=4 (blocks opposing directional overlap)
+                    if ta_dte4 and tb and ea and eb:
+                        conflict = ea["is_bull"] != eb["is_bull"]
+                        if ea["ent_ts"] <= eb["ent_ts"]:
+                            arb3_dual_nonconflicting.append(ta_dte4)
+                            if (not conflict) or ta_dte4["exit_hm"] < eb["ent_ts"]:
+                                arb3_dual_nonconflicting.append(tb)
+                        else:
+                            arb3_dual_nonconflicting.append(tb)
+                            if (not conflict) or tb["exit_hm"] < ea["ent_ts"]:
+                                arb3_dual_nonconflicting.append(ta_dte4)
+                    elif ta_dte4:
+                        arb3_dual_nonconflicting.append(ta_dte4)
+                    elif tb:
+                        arb3_dual_nonconflicting.append(tb)
+
+                multi_book_arb_audit = {
+                    "BOOK_B_ONLY": _full_with_2x_folds(arb_bk_b_trs),
+                    "BOOK_A_DTE4_ONLY": _full_with_2x_folds(arb_bk_a_dte4_trs),
+                    "ARB0_NAIVE_FCFS_1SLOT": _full_with_2x_folds(arb0_fcfs),
+                    "ARB1_THETA_DTE_LE2_ELSE_CONVEXITY_1SLOT": _full_with_2x_folds(arb1_theta_dte2),
+                    "ARB2_VIX_REGIME_SWITCH_1SLOT": _full_with_2x_folds(arb2_vix_switch),
+                    "ARB3_DUAL_SLOT_NON_CONFLICTING_DTE4": _full_with_2x_folds(arb3_dual_nonconflicting),
+                }
+
                 # 19 Nov research replay exact objects
                 nov19_ep = next((e for e in eps_b if e["dt"] == "2026-11-19"), None)
                 nov19_s205 = next((x for x in s205_ex if x["dt"] == "2026-11-19" and x["kind"] == "B"), None)
@@ -718,6 +858,7 @@ def run_full_research_audit(
                     "book_b_exit_variants": book_b_exit_variants,
                     "book_b_entry_variants": book_b_entry_variants,
                     "book_a_intraday_150_variants": book_a_variants,
+                    "multi_book_regime_arbitration_59_sessions": multi_book_arb_audit,
                     "nov19_research_replay": {
                         "episode_b_entry": {k: v for k, v in nov19_ep.items() if k != "path"} if nov19_ep else None,
                         "episode_b_step_ratchet_v1": _eval_b(nov19_ep, "STEP_RATCHET", "V1", 45) if nov19_ep else None,
@@ -730,7 +871,7 @@ def run_full_research_audit(
         parity_proof = verify_production_book_b_parity(v1_db_path, v2_db_path)
 
         return {
-            "report_version": "2.3.0-research-audit",
+            "report_version": "2.3.1-research-audit",
             "generated_at_ist": datetime.now(IST).isoformat(),
             "income_disclaimer": "An AI backtest, replay, or paper simulation does NOT prove or guarantee future trading income.",
             "n_trials_logged": {
@@ -738,7 +879,8 @@ def run_full_research_audit(
                 "intraday_book_a_trials": 16,
                 "book_b_exit_trials": 6,
                 "book_b_entry_and_gate_trials": 9,
-                "cumulative_total_trials": 166,
+                "multi_book_regime_arbitrator_trials": 4,
+                "cumulative_total_trials": 170,
             },
             "v2_baseline": {
                 "db_bytes": db_bytes,

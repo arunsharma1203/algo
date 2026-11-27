@@ -63,6 +63,10 @@ from app.analytics.option_sniffer_v2.v2_paper_simulator import (
     V2PaperSimulator,
     make_stable_id,
 )
+from app.analytics.option_sniffer_v2.v2_regime_arbitrator import (
+    check_candidate_arbitration_gate,
+    evaluate_v2_regime_arbitration,
+)
 
 
 def compute_causal_bar_indicators(completed_bars: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -146,6 +150,7 @@ class V2UnifiedEventEngine:
         on_package_opened_cb: Optional[Callable[[str, List[Dict[str, Any]]], None]] = None,
         on_package_closed_cb: Optional[Callable[[str], None]] = None,
         on_skew_sample_cb: Optional[Callable[[str, Optional[int]], None]] = None,
+        on_lifecycle_event_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         self.cfg = cfg
         self.cfg_hash = str(cfg_hash)
@@ -169,6 +174,7 @@ class V2UnifiedEventEngine:
         self.on_package_opened_cb = on_package_opened_cb
         self.on_package_closed_cb = on_package_closed_cb
         self.on_skew_sample_cb = on_skew_sample_cb
+        self.on_lifecycle_event_cb = on_lifecycle_event_cb
 
         # Session & bar state
         self.session_date: Optional[str] = None
@@ -203,10 +209,15 @@ class V2UnifiedEventEngine:
         self.prior_daily_spots: List[float] = []
         self.session_decision_trace: List[Dict[str, Any]] = []
         self.latest_decision_by_book: Dict[str, Dict[str, Any]] = {}
+        self.latest_regime_arbitration: Optional[Dict[str, Any]] = None
         self.last_indicators: Dict[str, Any] = compute_causal_bar_indicators([])
 
         if self.persist_bars_and_checkpoints:
             self.recover_from_db()
+
+    def _emit_lifecycle_event(self, event_payload: Dict[str, Any]) -> None:
+        if self.on_lifecycle_event_cb is not None:
+            self.on_lifecycle_event_cb(event_payload)
 
     def recover_from_db(self) -> None:
         """Reconstructs completed bars, indicator warmup, open basis ref, and checkpointed risk state."""
@@ -666,6 +677,7 @@ class V2UnifiedEventEngine:
 
         # 2. Manage open packages
         for pid, pkg in list(self.sim.open_packages.items()):
+            prev_ratchet = (pkg.get("legs_state") or {}).get("ratchet_stop")
             res_close = None
             if pkg["book_id"] == "V2_BOOK_B_PAID_FLOW":
                 res_close = manage_open_book_b_on_bar(
@@ -698,6 +710,49 @@ class V2UnifiedEventEngine:
             if isinstance(res_close, dict) and res_close.get("state") in ("CLOSED", "INCOMPLETE_LEG_UNWOUND"):
                 if self.on_package_closed_cb:
                     self.on_package_closed_cb(pid)
+                closed_snap = dict(self.sim._all_pkgs_by_id.get(pid) or pkg)
+                ls_snap = closed_snap.get("legs_state") or {}
+                q_snap: Dict[str, Dict[str, Any]] = {}
+                for lk_name in ("long_leg", "wing_leg", "short_leg"):
+                    lk_obj = ls_snap.get(lk_name) or {}
+                    ikey_l = str(lk_obj.get("instrument_key") or "")
+                    if ikey_l and ikey_l in self.latest_opt_quotes:
+                        q_snap[ikey_l] = dict(self.latest_opt_quotes[ikey_l])
+                self._emit_lifecycle_event(
+                    {
+                        "event_type": "PACKAGE_CLOSED",
+                        "run_mode": self.run_mode,
+                        "package_id": pid,
+                        "signal_id": closed_snap.get("signal_id"),
+                        "session_date": dt,
+                        "bar_ts": bar_open_ts,
+                        "decision_ts_ms": decision_ts_ms,
+                        "book_id": closed_snap.get("book_id"),
+                        "exit_reason": res_close.get("exit_reason") or closed_snap.get("exit_reason") or "STRATEGY_EXIT",
+                        "package_snapshot": closed_snap,
+                        "quote_by_ikey": q_snap,
+                    }
+                )
+            elif pid in self.sim.open_packages and pkg["book_id"] == "V2_BOOK_B_PAID_FLOW":
+                upd_pkg = self.sim.open_packages[pid]
+                ls_upd = upd_pkg.get("legs_state") or {}
+                new_ratchet = ls_upd.get("ratchet_stop")
+                if new_ratchet is not None and (prev_ratchet is None or float(new_ratchet) > float(prev_ratchet) + 1e-6):
+                    self._emit_lifecycle_event(
+                        {
+                            "event_type": "RATCHET_UPDATED",
+                            "run_mode": self.run_mode,
+                            "package_id": pid,
+                            "signal_id": upd_pkg.get("signal_id"),
+                            "session_date": dt,
+                            "bar_ts": bar_open_ts,
+                            "decision_ts_ms": decision_ts_ms,
+                            "book_id": upd_pkg.get("book_id"),
+                            "previous_ratchet_stop": prev_ratchet,
+                            "new_ratchet_stop": float(new_ratchet),
+                            "hard_stop": ls_upd.get("hard_stop"),
+                        }
+                    )
 
         # 3. Evaluate new entries strictly after exits (`active_slots_and_reserves` locks same-bar exit slots)
         slots = self.sim.active_slots_and_reserves(bar_open_ts, dt)
@@ -706,6 +761,27 @@ class V2UnifiedEventEngine:
         cfg_a = self.cfg["books"]["V2_BOOK_A_PROPOSED_O3"]
         entered_b = False
         sig_b_record: Optional[Dict[str, Any]] = None
+        expiries_all = sorted({k[0] for k in self.opt_contracts.keys()})
+        vix_now_val = float((self.latest_vix_q or {}).get("spot_ltp") or (b.get("vix_c") or 0.0)) or None
+        book_a_active = bool(cfg_a.get("autonomous_entries_enabled", False) or self.enable_book_a_opt_in)
+        self.latest_regime_arbitration = evaluate_v2_regime_arbitration(
+            session_date=dt,
+            ist_hhmm=eval_hhmm,
+            expiries=expiries_all,
+            spot_close=ind["spot_close"],
+            spot_vwap=ind["tpb_vwap"],
+            orb30_h=ind["orb30_h"],
+            orb30_l=ind["orb30_l"],
+            orb30_ready=bool(ind["orb30_ready"]),
+            adx14=ind["adx14"],
+            er20=ind["er20"],
+            vix_now=vix_now_val,
+            prior_vix_closes=self.prior_daily_vix,
+            open_packages=list(self.sim.open_packages.values()),
+            max_open_packages_total=int(env["max_open_packages_total"]),
+            book_a_enabled=book_a_active,
+            book_b_enabled=bool(cfg_b.get("autonomous_entries_enabled", True)),
+        )
 
         blocks = list(uncertainty_blocks or [])
         if self.sim.is_booking_halted():
@@ -728,7 +804,7 @@ class V2UnifiedEventEngine:
                 for k, c in self.opt_contracts.items()
                 if c["instrument_key"] in self.latest_opt_quotes
             }
-            expiries = sorted({k[0] for k in self.opt_contracts.keys()})
+            expiries = expiries_all
             sig_b = evaluate_book_b_entry_signal(
                 cfg=self.cfg,
                 session_date=dt,
@@ -767,59 +843,103 @@ class V2UnifiedEventEngine:
             self.latest_decision_by_book[cfg_b["book_id"]] = sig_b_record
 
             if sig_b["passed"] and sig_b.get("contract") and sig_b.get("quote"):
-                sid = make_stable_id(
-                    "osv2_sig", self.run_mode, self.book_b_params["variant_code"], bar_open_ts, sig_b["contract"]["instrument_key"]
-                )
-                self.store.record_signal_idempotent(
-                    {
-                        "signal_id": sid,
-                        "run_mode": self.run_mode,
-                        "config_hash": self.cfg_hash,
-                        "session_date": dt,
-                        "bar_ts": bar_open_ts,
-                        "decision_ts_ms": decision_ts_ms,
-                        "book_id": cfg_b["book_id"],
-                        "candidate_variant": self.book_b_params["variant_code"],
-                        "direction": sig_b["option_type"],
-                        "status": "TRIGGERED",
-                        "reject_reason": None,
-                        "gates": sig_b["gates"],
-                        "provenance": sig_b["basis_meta"],
-                    }
-                )
-                op = self.sim.open_book_b_paid_long(
-                    signal_id=sid,
-                    candidate_variant=self.book_b_params["variant_code"],
-                    session_date=dt,
-                    bar_ts=bar_open_ts,
-                    decision_ts_ms=decision_ts_ms,
-                    contract=sig_b["contract"],
-                    quote=sig_b["quote"],
-                    spot_price=ind["spot_close"],
-                    basis_meta=sig_b["basis_meta"],
-                    used_single_otm_fallback=sig_b["used_single_otm_fallback"],
-                )
-                if op.get("ok"):
-                    entered_b = True
-                    if self.on_package_opened_cb:
-                        self.on_package_opened_cb(op["package_id"], [sig_b["contract"]])
-                self._record_opportunity_with_dedup(
-                    session_date=dt,
-                    bar_ts=bar_open_ts,
-                    eval_hhmm=eval_hhmm,
-                    decision_ts_ms=decision_ts_ms,
+                arb_ok_b, arb_rsn_b = check_candidate_arbitration_gate(
+                    self.latest_regime_arbitration,
                     book_id=cfg_b["book_id"],
-                    candidate_variant=self.book_b_params["variant_code"],
-                    direction=sig_b.get("option_type"),
-                    decision_status="ACCEPTED" if op.get("ok") else "BLOCKED",
-                    primary_reject_reason=None if op.get("ok") else str(op.get("reason") or "OPEN_FAILED"),
-                    gates=sig_b.get("gates", []),
-                    ind=ind,
-                    extra_inputs=sig_b.get("basis_meta") or {},
-                    contract=sig_b.get("contract"),
-                    quote=sig_b.get("quote"),
-                    sig_obj=sig_b,
+                    is_bull=(sig_b["option_type"] == "CE"),
+                    open_total=slots["open_total"],
+                    max_open_packages_total=int(env["max_open_packages_total"]),
+                    book_a_enabled=book_a_active,
+                    book_b_enabled=bool(cfg_b.get("autonomous_entries_enabled", True)),
                 )
+                if not arb_ok_b:
+                    self._record_opportunity_with_dedup(
+                        session_date=dt,
+                        bar_ts=bar_open_ts,
+                        eval_hhmm=eval_hhmm,
+                        decision_ts_ms=decision_ts_ms,
+                        book_id=cfg_b["book_id"],
+                        candidate_variant=self.book_b_params["variant_code"],
+                        direction=sig_b.get("option_type"),
+                        decision_status="BLOCKED",
+                        primary_reject_reason=str(arb_rsn_b),
+                        gates=sig_b.get("gates", []),
+                        ind=ind,
+                        extra_inputs=sig_b.get("basis_meta") or {},
+                        contract=sig_b.get("contract"),
+                        quote=sig_b.get("quote"),
+                        sig_obj=sig_b,
+                    )
+                else:
+                    sid = make_stable_id(
+                        "osv2_sig", self.run_mode, self.book_b_params["variant_code"], bar_open_ts, sig_b["contract"]["instrument_key"]
+                    )
+                    self.store.record_signal_idempotent(
+                        {
+                            "signal_id": sid,
+                            "run_mode": self.run_mode,
+                            "config_hash": self.cfg_hash,
+                            "session_date": dt,
+                            "bar_ts": bar_open_ts,
+                            "decision_ts_ms": decision_ts_ms,
+                            "book_id": cfg_b["book_id"],
+                            "candidate_variant": self.book_b_params["variant_code"],
+                            "direction": sig_b["option_type"],
+                            "status": "TRIGGERED",
+                            "reject_reason": None,
+                            "gates": sig_b["gates"],
+                            "provenance": sig_b["basis_meta"],
+                        }
+                    )
+                    op = self.sim.open_book_b_paid_long(
+                        signal_id=sid,
+                        candidate_variant=self.book_b_params["variant_code"],
+                        session_date=dt,
+                        bar_ts=bar_open_ts,
+                        decision_ts_ms=decision_ts_ms,
+                        contract=sig_b["contract"],
+                        quote=sig_b["quote"],
+                        spot_price=ind["spot_close"],
+                        basis_meta=sig_b["basis_meta"],
+                        used_single_otm_fallback=sig_b["used_single_otm_fallback"],
+                    )
+                    if op.get("ok"):
+                        entered_b = True
+                        if self.on_package_opened_cb:
+                            self.on_package_opened_cb(op["package_id"], [sig_b["contract"]])
+                        open_snap = dict(self.sim.open_packages.get(op["package_id"]) or {})
+                        self._emit_lifecycle_event(
+                            {
+                                "event_type": "PACKAGE_OPENED",
+                                "run_mode": self.run_mode,
+                                "package_id": op["package_id"],
+                                "signal_id": sid,
+                                "session_date": dt,
+                                "bar_ts": bar_open_ts,
+                                "decision_ts_ms": decision_ts_ms,
+                                "book_id": cfg_b["book_id"],
+                                "structure": "SINGLE_LONG",
+                                "package_snapshot": open_snap,
+                                "quote_snapshot": dict(sig_b["quote"]),
+                            }
+                        )
+                    self._record_opportunity_with_dedup(
+                        session_date=dt,
+                        bar_ts=bar_open_ts,
+                        eval_hhmm=eval_hhmm,
+                        decision_ts_ms=decision_ts_ms,
+                        book_id=cfg_b["book_id"],
+                        candidate_variant=self.book_b_params["variant_code"],
+                        direction=sig_b.get("option_type"),
+                        decision_status="ACCEPTED" if op.get("ok") else "BLOCKED",
+                        primary_reject_reason=None if op.get("ok") else str(op.get("reason") or "OPEN_FAILED"),
+                        gates=sig_b.get("gates", []),
+                        ind=ind,
+                        extra_inputs=sig_b.get("basis_meta") or {},
+                        contract=sig_b.get("contract"),
+                        quote=sig_b.get("quote"),
+                        sig_obj=sig_b,
+                    )
             else:
                 self._record_opportunity_with_dedup(
                     session_date=dt,
@@ -868,8 +988,30 @@ class V2UnifiedEventEngine:
                 sig_obj=blk_obj,
             )
 
+        # Refresh slot & regime arbitrator state after potential Book B entry before evaluating Book A
+        if entered_b:
+            slots = self.sim.active_slots_and_reserves(bar_open_ts, dt)
+            self.latest_regime_arbitration = evaluate_v2_regime_arbitration(
+                session_date=dt,
+                ist_hhmm=eval_hhmm,
+                expiries=expiries_all,
+                spot_close=ind["spot_close"],
+                spot_vwap=ind["tpb_vwap"],
+                orb30_h=ind["orb30_h"],
+                orb30_l=ind["orb30_l"],
+                orb30_ready=bool(ind["orb30_ready"]),
+                adx14=ind["adx14"],
+                er20=ind["er20"],
+                vix_now=vix_now_val,
+                prior_vix_closes=self.prior_daily_vix,
+                open_packages=list(self.sim.open_packages.values()),
+                max_open_packages_total=int(env["max_open_packages_total"]),
+                book_a_enabled=book_a_active,
+                book_b_enabled=bool(cfg_b.get("autonomous_entries_enabled", True)),
+            )
+
         # Book A check (strictly disabled by default unless opt-in in research replay)
-        if not cfg_a.get("autonomous_entries_enabled", False) and not self.enable_book_a_opt_in:
+        if not book_a_active:
             dis_obj = {
                 "bar_ts": bar_open_ts,
                 "decision_ts_ms": decision_ts_ms,
@@ -898,7 +1040,10 @@ class V2UnifiedEventEngine:
             )
         elif (
             not blocks
+            and slots["open_total"] < int(env["max_open_packages_total"])
+            and slots["trades_today_total"] < int(env["max_total_trades_per_day"])
             and slots["open_by_book"].get(cfg_a["book_id"], 0) < int(cfg_a["max_open"])
+            and slots["trades_today_by_book"].get(cfg_a["book_id"], 0) < int(cfg_a.get("max_trades_day", cfg_a.get("max_trades_per_expiry", 1)))
             and decision_ts_ms >= self.sim.cooldown_until_ms.get(cfg_a["book_id"], 0)
         ):
             quotes_lk = {
@@ -906,8 +1051,8 @@ class V2UnifiedEventEngine:
                 for k, c in self.opt_contracts.items()
                 if c["instrument_key"] in self.latest_opt_quotes
             }
-            expiries = sorted({k[0] for k in self.opt_contracts.keys()})
-            vix_now = float((self.latest_vix_q or {}).get("spot_ltp") or (b.get("vix_c") or 0.0)) or None
+            expiries = expiries_all
+            vix_now = vix_now_val
             sig_a = evaluate_book_a_entry_signal(
                 cfg=self.cfg,
                 session_date=dt,
@@ -933,48 +1078,100 @@ class V2UnifiedEventEngine:
                 "gates": sig_a.get("gates", []),
             }
             if sig_a["passed"]:
-                sid_a = make_stable_id(
-                    "osv2_sig", self.run_mode, sig_a["candidate_variant"], bar_open_ts, sig_a["short_contract"]["instrument_key"]
+                cand_dte_a = (self.latest_regime_arbitration.get("dte_by_expiry") or {}).get(str(sig_a.get("expiry") or ""))
+                arb_ok_a, arb_rsn_a = check_candidate_arbitration_gate(
+                    self.latest_regime_arbitration,
+                    book_id=cfg_a["book_id"],
+                    is_bull=bool(sig_a["is_bull"]),
+                    open_total=slots["open_total"],
+                    max_open_packages_total=int(env["max_open_packages_total"]),
+                    book_a_enabled=book_a_active,
+                    book_b_enabled=bool(cfg_b.get("autonomous_entries_enabled", True)),
+                    candidate_dte=cand_dte_a,
                 )
-                l1 = self.sim.open_book_a_leg1_hedge(
-                    signal_id=sid_a,
-                    candidate_variant=sig_a["candidate_variant"],
-                    session_date=dt,
-                    bar_ts=bar_open_ts,
-                    decision_ts_ms=decision_ts_ms,
-                    wing_contract=sig_a["wing_contract"],
-                    short_contract=sig_a["short_contract"],
-                    wing_quote=sig_a["wing_quote"],
-                    spot_price=ind["spot_close"],
-                    vix_val=vix_now,
-                    is_bull=sig_a["is_bull"],
-                )
-                if l1.get("ok"):
-                    self.sim.complete_or_unwind_pending_leg2(
-                        package_id=l1["package_id"],
-                        short_quote=sig_a["short_quote"],
-                        wing_quote=sig_a["wing_quote"],
-                        decision_ts_ms=decision_ts_ms + 250,
+                if not arb_ok_a:
+                    self._record_opportunity_with_dedup(
                         session_date=dt,
                         bar_ts=bar_open_ts,
+                        eval_hhmm=eval_hhmm,
+                        decision_ts_ms=decision_ts_ms,
+                        book_id=cfg_a["book_id"],
+                        candidate_variant=sig_a["candidate_variant"],
+                        direction=sig_a.get("option_type"),
+                        decision_status="BLOCKED",
+                        primary_reject_reason=str(arb_rsn_a),
+                        gates=sig_a.get("gates", []),
+                        ind=ind,
+                        extra_inputs={"est_credit_pts": sig_a.get("est_credit_pts"), "skew_ms": sig_a.get("skew_ms")},
+                        contract=sig_a.get("short_contract"),
+                        quote=sig_a.get("short_quote"),
+                        sig_obj=sig_a,
                     )
-                self._record_opportunity_with_dedup(
-                    session_date=dt,
-                    bar_ts=bar_open_ts,
-                    eval_hhmm=eval_hhmm,
-                    decision_ts_ms=decision_ts_ms,
-                    book_id=cfg_a["book_id"],
-                    candidate_variant=sig_a["candidate_variant"],
-                    direction=sig_a.get("option_type"),
-                    decision_status="ACCEPTED",
-                    primary_reject_reason=None,
-                    gates=sig_a.get("gates", []),
-                    ind=ind,
-                    extra_inputs={"est_credit_pts": sig_a.get("est_credit_pts"), "skew_ms": sig_a.get("skew_ms")},
-                    contract=sig_a.get("short_contract"),
-                    quote=sig_a.get("short_quote"),
-                    sig_obj=sig_a,
-                )
+                else:
+                    sid_a = make_stable_id(
+                        "osv2_sig", self.run_mode, sig_a["candidate_variant"], bar_open_ts, sig_a["short_contract"]["instrument_key"]
+                    )
+                    l1 = self.sim.open_book_a_leg1_hedge(
+                        signal_id=sid_a,
+                        candidate_variant=sig_a["candidate_variant"],
+                        session_date=dt,
+                        bar_ts=bar_open_ts,
+                        decision_ts_ms=decision_ts_ms,
+                        wing_contract=sig_a["wing_contract"],
+                        short_contract=sig_a["short_contract"],
+                        wing_quote=sig_a["wing_quote"],
+                        spot_price=ind["spot_close"],
+                        vix_val=vix_now,
+                        is_bull=sig_a["is_bull"],
+                    )
+                    l2 = None
+                    if l1.get("ok"):
+                        l2 = self.sim.complete_or_unwind_pending_leg2(
+                            package_id=l1["package_id"],
+                            short_quote=sig_a["short_quote"],
+                            wing_quote=sig_a["wing_quote"],
+                            decision_ts_ms=decision_ts_ms + 250,
+                            session_date=dt,
+                            bar_ts=bar_open_ts,
+                        )
+                        if isinstance(l2, dict) and l2.get("state") == "OPEN":
+                            if self.on_package_opened_cb:
+                                self.on_package_opened_cb(
+                                    l1["package_id"], [sig_a["wing_contract"], sig_a["short_contract"]]
+                                )
+                            self._emit_lifecycle_event(
+                                {
+                                    "event_type": "PACKAGE_OPENED",
+                                    "run_mode": self.run_mode,
+                                    "package_id": l1["package_id"],
+                                    "signal_id": sid_a,
+                                    "session_date": dt,
+                                    "bar_ts": bar_open_ts,
+                                    "decision_ts_ms": decision_ts_ms,
+                                    "book_id": cfg_a["book_id"],
+                                    "structure": "DEFINED_RISK_SPREAD",
+                                    "package_snapshot": dict(self.sim.open_packages.get(l1["package_id"]) or {}),
+                                    "quote_snapshot": dict(sig_a["short_quote"]),
+                                    "wing_quote_snapshot": dict(sig_a["wing_quote"]),
+                                }
+                            )
+                    self._record_opportunity_with_dedup(
+                        session_date=dt,
+                        bar_ts=bar_open_ts,
+                        eval_hhmm=eval_hhmm,
+                        decision_ts_ms=decision_ts_ms,
+                        book_id=cfg_a["book_id"],
+                        candidate_variant=sig_a["candidate_variant"],
+                        direction=sig_a.get("option_type"),
+                        decision_status="ACCEPTED" if (isinstance(l2, dict) and l2.get("state") == "OPEN") else "BLOCKED",
+                        primary_reject_reason=None if (isinstance(l2, dict) and l2.get("state") == "OPEN") else str((l2 or l1).get("reason") or "LEG2_NOT_OPEN"),
+                        gates=sig_a.get("gates", []),
+                        ind=ind,
+                        extra_inputs={"est_credit_pts": sig_a.get("est_credit_pts"), "skew_ms": sig_a.get("skew_ms")},
+                        contract=sig_a.get("short_contract"),
+                        quote=sig_a.get("short_quote"),
+                        sig_obj=sig_a,
+                    )
             else:
                 self._record_opportunity_with_dedup(
                     session_date=dt,

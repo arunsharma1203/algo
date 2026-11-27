@@ -37,6 +37,20 @@
         "exit_ratchet": "Keep STEP_RATCHET (B4 failed LOWO and under V2 35m exits); evaluate stagnation_mins=45 vs 35 separately",
         "entry_window_note": "0945..1245 vs 1015..1300 non-stationary across 59d vs 9d L5 samples; evaluate prospectively"
       }
+    },
+    "V2_DUAL_BOOK_REGIME_ARB_DTE4_CANDIDATE": {
+      "protocol_ref": "V2_PROTOCOL_PROFILES.json#V2_DUAL_BOOK_REGIME_ARB_DTE4_CANDIDATE",
+      "engine_version": "2.3.1-regime-arb-candidate",
+      "live_arm_eligible": false,
+      "autonomous_activation_allowed": false,
+      "status": "RESEARCH_CANDIDATE_HOLDOUT_NEGATIVE_AT_2X",
+      "governance_note": "Pairs intraday Book A (150pt width, DTE<=4, 70% tgt, R0) with Book B (2<=DTE<=12) and hard anti-self-hedge opposing-direction block. Combined Holdout 2x (-Rs 3,056) remains negative across 59 sessions (N_trials=170); NOT eligible for live auto-activation.",
+      "rules": {
+        "anti_self_hedge_opposing_delta_block": true,
+        "book_a_intraday_max_trading_dte": 4,
+        "book_b_trading_dte_range": [2, 12],
+        "single_slot_trend_priority": "V2_BOOK_B_PAID_FLOW"
+      }
     }
   }
 }
