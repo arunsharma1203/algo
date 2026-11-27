@@ -1,12 +1,20 @@
 import React, { useState } from 'react';
-import { ShieldAlert, Lock, X, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { ShieldAlert, Lock, X, CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
 
 const fmtInr = (val) => {
   if (val === null || val === undefined || Number.isNaN(Number(val))) return 'Unavailable';
   return `₹${Number(val).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
-export default function V2LiveArmModal({ isOpen, onClose, liveStatus, paperOpenCount = 0, onConfirmArm }) {
+export default function V2LiveArmModal({
+  isOpen,
+  onClose,
+  liveStatus,
+  paperOpenCount = 0,
+  onConfirmArm,
+  statusError = '',
+  onRefreshStatus = null,
+}) {
   const [selectedBook, setSelectedBook] = useState('V2_BOOK_B_PAID_FLOW');
   const [maxLots, setMaxLots] = useState(liveStatus?.arm_state?.max_lots_per_book || 1);
   const [maxDailyLoss, setMaxDailyLoss] = useState(liveStatus?.arm_state?.max_daily_loss_inr || 2500);
@@ -14,17 +22,31 @@ export default function V2LiveArmModal({ isOpen, onClose, liveStatus, paperOpenC
   const [pin, setPin] = useState('');
   const [humanConfirmed, setHumanConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
   if (!isOpen) return null;
 
   const faults = liveStatus?.unresolved_faults || { total_blocking_faults: 0, items: [] };
   const paper = liveStatus?.paper_baseline_summary || {};
+  const expectedPin = liveStatus?.current_pin ? String(liveStatus.current_pin) : null;
   const canArm =
+    Boolean(liveStatus) &&
+    Boolean(expectedPin) &&
     faults.total_blocking_faults === 0 &&
     humanConfirmed &&
-    /^\d{4}$/.test(pin.trim()) &&
+    pin.trim() === expectedPin &&
     !submitting;
+
+  const handleRefresh = async () => {
+    if (!onRefreshStatus || refreshing) return;
+    setRefreshing(true);
+    try {
+      await onRefreshStatus();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -76,12 +98,37 @@ export default function V2LiveArmModal({ isOpen, onClose, liveStatus, paperOpenC
         </div>
 
         <form onSubmit={handleSubmit} className="p-5 space-y-4 max-h-[82vh] overflow-y-auto">
+          {!liveStatus && (
+            <div className="rounded-xl border border-rose-500/50 bg-rose-950/35 p-3 text-xs text-rose-200 flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-bold">Live Control Status Unavailable — Arming Blocked</div>
+                  <div className="text-[11px] mt-0.5 text-rose-200/90">
+                    {statusError || 'Cannot reach /api/option-sniffer-advance-v2-live/status (backend restart may be required).'}
+                  </div>
+                </div>
+              </div>
+              {onRefreshStatus && (
+                <button
+                  type="button"
+                  onClick={handleRefresh}
+                  disabled={refreshing}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-rose-400/40 bg-rose-900/40 hover:bg-rose-800/50 text-[11px] font-semibold text-rose-100 shrink-0"
+                >
+                  <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} />
+                  Refresh
+                </button>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
             <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
               <div className="text-[10px] text-slate-400 uppercase">Current Mode</div>
-              <div className="font-bold text-amber-300 mt-1">{liveStatus?.execution_mode || 'DISARMED'}</div>
+              <div className="font-bold text-amber-300 mt-1">{liveStatus?.execution_mode || 'UNAVAILABLE'}</div>
               <div className="text-[11px] text-slate-400 mt-1">
-                Live Open: {liveStatus?.open_package_count ?? 0} • Paper Open: {paperOpenCount}
+                Live Open: {liveStatus?.open_package_count ?? '—'} • Paper Open: {paperOpenCount}
               </div>
             </div>
             <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
@@ -92,20 +139,28 @@ export default function V2LiveArmModal({ isOpen, onClose, liveStatus, paperOpenC
               <div className="text-[11px] text-slate-400 mt-1">
                 {paper?.available
                   ? `Obs DD: ${fmtInr(paper.observed_mark_max_dd_inr)} • Stress: ${fmtInr(paper.stress_max_dd_inr)}`
-                  : paper?.reason || 'No forward DB'}
+                  : paper?.reason || (liveStatus ? 'No forward DB' : 'Status unavailable')}
               </div>
             </div>
             <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
               <div className="text-[10px] text-slate-400 uppercase">Unresolved Faults</div>
               <div
                 className={`font-bold mt-1 ${
-                  faults.total_blocking_faults > 0 ? 'text-rose-400' : 'text-emerald-400'
+                  !liveStatus
+                    ? 'text-amber-400'
+                    : faults.total_blocking_faults > 0
+                      ? 'text-rose-400'
+                      : 'text-emerald-400'
                 }`}
               >
-                {faults.total_blocking_faults} Blocking
+                {!liveStatus ? 'Unavailable' : `${faults.total_blocking_faults} Blocking`}
               </div>
               <div className="text-[11px] text-slate-400 mt-1">
-                {faults.total_blocking_faults > 0 ? 'Reconcile before arming' : 'Clean intent ledger'}
+                {!liveStatus
+                  ? 'Live endpoint unreachable'
+                  : faults.total_blocking_faults > 0
+                    ? 'Reconcile before arming'
+                    : 'Clean intent ledger'}
               </div>
             </div>
           </div>
@@ -212,11 +267,24 @@ export default function V2LiveArmModal({ isOpen, onClose, liveStatus, paperOpenC
                   Type the 4-digit session code shown here to confirm intentional human arming. Rotates after arm/disarm.
                 </div>
               </div>
-              <div
-                data-testid="v2-live-session-pin"
-                className="px-3.5 py-2 rounded-lg border border-cyan-400/50 bg-slate-950 font-mono text-lg font-extrabold tracking-[0.25em] text-cyan-200 select-all shrink-0"
-              >
-                {liveStatus?.current_pin || '----'}
+              <div className="flex items-center gap-2 shrink-0">
+                <div
+                  data-testid="v2-live-session-pin"
+                  className="px-3.5 py-2 rounded-lg border border-cyan-400/50 bg-slate-950 font-mono text-lg font-extrabold tracking-[0.25em] text-cyan-200 select-all"
+                >
+                  {expectedPin || 'Unavailable'}
+                </div>
+                {onRefreshStatus && (
+                  <button
+                    type="button"
+                    onClick={handleRefresh}
+                    disabled={refreshing}
+                    title="Refresh session interlock code"
+                    className="p-2 rounded-lg border border-cyan-500/40 bg-slate-900 hover:bg-slate-800 text-cyan-200"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                  </button>
+                )}
               </div>
             </div>
             <label className="block text-xs font-semibold text-slate-300 mb-1">

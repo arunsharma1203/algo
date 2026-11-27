@@ -145,6 +145,16 @@ export default function V2LiveControlPanel({ paperOpenCount = 0 }) {
                 Book: {(armState.selected_books || ['V2_BOOK_B_PAID_FLOW']).join(', ') || 'None'} • Limits:{' '}
                 {armState.max_lots_per_book || 1} lot(s), DD cap {fmtInr(armState.max_daily_loss_inr || 2500)}
               </span>
+              {!armed && liveStatus?.current_pin && (
+                <span className="px-2 py-0.5 rounded border border-cyan-500/40 bg-cyan-950/30 font-mono text-[11px] font-bold text-cyan-200">
+                  PIN: {liveStatus.current_pin}
+                </span>
+              )}
+              {!loading && !liveStatus && (
+                <span className="px-2 py-0.5 rounded border border-rose-500/40 bg-rose-950/30 text-[11px] font-semibold text-rose-300">
+                  Service Offline
+                </span>
+              )}
             </div>
             <div className="text-[11px] text-slate-400 mt-0.5">
               Separate SQLite ledger (`option_sniffer_advance_v2_live.db`) • Boots disarmed • Realized:{' '}
@@ -184,7 +194,10 @@ export default function V2LiveControlPanel({ paperOpenCount = 0 }) {
           ) : (
             <button
               type="button"
-              onClick={() => setArmModalOpen(true)}
+              onClick={() => {
+                loadLiveStatus();
+                setArmModalOpen(true);
+              }}
               className="px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white"
             >
               Arm Live Execution (Human PIN)
@@ -281,6 +294,8 @@ export default function V2LiveControlPanel({ paperOpenCount = 0 }) {
         liveStatus={liveStatus}
         paperOpenCount={paperOpenCount}
         onConfirmArm={handleArm}
+        statusError={errorMsg}
+        onRefreshStatus={loadLiveStatus}
       />
     </div>
   );
