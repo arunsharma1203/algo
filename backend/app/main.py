@@ -652,6 +652,8 @@ from app.api.option_sniffer_advance_api import router as option_sniffer_advance_
 app.include_router(option_sniffer_advance_router)
 from app.api.option_sniffer_v2_api import router as option_sniffer_v2_router
 app.include_router(option_sniffer_v2_router)
+from app.api.option_sniffer_v2_live_api import router as option_sniffer_v2_live_router
+app.include_router(option_sniffer_v2_live_router)
 
 try:
     from app.api.trade_agent import router as trade_agent_router

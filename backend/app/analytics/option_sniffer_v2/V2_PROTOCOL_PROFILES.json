@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0.0",
+  "note": "Versioned V2 strategy research profiles. V2_2_FROZEN_BASELINE remains active and untouched; research profiles NEVER auto-promote or override production without explicit operator selection.",
+  "active_profile_id": "V2_2_FROZEN_BASELINE",
+  "profiles": {
+    "V2_2_FROZEN_BASELINE": {
+      "protocol_ref": "V2_PREREGISTRATION_V1.json",
+      "engine_version": "2.2.0-causal",
+      "book_a_enabled_autonomous": false,
+      "book_a_status": "DISABLED_UNVERIFIED_O3_SPEC_CONFLICT",
+      "book_b": {
+        "entry_window": "1015..1300",
+        "min_adx14": 22.0,
+        "min_er20": 0.32,
+        "min_delta_basis_abs_pts": 3.0,
+        "min_l5_obi": 0.05,
+        "max_entry_outlay_inr": 18500.0,
+        "planned_loss_max_inr": 1800.0,
+        "stagnation_mins": 35,
+        "ratchet_mode": "STEP_RATCHET"
+      }
+    },
+    "V2_3_RESEARCH_CANDIDATE_PROFILE": {
+      "protocol_ref": "V2_PROTOCOL_PROFILES.json#V2_3_RESEARCH_CANDIDATE_PROFILE",
+      "engine_version": "2.3.0-research-candidate",
+      "autonomous_activation_allowed": false,
+      "governance_note": "Candidate profile informed by read-only matched-cohort & LOWO audit; requires prospective forward observation under human supervision before any capital scaling.",
+      "book_a_candidate": {
+        "strategy_family": "INTRADAY_DEFINED_RISK_SPREAD_150",
+        "max_trading_dte": 4,
+        "credit_capture_target_pct": 70.0,
+        "ratchet_mode": "R0_OR_R12",
+        "fidelity_limitation": "Prior to 2026-11-16 uses CANDLE_CALIBRATED_SIM; only >=2026-11-16 has OBSERVED_V3_L5 depth."
+      },
+      "book_b_candidate": {
+        "basis_gate": "Keep signed delta_basis >= 3.0pt (strongest observed L5 discriminator)",
+        "exit_ratchet": "Keep STEP_RATCHET (B4 failed LOWO and under V2 35m exits); evaluate stagnation_mins=45 vs 35 separately",
+        "entry_window_note": "0945..1245 vs 1015..1300 non-stationary across 59d vs 9d L5 samples; evaluate prospectively"
+      }
+    }
+  }
+}

@@ -1,0 +1,2505 @@
+{
+  "dataset_59_research": {
+    "book_a_intraday_150_variants": {
+      "A_TGT50_NONE_ALL_DTE": {
+        "all_1x": {
+          "avg": 2.85,
+          "dd": 6772.11,
+          "l2wo": -3415.56,
+          "lowo": -1683.53,
+          "max_w": 1843.22,
+          "max_w_dt": "2026-10-23",
+          "n": 56,
+          "net": 159.69,
+          "pf": 1.01,
+          "wr": 41.1
+        },
+        "all_2x": {
+          "avg": -115.84,
+          "dd": 9686.99,
+          "l2wo": -9821.77,
+          "lowo": -8210.21,
+          "max_w": 1723.44,
+          "max_w_dt": "2026-10-23",
+          "n": 56,
+          "net": -6486.77,
+          "pf": 0.75,
+          "wr": 41.1
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -34.24,
+            "dd": 4089.29,
+            "l2wo": -3172.58,
+            "lowo": -1813.75,
+            "max_w": 1437.07,
+            "max_w_dt": "2026-11-20",
+            "n": 11,
+            "net": -376.68,
+            "pf": 0.91,
+            "wr": 27.3
+          },
+          "TRAIN": {
+            "avg": -188.12,
+            "dd": 4767.89,
+            "l2wo": -7297.0,
+            "lowo": -6006.19,
+            "max_w": 1679.45,
+            "max_w_dt": "2026-09-15",
+            "n": 23,
+            "net": -4326.74,
+            "pf": 0.61,
+            "wr": 39.1
+          },
+          "VAL": {
+            "avg": 221.05,
+            "dd": 2682.82,
+            "l2wo": 1287.86,
+            "lowo": 3019.89,
+            "max_w": 1843.22,
+            "max_w_dt": "2026-10-23",
+            "n": 22,
+            "net": 4863.11,
+            "pf": 1.73,
+            "wr": 50.0
+          }
+        },
+        "max_cal_drought_days": 4,
+        "trades_per_month": 19.93,
+        "zero_trade_expiries": "0/14"
+      },
+      "A_TGT50_NONE_DTE_LE_4": {
+        "all_1x": {
+          "avg": 154.27,
+          "dd": 3659.03,
+          "l2wo": 267.81,
+          "lowo": 1704.88,
+          "max_w": 1843.22,
+          "max_w_dt": "2026-10-23",
+          "n": 23,
+          "net": 3548.1,
+          "pf": 1.43,
+          "wr": 47.8
+        },
+        "all_2x": {
+          "avg": 43.42,
+          "dd": 4474.31,
+          "l2wo": -2048.78,
+          "lowo": -724.89,
+          "max_w": 1723.44,
+          "max_w_dt": "2026-10-23",
+          "n": 23,
+          "net": 998.55,
+          "pf": 1.1,
+          "wr": 47.8
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": 420.33,
+            "dd": 1114.56,
+            "l2wo": -1114.56,
+            "lowo": 244.27,
+            "max_w": 1437.07,
+            "max_w_dt": "2026-11-20",
+            "n": 4,
+            "net": 1681.34,
+            "pf": 2.51,
+            "wr": 50.0
+          },
+          "TRAIN": {
+            "avg": -163.4,
+            "dd": 2354.82,
+            "l2wo": -3948.17,
+            "lowo": -2761.38,
+            "max_w": 1290.81,
+            "max_w_dt": "2026-09-28",
+            "n": 9,
+            "net": -1470.57,
+            "pf": 0.68,
+            "wr": 44.4
+          },
+          "VAL": {
+            "avg": 333.73,
+            "dd": 2544.47,
+            "l2wo": 232.83,
+            "lowo": 1494.11,
+            "max_w": 1843.22,
+            "max_w_dt": "2026-10-23",
+            "n": 10,
+            "net": 3337.33,
+            "pf": 2.31,
+            "wr": 50.0
+          }
+        },
+        "max_cal_drought_days": 10,
+        "trades_per_month": 8.19,
+        "zero_trade_expiries": "1/14"
+      },
+      "A_TGT70_NONE_ALL_DTE": {
+        "all_1x": {
+          "avg": 40.99,
+          "dd": 6772.11,
+          "l2wo": -1808.07,
+          "lowo": 203.5,
+          "max_w": 2092.05,
+          "max_w_dt": "2026-11-20",
+          "n": 56,
+          "net": 2295.55,
+          "pf": 1.1,
+          "wr": 41.1
+        },
+        "all_2x": {
+          "avg": -77.57,
+          "dd": 8789.47,
+          "l2wo": -8222.04,
+          "lowo": -6324.4,
+          "max_w": 1980.6,
+          "max_w_dt": "2026-11-20",
+          "n": 56,
+          "net": -4343.8,
+          "pf": 0.83,
+          "wr": 41.1
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": 77.47,
+            "dd": 4089.29,
+            "l2wo": -3172.58,
+            "lowo": -1239.91,
+            "max_w": 2092.05,
+            "max_w_dt": "2026-11-20",
+            "n": 11,
+            "net": 852.14,
+            "pf": 1.2,
+            "wr": 27.3
+          },
+          "TRAIN": {
+            "avg": -169.98,
+            "dd": 4767.89,
+            "l2wo": -7316.51,
+            "lowo": -5921.21,
+            "max_w": 2011.57,
+            "max_w_dt": "2026-09-15",
+            "n": 23,
+            "net": -3909.64,
+            "pf": 0.65,
+            "wr": 39.1
+          },
+          "VAL": {
+            "avg": 243.32,
+            "dd": 2682.82,
+            "l2wo": 1784.47,
+            "lowo": 3408.94,
+            "max_w": 1944.11,
+            "max_w_dt": "2026-10-21",
+            "n": 22,
+            "net": 5353.05,
+            "pf": 1.8,
+            "wr": 50.0
+          }
+        },
+        "max_cal_drought_days": 4,
+        "trades_per_month": 19.93,
+        "zero_trade_expiries": "0/14"
+      },
+      "A_TGT70_R0_ALL_DTE": {
+        "all_1x": {
+          "avg": 48.03,
+          "dd": 6195.49,
+          "l2wo": -1413.7,
+          "lowo": 597.87,
+          "max_w": 2092.05,
+          "max_w_dt": "2026-11-20",
+          "n": 56,
+          "net": 2689.92,
+          "pf": 1.12,
+          "wr": 41.1
+        },
+        "all_2x": {
+          "avg": -70.51,
+          "dd": 8380.92,
+          "l2wo": -7826.55,
+          "lowo": -5928.91,
+          "max_w": 1980.6,
+          "max_w_dt": "2026-11-20",
+          "n": 56,
+          "net": -3948.31,
+          "pf": 0.85,
+          "wr": 41.1
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": 77.47,
+            "dd": 4089.29,
+            "l2wo": -3172.58,
+            "lowo": -1239.91,
+            "max_w": 2092.05,
+            "max_w_dt": "2026-11-20",
+            "n": 11,
+            "net": 852.14,
+            "pf": 1.2,
+            "wr": 27.3
+          },
+          "TRAIN": {
+            "avg": -177.91,
+            "dd": 4767.89,
+            "l2wo": -7498.76,
+            "lowo": -6103.46,
+            "max_w": 2011.57,
+            "max_w_dt": "2026-09-15",
+            "n": 23,
+            "net": -4091.89,
+            "pf": 0.63,
+            "wr": 39.1
+          },
+          "VAL": {
+            "avg": 269.53,
+            "dd": 2106.2,
+            "l2wo": 2361.09,
+            "lowo": 3985.56,
+            "max_w": 1944.11,
+            "max_w_dt": "2026-10-21",
+            "n": 22,
+            "net": 5929.67,
+            "pf": 1.97,
+            "wr": 50.0
+          }
+        },
+        "max_cal_drought_days": 4,
+        "trades_per_month": 19.93,
+        "zero_trade_expiries": "0/14"
+      },
+      "A_TGT70_R0_DTE_LE_4": {
+        "all_1x": {
+          "avg": 237.48,
+          "dd": 3082.41,
+          "l2wo": 1437.37,
+          "lowo": 3370.04,
+          "max_w": 2092.05,
+          "max_w_dt": "2026-11-20",
+          "n": 23,
+          "net": 5462.09,
+          "pf": 1.71,
+          "wr": 47.8
+        },
+        "all_2x": {
+          "avg": 126.9,
+          "dd": 3896.32,
+          "l2wo": -882.91,
+          "lowo": 938.18,
+          "max_w": 1980.6,
+          "max_w_dt": "2026-11-20",
+          "n": 23,
+          "net": 2918.78,
+          "pf": 1.32,
+          "wr": 47.8
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": 727.54,
+            "dd": 1114.56,
+            "l2wo": -1114.56,
+            "lowo": 818.11,
+            "max_w": 2092.05,
+            "max_w_dt": "2026-11-20",
+            "n": 4,
+            "net": 2910.16,
+            "pf": 3.61,
+            "wr": 50.0
+          },
+          "TRAIN": {
+            "avg": -153.95,
+            "dd": 2354.82,
+            "l2wo": -3948.17,
+            "lowo": -2780.89,
+            "max_w": 1395.3,
+            "max_w_dt": "2026-09-28",
+            "n": 9,
+            "net": -1385.59,
+            "pf": 0.7,
+            "wr": 44.4
+          },
+          "VAL": {
+            "avg": 393.75,
+            "dd": 1967.85,
+            "l2wo": 909.33,
+            "lowo": 2331.41,
+            "max_w": 1606.11,
+            "max_w_dt": "2026-10-12",
+            "n": 10,
+            "net": 3937.52,
+            "pf": 3.0,
+            "wr": 50.0
+          }
+        },
+        "max_cal_drought_days": 10,
+        "trades_per_month": 8.19,
+        "zero_trade_expiries": "1/14"
+      },
+      "A_TGT70_R12_ALL_DTE": {
+        "all_1x": {
+          "avg": 58.26,
+          "dd": 5803.34,
+          "l2wo": -841.34,
+          "lowo": 1170.23,
+          "max_w": 2092.05,
+          "max_w_dt": "2026-11-20",
+          "n": 56,
+          "net": 3262.28,
+          "pf": 1.15,
+          "wr": 46.4
+        },
+        "all_2x": {
+          "avg": -60.22,
+          "dd": 8305.77,
+          "l2wo": -7250.58,
+          "lowo": -5352.94,
+          "max_w": 1980.6,
+          "max_w_dt": "2026-11-20",
+          "n": 56,
+          "net": -3372.34,
+          "pf": 0.86,
+          "wr": 46.4
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": 155.32,
+            "dd": 3730.28,
+            "l2wo": -2316.16,
+            "lowo": -383.49,
+            "max_w": 2092.05,
+            "max_w_dt": "2026-11-20",
+            "n": 11,
+            "net": 1708.56,
+            "pf": 1.42,
+            "wr": 45.5
+          },
+          "TRAIN": {
+            "avg": -174.93,
+            "dd": 4767.89,
+            "l2wo": -7430.31,
+            "lowo": -6035.01,
+            "max_w": 2011.57,
+            "max_w_dt": "2026-09-15",
+            "n": 23,
+            "net": -4023.44,
+            "pf": 0.64,
+            "wr": 39.1
+          },
+          "VAL": {
+            "avg": 253.51,
+            "dd": 2073.06,
+            "l2wo": 2008.58,
+            "lowo": 3633.05,
+            "max_w": 1944.11,
+            "max_w_dt": "2026-10-21",
+            "n": 22,
+            "net": 5577.16,
+            "pf": 1.92,
+            "wr": 54.5
+          }
+        },
+        "max_cal_drought_days": 4,
+        "trades_per_month": 19.93,
+        "zero_trade_expiries": "0/14"
+      },
+      "A_TGT70_R12_DTE_LE_4": {
+        "all_1x": {
+          "avg": 222.16,
+          "dd": 3049.27,
+          "l2wo": 1084.86,
+          "lowo": 3017.53,
+          "max_w": 2092.05,
+          "max_w_dt": "2026-11-20",
+          "n": 23,
+          "net": 5109.58,
+          "pf": 1.66,
+          "wr": 52.2
+        },
+        "all_2x": {
+          "avg": 111.51,
+          "dd": 3755.29,
+          "l2wo": -1236.93,
+          "lowo": 584.16,
+          "max_w": 1980.6,
+          "max_w_dt": "2026-11-20",
+          "n": 23,
+          "net": 2564.76,
+          "pf": 1.29,
+          "wr": 52.2
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": 727.54,
+            "dd": 1114.56,
+            "l2wo": -1114.56,
+            "lowo": 818.11,
+            "max_w": 2092.05,
+            "max_w_dt": "2026-11-20",
+            "n": 4,
+            "net": 2910.16,
+            "pf": 3.61,
+            "wr": 50.0
+          },
+          "TRAIN": {
+            "avg": -153.95,
+            "dd": 2354.82,
+            "l2wo": -3948.17,
+            "lowo": -2780.89,
+            "max_w": 1395.3,
+            "max_w_dt": "2026-09-28",
+            "n": 9,
+            "net": -1385.59,
+            "pf": 0.7,
+            "wr": 44.4
+          },
+          "VAL": {
+            "avg": 358.5,
+            "dd": 1934.71,
+            "l2wo": 441.97,
+            "lowo": 1978.9,
+            "max_w": 1606.11,
+            "max_w_dt": "2026-10-12",
+            "n": 10,
+            "net": 3585.01,
+            "pf": 2.85,
+            "wr": 60.0
+          }
+        },
+        "max_cal_drought_days": 10,
+        "trades_per_month": 8.19,
+        "zero_trade_expiries": "1/14"
+      }
+    },
+    "book_b_entry_variants": {
+      "2BAR_OPT_GREEN": {
+        "all_1x": {
+          "avg": -339.43,
+          "dd": 7867.56,
+          "l2wo": -10293.48,
+          "lowo": -8748.05,
+          "max_w": 2638.3,
+          "max_w_dt": "2026-10-23",
+          "n": 18,
+          "net": -6109.75,
+          "pf": 0.44,
+          "wr": 33.3
+        },
+        "all_2x": {
+          "avg": -406.4,
+          "dd": 8520.12,
+          "l2wo": -11356.96,
+          "lowo": -9881.35,
+          "max_w": 2566.1,
+          "max_w_dt": "2026-10-23",
+          "n": 18,
+          "net": -7315.25,
+          "pf": 0.38,
+          "wr": 27.8
+        },
+        "avoided_losses_count": 14,
+        "avoided_losses_net_1x": -16247.23,
+        "delayed_entry_premium_delta_1x": -11479.59,
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -918.86,
+            "dd": 2756.57,
+            "l2wo": -2756.57,
+            "lowo": -2756.57,
+            "max_w": 0.0,
+            "max_w_dt": null,
+            "n": 3,
+            "net": -2756.57,
+            "pf": 0.0,
+            "wr": 0.0
+          },
+          "TRAIN": {
+            "avg": -662.85,
+            "dd": 5965.64,
+            "l2wo": -6155.99,
+            "lowo": -6098.97,
+            "max_w": 133.33,
+            "max_w_dt": "2026-09-07",
+            "n": 9,
+            "net": -5965.64,
+            "pf": 0.03,
+            "wr": 22.2
+          },
+          "VAL": {
+            "avg": 435.41,
+            "dd": 1901.92,
+            "l2wo": -1571.27,
+            "lowo": -25.84,
+            "max_w": 2638.3,
+            "max_w_dt": "2026-10-23",
+            "n": 6,
+            "net": 2612.46,
+            "pf": 2.26,
+            "wr": 66.7
+          }
+        },
+        "max_cal_drought_days": 12,
+        "missed_winners_count": 7,
+        "missed_winners_net_1x": 21139.89,
+        "rejected_count": 21,
+        "trades_per_month": 6.41,
+        "zero_trade_expiries": "3/14"
+      },
+      "2BAR_OPT_HOLD": {
+        "all_1x": {
+          "avg": 132.57,
+          "dd": 5037.79,
+          "l2wo": -9835.14,
+          "lowo": -6214.71,
+          "max_w": 9396.47,
+          "max_w_dt": "2026-09-15",
+          "n": 24,
+          "net": 3181.76,
+          "pf": 1.22,
+          "wr": 37.5
+        },
+        "all_2x": {
+          "avg": 64.59,
+          "dd": 5454.08,
+          "l2wo": -11308.03,
+          "lowo": -7759.17,
+          "max_w": 9309.44,
+          "max_w_dt": "2026-09-15",
+          "n": 24,
+          "net": 1550.27,
+          "pf": 1.1,
+          "wr": 29.2
+        },
+        "avoided_losses_count": 11,
+        "avoided_losses_net_1x": -12272.13,
+        "delayed_entry_premium_delta_1x": -11180.48,
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -1235.33,
+            "dd": 4941.33,
+            "l2wo": -4941.33,
+            "lowo": -4941.33,
+            "max_w": 0.0,
+            "max_w_dt": null,
+            "n": 4,
+            "net": -4941.33,
+            "pf": 0.0,
+            "wr": 0.0
+          },
+          "TRAIN": {
+            "avg": 393.62,
+            "dd": 4272.95,
+            "l2wo": -7506.27,
+            "lowo": -3885.84,
+            "max_w": 9396.47,
+            "max_w_dt": "2026-09-15",
+            "n": 14,
+            "net": 5510.63,
+            "pf": 1.71,
+            "wr": 35.7
+          },
+          "VAL": {
+            "avg": 435.41,
+            "dd": 1901.92,
+            "l2wo": -1571.27,
+            "lowo": -25.84,
+            "max_w": 2638.3,
+            "max_w_dt": "2026-10-23",
+            "n": 6,
+            "net": 2612.46,
+            "pf": 2.26,
+            "wr": 66.7
+          }
+        },
+        "max_cal_drought_days": 12,
+        "missed_winners_count": 4,
+        "missed_winners_net_1x": 8172.39,
+        "rejected_count": 15,
+        "trades_per_month": 8.54,
+        "zero_trade_expiries": "3/14"
+      },
+      "2BAR_SPOT_FOLLOW": {
+        "all_1x": {
+          "avg": -137.75,
+          "dd": 4688.05,
+          "l2wo": -9289.17,
+          "lowo": -6650.87,
+          "max_w": 3620.43,
+          "max_w_dt": "2026-09-22",
+          "n": 22,
+          "net": -3030.44,
+          "pf": 0.74,
+          "wr": 36.4
+        },
+        "all_2x": {
+          "avg": -205.32,
+          "dd": 5550.85,
+          "l2wo": -10632.09,
+          "lowo": -8065.99,
+          "max_w": 3548.86,
+          "max_w_dt": "2026-09-22",
+          "n": 22,
+          "net": -4517.13,
+          "pf": 0.64,
+          "wr": 27.3
+        },
+        "avoided_losses_count": 13,
+        "avoided_losses_net_1x": -15618.37,
+        "delayed_entry_premium_delta_1x": -11530.59,
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -918.86,
+            "dd": 2756.57,
+            "l2wo": -2756.57,
+            "lowo": -2756.57,
+            "max_w": 0.0,
+            "max_w_dt": null,
+            "n": 3,
+            "net": -2756.57,
+            "pf": 0.0,
+            "wr": 0.0
+          },
+          "TRAIN": {
+            "avg": -232.18,
+            "dd": 4679.29,
+            "l2wo": -6539.89,
+            "lowo": -6406.56,
+            "max_w": 3620.43,
+            "max_w_dt": "2026-09-22",
+            "n": 12,
+            "net": -2786.13,
+            "pf": 0.58,
+            "wr": 33.3
+          },
+          "VAL": {
+            "avg": 358.89,
+            "dd": 1901.92,
+            "l2wo": -1671.47,
+            "lowo": -126.04,
+            "max_w": 2638.3,
+            "max_w_dt": "2026-10-23",
+            "n": 7,
+            "net": 2512.26,
+            "pf": 2.15,
+            "wr": 57.1
+          }
+        },
+        "max_cal_drought_days": 12,
+        "missed_winners_count": 4,
+        "missed_winners_net_1x": 17380.72,
+        "rejected_count": 17,
+        "trades_per_month": 7.83,
+        "zero_trade_expiries": "3/14"
+      },
+      "BASE_0945_1245_V2_STEP": {
+        "all_1x": {
+          "avg": 263.14,
+          "dd": 5627.48,
+          "l2wo": -4674.61,
+          "lowo": 979.84,
+          "max_w": 9282.66,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 10262.5,
+          "pf": 1.41,
+          "wr": 41.0
+        },
+        "all_2x": {
+          "avg": 194.78,
+          "dd": 6259.71,
+          "l2wo": -7168.47,
+          "lowo": -1599.07,
+          "max_w": 9195.57,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 7596.5,
+          "pf": 1.29,
+          "wr": 38.5
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -1310.21,
+            "dd": 5240.84,
+            "l2wo": -5240.84,
+            "lowo": -5240.84,
+            "max_w": 0.0,
+            "max_w_dt": null,
+            "n": 4,
+            "net": -5240.84,
+            "pf": 0.0,
+            "wr": 0.0
+          },
+          "TRAIN": {
+            "avg": 299.01,
+            "dd": 5627.48,
+            "l2wo": -6918.15,
+            "lowo": -3003.55,
+            "max_w": 9282.66,
+            "max_w_dt": "2026-09-15",
+            "n": 21,
+            "net": 6279.11,
+            "pf": 1.47,
+            "wr": 38.1
+          },
+          "VAL": {
+            "avg": 658.87,
+            "dd": 2819.47,
+            "l2wo": -347.34,
+            "lowo": 3569.78,
+            "max_w": 5654.45,
+            "max_w_dt": "2026-10-12",
+            "n": 14,
+            "net": 9224.23,
+            "pf": 2.44,
+            "wr": 57.1
+          }
+        },
+        "max_cal_drought_days": 7,
+        "trades_per_month": 13.88,
+        "zero_trade_expiries": "1/14"
+      },
+      "WINDOW_0945_1014_ONLY_V2_STEP": {
+        "all_1x": {
+          "avg": 448.03,
+          "dd": 5627.74,
+          "l2wo": -3736.41,
+          "lowo": 1918.04,
+          "max_w": 9282.66,
+          "max_w_dt": "2026-09-15",
+          "n": 25,
+          "net": 11200.7,
+          "pf": 1.77,
+          "wr": 40.0
+        },
+        "all_2x": {
+          "avg": 379.7,
+          "dd": 5964.48,
+          "l2wo": -5272.57,
+          "lowo": 296.83,
+          "max_w": 9195.57,
+          "max_w_dt": "2026-09-15",
+          "n": 25,
+          "net": 9492.4,
+          "pf": 1.61,
+          "wr": 40.0
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -1121.72,
+            "dd": 3365.15,
+            "l2wo": -3365.15,
+            "lowo": -3365.15,
+            "max_w": 0.0,
+            "max_w_dt": null,
+            "n": 3,
+            "net": -3365.15,
+            "pf": 0.0,
+            "wr": 0.0
+          },
+          "TRAIN": {
+            "avg": 218.1,
+            "dd": 5065.17,
+            "l2wo": -8524.0,
+            "lowo": -6665.46,
+            "max_w": 9282.66,
+            "max_w_dt": "2026-09-15",
+            "n": 12,
+            "net": 2617.2,
+            "pf": 1.28,
+            "wr": 33.3
+          },
+          "VAL": {
+            "avg": 1194.87,
+            "dd": 1184.32,
+            "l2wo": 2377.08,
+            "lowo": 6294.2,
+            "max_w": 5654.45,
+            "max_w_dt": "2026-10-12",
+            "n": 10,
+            "net": 11948.65,
+            "pf": 6.95,
+            "wr": 60.0
+          }
+        },
+        "max_cal_drought_days": 13,
+        "trades_per_month": 8.9,
+        "zero_trade_expiries": "5/14"
+      },
+      "WINDOW_1015_1300_V2_STEP": {
+        "all_1x": {
+          "avg": -67.01,
+          "dd": 4600.11,
+          "l2wo": -8476.48,
+          "lowo": -4852.8,
+          "max_w": 3914.6,
+          "max_w_dt": "2026-10-01",
+          "n": 14,
+          "net": -938.2,
+          "pf": 0.91,
+          "wr": 42.9
+        },
+        "all_2x": {
+          "avg": -135.42,
+          "dd": 4942.72,
+          "l2wo": -9289.46,
+          "lowo": -5737.35,
+          "max_w": 3841.45,
+          "max_w_dt": "2026-10-01",
+          "n": 14,
+          "net": -1895.9,
+          "pf": 0.83,
+          "wr": 35.7
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -1875.69,
+            "dd": 1875.69,
+            "l2wo": -1875.69,
+            "lowo": -1875.69,
+            "max_w": 0.0,
+            "max_w_dt": null,
+            "n": 1,
+            "net": -1875.69,
+            "pf": 0.0,
+            "wr": 0.0
+          },
+          "TRAIN": {
+            "avg": 406.88,
+            "dd": 2229.81,
+            "l2wo": -3876.37,
+            "lowo": -252.69,
+            "max_w": 3914.6,
+            "max_w_dt": "2026-10-01",
+            "n": 9,
+            "net": 3661.91,
+            "pf": 1.91,
+            "wr": 44.4
+          },
+          "VAL": {
+            "avg": -681.11,
+            "dd": 4415.72,
+            "l2wo": -4415.72,
+            "lowo": -4341.39,
+            "max_w": 1616.97,
+            "max_w_dt": "2026-10-30",
+            "n": 4,
+            "net": -2724.42,
+            "pf": 0.38,
+            "wr": 50.0
+          }
+        },
+        "max_cal_drought_days": 18,
+        "trades_per_month": 4.98,
+        "zero_trade_expiries": "6/14"
+      }
+    },
+    "book_b_exit_variants": {
+      "V1_SL2200_45M_B4": {
+        "all_1x": {
+          "avg": 501.43,
+          "dd": 6474.1,
+          "l2wo": -1010.26,
+          "lowo": 8272.4,
+          "max_w": 11283.45,
+          "max_w_dt": "2026-11-19",
+          "n": 39,
+          "net": 19555.85,
+          "pf": 1.75,
+          "wr": 43.6
+        },
+        "all_2x": {
+          "avg": 432.61,
+          "dd": 7104.7,
+          "l2wo": -3515.52,
+          "lowo": 5680.05,
+          "max_w": 11191.9,
+          "max_w_dt": "2026-11-19",
+          "n": 39,
+          "net": 16871.95,
+          "pf": 1.61,
+          "wr": 38.5
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": 1679.72,
+            "dd": 4644.6,
+            "l2wo": -4644.6,
+            "lowo": -4564.56,
+            "max_w": 11283.45,
+            "max_w_dt": "2026-11-19",
+            "n": 4,
+            "net": 6718.89,
+            "pf": 2.45,
+            "wr": 50.0
+          },
+          "TRAIN": {
+            "avg": 261.16,
+            "dd": 6474.1,
+            "l2wo": -9130.39,
+            "lowo": -3798.27,
+            "max_w": 9282.66,
+            "max_w_dt": "2026-09-15",
+            "n": 21,
+            "net": 5484.39,
+            "pf": 1.38,
+            "wr": 38.1
+          },
+          "VAL": {
+            "avg": 525.18,
+            "dd": 2565.28,
+            "l2wo": 742.56,
+            "lowo": 3555.47,
+            "max_w": 3797.1,
+            "max_w_dt": "2026-10-15",
+            "n": 14,
+            "net": 7352.57,
+            "pf": 2.06,
+            "wr": 50.0
+          }
+        },
+        "max_cal_drought_days": 7,
+        "trades_per_month": 13.88,
+        "zero_trade_expiries": "1/14"
+      },
+      "V1_SL2200_45M_STEP_RATCHET": {
+        "all_1x": {
+          "avg": 271.54,
+          "dd": 5234.99,
+          "l2wo": -4346.98,
+          "lowo": 1307.47,
+          "max_w": 9282.66,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 10590.13,
+          "pf": 1.43,
+          "wr": 43.6
+        },
+        "all_2x": {
+          "avg": 203.17,
+          "dd": 5867.98,
+          "l2wo": -6841.46,
+          "lowo": -1272.06,
+          "max_w": 9195.57,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 7923.51,
+          "pf": 1.31,
+          "wr": 38.5
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -1161.81,
+            "dd": 4727.28,
+            "l2wo": -4727.28,
+            "lowo": -4727.28,
+            "max_w": 80.04,
+            "max_w_dt": "2026-11-20",
+            "n": 4,
+            "net": -4647.24,
+            "pf": 0.02,
+            "wr": 25.0
+          },
+          "TRAIN": {
+            "avg": 279.23,
+            "dd": 5234.99,
+            "l2wo": -7333.33,
+            "lowo": -3418.73,
+            "max_w": 9282.66,
+            "max_w_dt": "2026-09-15",
+            "n": 21,
+            "net": 5863.93,
+            "pf": 1.43,
+            "wr": 42.9
+          },
+          "VAL": {
+            "avg": 669.53,
+            "dd": 2641.06,
+            "l2wo": -198.13,
+            "lowo": 3718.99,
+            "max_w": 5654.45,
+            "max_w_dt": "2026-10-12",
+            "n": 14,
+            "net": 9373.44,
+            "pf": 2.56,
+            "wr": 50.0
+          }
+        },
+        "max_cal_drought_days": 7,
+        "trades_per_month": 13.88,
+        "zero_trade_expiries": "1/14"
+      },
+      "V2_SL1800_35M_B4": {
+        "all_1x": {
+          "avg": 218.73,
+          "dd": 7015.81,
+          "l2wo": -6084.49,
+          "lowo": -752.37,
+          "max_w": 9282.66,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 8530.29,
+          "pf": 1.33,
+          "wr": 38.5
+        },
+        "all_2x": {
+          "avg": 150.45,
+          "dd": 7645.37,
+          "l2wo": -8584.23,
+          "lowo": -3327.99,
+          "max_w": 9195.57,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 5867.58,
+          "pf": 1.21,
+          "wr": 35.9
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -1310.21,
+            "dd": 5240.84,
+            "l2wo": -5240.84,
+            "lowo": -5240.84,
+            "max_w": 0.0,
+            "max_w_dt": null,
+            "n": 4,
+            "net": -5240.84,
+            "pf": 0.0,
+            "wr": 0.0
+          },
+          "TRAIN": {
+            "avg": 273.83,
+            "dd": 7015.81,
+            "l2wo": -8864.43,
+            "lowo": -3532.31,
+            "max_w": 9282.66,
+            "max_w_dt": "2026-09-15",
+            "n": 21,
+            "net": 5750.35,
+            "pf": 1.41,
+            "wr": 33.3
+          },
+          "VAL": {
+            "avg": 572.91,
+            "dd": 2743.69,
+            "l2wo": 1410.77,
+            "lowo": 4223.68,
+            "max_w": 3797.1,
+            "max_w_dt": "2026-10-15",
+            "n": 14,
+            "net": 8020.78,
+            "pf": 2.22,
+            "wr": 57.1
+          }
+        },
+        "max_cal_drought_days": 7,
+        "trades_per_month": 13.88,
+        "zero_trade_expiries": "1/14"
+      },
+      "V2_SL1800_35M_NO_RATCHET": {
+        "all_1x": {
+          "avg": 173.73,
+          "dd": 7015.81,
+          "l2wo": -9477.92,
+          "lowo": -2507.22,
+          "max_w": 9282.66,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 6775.44,
+          "pf": 1.26,
+          "wr": 38.5
+        },
+        "all_2x": {
+          "avg": 105.54,
+          "dd": 7645.37,
+          "l2wo": -11974.84,
+          "lowo": -5079.44,
+          "max_w": 9195.57,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 4116.13,
+          "pf": 1.15,
+          "wr": 30.8
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -1310.21,
+            "dd": 5240.84,
+            "l2wo": -5240.84,
+            "lowo": -5240.84,
+            "max_w": 0.0,
+            "max_w_dt": null,
+            "n": 4,
+            "net": -5240.84,
+            "pf": 0.0,
+            "wr": 0.0
+          },
+          "TRAIN": {
+            "avg": 276.92,
+            "dd": 7015.81,
+            "l2wo": -10438.12,
+            "lowo": -3467.42,
+            "max_w": 9282.66,
+            "max_w_dt": "2026-09-15",
+            "n": 21,
+            "net": 5815.24,
+            "pf": 1.41,
+            "wr": 33.3
+          },
+          "VAL": {
+            "avg": 442.93,
+            "dd": 2743.69,
+            "l2wo": -4080.91,
+            "lowo": 546.59,
+            "max_w": 5654.45,
+            "max_w_dt": "2026-10-12",
+            "n": 14,
+            "net": 6201.04,
+            "pf": 1.95,
+            "wr": 57.1
+          }
+        },
+        "max_cal_drought_days": 7,
+        "trades_per_month": 13.88,
+        "zero_trade_expiries": "1/14"
+      },
+      "V2_SL1800_35M_STEP_RATCHET": {
+        "all_1x": {
+          "avg": 263.14,
+          "dd": 5627.48,
+          "l2wo": -4674.61,
+          "lowo": 979.84,
+          "max_w": 9282.66,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 10262.5,
+          "pf": 1.41,
+          "wr": 41.0
+        },
+        "all_2x": {
+          "avg": 194.78,
+          "dd": 6259.71,
+          "l2wo": -7168.47,
+          "lowo": -1599.07,
+          "max_w": 9195.57,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 7596.5,
+          "pf": 1.29,
+          "wr": 38.5
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -1310.21,
+            "dd": 5240.84,
+            "l2wo": -5240.84,
+            "lowo": -5240.84,
+            "max_w": 0.0,
+            "max_w_dt": null,
+            "n": 4,
+            "net": -5240.84,
+            "pf": 0.0,
+            "wr": 0.0
+          },
+          "TRAIN": {
+            "avg": 299.01,
+            "dd": 5627.48,
+            "l2wo": -6918.15,
+            "lowo": -3003.55,
+            "max_w": 9282.66,
+            "max_w_dt": "2026-09-15",
+            "n": 21,
+            "net": 6279.11,
+            "pf": 1.47,
+            "wr": 38.1
+          },
+          "VAL": {
+            "avg": 658.87,
+            "dd": 2819.47,
+            "l2wo": -347.34,
+            "lowo": 3569.78,
+            "max_w": 5654.45,
+            "max_w_dt": "2026-10-12",
+            "n": 14,
+            "net": 9224.23,
+            "pf": 2.44,
+            "wr": 57.1
+          }
+        },
+        "max_cal_drought_days": 7,
+        "trades_per_month": 13.88,
+        "zero_trade_expiries": "1/14"
+      },
+      "V2_SL1800_45M_STEP_RATCHET": {
+        "all_1x": {
+          "avg": 284.18,
+          "dd": 5445.81,
+          "l2wo": -3853.93,
+          "lowo": 1800.52,
+          "max_w": 9282.66,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 11083.18,
+          "pf": 1.46,
+          "wr": 43.6
+        },
+        "all_2x": {
+          "avg": 215.78,
+          "dd": 6078.37,
+          "l2wo": -6349.36,
+          "lowo": -779.96,
+          "max_w": 9195.57,
+          "max_w_dt": "2026-09-15",
+          "n": 39,
+          "net": 8415.61,
+          "pf": 1.33,
+          "wr": 38.5
+        },
+        "folds_1x": {
+          "PREVIOUSLY_INSPECTED_HOLDOUT": {
+            "avg": -1045.04,
+            "dd": 4260.18,
+            "l2wo": -4260.18,
+            "lowo": -4260.18,
+            "max_w": 80.04,
+            "max_w_dt": "2026-11-20",
+            "n": 4,
+            "net": -4180.14,
+            "pf": 0.02,
+            "wr": 25.0
+          },
+          "TRAIN": {
+            "avg": 277.69,
+            "dd": 5445.81,
+            "l2wo": -7365.76,
+            "lowo": -3451.16,
+            "max_w": 9282.66,
+            "max_w_dt": "2026-09-15",
+            "n": 21,
+            "net": 5831.5,
+            "pf": 1.42,
+            "wr": 42.9
+          },
+          "VAL": {
+            "avg": 673.7,
+            "dd": 2641.06,
+            "l2wo": -139.75,
+            "lowo": 3777.37,
+            "max_w": 5654.45,
+            "max_w_dt": "2026-10-12",
+            "n": 14,
+            "net": 9431.82,
+            "pf": 2.59,
+            "wr": 50.0
+          }
+        },
+        "max_cal_drought_days": 7,
+        "trades_per_month": 13.88,
+        "zero_trade_expiries": "1/14"
+      }
+    },
+    "nov19_research_replay": {
+      "episode_b_b4_v1": {
+        "chg": 91.55,
+        "dt": "2026-11-19",
+        "dte": 4,
+        "ent_vix": 15.97,
+        "exit_hm": "15:15",
+        "exp": "2026-11-23",
+        "gross": 11375.0,
+        "net1x": 11283.45,
+        "net2x": 11191.9,
+        "rsn": "EOD_1515"
+      },
+      "episode_b_entry": {
+        "b_ent": 146.1,
+        "dt": "2026-11-19",
+        "dte": 4,
+        "ent_ts": "09:49",
+        "exp": "2026-11-23",
+        "is_bull": true,
+        "k": 25250.0,
+        "ot": "CE",
+        "outlay": 9496.5
+      },
+      "episode_b_step_ratchet_v1": {
+        "chg": 69.68,
+        "dt": "2026-11-19",
+        "dte": 4,
+        "ent_vix": 15.97,
+        "exit_hm": "10:26",
+        "exp": "2026-11-23",
+        "gross": -13.0,
+        "net1x": -82.68,
+        "net2x": -152.36,
+        "rsn": "RATCHET"
+      },
+      "s205_exact_meta": {
+        "dt": "2026-11-19",
+        "dte": 4,
+        "e1": 145.05,
+        "e2": 0.0,
+        "ent_ts": "10:49",
+        "exp": "2026-11-23",
+        "is_bull": true,
+        "k1": 25300.0,
+        "k2": 0.0,
+        "kind": "B",
+        "ot": "CE",
+        "pid": "shdw_ca4ad4fb109a"
+      }
+    },
+    "present": true,
+    "quote_fidelity_disclosure": "Pre-2026-11-16 bars use C1M candle-calibrated spreads; >=2026-11-16 uses OBSERVED_V3_L5 where present, C1M gap-fill during collector outages (notably 2026-11-19 10:50..15:13).",
+    "sample_span": "2026-08-28 .. 2026-11-25 (59 sessions, 14 expiries)"
+  },
+  "generated_at_ist": "2026-11-27T18:03:14.706511+05:30",
+  "income_disclaimer": "An AI backtest, replay, or paper simulation does NOT prove or guarantee future trading income.",
+  "n_trials_logged": {
+    "book_b_entry_and_gate_trials": 9,
+    "book_b_exit_trials": 6,
+    "cumulative_total_trials": 166,
+    "intraday_book_a_trials": 16,
+    "prior_phase4_o3": 135
+  },
+  "nov19_mismatch_reconciliation": {
+    "l5_minute_gaps_on_2026_11_19": [
+      {
+        "gap_resume_bar": "2026-11-19 15:14:00",
+        "gap_start_bar": "2026-11-19 10:49:00",
+        "missing_minutes": 264
+      }
+    ],
+    "reconciliation_verdict": "UNVERIFIED_STOP_PATH_265M_L5_OUTAGE_AND_STRIKE_ENTRY_TIME_DIVERGENCE",
+    "v1_actual_shadow_package": {
+      "accounting_json": "{\"legs\": [{\"label\": \"LONG 25300 CE\", \"option_type\": \"CE\", \"strike\": 25300.0, \"qty\": 65, \"exit_mode\": \"MARKET_ORDER\", \"entry_price\": 145.05, \"exit_price_effective\": 278.2, \"executed_orders\": 2, \"entry_cashflow\": -9428.25, \"exit_cashflow\": 18083.0, \"buy_premium_turnover\": 9428.25, \"sell_premium_turnover\": 18083.0, \"exercise_intrinsic_turnover\": 0.0, \"market_turnover\": 27511.25, \"brokerage\": 40.0, \"stt_sell\": 27.12, \"stt_exercise\": 0.0, \"stt\": 27.12, \"exchange_fee\": 9.77, \"exchange_core_fee\": 9.77, \"ipft_fee\": 0.0, \"sebi_fee\": 0.03, \"gst\": 8.96, \"stamp_duty\": 0.28, \"statutory_charges\": 86.16, \"additional_slippage\": 0.0, \"total_friction\": 86.16, \"gross_pnl\": 8654.75, \"net_pnl\": 8568.59, \"tariff_schedule\": \"STT_APR_2026_0.15PCT_NSE_MAR_2026_0.03553PCT\"}], \"leg_count\": 1, \"executed_orders\": 2, \"entry_cashflow\": -9428.25, \"exit_cashflow\": 18083.0, \"buy_premium_turnover\": 9428.25, \"sell_premium_turnover\": 18083.0, \"exercise_intrinsic_turnover\": 0.0, \"market_turnover\": 27511.25, \"brokerage\": 40.0, \"stt_sell\": 27.12, \"stt_exercise\": 0.0, \"stt\": 27.12, \"exchange_fee\": 9.77, \"exchange_core_fee\": 9.77, \"ipft_fee\": 0.0, \"sebi_fee\": 0.03, \"gst\": 8.96, \"stamp_duty\": 0.28, \"statutory_charges\": 86.16, \"additional_slippage\": 0.0, \"total_friction\": 86.16, \"gross_pnl\": 8654.75, \"net_pnl\": 8568.59, \"tariff_schedule\": \"STT_APR_2026_0.15PCT_NSE_MAR_2026_0.03553PCT\", \"risk\": {\"net_entry_cashflow_inr\": -9428.25, \"is_defined_risk\": true, \"unbounded_upside_risk\": false, \"final_package_max_loss_inr\": 9428.25, \"buy_first_incomplete_leg_exposure_inr\": 9428.25, \"sell_first_creates_uncovered_short\": false, \"is_multi_leg_package\": false, \"heuristic_margin_floor_inr\": 9428.25, \"margin_status\": \"UNVERIFIED_HEURISTIC_NOT_BROKER_SPAN\", \"can_certify_live_margin\": false, \"final_package_max_loss_after_friction_inr\": 9514.41}}",
+      "entry_bar_ts": "2026-11-19 10:49:00",
+      "exit_bar_ts": "2026-11-19 15:15:00",
+      "exit_reason": "EOD_SQUAREOFF_1515",
+      "expiry": "2026-11-23",
+      "gross_pnl_inr": 8654.75,
+      "legs_state_json": "{\"mode\": \"SINGLE_PAID_LONG\", \"long_leg\": {\"instrument_key\": \"NSE_FO|64456\", \"trading_symbol\": \"NIFTY 25300 CE 23 NOV 26\", \"expiry\": \"2026-11-23\", \"strike\": 25300.0, \"option_type\": \"CE\", \"qty\": 65, \"entry_price\": 145.05, \"entry_sweep\": {\"ok\": true, \"side\": \"BUY\", \"qty\": 65, \"fill_price\": 145.05, \"vwap_raw\": 145.0, \"top_price\": 145.0, \"raw_bid\": 144.95, \"raw_ask\": 145.0, \"depth_slippage_pts\": 0.05, \"levels_swept\": 1, \"available_l5_qty\": 4290, \"spread_pts\": 0.05, \"spread_pct\": 0.03, \"l1_book_age_ms\": 926}}, \"best_close_pts\": 279.55, \"ratchet_stop\": null, \"hard_stop\": 113.1, \"stop_loss_pct\": 22.0, \"is_bull\": true}",
+      "net_pnl_inr": 8568.59,
+      "package_id": "shdw_ca4ad4fb109a",
+      "prereg_sha256": "c11b7d5f41223f8c9425fe8d1e680151a0235032aab4dc78a4d39e417f81b56e",
+      "session_date": "2026-11-19",
+      "total_charges_inr": 86.16
+    }
+  },
+  "observed_l5_10day_audit": {
+    "bar_level_gate_fail_counts": {
+      "ADX<22": 640,
+      "ALL_V2_GATES_PASSED": 64,
+      "ER<0.32": 740,
+      "OBI<0.05": 649,
+      "UNEXECUTABLE_QUOTE": 7,
+      "Window<1015": 108,
+      "dBasis": 463
+    },
+    "session_opportunities": [
+      {
+        "adx14": 13.18,
+        "bar_ts": "2026-11-16 09:46:00",
+        "contract": "25300CE",
+        "counterfactual_exit": "STAG_35M@10:21",
+        "counterfactual_net_1x_inr": -1092.03,
+        "delta_basis_pts": -3.0,
+        "entry_price": 233.75,
+        "er20": 0.306,
+        "failed_gates": [
+          "Window<1015",
+          "ADX<22",
+          "ER<0.32",
+          "dBasis"
+        ],
+        "l5_obi": 0.0833,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-16",
+        "window_bucket": "EARLY_0945_1014"
+      },
+      {
+        "adx14": 11.77,
+        "bar_ts": "2026-11-16 10:18:00",
+        "contract": "25300CE",
+        "counterfactual_exit": "VFLIP@10:29",
+        "counterfactual_net_1x_inr": -1870.22,
+        "delta_basis_pts": 2.05,
+        "entry_price": 231.75,
+        "er20": 0.202,
+        "failed_gates": [
+          "ADX<22",
+          "ER<0.32",
+          "dBasis"
+        ],
+        "l5_obi": 0.3333,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-16",
+        "window_bucket": "V2_WIN_1015_1300"
+      },
+      {
+        "adx14": 11.01,
+        "bar_ts": "2026-11-17 09:45:00",
+        "contract": "25350CE",
+        "counterfactual_exit": "RATCHET@13:04",
+        "counterfactual_net_1x_inr": 2223.55,
+        "delta_basis_pts": -4.15,
+        "entry_price": 209.75,
+        "er20": 0.339,
+        "failed_gates": [
+          "Window<1015",
+          "ADX<22",
+          "dBasis"
+        ],
+        "l5_obi": 0.1549,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-17",
+        "window_bucket": "EARLY_0945_1014"
+      },
+      {
+        "adx14": 16.51,
+        "bar_ts": "2026-11-17 10:15:00",
+        "contract": "25400CE",
+        "counterfactual_exit": "RATCHET@10:33",
+        "counterfactual_net_1x_inr": 137.17,
+        "delta_basis_pts": 2.65,
+        "entry_price": 192.8,
+        "er20": 0.026,
+        "failed_gates": [
+          "ADX<22",
+          "ER<0.32",
+          "dBasis"
+        ],
+        "l5_obi": 0.2083,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-17",
+        "window_bucket": "V2_WIN_1015_1300"
+      },
+      {
+        "adx14": 23.2,
+        "bar_ts": "2026-11-17 10:23:00",
+        "contract": "25400CE",
+        "counterfactual_exit": "STAG_35M@10:58",
+        "counterfactual_net_1x_inr": -229.66,
+        "delta_basis_pts": 9.15,
+        "entry_price": 215.8,
+        "er20": 0.342,
+        "failed_gates": [],
+        "l5_obi": 0.0732,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-17",
+        "window_bucket": "FIRST_V2_PASS"
+      },
+      {
+        "adx14": 28.35,
+        "bar_ts": "2026-11-18 09:45:00",
+        "contract": "25200PE",
+        "counterfactual_exit": "HARD_SL@09:58",
+        "counterfactual_net_1x_inr": -2305.07,
+        "delta_basis_pts": 6.65,
+        "entry_price": 169.75,
+        "er20": 0.44,
+        "failed_gates": [
+          "Window<1015",
+          "dBasis"
+        ],
+        "l5_obi": 0.0921,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-18",
+        "window_bucket": "EARLY_0945_1014"
+      },
+      {
+        "adx14": 14.86,
+        "bar_ts": "2026-11-18 10:42:00",
+        "contract": "25200PE",
+        "counterfactual_exit": "STAG_35M@11:17",
+        "counterfactual_net_1x_inr": -941.09,
+        "delta_basis_pts": 10.85,
+        "entry_price": 159.4,
+        "er20": 0.231,
+        "failed_gates": [
+          "ADX<22",
+          "ER<0.32",
+          "dBasis"
+        ],
+        "l5_obi": 0.0647,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-18",
+        "window_bucket": "V2_WIN_1015_1300"
+      },
+      {
+        "adx14": 19.51,
+        "bar_ts": "2026-11-19 09:47:00",
+        "contract": "25250CE",
+        "counterfactual_exit": "RATCHET@10:23",
+        "counterfactual_net_1x_inr": 804.33,
+        "delta_basis_pts": -2.8,
+        "entry_price": 136.5,
+        "er20": 0.471,
+        "failed_gates": [
+          "Window<1015",
+          "ADX<22",
+          "dBasis"
+        ],
+        "l5_obi": 0.5805,
+        "quote_status": "EXECUTABLE_L5_OUTAGE_GAP",
+        "session_date": "2026-11-19",
+        "window_bucket": "EARLY_0945_1014"
+      },
+      {
+        "adx14": 21.71,
+        "bar_ts": "2026-11-19 10:15:00",
+        "contract": "25300CE",
+        "counterfactual_exit": "EOD_1515@15:15",
+        "counterfactual_net_1x_inr": 8942.07,
+        "delta_basis_pts": 6.65,
+        "entry_price": 142.0,
+        "er20": 0.241,
+        "failed_gates": [
+          "ADX<22",
+          "ER<0.32",
+          "OBI<0.05"
+        ],
+        "l5_obi": -0.0575,
+        "quote_status": "EXECUTABLE_L5_OUTAGE_GAP",
+        "session_date": "2026-11-19",
+        "window_bucket": "V2_WIN_1015_1300"
+      },
+      {
+        "adx14": 28.62,
+        "bar_ts": "2026-11-20 09:45:00",
+        "contract": "25500CE",
+        "counterfactual_exit": "STAG_35M@10:20",
+        "counterfactual_net_1x_inr": -980.66,
+        "delta_basis_pts": -4.65,
+        "entry_price": 121.5,
+        "er20": 0.25,
+        "failed_gates": [
+          "Window<1015",
+          "ER<0.32",
+          "dBasis",
+          "OBI<0.05"
+        ],
+        "l5_obi": -0.1864,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-20",
+        "window_bucket": "EARLY_0945_1014"
+      },
+      {
+        "adx14": 15.1,
+        "bar_ts": "2026-11-20 10:15:00",
+        "contract": "25500CE",
+        "counterfactual_exit": "RATCHET@10:59",
+        "counterfactual_net_1x_inr": 306.72,
+        "delta_basis_pts": 6.95,
+        "entry_price": 124.1,
+        "er20": 0.131,
+        "failed_gates": [
+          "ADX<22",
+          "ER<0.32",
+          "OBI<0.05"
+        ],
+        "l5_obi": -0.179,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-20",
+        "window_bucket": "V2_WIN_1015_1300"
+      },
+      {
+        "adx14": 23.58,
+        "bar_ts": "2026-11-20 11:56:00",
+        "contract": "25600CE",
+        "counterfactual_exit": "RATCHET@12:58",
+        "counterfactual_net_1x_inr": 3921.12,
+        "delta_basis_pts": 16.65,
+        "entry_price": 118.55,
+        "er20": 0.507,
+        "failed_gates": [],
+        "l5_obi": 0.2449,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-20",
+        "window_bucket": "FIRST_V2_PASS"
+      },
+      {
+        "adx14": 15.83,
+        "bar_ts": "2026-11-23 10:40:00",
+        "contract": "25600PE",
+        "counterfactual_exit": "STAG_35M@11:15",
+        "counterfactual_net_1x_inr": -174.87,
+        "delta_basis_pts": -7.05,
+        "entry_price": 281.2,
+        "er20": 0.194,
+        "failed_gates": [
+          "ADX<22",
+          "ER<0.32",
+          "OBI<0.05"
+        ],
+        "l5_obi": -0.2,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-23",
+        "window_bucket": "V2_WIN_1015_1300"
+      },
+      {
+        "adx14": 22.08,
+        "bar_ts": "2026-11-23 11:06:00",
+        "contract": "25500PE",
+        "counterfactual_exit": "HARD_SL@11:09",
+        "counterfactual_net_1x_inr": -2046.49,
+        "delta_basis_pts": -8.95,
+        "entry_price": 259.95,
+        "er20": 0.468,
+        "failed_gates": [],
+        "l5_obi": 0.2059,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-23",
+        "window_bucket": "FIRST_V2_PASS"
+      },
+      {
+        "adx14": 16.03,
+        "bar_ts": "2026-11-25 10:18:00",
+        "contract": "25800CE",
+        "counterfactual_exit": "RATCHET@12:10",
+        "counterfactual_net_1x_inr": 3340.81,
+        "delta_basis_pts": 36.2,
+        "entry_price": 242.75,
+        "er20": 0.136,
+        "failed_gates": [
+          "ADX<22",
+          "ER<0.32"
+        ],
+        "l5_obi": 0.26,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-25",
+        "window_bucket": "V2_WIN_1015_1300"
+      },
+      {
+        "adx14": 30.04,
+        "bar_ts": "2026-11-25 10:47:00",
+        "contract": "25850CE",
+        "counterfactual_exit": "RATCHET@12:10",
+        "counterfactual_net_1x_inr": 1390.54,
+        "delta_basis_pts": 43.0,
+        "entry_price": 247.8,
+        "er20": 0.398,
+        "failed_gates": [],
+        "l5_obi": 0.4382,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-25",
+        "window_bucket": "FIRST_V2_PASS"
+      },
+      {
+        "adx14": 28.36,
+        "bar_ts": "2026-11-26 10:21:00",
+        "contract": "25900CE",
+        "counterfactual_exit": "RATCHET@11:26",
+        "counterfactual_net_1x_inr": 928.86,
+        "delta_basis_pts": 6.7,
+        "entry_price": 191.5,
+        "er20": 0.247,
+        "failed_gates": [
+          "ER<0.32",
+          "OBI<0.05"
+        ],
+        "l5_obi": -0.44,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-26",
+        "window_bucket": "V2_WIN_1015_1300"
+      },
+      {
+        "adx14": 35.53,
+        "bar_ts": "2026-11-26 10:31:00",
+        "contract": "25900CE",
+        "counterfactual_exit": "STAG_35M@11:12",
+        "counterfactual_net_1x_inr": 299.02,
+        "delta_basis_pts": 7.2,
+        "entry_price": 216.15,
+        "er20": 0.4,
+        "failed_gates": [],
+        "l5_obi": 0.125,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-26",
+        "window_bucket": "FIRST_V2_PASS"
+      },
+      {
+        "adx14": 20.92,
+        "bar_ts": "2026-11-27 10:29:00",
+        "contract": "25800PE",
+        "counterfactual_exit": "RATCHET@10:44",
+        "counterfactual_net_1x_inr": -125.11,
+        "delta_basis_pts": -5.6,
+        "entry_price": 168.8,
+        "er20": 0.568,
+        "failed_gates": [
+          "ADX<22",
+          "OBI<0.05"
+        ],
+        "l5_obi": 0.0471,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-27",
+        "window_bucket": "V2_WIN_1015_1300"
+      },
+      {
+        "adx14": 31.05,
+        "bar_ts": "2026-11-27 10:39:00",
+        "contract": "25800PE",
+        "counterfactual_exit": "RATCHET@11:09",
+        "counterfactual_net_1x_inr": 921.58,
+        "delta_basis_pts": -9.9,
+        "entry_price": 175.65,
+        "er20": 0.365,
+        "failed_gates": [],
+        "l5_obi": 0.1067,
+        "quote_status": "EXECUTABLE_L5",
+        "session_date": "2026-11-27",
+        "window_bucket": "FIRST_V2_PASS"
+      }
+    ],
+    "single_gate_ablation": {
+      "ADX >= 22": {
+        "avoided_losers": 5,
+        "fail_n": 11,
+        "fail_net_1x": 11551.33,
+        "missed_winners": 6,
+        "pass_n": 3,
+        "pass_net_1x": -2356.87,
+        "pass_wins": 1
+      },
+      "ER >= 0.32": {
+        "avoided_losers": 5,
+        "fail_n": 10,
+        "fail_net_1x": 8596.76,
+        "missed_winners": 5,
+        "pass_n": 4,
+        "pass_net_1x": 597.7,
+        "pass_wins": 2
+      },
+      "L5 OBI >= 0.05": {
+        "avoided_losers": 3,
+        "fail_n": 6,
+        "fail_net_1x": 8897.01,
+        "missed_winners": 3,
+        "pass_n": 8,
+        "pass_net_1x": 297.45,
+        "pass_wins": 4
+      },
+      "Window >= 10:15": {
+        "avoided_losers": 3,
+        "fail_n": 5,
+        "fail_net_1x": -1349.88,
+        "missed_winners": 2,
+        "pass_n": 9,
+        "pass_net_1x": 10544.34,
+        "pass_wins": 5
+      },
+      "dBasis >= 3pt (signed)": {
+        "avoided_losers": 5,
+        "fail_n": 8,
+        "fail_net_1x": -4024.02,
+        "missed_winners": 3,
+        "pass_n": 6,
+        "pass_net_1x": 13218.48,
+        "pass_wins": 4
+      }
+    }
+  },
+  "phase4_o3_audit": {
+    "artifact_status": {
+      "locked_finalist_json_present": false,
+      "phase4_cache_coverage_json_present": false,
+      "phase4_monthly_csv_present": false,
+      "phase4_results_json_present": false,
+      "phase4_sqlite_path": "/private/tmp/phase4_options_cache/nifty_options.sqlite",
+      "phase4_sqlite_present": false,
+      "phase4_sqlite_sha256": "28f8a2a1bfc6613a9583d25406fa12e19695167eaedaebac464d4587817bfcd3",
+      "scratch_dir_present": false
+    },
+    "autonomous_activation_decision": {
+      "autonomous_entries_enabled": false,
+      "book_id": "V2_BOOK_A_PROPOSED_O3",
+      "reason": "UNVERIFIED_SPEC_CONFLICT: Proposed V2 parameters (50% target, holiday-adjusted DTE, 50pt grid, sub-second L5 strict credit floor) differ materially from Phase-4 frozen 15m O3 evidence (70% target, weekday DTE, 100pt grid) and raw 84-expiry SQLite cache in /private/tmp is unavailable on disk for re-simulation."
+    },
+    "monthly_reconciliation": {
+      "exact_arithmetic_reconciled": true,
+      "monthly_gross_minus_cost_diffs": [],
+      "months_checked": 20,
+      "pooled_oos_gross_minus_cost_diff": 0.0,
+      "sum_closed_trades": 23,
+      "sum_gross_pnl_inr": 14296.75,
+      "sum_net_pnl_inr": 11794.33,
+      "sum_total_cost_inr": 2502.42
+    },
+    "recorded_results": {
+      "baseline_1x": {
+        "Continuous_All": {
+          "closed_trades": 24,
+          "max_dd_pct": 4.79,
+          "net_pnl_inr": 13187.39,
+          "sr_ann": 1.3725
+        },
+        "HOLDOUT": {
+          "closed_trades": 6,
+          "gross_pnl_inr": 1066.0,
+          "max_dd_pct": 4.94,
+          "net_pnl_inr": 412.14,
+          "sr_ann": 0.1868,
+          "sr_excess_ann": -0.9669,
+          "total_cost_inr": 653.86
+        },
+        "Pooled_OOS": {
+          "closed_trades": 16,
+          "gross_pnl_inr": 9265.75,
+          "max_dd_pct": 4.98,
+          "net_pnl_inr": 7503.89,
+          "sr_ann": 1.0166,
+          "sr_excess_ann": 0.0657,
+          "total_cost_inr": 1761.86,
+          "trade_pf": 1.847,
+          "trade_wr_pct": 62.5,
+          "worst_overnight_gap_inr": -1735.58,
+          "worst_trade_loss_inr": -4097.31
+        },
+        "Train_1": {
+          "closed_trades": 7,
+          "gross_pnl_inr": 5031.0,
+          "max_dd_pct": 1.22,
+          "net_pnl_inr": 4290.44,
+          "sr_ann": 2.4035,
+          "total_cost_inr": 740.56
+        },
+        "VAL_1": {
+          "closed_trades": 1,
+          "gross_pnl_inr": -104.0,
+          "max_dd_pct": 0.21,
+          "net_pnl_inr": -209.83,
+          "sr_ann": -2.8027,
+          "total_cost_inr": 105.83
+        },
+        "VAL_2": {
+          "closed_trades": 4,
+          "gross_pnl_inr": 4849.0,
+          "max_dd_pct": 0.4,
+          "net_pnl_inr": 4432.21,
+          "sr_ann": 3.3795,
+          "total_cost_inr": 416.79
+        },
+        "VAL_3": {
+          "closed_trades": 5,
+          "gross_pnl_inr": 3454.75,
+          "max_dd_pct": 5.18,
+          "net_pnl_inr": 2869.37,
+          "sr_ann": 1.1425,
+          "total_cost_inr": 585.38
+        }
+      },
+      "hist_lot_and_tariff": {
+        "Continuous_All": {
+          "closed_trades": 24,
+          "net_pnl_inr": 14467.75,
+          "sr_ann": 1.4532
+        },
+        "Pooled_OOS": {
+          "closed_trades": 16,
+          "gross_pnl_inr": 9755.25,
+          "net_pnl_inr": 8002.55,
+          "sr_ann": 1.0668,
+          "total_cost_inr": 1752.7
+        }
+      },
+      "stress_2x": {
+        "Continuous_All": {
+          "closed_trades": 21,
+          "net_pnl_inr": 2798.24,
+          "sr_ann": 0.312
+        },
+        "HOLDOUT": {
+          "closed_trades": 6,
+          "net_pnl_inr": -479.61,
+          "sr_ann": -0.1592
+        },
+        "Pooled_OOS": {
+          "closed_trades": 15,
+          "gross_pnl_inr": 5326.75,
+          "max_dd_pct": 5.4,
+          "net_pnl_inr": 2007.01,
+          "sr_ann": 0.2924,
+          "total_cost_inr": 3319.74,
+          "trade_pf": 1.173
+        }
+      }
+    },
+    "reproduction_status": "ARTIFACT_RECONCILED_RAW_OPTION_SQLITE_PURGED_FROM_TMP",
+    "spec_conflicts": [
+      {
+        "field": "credit_capture_target_pct",
+        "impact": "Different profit-take geometry; invalidates direct transfer of Phase-4 O3 win/loss expectation.",
+        "phase4_o3_evidence": "70.0% decay target (`decay_tgt = 0.70`, curr_deb <= 0.30 * entry_credit)",
+        "proposed_v2_book_a": "50.0% credit-capture target (curr_deb <= 0.50 * entry_credit)"
+      },
+      {
+        "field": "dte_definition",
+        "impact": "Shifts holiday-week entry session by 1 day (e.g. Friday vs Monday before Tuesday expiry).",
+        "phase4_o3_evidence": "`weekday_dte(date, expiry) == 1` (Mon-Fri count; ignores NSE weekday holidays such as 2026-10-20, 2026-11-10, 2026-11-24)",
+        "proposed_v2_book_a": "Holiday-adjusted `trading_sessions_between(date, expiry) == 1`"
+      },
+      {
+        "field": "lot_size_and_tariff",
+        "impact": "Changes notional exposure and statutory STT across 2025 expiries (~Rs 499 Pooled_OOS delta).",
+        "phase4_o3_evidence": "Primary headline (+Rs 7,503.89 OOS) fixed 65 qty + Apr-2026 0.15% STT across all 84 expiries; `hist_lot_and_tariff` (+Rs 8,002.55 OOS) used contract lot (75 pre-Dec 2025, 65 post)",
+        "proposed_v2_book_a": "Contract-specific historical lot size & effective-dated Upstox tariff"
+      },
+      {
+        "field": "short_strike_anchor_grid",
+        "impact": "Changes strike selection by 50 points whenever spot is closer to an xx50 strike.",
+        "phase4_o3_evidence": "`atm_100 = round(spot_close / 100) * 100`; short = atm_100 - 50 (PE) or +50 (CE) (always xx50 strike!)",
+        "proposed_v2_book_a": "Standard 50pt ATM grid `round(spot / 50) * 50` +/- 50 offset (alternates xx00 and xx50 strikes)"
+      },
+      {
+        "field": "bar_timing_and_credit_floor",
+        "impact": "More conservative entry fill & strict floor rejects marginal ~26-29 pt spreads that Phase-4 accepted.",
+        "phase4_o3_evidence": "15m bar close signal -> `Open[t+1]` bar fill with empirical `p75` half-spread + `+1s p75` fade; Leg-2 collapse floor `25.5 pts` (`0.85 * 30`)",
+        "proposed_v2_book_a": "1m L5 order-book sweep, buy-first 3s Leg-2 timeout, strict `>= 30.0 pts` floor enforced at worst permitted short limit using actual hedge fill"
+      },
+      {
+        "field": "trend_vwap_clock",
+        "impact": "Minor intraday path differences near flat-VWAP transitions around 13:30-15:00 IST.",
+        "phase4_o3_evidence": "Equal-weighted 15m Typical Price VWAP (`mean((H+L+C)/3)` over 15m session bars) + prior daily SMA20",
+        "proposed_v2_book_a": "Equal-weighted 1m Typical Price VWAP (`tpb`) + prior daily SMA20"
+      }
+    ]
+  },
+  "production_evaluator_parity": {
+    "all_matched_passed": true,
+    "checks": [
+      {
+        "adx14_parity": 30.04,
+        "bar_ts": "2026-11-25 10:47:00",
+        "er20_parity": 0.398,
+        "orb30_parity": [
+          25620.2,
+          25795.55
+        ],
+        "prod_evaluator_passed": true,
+        "prod_evaluator_reject_reason": null,
+        "prod_ratchet_check_25nov": 272.58,
+        "recorded_forward_net_pnl": 1390.54,
+        "session_date": "2026-11-25"
+      },
+      {
+        "adx14_parity": 40.55,
+        "bar_ts": "2026-11-27 11:24:00",
+        "er20_parity": 0.363,
+        "orb30_parity": [
+          25803.6,
+          25909.1
+        ],
+        "prod_evaluator_passed": true,
+        "prod_evaluator_reject_reason": null,
+        "prod_ratchet_check_25nov": 272.58,
+        "recorded_forward_net_pnl": -1842.93,
+        "session_date": "2026-11-27"
+      }
+    ],
+    "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074"
+  },
+  "report_version": "2.3.0-research-audit",
+  "v2_baseline": {
+    "book_a_enabled": false,
+    "book_b_enabled": true,
+    "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074",
+    "db_bytes": 15728640,
+    "drawdown_separation": {
+      "has_unpriced_stress_inflation": true,
+      "observed_mark_max_dd_inr": 5810.04,
+      "observed_mark_max_dd_pct_peak": 2.83,
+      "observed_mark_max_dd_pct_start": 2.91,
+      "observed_mark_running_peak_inr": 205357.65,
+      "stored_legacy_max_dd_inr": 21550.03,
+      "stress_max_dd_inr": 21550.03,
+      "stress_max_dd_pct_peak": 10.49,
+      "stress_max_dd_pct_start": 10.78,
+      "stress_running_peak_inr": 205357.65,
+      "unpriced_stress_spikes": [
+        {
+          "classification": "UNPRICED_STRESS_CHARGE_NOT_OBSERVED_MARK",
+          "conservative_mtm_inr": -16192.38,
+          "legacy_drawdown_inr": 21550.03,
+          "next_bar_mtm_inr": 3586.55,
+          "prior_bar_mtm_inr": 3288.12,
+          "seq_no": 167,
+          "session_date": "2026-11-25",
+          "ts_ms": 1795588320000
+        }
+      ],
+      "unpriced_stress_spikes_count": 1
+    },
+    "engine_version": "2.2.0-causal",
+    "forward_paper_daily_snapshots": [
+      {
+        "closed_trades": 1,
+        "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074",
+        "eod_mtm_equity_inr": 201390.54,
+        "eod_realized_equity_inr": 201390.54,
+        "gap_count": 0,
+        "intraday_min_mtm_equity_inr": 183807.62,
+        "max_mtm_dd_inr": 21550.03,
+        "max_mtm_dd_pct_peak": 10.49,
+        "max_mtm_dd_pct_start": 10.78,
+        "net_pnl_inr": 1390.54,
+        "open_overnight_packages": 0,
+        "overflow_count": 0,
+        "peak_reserved_capital_inr": 16107.0,
+        "run_mode": "FORWARD_PAPER",
+        "running_peak_equity_inr": 205357.65,
+        "session_date": "2026-11-25",
+        "session_state": "COMPLETE_CLEAN",
+        "sod_equity_inr": 200000.0,
+        "unresolved_exposure_count": 0
+      },
+      {
+        "closed_trades": 0,
+        "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074",
+        "eod_mtm_equity_inr": 201390.54,
+        "eod_realized_equity_inr": 201390.54,
+        "gap_count": 0,
+        "intraday_min_mtm_equity_inr": 201390.54,
+        "max_mtm_dd_inr": 21550.03,
+        "max_mtm_dd_pct_peak": 10.49,
+        "max_mtm_dd_pct_start": 10.78,
+        "net_pnl_inr": 0.0,
+        "open_overnight_packages": 0,
+        "overflow_count": 0,
+        "peak_reserved_capital_inr": 0.0,
+        "run_mode": "FORWARD_PAPER",
+        "running_peak_equity_inr": 205357.65,
+        "session_date": "2026-11-26",
+        "session_state": "COMPLETE_CLEAN",
+        "sod_equity_inr": 201390.54,
+        "unresolved_exposure_count": 0
+      },
+      {
+        "closed_trades": 1,
+        "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074",
+        "eod_mtm_equity_inr": 199547.61,
+        "eod_realized_equity_inr": 199547.61,
+        "gap_count": 0,
+        "intraday_min_mtm_equity_inr": 199547.61,
+        "max_mtm_dd_inr": 21550.03,
+        "max_mtm_dd_pct_peak": 10.49,
+        "max_mtm_dd_pct_start": 10.78,
+        "net_pnl_inr": -1842.93,
+        "open_overnight_packages": 0,
+        "overflow_count": 0,
+        "peak_reserved_capital_inr": 11765.0,
+        "run_mode": "FORWARD_PAPER",
+        "running_peak_equity_inr": 205357.65,
+        "session_date": "2026-11-27",
+        "session_state": "COMPLETE_CLEAN",
+        "sod_equity_inr": 201390.54,
+        "unresolved_exposure_count": 0
+      }
+    ],
+    "forward_paper_fills": [
+      {
+        "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074",
+        "decision_ts_ms": 1795583880000,
+        "exchange_ts_ms": 1795583879515,
+        "fill_fidelity": "OBSERVED_L5_DEPTH_SWEEP",
+        "fill_id": "osv2_fil_05874dc169290a39",
+        "fill_price": 247.8,
+        "instrument_key": "NSE_FO|47847",
+        "intent_id": "osv2_int_a48970134b65fb41",
+        "package_id": "osv2_pkg_e449737a41796f0c",
+        "qty": 65,
+        "raw_top_price": 247.75,
+        "receipt_ts_ms": 1795583879687,
+        "run_mode": "FORWARD_PAPER",
+        "side": "BUY",
+        "slippage_pts": 0.05,
+        "vwap_raw": 247.75
+      },
+      {
+        "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074",
+        "decision_ts_ms": 1795588860000,
+        "exchange_ts_ms": 1795588859517,
+        "fill_fidelity": "OBSERVED_L5_DEPTH_SWEEP",
+        "fill_id": "osv2_fil_ab03814708590597",
+        "fill_price": 270.55,
+        "instrument_key": "NSE_FO|47847",
+        "intent_id": "osv2_int_e31b30772d8e31ca",
+        "package_id": "osv2_pkg_e449737a41796f0c",
+        "qty": 65,
+        "raw_top_price": 270.6,
+        "receipt_ts_ms": 1795588859887,
+        "run_mode": "FORWARD_PAPER",
+        "side": "SELL",
+        "slippage_pts": 0.05,
+        "vwap_raw": 270.6
+      },
+      {
+        "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074",
+        "decision_ts_ms": 1795758900000,
+        "exchange_ts_ms": 1795758899516,
+        "fill_fidelity": "OBSERVED_L5_DEPTH_SWEEP",
+        "fill_id": "osv2_fil_cf20be077b83ed70",
+        "fill_price": 181.0,
+        "instrument_key": "NSE_FO|47836",
+        "intent_id": "osv2_int_d3575f5f0b2c226f",
+        "package_id": "osv2_pkg_8308f50986135763",
+        "qty": 65,
+        "raw_top_price": 180.9,
+        "receipt_ts_ms": 1795758899723,
+        "run_mode": "FORWARD_PAPER",
+        "side": "BUY",
+        "slippage_pts": 0.1,
+        "vwap_raw": 180.9
+      },
+      {
+        "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074",
+        "decision_ts_ms": 1795761000000,
+        "exchange_ts_ms": 1795760999032,
+        "fill_fidelity": "OBSERVED_L5_DEPTH_SWEEP",
+        "fill_id": "osv2_fil_05de47672e588d5a",
+        "fill_price": 153.75,
+        "instrument_key": "NSE_FO|47836",
+        "intent_id": "osv2_int_ecf049e22366b92a",
+        "package_id": "osv2_pkg_8308f50986135763",
+        "qty": 65,
+        "raw_top_price": 153.85,
+        "receipt_ts_ms": 1795760999581,
+        "run_mode": "FORWARD_PAPER",
+        "side": "SELL",
+        "slippage_pts": 0.1,
+        "vwap_raw": 153.85
+      }
+    ],
+    "forward_paper_packages": [
+      {
+        "accounting_json": "{\"additional_slippage\": 0.0, \"brokerage\": 40.0, \"buy_premium_turnover\": 16107.0, \"entry_cashflow\": -16107.0, \"exchange_core_fee\": 11.97, \"exchange_fee\": 11.97, \"executed_orders\": 2, \"exercise_intrinsic_turnover\": 0.0, \"exit_cashflow\": 17585.75, \"gross_pnl\": 1478.75, \"gst\": 9.35, \"ipft_fee\": 0.0, \"leg_count\": 1, \"legs\": [{\"additional_slippage\": 0.0, \"brokerage\": 40.0, \"buy_premium_turnover\": 16107.0, \"entry_cashflow\": -16107.0, \"entry_price\": 247.8, \"exchange_core_fee\": 11.97, \"exchange_fee\": 11.97, \"executed_orders\": 2, \"exercise_intrinsic_turnover\": 0.0, \"exit_cashflow\": 17585.75, \"exit_mode\": \"MARKET_ORDER\", \"exit_price_effective\": 270.55, \"gross_pnl\": 1478.75, \"gst\": 9.35, \"ipft_fee\": 0.0, \"label\": \"LONG 25850 CE\", \"market_turnover\": 33692.75, \"net_pnl\": 1390.54, \"option_type\": \"CE\", \"qty\": 65, \"sebi_fee\": 0.03, \"sell_premium_turnover\": 17585.75, \"stamp_duty\": 0.48, \"statutory_charges\": 88.21, \"strike\": 25850.0, \"stt\": 26.38, \"stt_exercise\": 0.0, \"stt_sell\": 26.38, \"tariff_schedule\": \"STT_APR_2026_0.15PCT_NSE_MAR_2026_0.03553PCT\", \"total_friction\": 88.21}], \"market_turnover\": 33692.75, \"net_pnl\": 1390.54, \"risk\": {\"buy_first_incomplete_leg_exposure_inr\": 16107.0, \"can_certify_live_margin\": false, \"final_package_max_loss_after_friction_inr\": 16195.21, \"final_package_max_loss_inr\": 16107.0, \"heuristic_margin_floor_inr\": 16107.0, \"is_defined_risk\": true, \"is_multi_leg_package\": false, \"margin_status\": \"UNVERIFIED_HEURISTIC_NOT_BROKER_SPAN\", \"net_entry_cashflow_inr\": -16107.0, \"sell_first_creates_uncovered_short\": false, \"unbounded_upside_risk\": false}, \"sebi_fee\": 0.03, \"sell_premium_turnover\": 17585.75, \"stamp_duty\": 0.48, \"statutory_charges\": 88.21, \"stt\": 26.38, \"stt_exercise\": 0.0, \"stt_sell\": 26.38, \"tariff_schedule\": \"STT_APR_2026_0.15PCT_NSE_MAR_2026_0.03553PCT\", \"total_friction\": 88.21}",
+        "actual_gross_fill_loss_inr": 0.0,
+        "book_id": "V2_BOOK_B_PAID_FLOW",
+        "brokerage_inr": 40.0,
+        "candidate_variant": "V2_FROZEN_COMBINED",
+        "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074",
+        "direction_label": "BUY_CE",
+        "entry_bar_ts": "2026-11-25 10:47:00",
+        "entry_day_mtm_pnl_inr": 1390.54,
+        "entry_ts_ms": 1795583880000,
+        "events_timeline_json": "[{\"bar_ts\": \"2026-11-25 10:47:00\", \"detail\": \"Bought 65 NIFTY 25850 CE 01 DEC 26 @ Rs 247.80 (SL Rs 220.15)\", \"event\": \"OPEN_BOOK_B\", \"ts_ms\": 1795583880000}, {\"bar_ts\": \"2026-11-25 12:10:00\", \"detail\": \"Gross +1478.75 - Fric 88.21 = Net +1390.54\", \"event\": \"EXIT_CLOSE_ONLY_RATCHET_STOP\", \"ts_ms\": 1795588860000}]",
+        "exit_bar_ts": "2026-11-25 12:10:00",
+        "exit_reason": "CLOSE_ONLY_RATCHET_STOP",
+        "exit_ts_ms": 1795588860000,
+        "expiry": "2026-12-01",
+        "expiry_intraday_pnl_inr": 0.0,
+        "fill_fidelity": "OBSERVED_L5_DEPTH_SWEEP",
+        "gross_pnl_inr": 1478.75,
+        "is_unpriced_exposure": 0,
+        "last_mark_net_pnl_inr": 1390.54,
+        "last_mark_ts_ms": 1795588860000,
+        "last_reliable_mark_net_inr": 1390.54,
+        "last_reliable_mark_ts_ms": 1795588860000,
+        "leg2_confirmed_ts_ms": 1795583880000,
+        "legs_json": "{\"basis_meta\": {\"current_basis_pts\": 140.3, \"delta_basis_pts\": 43.0, \"fut_instrument_key\": \"NSE_FO|58875\", \"open_basis_pts\": 97.3, \"variant\": \"V2_FROZEN_COMBINED\", \"weekly_synthetic_basis_pts\": 42.35}, \"best_close_pts\": 331.7, \"hard_stop\": 220.15, \"is_bull\": true, \"long_leg\": {\"entry_price\": 247.8, \"entry_sweep\": {\"age_ms\": 313, \"available_l5_qty\": 1625, \"book_provenance\": \"OBSERVED_V3_L5\", \"carried_l2_l5_stripped\": false, \"confirmed_lot_qty\": 65, \"consumed_rungs\": [{\"book_qty\": 195, \"price\": 247.75, \"qty_taken\": 65}], \"consumed_ts_ms\": 1795583879687, \"depth_slippage_pts\": 0.05, \"fill_fidelity\": \"OBSERVED_L5_DEPTH_SWEEP\", \"fill_price\": 247.8, \"filled_qty\": 65, \"levels_swept\": 1, \"ok\": true, \"partial_fill\": false, \"raw_ask\": 247.75, \"raw_bid\": 247.25, \"reason\": \"OK\", \"side\": \"BUY\", \"spread_pct\": 0.2, \"spread_pts\": 0.5, \"target_qty\": 65, \"top_price\": 247.75, \"ts_ms\": 1795583879687, \"unfilled_qty\": 0, \"vwap_raw\": 247.75, \"worst_level_price_used\": 247.75}, \"exit_price\": 270.55, \"expiry\": \"2026-12-01\", \"instrument_key\": \"NSE_FO|47847\", \"lot_size\": 65, \"option_type\": \"CE\", \"qty\": 65, \"strike\": 25850.0, \"trading_symbol\": \"NIFTY 25850 CE 01 DEC 26\"}, \"mode\": \"SINGLE_PAID_LONG\", \"planned_stop_loss_inr\": 1797.25, \"ratchet_stop\": 272.58, \"used_single_otm_fallback\": false}",
+        "net_pnl_inr": 1390.54,
+        "overnight_gap_pnl_inr": 0.0,
+        "package_id": "osv2_pkg_e449737a41796f0c",
+        "planned_loss_inr": 1797.25,
+        "reserved_capital_inr": 0.0,
+        "run_mode": "FORWARD_PAPER",
+        "session_date": "2026-11-25",
+        "signal_id": "osv2_sig_21823a6b6ca54661",
+        "slippage_and_gap_overshoot_inr": 0.0,
+        "state": "CLOSED",
+        "statutory_charges_inr": 88.21,
+        "structural_max_loss_inr": 16192.38,
+        "stt_inr": 26.38,
+        "total_friction_inr": 88.21,
+        "transition_seq": 2,
+        "unpriced_reason": null,
+        "unpriced_since_ts_ms": null,
+        "worst_gap_loss_inr": 0.0
+      },
+      {
+        "accounting_json": "{\"additional_slippage\": 0.0, \"brokerage\": 40.0, \"buy_premium_turnover\": 11765.0, \"entry_cashflow\": -11765.0, \"exchange_core_fee\": 7.73, \"exchange_fee\": 7.73, \"executed_orders\": 2, \"exercise_intrinsic_turnover\": 0.0, \"exit_cashflow\": 9993.75, \"gross_pnl\": -1771.25, \"gst\": 8.59, \"ipft_fee\": 0.0, \"leg_count\": 1, \"legs\": [{\"additional_slippage\": 0.0, \"brokerage\": 40.0, \"buy_premium_turnover\": 11765.0, \"entry_cashflow\": -11765.0, \"entry_price\": 181.0, \"exchange_core_fee\": 7.73, \"exchange_fee\": 7.73, \"executed_orders\": 2, \"exercise_intrinsic_turnover\": 0.0, \"exit_cashflow\": 9993.75, \"exit_mode\": \"MARKET_ORDER\", \"exit_price_effective\": 153.75, \"gross_pnl\": -1771.25, \"gst\": 8.59, \"ipft_fee\": 0.0, \"label\": \"LONG 25700 PE\", \"market_turnover\": 21758.75, \"net_pnl\": -1842.93, \"option_type\": \"PE\", \"qty\": 65, \"sebi_fee\": 0.02, \"sell_premium_turnover\": 9993.75, \"stamp_duty\": 0.35, \"statutory_charges\": 71.68, \"strike\": 25700.0, \"stt\": 14.99, \"stt_exercise\": 0.0, \"stt_sell\": 14.99, \"tariff_schedule\": \"STT_APR_2026_0.15PCT_NSE_MAR_2026_0.03553PCT\", \"total_friction\": 71.68}], \"market_turnover\": 21758.75, \"net_pnl\": -1842.93, \"risk\": {\"buy_first_incomplete_leg_exposure_inr\": 11765.0, \"can_certify_live_margin\": false, \"final_package_max_loss_after_friction_inr\": 11836.68, \"final_package_max_loss_inr\": 11765.0, \"heuristic_margin_floor_inr\": 11765.0, \"is_defined_risk\": true, \"is_multi_leg_package\": false, \"margin_status\": \"UNVERIFIED_HEURISTIC_NOT_BROKER_SPAN\", \"net_entry_cashflow_inr\": -11765.0, \"sell_first_creates_uncovered_short\": false, \"unbounded_upside_risk\": false}, \"sebi_fee\": 0.02, \"sell_premium_turnover\": 9993.75, \"stamp_duty\": 0.35, \"statutory_charges\": 71.68, \"stt\": 14.99, \"stt_exercise\": 0.0, \"stt_sell\": 14.99, \"tariff_schedule\": \"STT_APR_2026_0.15PCT_NSE_MAR_2026_0.03553PCT\", \"total_friction\": 71.68}",
+        "actual_gross_fill_loss_inr": 1771.25,
+        "book_id": "V2_BOOK_B_PAID_FLOW",
+        "brokerage_inr": 40.0,
+        "candidate_variant": "V2_FROZEN_COMBINED",
+        "config_hash": "cdcda8a23b487916d608fc27dda7ef26b730ba95eb408b8022bf68e30ee17074",
+        "direction_label": "BUY_PE",
+        "entry_bar_ts": "2026-11-27 11:24:00",
+        "entry_day_mtm_pnl_inr": -1842.93,
+        "entry_ts_ms": 1795758900000,
+        "events_timeline_json": "[{\"bar_ts\": \"2026-11-27 11:24:00\", \"detail\": \"Bought 65 NIFTY 25700 PE 01 DEC 26 @ Rs 181.00 (SL Rs 153.35)\", \"event\": \"OPEN_BOOK_B\", \"ts_ms\": 1795758900000}, {\"bar_ts\": \"2026-11-27 11:59:00\", \"detail\": \"Gross -1771.25 - Fric 71.68 = Net -1842.93\", \"event\": \"EXIT_STAGNATION_TIME_STOP\", \"ts_ms\": 1795761000000}]",
+        "exit_bar_ts": "2026-11-27 11:59:00",
+        "exit_reason": "STAGNATION_TIME_STOP",
+        "exit_ts_ms": 1795761000000,
+        "expiry": "2026-12-01",
+        "expiry_intraday_pnl_inr": 0.0,
+        "fill_fidelity": "OBSERVED_L5_DEPTH_SWEEP",
+        "gross_pnl_inr": -1771.25,
+        "is_unpriced_exposure": 0,
+        "last_mark_net_pnl_inr": -1842.93,
+        "last_mark_ts_ms": 1795761000000,
+        "last_reliable_mark_net_inr": -1842.93,
+        "last_reliable_mark_ts_ms": 1795761000000,
+        "leg2_confirmed_ts_ms": 1795758900000,
+        "legs_json": "{\"basis_meta\": {\"current_basis_pts\": 88.35, \"delta_basis_pts\": -7.35, \"fut_instrument_key\": \"NSE_FO|58875\", \"open_basis_pts\": 95.7, \"variant\": \"V2_FROZEN_COMBINED\", \"weekly_synthetic_basis_pts\": -15.4}, \"best_close_pts\": 188.35, \"hard_stop\": 153.35, \"is_bull\": false, \"long_leg\": {\"entry_price\": 181.0, \"entry_sweep\": {\"age_ms\": 277, \"available_l5_qty\": 6175, \"book_provenance\": \"OBSERVED_V3_L5\", \"carried_l2_l5_stripped\": false, \"confirmed_lot_qty\": 65, \"consumed_rungs\": [{\"book_qty\": 1300, \"price\": 180.9, \"qty_taken\": 65}], \"consumed_ts_ms\": 1795758899723, \"depth_slippage_pts\": 0.1, \"fill_fidelity\": \"OBSERVED_L5_DEPTH_SWEEP\", \"fill_price\": 181.0, \"filled_qty\": 65, \"levels_swept\": 1, \"ok\": true, \"partial_fill\": false, \"raw_ask\": 180.9, \"raw_bid\": 180.4, \"reason\": \"OK\", \"side\": \"BUY\", \"spread_pct\": 0.28, \"spread_pts\": 0.5, \"target_qty\": 65, \"top_price\": 180.9, \"ts_ms\": 1795758899723, \"unfilled_qty\": 0, \"vwap_raw\": 180.9, \"worst_level_price_used\": 180.9}, \"exit_price\": 153.75, \"expiry\": \"2026-12-01\", \"instrument_key\": \"NSE_FO|47836\", \"lot_size\": 65, \"option_type\": \"PE\", \"qty\": 65, \"strike\": 25700.0, \"trading_symbol\": \"NIFTY 25700 PE 01 DEC 26\"}, \"mode\": \"SINGLE_PAID_LONG\", \"planned_stop_loss_inr\": 1797.25, \"ratchet_stop\": null, \"used_single_otm_fallback\": false}",
+        "net_pnl_inr": -1842.93,
+        "overnight_gap_pnl_inr": 0.0,
+        "package_id": "osv2_pkg_8308f50986135763",
+        "planned_loss_inr": 1797.25,
+        "reserved_capital_inr": 0.0,
+        "run_mode": "FORWARD_PAPER",
+        "session_date": "2026-11-27",
+        "signal_id": "osv2_sig_38a31e5cf12ce9ff",
+        "slippage_and_gap_overshoot_inr": 0.0,
+        "state": "CLOSED",
+        "statutory_charges_inr": 71.68,
+        "structural_max_loss_inr": 11840.08,
+        "stt_inr": 14.99,
+        "total_friction_inr": 71.68,
+        "transition_seq": 2,
+        "unpriced_reason": null,
+        "unpriced_since_ts_ms": null,
+        "worst_gap_loss_inr": 0.0
+      }
+    ],
+    "nov25_unpriced_mtm_diagnosis": {
+      "classification": "INTENTIONAL_CONSERVATIVE_STRESS_CHARGE_CONFLATED_INTO_SINGLE_DD_METRIC",
+      "l5_quotes_around_event": [
+        {
+          "bar_ts": "2026-11-25 12:00:00",
+          "book_provenance": "OBSERVED_V3_L5",
+          "l1_book_age_ms": 735,
+          "raw_ask": 300.35,
+          "raw_bid": 299.9,
+          "recorded_at": "2026-11-25T12:01:00.119291"
+        },
+        {
+          "bar_ts": "2026-11-25 12:01:00",
+          "book_provenance": "OBSERVED_V3_L5",
+          "l1_book_age_ms": 15268,
+          "raw_ask": 297.85,
+          "raw_bid": 297.55,
+          "recorded_at": "2026-11-25T12:02:00.530444"
+        },
+        {
+          "bar_ts": "2026-11-25 12:02:00",
+          "book_provenance": "OBSERVED_V3_L5",
+          "l1_book_age_ms": 715,
+          "raw_ask": 305.2,
+          "raw_bid": 304.45,
+          "recorded_at": "2026-11-25T12:03:00.061912"
+        },
+        {
+          "bar_ts": "2026-11-25 12:03:00",
+          "book_provenance": "OBSERVED_V3_L5",
+          "l1_book_age_ms": 445,
+          "raw_ask": 299.35,
+          "raw_bid": 298.65,
+          "recorded_at": "2026-11-25T12:04:00.076207"
+        }
+      ],
+      "spike_points": [
+        {
+          "classification": "UNPRICED_STRESS_CHARGE_NOT_OBSERVED_MARK",
+          "conservative_mtm_inr": -16192.38,
+          "legacy_drawdown_inr": 21550.03,
+          "next_bar_mtm_inr": 3586.55,
+          "prior_bar_mtm_inr": 3288.12,
+          "seq_no": 167,
+          "session_date": "2026-11-25",
+          "ts_ms": 1795588320000
+        }
+      ]
+    },
+    "nov26_feed_skew_diagnosis": {
+      "classification": "SHARED_WS_BACKLOG_SKEW_PLUS_ZERO_FAIL_REASON_PERSISTENCE",
+      "open_basis_ref_json": null
+    },
+    "run_modes_summary": [
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_1_B0_V1_BASELINE",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_1_B1_BASIS_DELTA_ONLY",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_1_B2_WINDOW_1015_1300_ONLY",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_1_B3_STOP_20PCT_1800_ONLY",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_1_B4_1OTM_FALLBACK_ONLY",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_1_B5_V2_COMBINED",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": -700.3,
+        "run_mode": "ABLATION_V2_1_B6_RESEARCH_WEEKLY_SYN_BASIS",
+        "sessions": 6,
+        "stored_max_dd_inr": 11894.09,
+        "trades": 1
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_2_B0_V1_BASELINE",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_2_B1_BASIS_DELTA_ONLY",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_2_B2_WINDOW_1015_1300_ONLY",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_2_B3_STOP_20PCT_1800_ONLY",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_2_B4_1OTM_FALLBACK_ONLY",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": 0.0,
+        "run_mode": "ABLATION_V2_2_B5_V2_COMBINED",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": -874.96,
+        "run_mode": "ABLATION_V2_2_B6_RESEARCH_WEEKLY_SYN_BASIS",
+        "sessions": 6,
+        "stored_max_dd_inr": 17383.4,
+        "trades": 2
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": -452.39,
+        "run_mode": "FORWARD_PAPER",
+        "sessions": 3,
+        "stored_max_dd_inr": 21550.03,
+        "trades": 2
+      },
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": 0.0,
+        "run_mode": "REPLAY_V2_1_CAUSAL",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": 0.0,
+        "run_mode": "REPLAY_V2_2_CAUSAL",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": 0.0,
+        "run_mode": "STRESS_V2_1_2X_CHARGES",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": 0.0,
+        "run_mode": "STRESS_V2_1_2X_SLIPPAGE",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "bc3bf817be22",
+        "net_pnl_inr": 0.0,
+        "run_mode": "STRESS_V2_1_BOOK_A_STRICT",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": 0.0,
+        "run_mode": "STRESS_V2_2_2X_CHARGES",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": 0.0,
+        "run_mode": "STRESS_V2_2_2X_SLIPPAGE",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      },
+      {
+        "cfg": "cdcda8a23b48",
+        "net_pnl_inr": 0.0,
+        "run_mode": "STRESS_V2_2_BOOK_A_STRICT",
+        "sessions": 6,
+        "stored_max_dd_inr": 0.0,
+        "trades": 0
+      }
+    ],
+    "wal_bytes": 0
+  }
+}

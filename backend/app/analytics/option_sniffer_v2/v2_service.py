@@ -49,6 +49,10 @@ from app.analytics.option_sniffer_v2.v2_feed_consumer import (
     V2BoundedFeedConsumer,
     V2SubscriptionRegistry,
 )
+from app.analytics.option_sniffer_v2.v2_dedicated_feed import (
+    compute_v2_priority_keys,
+    evaluate_feed_architecture_options,
+)
 from app.analytics.option_sniffer_v2.v2_ledger_db import (
     V2LedgerStore,
     open_v1_readonly_db,
@@ -57,6 +61,7 @@ from app.analytics.option_sniffer_v2.v2_o3_reproducer import load_phase4_o3_audi
 from app.analytics.option_sniffer_v2.v2_paper_simulator import (
     OPEN_EXPOSURE_STATES,
     V2PaperSimulator,
+    audit_historical_drawdown_separation,
 )
 from app.analytics.option_sniffer_v2.v2_replay_attribution import (
     _compute_series_stats,
@@ -141,6 +146,9 @@ class OptionSnifferV2Service:
             v1_reserved_headroom=int(hyg["v1_reserved_ws_headroom"]),
             max_v2_additive_pins=int(hyg["max_v2_additive_pins"]),
         )
+        self.feed_consumer.set_priority_keys(
+            compute_v2_priority_keys(list(self.simulator.open_packages.values()))
+        )
         self.protected_baseline_hashes = compute_protected_hashes_readonly()
 
         self.collector_state: str = "STANDBY_NOT_STARTED"
@@ -160,6 +168,7 @@ class OptionSnifferV2Service:
             persist_bars_and_checkpoints=True,
             on_package_opened_cb=self._on_package_opened,
             on_package_closed_cb=self._on_package_closed,
+            on_skew_sample_cb=self.feed_consumer.record_skew_sample,
         )
 
         # Cached read-only archive report populated only by explicit CLI/control actions
@@ -262,6 +271,9 @@ class OptionSnifferV2Service:
             existing_stream_keys_fn=self._existing_v1_stream_keys,
             subscribe_additive_fn=self._subscribe_v2_only_additive,
         )
+        self.feed_consumer.set_priority_keys(
+            compute_v2_priority_keys(list(self.simulator.open_packages.values()))
+        )
 
     def _on_package_closed(self, package_id: str) -> None:
         mgr = self._stream_mgr_ref
@@ -269,6 +281,9 @@ class OptionSnifferV2Service:
             package_id=package_id,
             stream_manager=mgr,
             unpin_v2_only_fn=self._unpin_v2_only_keys,
+        )
+        self.feed_consumer.set_priority_keys(
+            compute_v2_priority_keys(list(self.simulator.open_packages.values()))
         )
 
     def start_parallel_collector(
@@ -733,6 +748,7 @@ class OptionSnifferV2Service:
 
                 last_bar_res: Optional[Dict[str, Any]] = None
                 blocks = health.get("uncertainty_blocks", [])
+                proc_t0_ns = time.perf_counter_ns()
                 for avail_ms, _, env in prepared:
                     res_ev = self.unified_engine.ingest_event(
                         kind=env["kind"],
@@ -743,6 +759,9 @@ class OptionSnifferV2Service:
                     )
                     if res_ev is not None:
                         last_bar_res = res_ev
+                self.feed_consumer.record_processing_duration_ms(
+                    (time.perf_counter_ns() - proc_t0_ns) / 1_000_000.0
+                )
 
                 if (
                     self.unified_engine.building_bar is not None
@@ -1212,6 +1231,17 @@ class OptionSnifferV2Service:
         col_status, alerts = self._compute_collection_and_alerts(fwd_open, hygiene)
         book_rows = self._build_book_status_rows(fwd_open, fwd_closed, fwd_signals, fwd_fills)
 
+        dd_audit = audit_historical_drawdown_separation(fwd_eq, fwd_pkgs, start_cap)
+        metric_corrections = self.store.load_metric_corrections("FORWARD_PAPER", self.config_hash)
+        fwd_opps = self.store.load_opportunities("FORWARD_PAPER", self.config_hash, limit=500)
+        opp_counts = {
+            "total": len(fwd_opps),
+            "accepted": sum(1 for o in fwd_opps if o.get("decision_status") == "ACCEPTED"),
+            "rejected": sum(1 for o in fwd_opps if o.get("decision_status") == "REJECTED"),
+            "blocked": sum(1 for o in fwd_opps if o.get("decision_status") == "BLOCKED"),
+            "breakout_bars_recorded": sum(1 for o in fwd_opps if int(o.get("is_breakout_bar") or 0) == 1),
+        }
+
         col_cfg = dict(self.config["optional_collateral_scenario_defaults"])
         col_cfg["assumed_gross_yield_pa_pct"] = float(collateral_yield_pa)
         col_cfg["broker_haircut_pct"] = float(haircut_pct)
@@ -1268,8 +1298,23 @@ class OptionSnifferV2Service:
                 "realized_equity_inr": self.simulator.realized_equity_inr,
                 "reserved_capital_inr": self.simulator.reserved_capital_inr,
                 "booking_halted": self.simulator.is_booking_halted(),
+                "observed_mark_dd_inr": dd_audit["observed_mark_max_dd_inr"],
+                "observed_mark_dd_pct": dd_audit["observed_mark_max_dd_pct_start"],
+                "observed_running_peak_inr": dd_audit["observed_mark_running_peak_inr"],
+                "stress_dd_inr": dd_audit["stress_max_dd_inr"],
+                "stress_dd_pct": dd_audit["stress_max_dd_pct_start"],
+                "has_unpriced_stress_inflation": dd_audit["has_unpriced_stress_inflation"],
+                "drawdown_audit_correction": {
+                    "audit_version": "v2.2.1-dd-separation",
+                    "historical_rows_mutated": False,
+                    **dd_audit,
+                    "persisted_corrections": metric_corrections,
+                },
                 "canonical_ledger_sha256": self.store.compute_canonical_ledger_digest("FORWARD_PAPER", self.config_hash),
             },
+            "opportunity_summary": opp_counts,
+            "open_basis_fail_summary": self.unified_engine.open_basis_fail_counts,
+            "stress_kill_warnings_by_date": self.unified_engine.stress_kill_warnings_by_date,
             "archive_replay_summary": {
                 **rep_stats,
                 "persisted_sessions": len(rep_daily),
@@ -1322,16 +1367,26 @@ class OptionSnifferV2Service:
                 age_unpriced = max(0, now_ms - int(since_ms)) if since_ms else None
                 last_rel_ms = p.get("last_reliable_mark_ts_ms")
                 mark_age = max(0, now_ms - int(last_rel_ms)) if last_rel_ms else None
+                is_unpriced = bool(p.get("is_unpriced_exposure"))
+                is_stale = is_unpriced or (
+                    mark_age is not None
+                    and mark_age > int(self.config["quote_hygiene"]["max_exit_quote_age_ms"])
+                )
+                stress_est = (
+                    -abs(float(p.get("structural_max_loss_inr") or 0.0))
+                    if is_unpriced
+                    else p.get("last_mark_net_pnl_inr")
+                )
                 fwd_open.append(
                     {
                         **enriched,
                         "unpriced_age_ms": age_unpriced,
                         "mark_age_ms": mark_age,
-                        "conservative_worst_loss_inr": (
-                            -abs(float(p.get("structural_max_loss_inr") or 0.0))
-                            if p.get("is_unpriced_exposure")
-                            else p.get("last_mark_net_pnl_inr")
-                        ),
+                        "fresh_executable_mark_inr": (None if is_unpriced else p.get("last_mark_net_pnl_inr")),
+                        "fresh_mark_ts_ms": (None if is_unpriced else p.get("last_mark_ts_ms")),
+                        "is_stale_mark": is_stale,
+                        "conservative_stress_estimate_inr": stress_est,
+                        "conservative_worst_loss_inr": stress_est,
                         "legs_count": 2 if ls.get("short_leg") else 1,
                     }
                 )
@@ -1483,6 +1538,13 @@ class OptionSnifferV2Service:
         fwd_open = [p for p in fwd_pkgs if p["state"] in OPEN_EXPOSURE_STATES]
         hygiene = self._compute_feed_hygiene_snapshot()
         col_status, alerts = self._compute_collection_and_alerts(fwd_open, hygiene)
+        shared_keys_count = 0
+        try:
+            mgr = self._stream_mgr_ref
+            if mgr is not None and hasattr(mgr, "_key_to_contract"):
+                shared_keys_count = len(getattr(mgr, "_key_to_contract", {}) or {})
+        except Exception:
+            shared_keys_count = 0
         return {
             "service_name": "V2 Option Sniffer",
             "protocol_id": self.config["protocol_id"],
@@ -1501,6 +1563,11 @@ class OptionSnifferV2Service:
             "collector_status": col_status,
             "active_alerts": alerts,
             "feed_hygiene": hygiene,
+            "feed_architecture_comparison": evaluate_feed_architecture_options(
+                health_metrics=hygiene.get("feed_consumer"),
+                shared_subscribed_keys_count=shared_keys_count,
+            ),
+            "metric_corrections": self.store.load_metric_corrections("FORWARD_PAPER", self.config_hash),
             "recent_signals_forward": self.store.load_signals("FORWARD_PAPER", self.config_hash, limit=50),
             "recent_signals_replay": self.store.load_signals(self.replay_run_mode, self.config_hash, limit=50),
             "operator_activation_commands": {
@@ -1519,6 +1586,48 @@ class OptionSnifferV2Service:
                     "app.analytics.option_sniffer_v2.v2_reproducible_audit_cli"
                 ),
             },
+        }
+
+    def get_opportunities(
+        self,
+        session_date: Optional[str] = None,
+        book_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        """Strictly read-only endpoint returning accepted & rejected V2 gate evaluations without DB writes."""
+        rows = self.store.load_opportunities(
+            run_mode="FORWARD_PAPER",
+            config_hash=self.config_hash,
+            session_date=session_date,
+            book_id=book_id,
+            limit=limit,
+        )
+        by_status: Dict[str, int] = {}
+        by_reason: Dict[str, int] = {}
+        by_avail: Dict[str, int] = {}
+        by_session: Dict[str, Dict[str, int]] = {}
+        for r in rows:
+            st = str(r.get("decision_status") or "UNKNOWN")
+            by_status[st] = by_status.get(st, 0) + 1
+            rsn = str(r.get("primary_reject_reason") or "ACCEPTED")
+            by_reason[rsn] = by_reason.get(rsn, 0) + 1
+            av = str(r.get("execution_availability") or "UNKNOWN")
+            by_avail[av] = by_avail.get(av, 0) + 1
+            dt_s = str(r.get("session_date") or "")
+            sb = by_session.setdefault(dt_s, {"accepted": 0, "rejected": 0, "blocked": 0, "disabled": 0})
+            k_s = st.lower()
+            if k_s in sb:
+                sb[k_s] += 1
+        return {
+            "engine_version": self.engine_version,
+            "config_hash": self.config_hash,
+            "db_exists": self.store.db_exists(),
+            "count": len(rows),
+            "summary_by_status": by_status,
+            "summary_by_primary_reason": by_reason,
+            "summary_by_execution_availability": by_avail,
+            "summary_by_session": by_session,
+            "rows": rows,
         }
 
 

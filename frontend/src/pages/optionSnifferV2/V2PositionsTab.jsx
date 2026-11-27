@@ -209,20 +209,37 @@ export function V2OpenExposurePanel({ openPositions }) {
                             {p.state}
                           </span>
                         </div>
-                        <div className="text-[11px] text-amber-300 break-words mt-0.5">
-                          {p.is_unpriced_exposure
-                            ? `${p.unpriced_reason} (unpriced ${fmtAgeMs(p.unpriced_age_ms)})`
-                            : 'Fresh synchronized mark'}
+                        <div className="text-[11px] text-amber-300 break-words mt-0.5 space-y-0.5">
+                          <div>
+                            {p.is_unpriced_exposure || p.is_stale_mark ? (
+                              <span className="inline-flex items-center gap-1.5">
+                                <span className="px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-semibold text-[10px]">
+                                  {p.is_unpriced_exposure ? 'UNPRICED / STALE' : 'STALE MARK'}
+                                </span>
+                                <span>
+                                  {p.is_unpriced_exposure
+                                    ? `${p.unpriced_reason} (${fmtAgeMs(p.unpriced_age_ms)} old)`
+                                    : `${fmtSignedInr(p.last_reliable_mark_net_inr)} (${fmtAgeMs(p.mark_age_ms)} old)`}
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="text-emerald-300">
+                                Fresh synchronized mark: {fmtSignedInr(p.fresh_executable_mark_inr ?? p.last_reliable_mark_net_inr)}
+                              </span>
+                            )}
+                          </div>
                           {p.last_reliable_mark_net_inr != null && (
-                            <span className="text-slate-400">
-                              {' '}• Last reliable mark: {fmtSignedInr(p.last_reliable_mark_net_inr)} ({fmtAgeMs(p.mark_age_ms)} ago)
-                            </span>
+                            <div className="text-slate-400">
+                              Last reliable mark: {fmtSignedInr(p.last_reliable_mark_net_inr)} ({fmtAgeMs(p.mark_age_ms)} ago
+                              {p.is_unpriced_exposure ? ' — STALE' : ''})
+                            </div>
                           )}
                         </div>
                       </div>
                     </div>
                     <div className="text-right shrink-0">
                       <div className="font-bold text-rose-400">{fmtSignedInr(p.conservative_worst_loss_inr)}</div>
+                      <div className="text-[10px] text-amber-300/80">Conservative Stress Est</div>
                       <div className="text-[10px] text-slate-400">Reserved {fmtInr(p.reserved_capital_inr)}</div>
                     </div>
                   </div>

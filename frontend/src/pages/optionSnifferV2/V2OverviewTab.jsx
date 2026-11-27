@@ -84,14 +84,32 @@ export default function V2OverviewTab({ overview, overviewMeta, positions, posit
         </div>
 
         <div className="rounded-xl border border-slate-700/80 bg-slate-900/80 p-3.5">
-          <div className="text-[11px] text-slate-400 uppercase">Conservative MTM Drawdown</div>
+          <div className="text-[11px] text-slate-400 uppercase">Observed vs Stress Drawdown</div>
           <div className="text-lg font-bold text-amber-300 mt-1">
-            {fwd ? fmtInr(fwd.intraday_mtm_dd_inr) : 'Unavailable'}
+            {fwd
+              ? fmtInr(
+                  fwd.observed_mark_dd_inr !== undefined
+                    ? fwd.observed_mark_dd_inr
+                    : fwd.intraday_mtm_dd_inr
+                )
+              : 'Unavailable'}
           </div>
           <div className="text-[11px] text-slate-400 mt-1">
-            {fwd
-              ? `${fmtPct(fwd.intraday_mtm_dd_pct)} start • ${fmtPct(fwd.intraday_mtm_dd_pct_peak)} peak`
-              : 'Chronological DD unavailable'}
+            {fwd ? (
+              <>
+                {fwd.drawdown_audit_correction?.observed_mark_max_dd_pct_start !== undefined
+                  ? `Obs ${fmtPct(fwd.drawdown_audit_correction.observed_mark_max_dd_pct_start)} start • ${fmtPct(fwd.drawdown_audit_correction.observed_mark_max_dd_pct_peak)} peak`
+                  : `${fmtPct(fwd.intraday_mtm_dd_pct)} start • ${fmtPct(fwd.intraday_mtm_dd_pct_peak)} peak`}
+                {(fwd.stress_dd_inr !== undefined || fwd.drawdown_audit_correction?.stress_max_dd_inr !== undefined) && (
+                  <div className="text-[10px] text-amber-400/90 mt-0.5">
+                    Stress Est: {fmtInr(fwd.stress_dd_inr ?? fwd.drawdown_audit_correction?.stress_max_dd_inr)}
+                    {fwd.has_unpriced_stress_inflation ? ' (incl. unpriced gap stress)' : ''}
+                  </div>
+                )}
+              </>
+            ) : (
+              'Chronological DD unavailable'
+            )}
           </div>
         </div>
 

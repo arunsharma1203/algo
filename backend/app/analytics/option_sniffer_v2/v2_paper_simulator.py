@@ -81,6 +81,103 @@ def compute_chronological_drawdown(
     }
 
 
+def _is_legacy_unpriced_stress_point(
+    pt: Dict[str, Any],
+    packages: List[Dict[str, Any]],
+) -> bool:
+    """
+    Identifies whether an equity curve row reflects an unpriced structural max-loss stress charge
+    rather than a fresh executable mark-to-market price.
+    """
+    if int(pt.get("unpriced_open_count") or 0) > 0:
+        return True
+    if pt.get("observed_mtm_inr") is not None:
+        return False
+    # Legacy row heuristic: BAR_MTM whose conservative_mtm matches sum(-structural_max_loss) of active pkgs
+    cmtm = float(pt.get("conservative_mtm_inr") or 0.0)
+    if cmtm >= -1.0 or str(pt.get("event_kind") or "") != "BAR_MTM":
+        return False
+    ts_ms = int(pt.get("ts_ms") or 0)
+    active_stress = 0.0
+    matched_any = False
+    for p in packages:
+        ent_ms = int(p.get("entry_ts_ms") or 0)
+        ex_ms = p.get("exit_ts_ms")
+        if ent_ms <= ts_ms and (ex_ms is None or ts_ms <= int(ex_ms)):
+            matched_any = True
+            active_stress -= abs(float(p.get("structural_max_loss_inr") or 0.0))
+    if not matched_any or active_stress >= -1.0:
+        return False
+    return abs(cmtm - active_stress) <= 2.5
+
+
+def audit_historical_drawdown_separation(
+    eq_curve: List[Dict[str, Any]],
+    packages: List[Dict[str, Any]],
+    starting_capital_inr: float = 200000.0,
+) -> Dict[str, Any]:
+    """
+    Non-destructively separates legacy/current equity curve points into:
+      1) Observed-Mark Equity & Drawdown (fresh executable marks + flat realized bars), and
+      2) Conservative Stress Equity & Drawdown (structural max-loss charges during unpriced bars).
+    Produces explicit event-level proof for versioned drawdown corrections without modifying history.
+    """
+    start_cap = max(1.0, float(starting_capital_inr))
+    obs_series: List[float] = []
+    stress_series: List[float] = []
+    spikes: List[Dict[str, Any]] = []
+    stored_legacy_max_dd = 0.0
+
+    for idx, pt in enumerate(eq_curve):
+        stored_legacy_max_dd = max(stored_legacy_max_dd, float(pt.get("drawdown_inr") or 0.0))
+        stress_eq = float(
+            pt["stress_marked_equity_inr"]
+            if pt.get("stress_marked_equity_inr") is not None
+            else pt.get("marked_equity_inr", start_cap)
+        )
+        stress_series.append(stress_eq)
+
+        if pt.get("observed_marked_equity_inr") is not None:
+            obs_series.append(float(pt["observed_marked_equity_inr"]))
+            continue
+
+        is_spike = _is_legacy_unpriced_stress_point(pt, packages)
+        if is_spike:
+            prev_mtm = float(eq_curve[idx - 1].get("conservative_mtm_inr") or 0.0) if idx > 0 else None
+            next_mtm = float(eq_curve[idx + 1].get("conservative_mtm_inr") or 0.0) if idx + 1 < len(eq_curve) else None
+            spikes.append(
+                {
+                    "seq_no": int(pt.get("seq_no") or 0),
+                    "session_date": pt.get("session_date"),
+                    "ts_ms": int(pt.get("ts_ms") or 0),
+                    "conservative_mtm_inr": float(pt.get("conservative_mtm_inr") or 0.0),
+                    "legacy_drawdown_inr": float(pt.get("drawdown_inr") or 0.0),
+                    "prior_bar_mtm_inr": prev_mtm,
+                    "next_bar_mtm_inr": next_mtm,
+                    "classification": "UNPRICED_STRESS_CHARGE_NOT_OBSERVED_MARK",
+                }
+            )
+        else:
+            obs_series.append(float(pt.get("marked_equity_inr", start_cap)))
+
+    obs_dd = compute_chronological_drawdown(obs_series, starting_capital_inr=start_cap)
+    stress_dd = compute_chronological_drawdown(stress_series, starting_capital_inr=start_cap)
+    return {
+        "stored_legacy_max_dd_inr": round(stored_legacy_max_dd, 2),
+        "observed_mark_running_peak_inr": obs_dd["running_peak_equity_inr"],
+        "observed_mark_max_dd_inr": obs_dd["max_dd_inr"],
+        "observed_mark_max_dd_pct_start": obs_dd["max_dd_pct_of_starting_capital"],
+        "observed_mark_max_dd_pct_peak": obs_dd["max_dd_pct_of_peak_equity"],
+        "stress_running_peak_inr": stress_dd["running_peak_equity_inr"],
+        "stress_max_dd_inr": stress_dd["max_dd_inr"],
+        "stress_max_dd_pct_start": stress_dd["max_dd_pct_of_starting_capital"],
+        "stress_max_dd_pct_peak": stress_dd["max_dd_pct_of_peak_equity"],
+        "unpriced_stress_spikes_count": len(spikes),
+        "unpriced_stress_spikes": spikes,
+        "has_unpriced_stress_inflation": bool(spikes) and (stress_dd["max_dd_inr"] > obs_dd["max_dd_inr"] + 0.01),
+    }
+
+
 def _append_timeline(pkg: Dict[str, Any], ts_ms: int, bar_ts: str, event: str, detail: str) -> List[Dict[str, Any]]:
     cur = list(pkg.get("events_timeline") or [])
     cur.append({"ts_ms": int(ts_ms), "bar_ts": str(bar_ts), "event": str(event), "detail": str(detail)})
@@ -119,6 +216,10 @@ class V2PaperSimulator:
         self.reserved_capital_inr: float = 0.0
         self.running_peak_equity_inr: float = self.starting_capital_inr
         self.max_mtm_dd_inr: float = 0.0
+        self.observed_running_peak_equity_inr: float = self.starting_capital_inr
+        self.max_observed_mtm_dd_inr: float = 0.0
+        self.stress_running_peak_equity_inr: float = self.starting_capital_inr
+        self.max_stress_mtm_dd_inr: float = 0.0
         self.equity_seq_no: int = 0
 
         self.open_packages: Dict[str, Dict[str, Any]] = {}
@@ -127,6 +228,8 @@ class V2PaperSimulator:
         self.seen_signal_ids: set[str] = set()
         self.daily_kill_triggered_by_date: Dict[str, str] = {}
         self.intraday_min_equity_by_date: Dict[str, float] = {}
+        self.observed_intraday_min_equity_by_date: Dict[str, float] = {}
+        self.stress_intraday_min_equity_by_date: Dict[str, float] = {}
         self.peak_reserved_by_date: Dict[str, float] = {}
         self.subscription_evicted_keys: set[str] = set()
         self._all_pkgs_by_id: Dict[str, Dict[str, Any]] = {}
@@ -145,6 +248,8 @@ class V2PaperSimulator:
             self.cooldown_until_ms.clear()
             self.locked_until_after_bar.clear()
             self.intraday_min_equity_by_date.clear()
+            self.observed_intraday_min_equity_by_date.clear()
+            self.stress_intraday_min_equity_by_date.clear()
             self.peak_reserved_by_date.clear()
             self.booking_fault = None
             self.blocked_books_due_to_fault.clear()
@@ -174,10 +279,20 @@ class V2PaperSimulator:
                 self.equity_seq_no = int(last_pt["seq_no"])
                 self.running_peak_equity_inr = float(last_pt["running_peak_equity_inr"])
                 self.max_mtm_dd_inr = max(float(pt["drawdown_inr"]) for pt in eq_curve)
+                dd_audit = audit_historical_drawdown_separation(eq_curve, all_pkgs, self.starting_capital_inr)
+                self.observed_running_peak_equity_inr = float(dd_audit["observed_mark_running_peak_inr"])
+                self.max_observed_mtm_dd_inr = float(dd_audit["observed_mark_max_dd_inr"])
+                self.stress_running_peak_equity_inr = float(dd_audit["stress_running_peak_inr"])
+                self.max_stress_mtm_dd_inr = float(dd_audit["stress_max_dd_inr"])
             else:
                 self.equity_seq_no = 0
-                self.running_peak_equity_inr = max(self.starting_capital_inr, self.realized_equity_inr)
+                base_eq = max(self.starting_capital_inr, self.realized_equity_inr)
+                self.running_peak_equity_inr = base_eq
                 self.max_mtm_dd_inr = 0.0
+                self.observed_running_peak_equity_inr = base_eq
+                self.max_observed_mtm_dd_inr = 0.0
+                self.stress_running_peak_equity_inr = base_eq
+                self.max_stress_mtm_dd_inr = 0.0
 
             ckpts = self.store.load_runtime_checkpoints(self.run_mode, self.config_hash)
             for ck in ckpts:
@@ -188,10 +303,18 @@ class V2PaperSimulator:
                     self.cooldown_until_ms[str(bid)] = max(self.cooldown_until_ms.get(str(bid), 0), int(ts_u))
                 for b_k, items in (ck.get("bar_locks") or {}).items():
                     self.locked_until_after_bar[str(b_k)] = [(str(x[0]), float(x[1])) for x in items]
-                self.intraday_min_equity_by_date[dt_c] = float(ck.get("intraday_min_mtm_equity_inr") or self.realized_equity_inr)
+                min_eq_ck = float(ck.get("intraday_min_mtm_equity_inr") or self.realized_equity_inr)
+                self.intraday_min_equity_by_date[dt_c] = min_eq_ck
+                self.stress_intraday_min_equity_by_date[dt_c] = min_eq_ck
                 self.peak_reserved_by_date[dt_c] = float(ck.get("peak_reserved_inr") or self.reserved_capital_inr)
                 self.running_peak_equity_inr = max(self.running_peak_equity_inr, float(ck.get("running_peak_equity_inr") or self.starting_capital_inr))
                 self.max_mtm_dd_inr = max(self.max_mtm_dd_inr, float(ck.get("max_mtm_dd_inr") or 0.0))
+                self.stress_running_peak_equity_inr = max(self.stress_running_peak_equity_inr, self.running_peak_equity_inr)
+                self.max_stress_mtm_dd_inr = max(self.max_stress_mtm_dd_inr, float(ck.get("stress_max_mtm_dd_inr") or self.max_mtm_dd_inr))
+                if ck.get("observed_running_peak_inr") is not None:
+                    self.observed_running_peak_equity_inr = max(self.observed_running_peak_equity_inr, float(ck["observed_running_peak_inr"]))
+                if ck.get("observed_max_mtm_dd_inr") is not None:
+                    self.max_observed_mtm_dd_inr = max(self.max_observed_mtm_dd_inr, float(ck["observed_max_mtm_dd_inr"]))
                 if ck.get("booking_fault"):
                     self.booking_fault = ck["booking_fault"]
                     self.blocked_books_due_to_fault.add(str(ck["booking_fault"].get("book_id") or "PORTFOLIO"))
@@ -202,6 +325,9 @@ class V2PaperSimulator:
                 "reserved_capital_inr": self.reserved_capital_inr,
                 "running_peak_equity_inr": self.running_peak_equity_inr,
                 "max_mtm_dd_inr": self.max_mtm_dd_inr,
+                "observed_running_peak_equity_inr": self.observed_running_peak_equity_inr,
+                "max_observed_mtm_dd_inr": self.max_observed_mtm_dd_inr,
+                "max_stress_mtm_dd_inr": self.max_stress_mtm_dd_inr,
             }
 
     def _build_equity_point(
@@ -211,13 +337,35 @@ class V2PaperSimulator:
         event_kind: str,
         realized_eq: float,
         conservative_mtm: float,
+        observed_mtm: Optional[float] = None,
+        last_reliable_mtm: Optional[float] = None,
+        unpriced_open_count: int = 0,
     ) -> Dict[str, Any]:
-        marked_eq = round(realized_eq + conservative_mtm, 2)
-        new_peak = max(self.running_peak_equity_inr, marked_eq)
-        cur_dd = round(max(0.0, new_peak - marked_eq), 2)
-        self.running_peak_equity_inr = new_peak
-        if cur_dd > self.max_mtm_dd_inr:
-            self.max_mtm_dd_inr = cur_dd
+        # Stress curve always charges structural_max_loss on unpriced exposure
+        stress_mtm = float(conservative_mtm)
+        stress_eq = round(realized_eq + stress_mtm, 2)
+        new_stress_peak = max(self.stress_running_peak_equity_inr, self.running_peak_equity_inr, stress_eq)
+        stress_dd = round(max(0.0, new_stress_peak - stress_eq), 2)
+        self.stress_running_peak_equity_inr = new_stress_peak
+        if stress_dd > self.max_stress_mtm_dd_inr:
+            self.max_stress_mtm_dd_inr = stress_dd
+        # Preserve legacy fields cleanly aligned with stress curve
+        self.running_peak_equity_inr = new_stress_peak
+        self.max_mtm_dd_inr = self.max_stress_mtm_dd_inr
+
+        # Observed-mark curve strictly excludes unpriced stress placeholders (never silently 0 or stale!)
+        eff_obs_mtm: Optional[float] = observed_mtm
+        if eff_obs_mtm is None and unpriced_open_count == 0 and len(self.open_packages) == 0:
+            eff_obs_mtm = 0.0
+        obs_marked_eq: Optional[float] = None
+        obs_dd: Optional[float] = None
+        if eff_obs_mtm is not None and unpriced_open_count == 0:
+            obs_marked_eq = round(realized_eq + float(eff_obs_mtm), 2)
+            self.observed_running_peak_equity_inr = max(self.observed_running_peak_equity_inr, obs_marked_eq)
+            obs_dd = round(max(0.0, self.observed_running_peak_equity_inr - obs_marked_eq), 2)
+            if obs_dd > self.max_observed_mtm_dd_inr:
+                self.max_observed_mtm_dd_inr = obs_dd
+
         self.equity_seq_no += 1
         return {
             "run_mode": self.run_mode,
@@ -227,10 +375,19 @@ class V2PaperSimulator:
             "ts_ms": int(ts_ms),
             "event_kind": str(event_kind),
             "realized_equity_inr": round(realized_eq, 2),
-            "conservative_mtm_inr": round(conservative_mtm, 2),
-            "marked_equity_inr": marked_eq,
-            "running_peak_equity_inr": round(self.running_peak_equity_inr, 2),
-            "drawdown_inr": cur_dd,
+            "conservative_mtm_inr": round(stress_mtm, 2),
+            "marked_equity_inr": stress_eq,
+            "running_peak_equity_inr": round(new_stress_peak, 2),
+            "drawdown_inr": stress_dd,
+            "observed_mtm_inr": round(eff_obs_mtm, 2) if eff_obs_mtm is not None else None,
+            "last_reliable_mtm_inr": round(last_reliable_mtm, 2) if last_reliable_mtm is not None else None,
+            "stress_mtm_inr": round(stress_mtm, 2),
+            "observed_marked_equity_inr": obs_marked_eq,
+            "observed_running_peak_inr": round(self.observed_running_peak_equity_inr, 2),
+            "observed_drawdown_inr": obs_dd,
+            "stress_marked_equity_inr": stress_eq,
+            "stress_drawdown_inr": stress_dd,
+            "unpriced_open_count": int(unpriced_open_count),
         }
 
     def _commit_atomic_or_fault(
@@ -280,6 +437,37 @@ class V2PaperSimulator:
             if book_id and book_id in self.blocked_books_due_to_fault:
                 return True
             return True
+
+    def _other_open_mtm_summary(self, exclude_package_id: str) -> Tuple[float, Optional[float], Optional[float], int]:
+        """Returns `(stress_mtm, observed_mtm_or_none, last_reliable_mtm_or_none, unpriced_count)` excluding one pkg."""
+        others = [(pid_o, p) for pid_o, p in self.open_packages.items() if pid_o != exclude_package_id]
+        if not others:
+            return 0.0, 0.0, 0.0, 0
+        stress = 0.0
+        obs = 0.0
+        rel = 0.0
+        unp = 0
+        has_rel = False
+        for _, p in others:
+            lr = p.get("last_reliable_mark_net_inr")
+            if lr is None:
+                lr = p.get("last_mark_net_pnl_inr")
+            if lr is not None:
+                rel += float(lr)
+                has_rel = True
+            if p.get("is_unpriced_exposure"):
+                unp += 1
+                stress -= abs(float(p.get("structural_max_loss_inr") or 0.0))
+            else:
+                mk = float(p.get("last_mark_net_pnl_inr") or 0.0)
+                stress += mk
+                obs += mk
+        return (
+            round(stress, 2),
+            (round(obs, 2) if unp == 0 else None),
+            (round(rel, 2) if has_rel else None),
+            unp,
+        )
 
     def current_open_conservative_mtm(self) -> float:
         tot = 0.0
@@ -1084,12 +1272,17 @@ class V2PaperSimulator:
                 ),
                 "transition_seq": seq,
             }
-            other_open_mtm = sum(
-                (-abs(float(p.get("structural_max_loss_inr") or 0.0)) if p.get("is_unpriced_exposure") else float(p.get("last_mark_net_pnl_inr") or 0.0))
-                for pid_o, p in self.open_packages.items()
-                if pid_o != package_id
+            other_open_mtm, other_obs_mtm, other_rel_mtm, other_unp = self._other_open_mtm_summary(package_id)
+            eq_pt_unw = self._build_equity_point(
+                session_date,
+                decision_ts_ms,
+                "HEDGE_UNWOUND_CLOSE",
+                new_realized,
+                other_open_mtm,
+                observed_mtm=other_obs_mtm,
+                last_reliable_mtm=other_rel_mtm,
+                unpriced_open_count=other_unp,
             )
-            eq_pt_unw = self._build_equity_point(session_date, decision_ts_ms, "HEDGE_UNWOUND_CLOSE", new_realized, other_open_mtm)
             le_c = {
                 "entry_id": make_stable_id("osv2_le", package_id, seq, "HEDGE_UNWOUND_CLOSE"),
                 "package_id": package_id,
@@ -1304,12 +1497,17 @@ class V2PaperSimulator:
                 ),
                 "transition_seq": seq,
             }
-            other_open_mtm = sum(
-                (-abs(float(p.get("structural_max_loss_inr") or 0.0)) if p.get("is_unpriced_exposure") else float(p.get("last_mark_net_pnl_inr") or 0.0))
-                for pid_o, p in self.open_packages.items()
-                if pid_o != package_id
+            other_open_mtm, other_obs_mtm, other_rel_mtm, other_unp = self._other_open_mtm_summary(package_id)
+            eq_pt_c = self._build_equity_point(
+                session_date,
+                decision_ts_ms,
+                f"CLOSE_{exit_reason}",
+                new_realized,
+                other_open_mtm,
+                observed_mtm=other_obs_mtm,
+                last_reliable_mtm=other_rel_mtm,
+                unpriced_open_count=other_unp,
             )
-            eq_pt_c = self._build_equity_point(session_date, decision_ts_ms, f"CLOSE_{exit_reason}", new_realized, other_open_mtm)
             le = {
                 "entry_id": make_stable_id("osv2_le", package_id, seq, "CLOSE_PACKAGE"),
                 "package_id": package_id,
@@ -1401,7 +1599,11 @@ class V2PaperSimulator:
             hyg = self.config["quote_hygiene"]
             priced_mtm = 0.0
             conservative_mtm = 0.0
+            last_reliable_sum = 0.0
+            has_any_reliable = False
+            oldest_reliable_age_ms: Optional[int] = None
             unpriced_details: List[Dict[str, Any]] = []
+            per_package_marks: List[Dict[str, Any]] = []
 
             for pid, pkg in list(self.open_packages.items()):
                 ls = dict(pkg["legs_state"])
@@ -1499,6 +1701,9 @@ class V2PaperSimulator:
                 if net_mark is not None:
                     priced_mtm += net_mark
                     conservative_mtm += net_mark
+                    last_reliable_sum += net_mark
+                    has_any_reliable = True
+                    oldest_reliable_age_ms = 0 if oldest_reliable_age_ms is None else max(oldest_reliable_age_ms, 0)
                     entry_day_mtm = float(pkg.get("entry_day_mtm_pnl_inr") or 0.0)
                     overnight_gap = float(pkg.get("overnight_gap_pnl_inr") or 0.0)
                     worst_gap = float(pkg.get("worst_gap_loss_inr") or 0.0)
@@ -1527,6 +1732,21 @@ class V2PaperSimulator:
                     self._all_pkgs_by_id[pid] = upd
                     if self.run_mode == "FORWARD_PAPER" or is_opening_bar or is_eod_bar or int(pkg.get("is_unpriced_exposure") or 0) != 0:
                         self._commit_atomic_or_fault(pkg["book_id"], "MARK_OPEN", now_ms, [], [], upd, None)
+                    per_package_marks.append(
+                        {
+                            "package_id": pid,
+                            "book_id": pkg["book_id"],
+                            "fresh_executable_mark_inr": round(net_mark, 2),
+                            "fresh_mark_ts_ms": now_ms,
+                            "last_reliable_mark_net_inr": round(net_mark, 2),
+                            "last_reliable_mark_ts_ms": now_ms,
+                            "last_reliable_mark_age_ms": 0,
+                            "is_stale_mark": False,
+                            "is_unpriced_exposure": False,
+                            "unpriced_reason": None,
+                            "conservative_stress_estimate_inr": round(net_mark, 2),
+                        }
+                    )
                 else:
                     since_ms = pkg.get("unpriced_since_ts_ms") or now_ms
                     age_unpriced = max(0, now_ms - int(since_ms))
@@ -1537,6 +1757,10 @@ class V2PaperSimulator:
                         last_rel_net = pkg.get("last_mark_net_pnl_inr")
                     last_rel_ts = pkg.get("last_reliable_mark_ts_ms") or pkg.get("last_mark_ts_ms") or pkg.get("entry_ts_ms")
                     last_rel_age = max(0, now_ms - int(last_rel_ts)) if last_rel_ts else age_unpriced
+                    if last_rel_net is not None:
+                        last_reliable_sum += float(last_rel_net)
+                        has_any_reliable = True
+                    oldest_reliable_age_ms = last_rel_age if oldest_reliable_age_ms is None else max(oldest_reliable_age_ms, last_rel_age)
                     upd = {
                         **pkg,
                         "is_unpriced_exposure": 1,
@@ -1567,8 +1791,41 @@ class V2PaperSimulator:
                             "worst_case_risk_inr": worst_loss,
                         }
                     )
+                    per_package_marks.append(
+                        {
+                            "package_id": pid,
+                            "book_id": pkg["book_id"],
+                            "fresh_executable_mark_inr": None,
+                            "fresh_mark_ts_ms": None,
+                            "last_reliable_mark_net_inr": last_rel_net,
+                            "last_reliable_mark_ts_ms": last_rel_ts,
+                            "last_reliable_mark_age_ms": last_rel_age,
+                            "is_stale_mark": True,
+                            "is_unpriced_exposure": True,
+                            "unpriced_reason": upd["unpriced_reason"],
+                            "conservative_stress_estimate_inr": round(worst_loss, 2),
+                        }
+                    )
 
-            eq_pt = self._build_equity_point(session_date, now_ms, "BAR_MTM", self.realized_equity_inr, conservative_mtm)
+            unpriced_cnt = len(unpriced_details)
+            fresh_exec_mtm: Optional[float] = (
+                round(priced_mtm, 2) if unpriced_cnt == 0 else None
+            )
+            last_rel_total: Optional[float] = (
+                0.0
+                if not self.open_packages
+                else (round(last_reliable_sum, 2) if has_any_reliable else None)
+            )
+            eq_pt = self._build_equity_point(
+                session_date,
+                now_ms,
+                "BAR_MTM",
+                self.realized_equity_inr,
+                conservative_mtm,
+                observed_mtm=fresh_exec_mtm,
+                last_reliable_mtm=last_rel_total,
+                unpriced_open_count=unpriced_cnt,
+            )
             if self.run_mode == "FORWARD_PAPER" or self.open_packages:
                 try:
                     self.store.append_equity_point(eq_pt)
@@ -1583,15 +1840,31 @@ class V2PaperSimulator:
             cur_mtm_eq = float(eq_pt["marked_equity_inr"])
             prev_min = self.intraday_min_equity_by_date.get(session_date, cur_mtm_eq)
             self.intraday_min_equity_by_date[session_date] = min(prev_min, cur_mtm_eq)
+            prev_s_min = self.stress_intraday_min_equity_by_date.get(session_date, cur_mtm_eq)
+            self.stress_intraday_min_equity_by_date[session_date] = min(prev_s_min, cur_mtm_eq)
+            obs_eq_val = eq_pt.get("observed_marked_equity_inr")
+            if obs_eq_val is not None:
+                prev_o_min = self.observed_intraday_min_equity_by_date.get(session_date, float(obs_eq_val))
+                self.observed_intraday_min_equity_by_date[session_date] = min(prev_o_min, float(obs_eq_val))
             return {
                 "realized_equity_inr": self.realized_equity_inr,
                 "priced_unrealized_mtm_inr": round(priced_mtm, 2),
+                "fresh_executable_mtm_inr": fresh_exec_mtm,
+                "last_reliable_mtm_inr": last_rel_total,
+                "oldest_reliable_mark_age_ms": oldest_reliable_age_ms,
+                "has_stale_marks": unpriced_cnt > 0,
                 "conservative_unrealized_mtm_inr": round(conservative_mtm, 2),
+                "stress_unrealized_mtm_inr": round(conservative_mtm, 2),
                 "conservative_mtm_equity_inr": cur_mtm_eq,
+                "observed_marked_equity_inr": obs_eq_val,
                 "running_peak_equity_inr": self.running_peak_equity_inr,
+                "observed_running_peak_equity_inr": self.observed_running_peak_equity_inr,
                 "max_mtm_dd_inr": self.max_mtm_dd_inr,
-                "unpriced_count": len(unpriced_details),
+                "observed_max_mtm_dd_inr": self.max_observed_mtm_dd_inr,
+                "stress_max_mtm_dd_inr": self.max_stress_mtm_dd_inr,
+                "unpriced_count": unpriced_cnt,
                 "unpriced_details": unpriced_details,
+                "per_package_marks": per_package_marks,
                 "open_count": len(self.open_packages),
                 "reserved_capital_inr": self.reserved_capital_inr,
             }

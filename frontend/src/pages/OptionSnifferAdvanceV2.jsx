@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw, ShieldCheck, FlaskConical } from 'lucide-react';
 import V2OverviewTab from './optionSnifferV2/V2OverviewTab';
+import V2LiveControlPanel from '../components/optionSnifferV2Live/V2LiveControlPanel';
+import V2ObservabilityPanel from '../components/optionSnifferV2Live/V2ObservabilityPanel';
 import V2ComparisonTab from './optionSnifferV2/V2ComparisonTab';
 import V2AuditTab from './optionSnifferV2/V2AuditTab';
 import { fetchAllV2EndpointsReadOnly } from './optionSnifferV2/v2ApiClient';
@@ -29,6 +31,7 @@ export default function OptionSnifferAdvanceV2() {
     replayAudit: { data: null, status: 'loading', stale: false, unavailable: false, error: null },
     counterfactuals: { data: null, status: 'loading', stale: false, unavailable: false, error: null },
     diagnostics: { data: null, status: 'loading', stale: false, unavailable: false, error: null },
+    opportunities: { data: null, status: 'loading', stale: false, unavailable: false, error: null },
   });
 
   const abortRef = useRef(null);
@@ -174,13 +177,21 @@ export default function OptionSnifferAdvanceV2() {
         </div>
       ) : (
         <>
+          <V2LiveControlPanel paperOpenCount={endpoints.positions.data?.forward_open_positions?.length || 0} />
           {activeTab === 'forward' && (
-            <V2OverviewTab
-              overview={endpoints.overview.data}
-              overviewMeta={endpoints.overview}
-              positions={endpoints.positions.data}
-              positionsMeta={endpoints.positions}
-            />
+            <>
+              <V2OverviewTab
+                overview={endpoints.overview.data}
+                overviewMeta={endpoints.overview}
+                positions={endpoints.positions.data}
+                positionsMeta={endpoints.positions}
+              />
+              <V2ObservabilityPanel
+                overview={endpoints.overview.data}
+                diagnostics={endpoints.diagnostics.data}
+                opportunities={endpoints.opportunities.data}
+              />
+            </>
           )}
           {activeTab === 'replay' && (
             <V2ComparisonTab

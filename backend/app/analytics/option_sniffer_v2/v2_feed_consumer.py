@@ -18,7 +18,7 @@ import hashlib
 import logging
 import threading
 import time
-from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -297,11 +297,20 @@ class V2BoundedFeedConsumer:
     def __init__(self, config_hash: str, maxlen: int = 4096) -> None:
         self.config_hash = str(config_hash)
         self.maxlen = max(64, int(maxlen))
+        self.priority_maxlen = max(256, self.maxlen // 2)
         self._lock = threading.Lock()
-        self._queue: Deque[Dict[str, Any]] = deque()
+        self._priority_queue: Deque[Dict[str, Any]] = deque()
+        self._normal_queue: Deque[Dict[str, Any]] = deque()
+        # Preserve `_queue` attribute alias pointing to normal queue for any diagnostics inspecting length
+        self._queue: Deque[Dict[str, Any]] = self._normal_queue
+        self._priority_keys: Set[str] = {
+            "NSE_INDEX|Nifty 50",
+            "NSE_INDEX|India VIX",
+        }
+        self._position_priority_keys: Set[str] = set()
         self._wake_event = threading.Event()
 
-        # Sequence / dedup / lag telemetry
+        # Sequence / dedup / lag / skew / reconnect telemetry
         self._recent_dedup_keys: Set[str] = set()
         self._dedup_fifo: Deque[str] = deque(maxlen=16384)
         self._max_exchange_ts_by_key: Dict[str, int] = {}
@@ -312,9 +321,66 @@ class V2BoundedFeedConsumer:
         self._late_count: int = 0
         self._gap_count: int = 0
         self._dropped_overflow_count: int = 0
+        self._dropped_normal_overflow_count: int = 0
+        self._dropped_priority_overflow_count: int = 0
+        self._reconnect_count: int = 0
+        self._last_reconnect_reason: Optional[str] = None
+        self._last_reconnect_ts_ms: int = 0
         self._uncertainty_reasons: Set[str] = set()
         self._max_queue_depth_seen: int = 0
         self._lag_samples_ms: Deque[float] = deque(maxlen=2000)
+        self._priority_lag_samples_ms: Deque[float] = deque(maxlen=2000)
+        self._source_age_samples_ms: Deque[float] = deque(maxlen=2000)
+        self._processing_samples_ms: Deque[float] = deque(maxlen=2000)
+        self._spot_fut_skew_samples_ms: Deque[float] = deque(maxlen=2000)
+        self._cross_leg_skew_samples_ms: Deque[float] = deque(maxlen=2000)
+
+    def set_priority_keys(self, keys: Iterable[str]) -> None:
+        """Registers active V2 position legs for priority queue protection against watchlist bursts."""
+        cleaned = {str(k).strip() for k in (keys or []) if str(k or "").strip()}
+        with self._lock:
+            self._position_priority_keys = cleaned
+
+    def note_reconnect(self, reason: str = "STREAM_RECONNECT") -> None:
+        with self._lock:
+            self._reconnect_count += 1
+            self._last_reconnect_reason = str(reason)
+            self._last_reconnect_ts_ms = int(time.time() * 1000)
+
+    def record_processing_duration_ms(self, duration_ms: float) -> None:
+        with self._lock:
+            self._processing_samples_ms.append(max(0.0, float(duration_ms)))
+
+    def record_skew_sample(self, skew_kind: str, skew_ms: Optional[int]) -> None:
+        if skew_ms is None:
+            return
+        with self._lock:
+            val = max(0.0, float(skew_ms))
+            if skew_kind == "spot_fut":
+                self._spot_fut_skew_samples_ms.append(val)
+            elif skew_kind == "cross_leg":
+                self._cross_leg_skew_samples_ms.append(val)
+
+    def _is_priority_event_locked(self, kind: str, ikey: str, payload: Dict[str, Any]) -> bool:
+        ku = str(kind).upper().strip()
+        if ku in ("INDEX", "FUTURES", "BAR_CLOSE_CHECK"):
+            return True
+        if ikey in self._priority_keys or ikey in self._position_priority_keys:
+            return True
+        if bool(payload.get("is_active_position_leg")):
+            return True
+        return False
+
+    @staticmethod
+    def _percentiles(samples: Deque[float]) -> Tuple[float, float, float]:
+        if not samples:
+            return 0.0, 0.0, 0.0
+        vals = sorted(samples)
+        n = len(vals)
+        p50 = vals[n // 2]
+        p95 = vals[min(n - 1, int(0.95 * (n - 1)))]
+        p99 = vals[min(n - 1, int(0.99 * (n - 1)))]
+        return round(p50, 4), round(p95, 4), round(p99, 4)
 
     def push_events(
         self,
@@ -322,9 +388,9 @@ class V2BoundedFeedConsumer:
         receipt_ts_ms: Optional[int] = None,
     ) -> int:
         """
-        Non-blocking O(k) ingress hook compatible with `OptionStreamManager._advance_feed_listeners`.
-        Drops oldest queued items ONLY on extreme saturation (`len >= maxlen`) and raises explicit
-        `UNCERTAINTY_QUEUE_OVERFLOW` rather than blocking the live Upstox WebSocket thread.
+        Non-blocking O(k) two-tier ingress hook compatible with `OptionStreamManager._advance_feed_listeners`.
+        Index/Futures/active-position events enter `_priority_queue`; watchlist option strikes enter `_normal_queue`
+        and shed oldest first under extreme saturation without blocking WebSocket threads.
         """
         if not events:
             return 0
@@ -361,13 +427,24 @@ class V2BoundedFeedConsumer:
                 else:
                     self._max_exchange_ts_by_key[ikey] = max(prev_ex, ex_ts)
 
-                if len(self._queue) >= self.maxlen:
-                    self._queue.popleft()
+                if ex_ts > 0:
+                    self._source_age_samples_ms.append(float(max(0, now_ms - ex_ts)))
+
+                is_prio = self._is_priority_event_locked(str(kind), ikey, payload)
+                target_q = self._priority_queue if is_prio else self._normal_queue
+                cap = self.priority_maxlen if is_prio else self.maxlen
+                if len(target_q) >= cap:
+                    target_q.popleft()
                     self._dropped_overflow_count += 1
-                    self._uncertainty_reasons.add("UNCERTAINTY_QUEUE_OVERFLOW")
+                    if is_prio:
+                        self._dropped_priority_overflow_count += 1
+                        self._uncertainty_reasons.add("UNCERTAINTY_PRIORITY_QUEUE_OVERFLOW")
+                    else:
+                        self._dropped_normal_overflow_count += 1
+                        self._uncertainty_reasons.add("UNCERTAINTY_QUEUE_OVERFLOW")
 
                 avail_ms = int(payload.get("availability_ts_ms") or now_ms)
-                self._queue.append(
+                target_q.append(
                     {
                         "dedup_key": dedup_k,
                         "kind": str(kind),
@@ -377,6 +454,7 @@ class V2BoundedFeedConsumer:
                         "receipt_ts_ms": now_ms,
                         "availability_ts_ms": avail_ms,
                         "enqueued_perf_ns": time.perf_counter_ns(),
+                        "priority_tier": "PRIORITY" if is_prio else "NORMAL",
                         "sequence_flag": seq_flag,
                         "config_hash": self.config_hash,
                         "payload": dict(payload),
@@ -384,24 +462,62 @@ class V2BoundedFeedConsumer:
                 )
                 accepted += 1
                 self._enqueued_count += 1
-            if len(self._queue) > self._max_queue_depth_seen:
-                self._max_queue_depth_seen = len(self._queue)
+            tot_depth = len(self._priority_queue) + len(self._normal_queue)
+            if tot_depth > self._max_queue_depth_seen:
+                self._max_queue_depth_seen = tot_depth
         if accepted:
             self._wake_event.set()
         return accepted
 
     def drain_batch(self, max_items: int = 500) -> List[Dict[str, Any]]:
-        """Pops up to `max_items` queued envelopes in FIFO order for downstream V2 processing."""
+        """
+        Drains bounded priority + normal queues.
+        Under normal load, preserves causal `availability_ts_ms` ordering across both queues
+        (priority breaks timestamp ties). Under watchlist saturation or overflow drops, drains
+        priority queue strictly first so active legs and spot/futures never wait behind normal load.
+        """
         batch: List[Dict[str, Any]] = []
         now_ns = time.perf_counter_ns()
         with self._lock:
-            while self._queue and len(batch) < max_items:
-                item = self._queue.popleft()
-                lag_ms = max(0.0, (now_ns - item["enqueued_perf_ns"]) / 1_000_000.0)
-                self._lag_samples_ms.append(lag_ms)
-                self._processed_count += 1
-                batch.append(item)
-            if not self._queue:
+            saturated = (
+                self._dropped_normal_overflow_count > 0
+                or len(self._normal_queue) >= max(32, self.maxlen // 2)
+            )
+            if saturated:
+                while self._priority_queue and len(batch) < max_items:
+                    item = self._priority_queue.popleft()
+                    lag_ms = max(0.0, (now_ns - item["enqueued_perf_ns"]) / 1_000_000.0)
+                    self._lag_samples_ms.append(lag_ms)
+                    self._priority_lag_samples_ms.append(lag_ms)
+                    self._processed_count += 1
+                    batch.append(item)
+                while self._normal_queue and len(batch) < max_items:
+                    item = self._normal_queue.popleft()
+                    lag_ms = max(0.0, (now_ns - item["enqueued_perf_ns"]) / 1_000_000.0)
+                    self._lag_samples_ms.append(lag_ms)
+                    self._processed_count += 1
+                    batch.append(item)
+            else:
+                while (self._priority_queue or self._normal_queue) and len(batch) < max_items:
+                    take_prio = False
+                    if self._priority_queue and not self._normal_queue:
+                        take_prio = True
+                    elif self._priority_queue and self._normal_queue:
+                        p_ts = int(self._priority_queue[0]["availability_ts_ms"])
+                        n_ts = int(self._normal_queue[0]["availability_ts_ms"])
+                        take_prio = p_ts <= n_ts
+                    if take_prio:
+                        item = self._priority_queue.popleft()
+                        lag_ms = max(0.0, (now_ns - item["enqueued_perf_ns"]) / 1_000_000.0)
+                        self._lag_samples_ms.append(lag_ms)
+                        self._priority_lag_samples_ms.append(lag_ms)
+                    else:
+                        item = self._normal_queue.popleft()
+                        lag_ms = max(0.0, (now_ns - item["enqueued_perf_ns"]) / 1_000_000.0)
+                        self._lag_samples_ms.append(lag_ms)
+                    self._processed_count += 1
+                    batch.append(item)
+            if not self._priority_queue and not self._normal_queue:
                 self._wake_event.clear()
         return batch
 
@@ -435,12 +551,20 @@ class V2BoundedFeedConsumer:
 
     def get_health_metrics(self) -> Dict[str, Any]:
         with self._lock:
-            lags = sorted(self._lag_samples_ms)
-            p50 = lags[len(lags) // 2] if lags else 0.0
-            p99 = lags[min(len(lags) - 1, int(0.99 * len(lags)))] if lags else 0.0
+            p50, p95, p99 = self._percentiles(self._lag_samples_ms)
+            pp50, _, pp99 = self._percentiles(self._priority_lag_samples_ms)
+            sa50, sa95, sa99 = self._percentiles(self._source_age_samples_ms)
+            pr50, pr95, pr99 = self._percentiles(self._processing_samples_ms)
+            sf50, _, sf99 = self._percentiles(self._spot_fut_skew_samples_ms)
+            cl50, _, cl99 = self._percentiles(self._cross_leg_skew_samples_ms)
+            cur_depth = len(self._priority_queue) + len(self._normal_queue)
             return {
                 "queue_capacity": self.maxlen,
-                "current_queue_depth": len(self._queue),
+                "priority_queue_capacity": self.priority_maxlen,
+                "current_queue_depth": cur_depth,
+                "priority_queue_depth": len(self._priority_queue),
+                "normal_queue_depth": len(self._normal_queue),
+                "priority_keys_count": len(self._priority_keys) + len(self._position_priority_keys),
                 "max_queue_depth_seen": self._max_queue_depth_seen,
                 "enqueued_total": self._enqueued_count,
                 "processed_total": self._processed_count,
@@ -448,7 +572,25 @@ class V2BoundedFeedConsumer:
                 "late_out_of_order_events": self._late_count,
                 "sequence_bar_gaps": self._gap_count,
                 "dropped_overflow_events": self._dropped_overflow_count,
-                "queue_lag_p50_ms": round(p50, 4),
-                "queue_lag_p99_ms": round(p99, 4),
+                "dropped_normal_overflow_events": self._dropped_normal_overflow_count,
+                "dropped_priority_overflow_events": self._dropped_priority_overflow_count,
+                "queue_lag_p50_ms": p50,
+                "queue_lag_p95_ms": p95,
+                "queue_lag_p99_ms": p99,
+                "priority_queue_lag_p50_ms": pp50,
+                "priority_queue_lag_p99_ms": pp99,
+                "source_age_p50_ms": sa50,
+                "source_age_p95_ms": sa95,
+                "source_age_p99_ms": sa99,
+                "processing_lag_p50_ms": pr50,
+                "processing_lag_p95_ms": pr95,
+                "processing_lag_p99_ms": pr99,
+                "spot_fut_skew_p50_ms": sf50,
+                "spot_fut_skew_p99_ms": sf99,
+                "cross_leg_skew_p50_ms": cl50,
+                "cross_leg_skew_p99_ms": cl99,
+                "reconnect_count": self._reconnect_count,
+                "last_reconnect_reason": self._last_reconnect_reason,
+                "last_reconnect_ts_ms": self._last_reconnect_ts_ms,
                 "uncertainty_blocks": sorted(self._uncertainty_reasons),
             }

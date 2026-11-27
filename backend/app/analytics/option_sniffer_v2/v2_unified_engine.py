@@ -50,7 +50,9 @@ from app.analytics.option_sniffer_v2.v2_config import (
     parse_ist_timestamp_ms,
 )
 from app.analytics.option_sniffer_v2.v2_data_contract import (
+    check_cross_leg_skew,
     check_spot_futures_sync,
+    extract_observed_timestamp_ms,
     validate_nifty_futures_identity,
     validate_nifty_option_identity,
     validate_nifty_spot_identity,
@@ -143,6 +145,7 @@ class V2UnifiedEventEngine:
         persist_bars_and_checkpoints: bool = True,
         on_package_opened_cb: Optional[Callable[[str, List[Dict[str, Any]]], None]] = None,
         on_package_closed_cb: Optional[Callable[[str], None]] = None,
+        on_skew_sample_cb: Optional[Callable[[str, Optional[int]], None]] = None,
     ) -> None:
         self.cfg = cfg
         self.cfg_hash = str(cfg_hash)
@@ -165,6 +168,7 @@ class V2UnifiedEventEngine:
         self.persist_bars_and_checkpoints = bool(persist_bars_and_checkpoints)
         self.on_package_opened_cb = on_package_opened_cb
         self.on_package_closed_cb = on_package_closed_cb
+        self.on_skew_sample_cb = on_skew_sample_cb
 
         # Session & bar state
         self.session_date: Optional[str] = None
@@ -182,6 +186,9 @@ class V2UnifiedEventEngine:
         self.unverifiable_basis_events: int = 0
         self.last_usable_event_ts_ms: int = 0
         self.last_decision_ts_ms: int = 0
+        self.open_basis_fail_counts: Dict[str, int] = {}
+        self.stress_kill_warnings_by_date: Dict[str, str] = {}
+        self._last_persisted_opp_sig: Dict[str, Tuple[Any, ...]] = {}
 
         # Intraday quotes & references (strict NIFTY identity only)
         self.open_basis_ref: Optional[Dict[str, Any]] = None
@@ -223,6 +230,7 @@ class V2UnifiedEventEngine:
         self.session_started_from_open = bool(last_ck.get("session_started_from_open"))
         self.sequence_gap_count = int(last_ck.get("sequence_gap_count") or 0)
         self.overflow_drop_count = int(last_ck.get("overflow_drop_count") or 0)
+        self.open_basis_fail_counts = dict(last_ck.get("open_basis_fail_summary") or {})
         bars = self.store.load_completed_bars(self.run_mode, self.cfg_hash, session_date=dt)
         self.completed_bars = [
             dict(b)
@@ -262,6 +270,8 @@ class V2UnifiedEventEngine:
         open_mtm = self.sim.current_open_conservative_mtm()
         self.sod_equity_inr = round(self.sim.realized_equity_inr + open_mtm, 2)
         self.sim.intraday_min_equity_by_date[new_session_date] = self.sod_equity_inr
+        self.sim.stress_intraday_min_equity_by_date[new_session_date] = self.sod_equity_inr
+        self.sim.observed_intraday_min_equity_by_date[new_session_date] = round(self.sim.realized_equity_inr, 2)
         self.sim.peak_reserved_by_date[new_session_date] = self.sim.reserved_capital_inr
         self.completed_bars = []
         self.building_bar = None
@@ -272,6 +282,8 @@ class V2UnifiedEventEngine:
         self.post_session_ignored_count = 0
         self.open_basis_ref = None
         self.open_basis_samples = []
+        self.open_basis_fail_counts = {}
+        self._last_persisted_opp_sig = {}
         self.latest_spot_q = None
         self.latest_fut_q = None
         self.latest_vix_q = None
@@ -332,6 +344,11 @@ class V2UnifiedEventEngine:
                 "max_mtm_dd_pct_peak": round(100.0 * max_dd / peak_eq, 2),
                 "gap_count": self.sequence_gap_count,
                 "overflow_count": self.overflow_drop_count,
+                "observed_max_mtm_dd_inr": round(self.sim.max_observed_mtm_dd_inr, 2),
+                "stress_max_mtm_dd_inr": round(self.sim.max_stress_mtm_dd_inr, 2),
+                "observed_intraday_min_equity_inr": self.sim.observed_intraday_min_equity_by_date.get(dt),
+                "stress_intraday_min_equity_inr": self.sim.stress_intraday_min_equity_by_date.get(dt, eod_mtm),
+                "open_basis_fail_summary": dict(self.open_basis_fail_counts),
             }
         )
 
@@ -355,6 +372,163 @@ class V2UnifiedEventEngine:
                 "max_mtm_dd_inr": max_dd,
                 "intraday_min_mtm_equity_inr": self.sim.intraday_min_equity_by_date.get(dt, eod_mtm),
                 "peak_reserved_inr": self.sim.peak_reserved_by_date.get(dt, self.sim.reserved_capital_inr),
+                "observed_running_peak_inr": round(self.sim.observed_running_peak_equity_inr, 2),
+                "observed_max_mtm_dd_inr": round(self.sim.max_observed_mtm_dd_inr, 2),
+                "stress_max_mtm_dd_inr": round(self.sim.max_stress_mtm_dd_inr, 2),
+                "open_basis_fail_summary": dict(self.open_basis_fail_counts),
+            }
+        )
+
+    @staticmethod
+    def _classify_execution_availability(
+        book_id: str,
+        sig_or_block: Dict[str, Any],
+        passed: bool,
+        decision_status: str,
+    ) -> str:
+        if decision_status in ("BLOCKED", "DISABLED"):
+            rsn_u = str(sig_or_block.get("reject_reason") or "").upper()
+            if "UNVERIFIABLE" in rsn_u or "BASIS" in rsn_u or "SKEW" in rsn_u:
+                return "UNEXECUTABLE_UNVERIFIABLE_BASIS"
+            return "NOT_EVALUATED"
+        if passed:
+            return "EXECUTABLE_L5"
+        rsn = str(sig_or_block.get("reject_reason") or "")
+        for g in sig_or_block.get("gates") or []:
+            if not g.get("passed") and g.get("name") == "ObsL5Depth":
+                cur = str(g.get("current") or "").upper()
+                if "STALE" in cur or "AGE" in cur:
+                    return "UNEXECUTABLE_STALE"
+                if "SPREAD" in cur:
+                    return "UNEXECUTABLE_SPREAD_WIDE"
+                if "MISSING" in cur or "NO_QUOTE" in cur or "UNOBSERVED" in cur or "NONE" in cur:
+                    return "UNEXECUTABLE_MISSING_QUOTE"
+        ru = rsn.upper()
+        if "STALE" in ru:
+            return "UNEXECUTABLE_STALE"
+        if "SPREAD" in ru:
+            return "UNEXECUTABLE_SPREAD_WIDE"
+        if "MISSING" in ru or "ORB30_OR_VWAP_INCOMPLETE" in ru:
+            return "UNEXECUTABLE_MISSING_QUOTE"
+        if "BasisGate:" in rsn and any(tok in ru for tok in ("MISSING", "SKEW", "STALE", "UNVERIFIABLE", "ROLLED")):
+            return "UNEXECUTABLE_UNVERIFIABLE_BASIS"
+        # Check if quote payload was observed even though another gate failed
+        q = sig_or_block.get("quote") or sig_or_block.get("short_quote")
+        if isinstance(q, dict) and float(q.get("raw_bid") or 0.0) > 0.0 and float(q.get("raw_ask") or 0.0) >= float(q.get("raw_bid") or 0.0):
+            if q.get("book_provenance") == "OBSERVED_V3_L5" and q.get("depth_observed_on_tick"):
+                return "EXECUTABLE_L5"
+            if q.get("is_observed_l1_book"):
+                return "EXECUTABLE_L1_ONLY"
+        return "UNEXECUTABLE_MISSING_QUOTE" if book_id == "V2_BOOK_B_PAID_FLOW" else "NOT_EVALUATED"
+
+    def _record_opportunity_with_dedup(
+        self,
+        session_date: str,
+        bar_ts: str,
+        eval_hhmm: int,
+        decision_ts_ms: int,
+        book_id: str,
+        candidate_variant: str,
+        direction: Optional[str],
+        decision_status: str,
+        primary_reject_reason: Optional[str],
+        gates: List[Dict[str, Any]],
+        ind: Dict[str, Any],
+        extra_inputs: Dict[str, Any],
+        contract: Optional[Dict[str, Any]],
+        quote: Optional[Dict[str, Any]],
+        sig_obj: Dict[str, Any],
+    ) -> None:
+        if not self.persist_bars_and_checkpoints or not (915 <= eval_hhmm <= 1515):
+            return
+        failed_gates = [g for g in (gates or []) if not g.get("passed")]
+        failed_names = tuple(str(g.get("name")) for g in failed_gates)
+        exec_avail = self._classify_execution_availability(
+            book_id, sig_obj, decision_status == "ACCEPTED", decision_status
+        )
+        # Flag true ORB30+VWAP breakout bars for Book B
+        is_brk = 0
+        if book_id == "V2_BOOK_B_PAID_FLOW":
+            sc = float(ind.get("spot_close") or 0.0)
+            oh = ind.get("orb30_h")
+            ol = ind.get("orb30_l")
+            vw = ind.get("tpb_vwap")
+            if oh and ol and vw and ((sc > oh and sc > vw) or (sc < ol and sc < vw)):
+                is_brk = 1
+        elif book_id != "V2_BOOK_B_PAID_FLOW" and decision_status in ("ACCEPTED", "REJECTED"):
+            is_brk = 1
+
+        sig_key = (
+            str(direction or ""),
+            decision_status,
+            failed_names,
+            exec_avail,
+            is_brk,
+            str(primary_reject_reason or "") if decision_status == "BLOCKED" else "",
+        )
+        prev_sig = self._last_persisted_opp_sig.get(book_id)
+        if decision_status != "ACCEPTED" and sig_key == prev_sig:
+            return
+        self._last_persisted_opp_sig[book_id] = sig_key
+
+        spot_ts = extract_observed_timestamp_ms(self.latest_spot_q, require_depth_ts=False) or None
+        fut_ts = extract_observed_timestamp_ms(self.latest_fut_q, require_depth_ts=False) or None
+        opt_depth_ts = extract_observed_timestamp_ms(quote, require_depth_ts=True) or None if quote else None
+        opt_l1_ts = extract_observed_timestamp_ms(quote, require_depth_ts=False) or None if quote else None
+        sf_skew = abs(int(spot_ts) - int(fut_ts)) if (spot_ts and fut_ts) else None
+
+        gate_inputs = {
+            "spot_close": ind.get("spot_close"),
+            "tpb_vwap": ind.get("tpb_vwap"),
+            "orb30_h": ind.get("orb30_h"),
+            "orb30_l": ind.get("orb30_l"),
+            "adx14": ind.get("adx14"),
+            "er20": ind.get("er20"),
+            "vix_ltp": (self.latest_vix_q or {}).get("spot_ltp"),
+            **(extra_inputs or {}),
+        }
+        contract_id = (
+            {
+                "instrument_key": contract.get("instrument_key"),
+                "trading_symbol": contract.get("trading_symbol"),
+                "expiry": contract.get("expiry"),
+                "strike": contract.get("strike"),
+                "option_type": contract.get("option_type"),
+                "lot_size": contract.get("lot_size"),
+            }
+            if isinstance(contract, dict) and contract.get("instrument_key")
+            else None
+        )
+        quote_ts = {
+            "spot_ts_ms": spot_ts,
+            "fut_ts_ms": fut_ts,
+            "spot_fut_skew_ms": sf_skew,
+            "opt_depth_ts_ms": opt_depth_ts,
+            "opt_l1_ts_ms": opt_l1_ts,
+            "opt_age_ms": quote.get("l1_book_age_ms") if isinstance(quote, dict) else None,
+            "opt_provenance": quote.get("book_provenance") if isinstance(quote, dict) else None,
+        }
+        opp_id = make_stable_id("osv2_opp", self.run_mode, self.cfg_hash[:12], book_id, bar_ts, decision_status)
+        self.store.record_opportunity_idempotent(
+            {
+                "opportunity_id": opp_id,
+                "run_mode": self.run_mode,
+                "config_hash": self.cfg_hash,
+                "protocol_version": str(self.cfg.get("engine_version") or "2.2.0-causal"),
+                "session_date": session_date,
+                "bar_ts": bar_ts,
+                "decision_ts_ms": decision_ts_ms,
+                "book_id": book_id,
+                "candidate_variant": candidate_variant,
+                "direction": direction,
+                "decision_status": decision_status,
+                "primary_reject_reason": primary_reject_reason,
+                "failed_gates": failed_gates,
+                "gate_inputs": gate_inputs,
+                "contract_identity": contract_id,
+                "quote_timestamps": quote_ts,
+                "execution_availability": exec_avail,
+                "is_breakout_bar": is_brk,
             }
         )
 
@@ -431,38 +605,46 @@ class V2UnifiedEventEngine:
         # Spot/Futures observations (immune to 09:15 opening auction noise & mid-session roll).
         if (
             915 <= bar_open_hhmm <= 929
-            and self.latest_spot_q
-            and self.latest_fut_q
             and not (isinstance(self.open_basis_ref, dict) and self.open_basis_ref.get("ok") is False)
         ):
-            expected_open_contract = self.open_basis_samples[0] if self.open_basis_samples else None
-            chk = check_spot_futures_sync(
-                self.latest_spot_q,
-                self.latest_fut_q,
-                max_skew_ms=int(self.cfg["quote_hygiene"]["max_spot_fut_sync_skew_ms"]),
-                max_age_ms=int(self.cfg["quote_hygiene"]["max_entry_quote_age_ms"]),
-                now_ms=decision_ts_ms,
-                expected_fut_contract=expected_open_contract,
-            )
-            if chk.get("ok"):
-                self.open_basis_samples.append(chk)
-                pts_list = [float(s["basis_pts"]) for s in self.open_basis_samples]
-                med_pts = round(float(statistics.median(pts_list)), 4)
-                self.open_basis_ref = {
-                    **chk,
-                    "basis_pts": med_pts,
-                    "sample_count": len(pts_list),
-                    "sample_basis_pts": pts_list,
-                    "aggregation": "MEDIAN_0915_0929",
-                }
-            elif chk.get("reason") == "FUTURES_CONTRACT_ROLLED_MID_SESSION":
-                self.open_basis_ref = {
-                    "ok": False,
-                    "verifiable": True,
-                    "reason": "FUTURES_CONTRACT_ROLLED_MID_SESSION",
-                }
-            elif chk.get("verifiable") is False:
-                self.unverifiable_basis_events += 1
+            if not self.latest_spot_q or not self.latest_fut_q:
+                missing_tag = "MISSING_SPOT_AND_FUT" if (not self.latest_spot_q and not self.latest_fut_q) else ("MISSING_FUT" if not self.latest_fut_q else "MISSING_SPOT")
+                self.open_basis_fail_counts[missing_tag] = self.open_basis_fail_counts.get(missing_tag, 0) + 1
+            else:
+                expected_open_contract = self.open_basis_samples[0] if self.open_basis_samples else None
+                chk = check_spot_futures_sync(
+                    self.latest_spot_q,
+                    self.latest_fut_q,
+                    max_skew_ms=int(self.cfg["quote_hygiene"]["max_spot_fut_sync_skew_ms"]),
+                    max_age_ms=int(self.cfg["quote_hygiene"]["max_entry_quote_age_ms"]),
+                    now_ms=decision_ts_ms,
+                    expected_fut_contract=expected_open_contract,
+                )
+                if chk.get("skew_ms") is not None and self.on_skew_sample_cb:
+                    self.on_skew_sample_cb("spot_fut", int(chk["skew_ms"]))
+                if chk.get("ok"):
+                    self.open_basis_samples.append(chk)
+                    pts_list = [float(s["basis_pts"]) for s in self.open_basis_samples]
+                    med_pts = round(float(statistics.median(pts_list)), 4)
+                    self.open_basis_ref = {
+                        **chk,
+                        "basis_pts": med_pts,
+                        "sample_count": len(pts_list),
+                        "sample_basis_pts": pts_list,
+                        "aggregation": "MEDIAN_0915_0929",
+                    }
+                else:
+                    fail_rsn = str(chk.get("reason") or "BASIS_SYNC_FAILED")
+                    fail_key = "SPOT_FUT_SKEW" if fail_rsn.startswith("SPOT_FUT_SKEW_") else fail_rsn
+                    self.open_basis_fail_counts[fail_key] = self.open_basis_fail_counts.get(fail_key, 0) + 1
+                    if fail_rsn == "FUTURES_CONTRACT_ROLLED_MID_SESSION":
+                        self.open_basis_ref = {
+                            "ok": False,
+                            "verifiable": True,
+                            "reason": "FUTURES_CONTRACT_ROLLED_MID_SESSION",
+                        }
+                    elif chk.get("verifiable") is False:
+                        self.unverifiable_basis_events += 1
 
         # 1. Mark existing exposure first (strict bar[t].close MTM before evaluating exits / entries)
         mtm_info = self.sim.mark_open_packages(
@@ -475,8 +657,12 @@ class V2UnifiedEventEngine:
         )
         kill_lim = float(self.cfg["account_envelope"]["max_daily_mtm_kill_inr"])
         slots = self.sim.active_slots_and_reserves(bar_open_ts, dt)
-        if (slots["realized_today_inr"] + mtm_info["conservative_unrealized_mtm_inr"]) <= kill_lim:
-            self.sim.daily_kill_triggered_by_date[dt] = f"DAILY_KILL_MTM_LE_{kill_lim}"
+        obs_mtm_val = mtm_info.get("fresh_executable_mtm_inr")
+        stress_mtm_val = float(mtm_info["stress_unrealized_mtm_inr"])
+        if obs_mtm_val is not None and (slots["realized_today_inr"] + float(obs_mtm_val)) <= kill_lim:
+            self.sim.daily_kill_triggered_by_date[dt] = f"DAILY_KILL_OBSERVED_MTM_LE_{kill_lim}"
+        elif obs_mtm_val is None and (slots["realized_today_inr"] + stress_mtm_val) <= kill_lim:
+            self.stress_kill_warnings_by_date[dt] = f"STRESS_ESTIMATE_LE_{kill_lim}"
 
         # 2. Manage open packages
         for pid, pkg in list(self.sim.open_packages.items()):
@@ -617,9 +803,44 @@ class V2UnifiedEventEngine:
                     entered_b = True
                     if self.on_package_opened_cb:
                         self.on_package_opened_cb(op["package_id"], [sig_b["contract"]])
+                self._record_opportunity_with_dedup(
+                    session_date=dt,
+                    bar_ts=bar_open_ts,
+                    eval_hhmm=eval_hhmm,
+                    decision_ts_ms=decision_ts_ms,
+                    book_id=cfg_b["book_id"],
+                    candidate_variant=self.book_b_params["variant_code"],
+                    direction=sig_b.get("option_type"),
+                    decision_status="ACCEPTED" if op.get("ok") else "BLOCKED",
+                    primary_reject_reason=None if op.get("ok") else str(op.get("reason") or "OPEN_FAILED"),
+                    gates=sig_b.get("gates", []),
+                    ind=ind,
+                    extra_inputs=sig_b.get("basis_meta") or {},
+                    contract=sig_b.get("contract"),
+                    quote=sig_b.get("quote"),
+                    sig_obj=sig_b,
+                )
+            else:
+                self._record_opportunity_with_dedup(
+                    session_date=dt,
+                    bar_ts=bar_open_ts,
+                    eval_hhmm=eval_hhmm,
+                    decision_ts_ms=decision_ts_ms,
+                    book_id=cfg_b["book_id"],
+                    candidate_variant=self.book_b_params["variant_code"],
+                    direction=sig_b.get("option_type"),
+                    decision_status="REJECTED",
+                    primary_reject_reason=sig_b.get("reject_reason"),
+                    gates=sig_b.get("gates", []),
+                    ind=ind,
+                    extra_inputs=sig_b.get("basis_meta") or {},
+                    contract=sig_b.get("contract"),
+                    quote=sig_b.get("quote"),
+                    sig_obj=sig_b,
+                )
         else:
             blk_reason = "; ".join(blocks) if blocks else f"SLOTS_OR_COOLDOWN ({slots['trades_today_by_book'].get(cfg_b['book_id'], 0)} trades)"
-            self.latest_decision_by_book[cfg_b["book_id"]] = {
+            blk_obj = {
                 "bar_ts": bar_open_ts,
                 "decision_ts_ms": decision_ts_ms,
                 "passed": False,
@@ -628,10 +849,28 @@ class V2UnifiedEventEngine:
                 "gates": [],
                 "indicators": dict(ind),
             }
+            self.latest_decision_by_book[cfg_b["book_id"]] = blk_obj
+            self._record_opportunity_with_dedup(
+                session_date=dt,
+                bar_ts=bar_open_ts,
+                eval_hhmm=eval_hhmm,
+                decision_ts_ms=decision_ts_ms,
+                book_id=cfg_b["book_id"],
+                candidate_variant=self.book_b_params["variant_code"],
+                direction=None,
+                decision_status="BLOCKED",
+                primary_reject_reason=blk_reason,
+                gates=[],
+                ind=ind,
+                extra_inputs={"open_basis_pts": (self.open_basis_ref or {}).get("basis_pts")},
+                contract=None,
+                quote=None,
+                sig_obj=blk_obj,
+            )
 
         # Book A check (strictly disabled by default unless opt-in in research replay)
         if not cfg_a.get("autonomous_entries_enabled", False) and not self.enable_book_a_opt_in:
-            self.latest_decision_by_book[cfg_a["book_id"]] = {
+            dis_obj = {
                 "bar_ts": bar_open_ts,
                 "decision_ts_ms": decision_ts_ms,
                 "passed": False,
@@ -639,6 +878,24 @@ class V2UnifiedEventEngine:
                 "reject_reason": "BLOCKED_UNVERIFIED_O3_SPEC_CONFLICT",
                 "gates": [],
             }
+            self.latest_decision_by_book[cfg_a["book_id"]] = dis_obj
+            self._record_opportunity_with_dedup(
+                session_date=dt,
+                bar_ts=bar_open_ts,
+                eval_hhmm=eval_hhmm,
+                decision_ts_ms=decision_ts_ms,
+                book_id=cfg_a["book_id"],
+                candidate_variant=cfg_a["verification_status"],
+                direction=None,
+                decision_status="DISABLED",
+                primary_reject_reason="BLOCKED_UNVERIFIED_O3_SPEC_CONFLICT",
+                gates=[],
+                ind=ind,
+                extra_inputs={},
+                contract=None,
+                quote=None,
+                sig_obj=dis_obj,
+            )
         elif (
             not blocks
             and slots["open_by_book"].get(cfg_a["book_id"], 0) < int(cfg_a["max_open"])
@@ -701,6 +958,41 @@ class V2UnifiedEventEngine:
                         session_date=dt,
                         bar_ts=bar_open_ts,
                     )
+                self._record_opportunity_with_dedup(
+                    session_date=dt,
+                    bar_ts=bar_open_ts,
+                    eval_hhmm=eval_hhmm,
+                    decision_ts_ms=decision_ts_ms,
+                    book_id=cfg_a["book_id"],
+                    candidate_variant=sig_a["candidate_variant"],
+                    direction=sig_a.get("option_type"),
+                    decision_status="ACCEPTED",
+                    primary_reject_reason=None,
+                    gates=sig_a.get("gates", []),
+                    ind=ind,
+                    extra_inputs={"est_credit_pts": sig_a.get("est_credit_pts"), "skew_ms": sig_a.get("skew_ms")},
+                    contract=sig_a.get("short_contract"),
+                    quote=sig_a.get("short_quote"),
+                    sig_obj=sig_a,
+                )
+            else:
+                self._record_opportunity_with_dedup(
+                    session_date=dt,
+                    bar_ts=bar_open_ts,
+                    eval_hhmm=eval_hhmm,
+                    decision_ts_ms=decision_ts_ms,
+                    book_id=cfg_a["book_id"],
+                    candidate_variant=sig_a["candidate_variant"],
+                    direction=sig_a.get("option_type"),
+                    decision_status="REJECTED",
+                    primary_reject_reason=sig_a.get("reject_reason"),
+                    gates=sig_a.get("gates", []),
+                    ind=ind,
+                    extra_inputs={"est_credit_pts": sig_a.get("est_credit_pts"), "skew_ms": sig_a.get("skew_ms")},
+                    contract=sig_a.get("short_contract"),
+                    quote=sig_a.get("short_quote"),
+                    sig_obj=sig_a,
+                )
 
         trace_entry = {
             "bar_open_ts": bar_open_ts,

@@ -10,6 +10,7 @@ export const V2_ENDPOINTS = Object.freeze({
   replayAudit: '/replay-audit',
   counterfactuals: '/counterfactuals',
   diagnostics: '/diagnostics',
+  opportunities: '/opportunities',
 });
 
 export function nowIstClockLabel() {
@@ -149,6 +150,7 @@ export async function fetchAllV2EndpointsReadOnly({
     ['replayAudit', buildV2EndpointUrl(V2_ENDPOINTS.replayAudit)],
     ['counterfactuals', buildV2EndpointUrl(V2_ENDPOINTS.counterfactuals)],
     ['diagnostics', buildV2EndpointUrl(V2_ENDPOINTS.diagnostics)],
+    ['opportunities', buildV2EndpointUrl(V2_ENDPOINTS.opportunities)],
   ];
 
   const settled = await Promise.allSettled(

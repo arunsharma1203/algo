@@ -107,6 +107,27 @@ def get_v2_diagnostics() -> Dict[str, Any]:
     return get_option_sniffer_v2_service().get_diagnostics()
 
 
+@router.get("/opportunities")
+def get_v2_opportunities(
+    session_date: Any = Query(None),
+    book_id: Any = Query(None),
+    limit: Any = Query(200),
+) -> Dict[str, Any]:
+    """Read-only accepted & rejected opportunity evaluations with gate inputs and quote provenance."""
+    sd_raw = getattr(session_date, "default", session_date)
+    bid_raw = getattr(book_id, "default", book_id)
+    lim_raw = getattr(limit, "default", limit)
+    try:
+        lim_i = int(lim_raw)
+    except Exception:
+        lim_i = 200
+    return get_option_sniffer_v2_service().get_opportunities(
+        session_date=str(sd_raw) if sd_raw else None,
+        book_id=str(bid_raw) if bid_raw else None,
+        limit=max(1, min(1000, lim_i)),
+    )
+
+
 @router.post("/control/start-collector")
 def post_v2_start_collector() -> Dict[str, Any]:
     """Explicit operator action to attach V2 passive listener to shared OptionStreamManager (paper only)."""
