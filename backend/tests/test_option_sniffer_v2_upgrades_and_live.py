@@ -1084,6 +1084,15 @@ class TestV2UpgradesAndIsolatedLiveLayer(unittest.TestCase):
         res_b = eng_b.submit_entry_signal(_sample_spread_signal("sig_sp_short_to_abs", buy_qty=65))
         self.assertEqual(res_b["status"], "SHORT_TIMEOUT_AMBIGUOUS")
 
+        # Finding #1 invariant: Single missing get_orders() snapshot MUST HOLD the bought wing (0 premature unwind)
+        rec_b1 = eng_b.reconcile_with_broker()
+        pkg_b1 = eng_b.store.get_package_by_signal("sig_sp_short_to_abs")
+        self.assertEqual(pkg_b1["state"], "RECONCILE_MISMATCH")
+        self.assertGreater(rec_b1["unresolved_faults"]["total_blocking_faults"], 0)
+        d_pos_b1 = {p["instrument_token"]: int(p["quantity"]) for p in broker_b.get_positions()}
+        self.assertEqual(d_pos_b1.get("NSE_FO|BUY_WING_1"), 65)
+
+        # Second confirmation (checks >= 2 + empty order_history + short_pos == 0) safely unwinds wing
         rec_b = eng_b.reconcile_with_broker()
         self.assertEqual(rec_b["unresolved_faults"]["total_blocking_faults"], 0)
         pkg_b = eng_b.store.get_package_by_signal("sig_sp_short_to_abs")
@@ -1196,6 +1205,338 @@ class TestV2UpgradesAndIsolatedLiveLayer(unittest.TestCase):
             self.assertAlmostEqual(pkg_b["legs"]["buy_leg"]["stop_trigger_price"], 160.0, places=2)
         finally:
             eng_burst.detach_from_paper_service()
+
+    def test_25_six_critical_security_and_microstructure_findings(self) -> None:
+        # ── Finding #1: Late short appearance after 1st reconcile recovers OPEN instead of naked short ──
+        db1 = os.path.join(self._td.name, "f1_late_short.db")
+        broker1 = MockV2BrokerClient()
+        orig_place1 = broker1.place_order
+        inj1 = {"done": False}
+
+        def _short_timeout_absent_then_late_fill(payload, *, is_emergency=False):
+            if str(payload.get("instrument_token")) == "NSE_FO|SHORT_LEG_1" and not inj1["done"]:
+                inj1["done"] = True
+                broker1.inject_timeout_order_not_received = True
+            return orig_place1(payload, is_emergency=is_emergency)
+
+        broker1.place_order = _short_timeout_absent_then_late_fill  # type: ignore
+        eng1 = V2LiveExecutionEngine(
+            db_path=db1, broker_client=broker1, initial_pin="2501",
+            log_pin_on_boot=False, order_poll_interval_sec=0.0,
+        )
+        eng1.arm_live(pin="2501", human_confirmed=True, selected_books=["V2_BOOK_B_PAID_FLOW"])
+        res1 = eng1.submit_entry_signal(_sample_spread_signal("sig_f1_late", buy_qty=65))
+        self.assertEqual(res1["status"], "SHORT_TIMEOUT_AMBIGUOUS")
+
+        # 1st reconcile holds wing open (short absent so far)
+        eng1.reconcile_with_broker()
+        pkg1_mid = eng1.store.get_package_by_signal("sig_f1_late")
+        self.assertEqual(pkg1_mid["state"], "RECONCILE_MISMATCH")
+        self.assertEqual(int(pkg1_mid["legs"]["buy_leg"]["qty"]), 65)
+
+        # Simulate late-arriving short fill on broker before 2nd reconcile
+        short_intent_1 = [
+            it for it in eng1.store.list_intents(live_package_id=pkg1_mid["live_package_id"]) if it["leg_role"] == "SHORT_LEG"
+        ][0]
+        oid_late = "ORD_LATE_SHORT_01"
+        broker1._orders[oid_late] = {
+            "order_id": oid_late,
+            "instrument_token": "NSE_FO|SHORT_LEG_1",
+            "trading_symbol": "NIFTY 25300 CE 01 DEC 26",
+            "transaction_type": "SELL",
+            "order_type": "LIMIT",
+            "product": "D",
+            "quantity": 65,
+            "filled_quantity": 65,
+            "average_price": 165.0,
+            "price": 165.0,
+            "status": "complete",
+            "tag": short_intent_1["tag"],
+        }
+        broker1._order_history[oid_late] = [dict(broker1._orders[oid_late])]
+        broker1._record_fill_into_positions("NSE_FO|SHORT_LEG_1", "NIFTY 25300 CE 01 DEC 26", "SELL", 65, 165.0, product="D")
+
+        rec1_late = eng1.reconcile_with_broker()
+        self.assertEqual(rec1_late["unresolved_faults"]["total_blocking_faults"], 0)
+        pkg1_ok = eng1.store.get_package_by_signal("sig_f1_late")
+        self.assertEqual(pkg1_ok["state"], "OPEN")
+        self.assertEqual(int(pkg1_ok["legs"]["short_leg"]["qty"]), 65)
+        self.assertEqual(int(pkg1_ok["legs"]["buy_leg"]["qty"]), 65)
+
+        # ── Finding #2: GTT cancel fail abort, partial working GTT child, & manual SELL collision ──
+        # 2a) GTT cancel fails & rule stays active -> abort exit with ZERO sell orders placed
+        db2a = os.path.join(self._td.name, "f2a_gtt_fail.db")
+        broker2a = MockV2BrokerClient()
+        eng2a = V2LiveExecutionEngine(
+            db_path=db2a, broker_client=broker2a, initial_pin="2502",
+            log_pin_on_boot=False, order_poll_interval_sec=0.0,
+        )
+        eng2a.arm_live(pin="2502", human_confirmed=True, selected_books=["V2_BOOK_B_PAID_FLOW"])
+        r2a = eng2a.submit_entry_signal(_sample_single_signal("sig_f2a_gtt_fail"))
+        self.assertTrue(r2a["ok"])
+        pid2a = r2a["package"]["live_package_id"]
+        broker2a.inject_gtt_cancel_fail = True
+        calls_pre_2a = len(broker2a.call_log)
+        ex2a = eng2a.exit_live_package(live_package_id=pid2a, reason="EXIT_SHOULD_ABORT_ON_GTT_FAIL", exit_price=190.0)
+        self.assertFalse(ex2a["ok"])
+        self.assertEqual(ex2a["status"], "GTT_CANCEL_UNCONFIRMED_ABORT_EXIT")
+        sells_after_2a = [
+            c for c in broker2a.call_log[calls_pre_2a:]
+            if c["method"] == "place_order" and str(c.get("side")).upper() == "SELL"
+        ]
+        self.assertEqual(sells_after_2a, [])
+
+        # 2b) Working GTT child partially filled (25/65) -> cancel working child + sell ONLY residual 40
+        db2b = os.path.join(self._td.name, "f2b_gtt_partial.db")
+        broker2b = MockV2BrokerClient()
+        eng2b = V2LiveExecutionEngine(
+            db_path=db2b, broker_client=broker2b, initial_pin="2503",
+            log_pin_on_boot=False, order_poll_interval_sec=0.0,
+        )
+        eng2b.arm_live(pin="2503", human_confirmed=True, selected_books=["V2_BOOK_B_PAID_FLOW"])
+        r2b = eng2b.submit_entry_signal(_sample_single_signal("sig_f2b_gtt_part"))
+        pid2b = r2b["package"]["live_package_id"]
+        gid2b = r2b["package"]["legs"]["buy_leg"]["gtt_id"]
+        broker2b.inject_working_gtt_child_on_cancel[gid2b] = (25, 151.0)
+        ex2b = eng2b.exit_live_package(live_package_id=pid2b, reason="EXIT_RESIDUAL_AFTER_PARTIAL_GTT", exit_price=150.0)
+        self.assertTrue(ex2b["ok"], f"Expected clean partial GTT settle + residual close: {ex2b}")
+        self.assertEqual(ex2b["package"]["state"], "CLOSED")
+        self.assertEqual(int(ex2b["package"]["legs"]["buy_leg"]["exited_qty"]), 65)
+        for bp in broker2b.get_positions():
+            self.assertEqual(int(bp["quantity"]), 0, f"Double-sell / leftover qty in {bp}")
+
+        # 2c) Untagged manual SELL collision halts exit cleanly instead of falsely booking GTT exit
+        db2c = os.path.join(self._td.name, "f2c_manual_sell.db")
+        broker2c = MockV2BrokerClient()
+        eng2c = V2LiveExecutionEngine(
+            db_path=db2c, broker_client=broker2c, initial_pin="2504",
+            log_pin_on_boot=False, order_poll_interval_sec=0.0,
+        )
+        eng2c.arm_live(pin="2504", human_confirmed=True, selected_books=["V2_BOOK_B_PAID_FLOW"])
+        r2c = eng2c.submit_entry_signal(_sample_single_signal("sig_f2c_manual"))
+        pid2c = r2c["package"]["live_package_id"]
+        gid2c = r2c["package"]["legs"]["buy_leg"]["gtt_id"]
+        # GTT remains SCHEDULED, but someone placed an untagged SELL with a different qty (130 != 65)
+        broker2c._orders["ORD_MANUAL_1"] = {
+            "order_id": "ORD_MANUAL_1",
+            "instrument_token": "NSE_FO|47836",
+            "trading_symbol": "NIFTY 25700 PE 01 DEC 26",
+            "transaction_type": "SELL",
+            "order_type": "LIMIT",
+            "product": "D",
+            "quantity": 130,
+            "filled_quantity": 130,
+            "average_price": 175.0,
+            "status": "complete",
+            "tag": "",
+        }
+        self.assertIn(gid2c, {g["gtt_order_id"] for g in broker2c.get_gtt_orders()})
+        ex2c = eng2c.exit_live_package(live_package_id=pid2c, reason="EXIT_MANUAL_COLLISION", exit_price=175.0)
+        self.assertFalse(ex2c["ok"])
+        self.assertEqual(ex2c["status"], "AMBIGUOUS_UNTAGGED_SELL_COLLISION")
+
+        # ── Finding #3: Partial excess wing unwind persists buy_leg.qty + product="D" collision detection ──
+        db3 = os.path.join(self._td.name, "f3_partial_unwind.db")
+        broker3 = MockV2BrokerClient(available_margin_inr=500000.0)
+        # Inject an unrelated INTRADAY ("I") short on BUY_WING_1 to test product isolation & collision alert
+        broker3._record_fill_into_positions("NSE_FO|BUY_WING_1", "NIFTY 25500 CE 01 DEC 26", "SELL", 65, 45.0, product="I")
+        # 3-lot spread (195 buy wing): short leg fills only 1 lot (~65 via floor division), leaving 130 excess
+        broker3.inject_partial_fill_ratio["NSE_FO|SHORT_LEG_1"] = 0.4
+        eng3 = V2LiveExecutionEngine(
+            db_path=db3, broker_client=broker3, initial_pin="2505",
+            log_pin_on_boot=False, order_poll_interval_sec=0.0,
+        )
+        eng3.arm_live(
+            pin="2505", human_confirmed=True, selected_books=["V2_BOOK_B_PAID_FLOW"],
+            max_lots_per_book=3, max_open_packages=2,
+        )
+        # During the excess unwind of 130 buy wing, let only 65 fill (so 65 excess remains!)
+        orig_place3 = broker3.place_order
+
+        def _partial_excess_unwind(payload, *, is_emergency=False):
+            if str(payload.get("instrument_token")) == "NSE_FO|BUY_WING_1" and str(payload.get("transaction_type")) == "SELL":
+                broker3.inject_partial_fill_ratio["NSE_FO|BUY_WING_1"] = 0.5
+            return orig_place3(payload, is_emergency=is_emergency)
+
+        broker3.place_order = _partial_excess_unwind  # type: ignore
+        r3 = eng3.submit_entry_signal(_sample_spread_signal("sig_f3_part_unw", buy_qty=195))
+        self.assertFalse(r3["ok"])
+        pkg3_mid = eng3.store.get_package_by_signal("sig_f3_part_unw")
+        # Confirmed partial excess unwind persisted buy_leg["qty"] = 195 - 65 = 130 (short_leg is 65)
+        self.assertEqual(int(pkg3_mid["legs"]["buy_leg"]["qty"]), 130)
+        self.assertEqual(int(pkg3_mid["legs"]["short_leg"]["qty"]), 65)
+
+        # Clear partial-fill mocks and reconcile: MUST unwind ONLY remaining 65 (not 130!), preserving 65 hedge
+        broker3.place_order = orig_place3  # type: ignore
+        broker3.inject_partial_fill_ratio.clear()
+        rec3 = eng3.reconcile_with_broker()
+        self.assertEqual(rec3["unresolved_faults"]["total_blocking_faults"], 0)
+        self.assertTrue(any(c.get("instrument_key") == "NSE_FO|BUY_WING_1" and c.get("collision_type") == "OTHER_PRODUCT_POSITION_PRESENT" for c in rec3.get("position_collisions", [])))
+        pkg3_ok = eng3.store.get_package_by_signal("sig_f3_part_unw")
+        self.assertEqual(pkg3_ok["state"], "OPEN")
+        self.assertEqual(int(pkg3_ok["legs"]["buy_leg"]["qty"]), 65)
+        self.assertEqual(int(pkg3_ok["legs"]["short_leg"]["qty"]), 65)
+        d_pos3 = {p["instrument_token"]: int(p["quantity"]) for p in broker3.get_positions() if p.get("product") == "D"}
+        self.assertEqual(d_pos3["NSE_FO|BUY_WING_1"], 65)
+        self.assertEqual(d_pos3["NSE_FO|SHORT_LEG_1"], -65)
+
+        # ── Finding #4: Operator auth boundary & zero PIN in GET /status ──
+        db4 = os.path.join(self._td.name, "f4_auth.db")
+        set_v2_live_test_db_override(db4)
+        reset_option_sniffer_v2_live_engine()
+        eng4 = get_option_sniffer_v2_live_engine(db_path=db4, broker_client=MockV2BrokerClient(), initial_pin="2506")
+        status_http = option_sniffer_v2_live_api.get_v2_live_status(include_paper_baseline=False)
+        self.assertNotIn("current_pin", status_http)
+        self.assertEqual(eng4.get_status(include_paper_baseline=False)["current_pin"], "2506")
+
+        class _FakeClient:
+            def __init__(self, host: str) -> None:
+                self.host = host
+
+        class _FakeReq:
+            def __init__(self, host: str, headers: dict) -> None:
+                self.client = _FakeClient(host)
+                self.headers = {k.lower(): v for k, v in headers.items()}
+
+        # Reject non-loopback client, cross-origin, and missing intent header
+        with self.assertRaises(option_sniffer_v2_live_api.HTTPException):
+            option_sniffer_v2_live_api.verify_v2_live_operator(_FakeReq("192.168.1.50", {"X-V2-Operator-Intent": "confirmed"}))
+        with self.assertRaises(option_sniffer_v2_live_api.HTTPException):
+            option_sniffer_v2_live_api.verify_v2_live_operator(_FakeReq("127.0.0.1", {"Origin": "http://evil.example", "X-V2-Operator-Intent": "confirmed"}))
+        with self.assertRaises(option_sniffer_v2_live_api.HTTPException):
+            option_sniffer_v2_live_api.verify_v2_live_operator(_FakeReq("127.0.0.1", {}))
+
+        ok_op = option_sniffer_v2_live_api.verify_v2_live_operator(
+            _FakeReq("127.0.0.1", {"Origin": "http://localhost:5173", "X-V2-Operator-Intent": "confirmed"})
+        )
+        self.assertTrue(ok_op["authorized"])
+        prev_tok = os.environ.get("V2_LIVE_OPERATOR_TOKEN")
+        try:
+            os.environ["V2_LIVE_OPERATOR_TOKEN"] = "secret_v2_op_token"
+            with self.assertRaises(option_sniffer_v2_live_api.HTTPException):
+                option_sniffer_v2_live_api.verify_v2_live_operator(_FakeReq("127.0.0.1", {"X-V2-Operator-Intent": "confirmed", "X-V2-Operator-Token": "wrong"}))
+            ok_tok = option_sniffer_v2_live_api.verify_v2_live_operator(_FakeReq("127.0.0.1", {"X-V2-Operator-Intent": "confirmed", "X-V2-Operator-Token": "secret_v2_op_token"}))
+            self.assertTrue(ok_tok["token_enforced"])
+        finally:
+            if prev_tok is None:
+                os.environ.pop("V2_LIVE_OPERATOR_TOKEN", None)
+            else:
+                os.environ["V2_LIVE_OPERATOR_TOKEN"] = prev_tok
+        ch_http = option_sniffer_v2_live_api.post_v2_live_arm_challenge(_operator=ok_op)
+        self.assertEqual(ch_http["challenge_pin"], "2506")
+        self.assertEqual(ch_http["pin_delivery"], "OPERATOR_CHALLENGE_ONLY")
+        with self.assertRaises(option_sniffer_v2_live_api.HTTPException):
+            option_sniffer_v2_live_api.verify_v2_live_operator(_FakeReq("", {"X-V2-Operator-Intent": "confirmed"}))
+        redacted = option_sniffer_v2_live_api._redact_http_pin(
+            {"armed": False, "current_pin": "2506", "live_status": {"current_pin": "2506"}, "nested": [{"current_pin": "2506"}]}
+        )
+        self.assertNotIn("current_pin", json.dumps(redacted))
+        sos_http = option_sniffer_v2_live_api.post_v2_live_sos_flatten(
+            payload={"reason": "TEST_SOS_REDACT"}, _operator=ok_op
+        )
+        self.assertNotIn("current_pin", json.dumps(sos_http))
+        disarm_http = option_sniffer_v2_live_api.post_v2_live_disarm(
+            payload={"reason": "TEST_DISARM_REDACT"}, _operator=ok_op
+        )
+        self.assertNotIn("current_pin", json.dumps(disarm_http))
+
+        # ── Finding #5: Unbounded exit queue, decision/arm age guards, & independent 15:15 exit guardian ──
+        db5 = os.path.join(self._td.name, "f5_queue_guards.db")
+        broker5 = MockV2BrokerClient()
+        eng5 = V2LiveExecutionEngine(
+            db_path=db5, broker_client=broker5, initial_pin="2507",
+            log_pin_on_boot=False, order_poll_interval_sec=0.0,
+            enforce_wall_clock_guards=True, max_signal_decision_age_ms=10_000,
+        )
+        st5 = eng5.arm_live(pin="2507", human_confirmed=True, selected_books=["V2_BOOK_B_PAID_FLOW"])
+        now_ms = int(time.time() * 1000)
+        # Stale decision (>10s old) blocked
+        stale_sig = _sample_single_signal("sig_f5_stale", ts_date=st5["arm_state"]["armed_for_date"])
+        stale_sig["decision_ts_ms"] = now_ms - 30_000
+        r5_stale = eng5.submit_entry_signal(stale_sig)
+        self.assertFalse(r5_stale["ok"])
+        self.assertIn(r5_stale["status"], ("PRE_ARM_SIGNAL_BLOCKED", "STALE_SIGNAL_DECISION_AGE_EXCEEDED"))
+
+        # Fresh live entry succeeds, then saturate heartbeat & verify priority exit + 15:15 guardian
+        fresh_sig = _sample_single_signal("sig_f5_fresh", ts_date=st5["arm_state"]["armed_for_date"])
+        fresh_sig["decision_ts_ms"] = now_ms + 50
+        r5_ok = eng5.submit_entry_signal(fresh_sig)
+        self.assertTrue(r5_ok["ok"], f"Fresh live signal expected ok: {r5_ok}")
+        # Independent EOD 15:16 IST check closes live position even with ZERO paper events!
+        eod_ms = parse_ist_timestamp_ms(f"{st5['arm_state']['armed_for_date']} 15:16:00")
+        g_exits = eng5.evaluate_independent_live_exits(now_ms=eod_ms)
+        self.assertTrue(any(g.get("trigger") == "EOD_1515" for g in g_exits))
+        pkg5_closed = eng5.store.get_package_by_signal("sig_f5_fresh")
+        self.assertEqual(pkg5_closed["state"], "CLOSED")
+        self.assertEqual(pkg5_closed["exit_reason"], "AUTO_LIVE_GUARDIAN_EOD_1515")
+
+        # ── Finding #6: Live outlay cap, actual-fill GTT stop, & Book A subsequent quote requirement ──
+        db6 = os.path.join(self._td.name, "f6_risk_par.db")
+        broker6 = MockV2BrokerClient()
+        eng6 = V2LiveExecutionEngine(
+            db_path=db6, broker_client=broker6, initial_pin="2508",
+            log_pin_on_boot=False, order_poll_interval_sec=0.0,
+        )
+        eng6.arm_live(pin="2508", human_confirmed=True, selected_books=["V2_BOOK_B_PAID_FLOW"], max_lots_per_book=1, max_open_packages=2)
+        # 6a) Collar outlay > ₹18,500 * lots blocked at live limit collar (65 * 290 = 18,850 > 18,500)
+        cap_sig = _sample_single_signal("sig_f6_cap")
+        cap_sig["buy_leg"]["limit_price"] = 290.0
+        r6_cap = eng6.submit_entry_signal(cap_sig)
+        self.assertFalse(r6_cap["ok"])
+        self.assertEqual(r6_cap["status"], "LIVE_CASH_CAP_EXCEEDED")
+
+        # 6b) Worse fill (190.0 vs paper 180.0) derives V3 GTT stop from actual fill (190 - 1800/65 = 162.30)
+        orig_place6 = broker6.place_order
+
+        def _worse_fill_place(payload, *, is_emergency=False):
+            payload = dict(payload)
+            payload["price"] = 190.0
+            return orig_place6(payload, is_emergency=is_emergency)
+
+        broker6.place_order = _worse_fill_place  # type: ignore
+        fill_sig = _sample_single_signal("sig_f6_fill_stop")
+        fill_sig["buy_leg"]["derive_stop_from_actual_fill"] = True
+        fill_sig["buy_leg"]["stop_trigger_price"] = 152.30
+        r6_fill = eng6.submit_entry_signal(fill_sig)
+        self.assertTrue(r6_fill["ok"])
+        self.assertAlmostEqual(float(r6_fill["package"]["legs"]["buy_leg"]["entry_price"]), 190.0, places=2)
+        self.assertGreater(float(r6_fill["package"]["legs"]["buy_leg"]["stop_trigger_price"]), 160.0)
+
+        # 6c) PaperSimulator Book A requires strictly subsequent quote when require_subsequent_quote=True
+        store_p6 = V2LedgerStore(os.path.join(self._td.name, "f6_paper.db"), auto_create=True)
+        try:
+            sim6 = V2PaperSimulator(self.cfg, self.cfg_hash, store_p6, run_mode="FORWARD_PAPER")
+            t_p6 = parse_ist_timestamp_ms("2026-11-27 11:45:00")
+            exp_p6 = "2026-12-01"
+            wc6 = {"instrument_key": "NSE_FO|PW", "trading_symbol": "NIFTY 25500 PE", "expiry": exp_p6, "strike": 25500.0, "option_type": "PE", "lot_size": 65}
+            sc6 = {"instrument_key": "NSE_FO|PS", "trading_symbol": "NIFTY 25600 PE", "expiry": exp_p6, "strike": 25600.0, "option_type": "PE", "lot_size": 65}
+            wq6 = {"instrument_key": "NSE_FO|PW", "bid": 40.0, "ask": 40.2, "raw_bid": 40.0, "raw_ask": 40.2, "l1_book_timestamp_ms": t_p6, "depth_timestamp_ms": t_p6, "depth_observed_on_tick": True, "l1_observed_on_tick": True, "source_ts_proven": True, "book_provenance": "OBSERVED_V3_L5", "depth_levels": [{"bid_p": 40.0, "bid_q": 650, "ask_p": 40.2, "ask_q": 650}]}
+            sq6_same = {"instrument_key": "NSE_FO|PS", "bid": 70.0, "ask": 70.2, "raw_bid": 70.0, "raw_ask": 70.2, "l1_book_timestamp_ms": t_p6, "depth_timestamp_ms": t_p6, "depth_observed_on_tick": True, "l1_observed_on_tick": True, "source_ts_proven": True, "book_provenance": "OBSERVED_V3_L5", "depth_levels": [{"bid_p": 70.0, "bid_q": 650, "ask_p": 70.2, "ask_q": 650}]}
+            l1_p6 = sim6.open_book_a_leg1_hedge(
+                "sig_p6", "V2_BOOK_A_INTRADAY_CREDIT", "2026-11-27", "2026-11-27 11:45:00", t_p6,
+                wc6, sc6, wq6, 25800.0, 13.5, True, book_id_override="V2_BOOK_A_INTRADAY_CREDIT",
+                initial_short_quote_ts_ms=t_p6,
+            )
+            self.assertTrue(l1_p6["ok"])
+            # Same-timestamp quote MUST wait (AWAITING_SUBSEQUENT_SHORT_QUOTE), NOT fill synchronously
+            wait_res = sim6.complete_or_unwind_pending_leg2(
+                l1_p6["package_id"], sq6_same, wq6, t_p6 + 200, "2026-11-27", "2026-11-27 11:45:00",
+                require_subsequent_quote=True,
+            )
+            self.assertTrue(wait_res.get("pending"))
+            self.assertEqual(wait_res.get("reason"), "AWAITING_SUBSEQUENT_SHORT_QUOTE")
+            # Next observed quote (t_p6 + 300 > t_p6) completes Leg-2 cleanly
+            sq6_next = {**sq6_same, "l1_book_timestamp_ms": t_p6 + 300, "depth_timestamp_ms": t_p6 + 300}
+            wq6_next = {**wq6, "l1_book_timestamp_ms": t_p6 + 300, "depth_timestamp_ms": t_p6 + 300}
+            ok_next = sim6.complete_or_unwind_pending_leg2(
+                l1_p6["package_id"], sq6_next, wq6_next, t_p6 + 350, "2026-11-27", "2026-11-27 11:45:00",
+                require_subsequent_quote=True,
+            )
+            self.assertTrue(ok_next["ok"])
+            self.assertEqual(ok_next["state"], "OPEN")
+            self.assertEqual(ok_next["leg2_execution_mode"], "SUBSEQUENT_OBSERVED_QUOTE")
+        finally:
+            store_p6.close()
 
 
 if __name__ == "__main__":

@@ -11,9 +11,24 @@ export const V2_LIVE_API_ROOT = `${resolveApiBase()}/option-sniffer-advance-v2-l
 export const V2_PAPER_API_ROOT = `${resolveApiBase()}/option-sniffer-advance-v2`;
 
 async function jsonPostFetch(root, path, payload = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (root === V2_LIVE_API_ROOT) {
+    headers['X-V2-Operator-Intent'] = 'confirmed';
+    try {
+      const opToken =
+        typeof window !== 'undefined' && window.localStorage
+          ? window.localStorage.getItem('v2_operator_token')
+          : null;
+      if (opToken) {
+        headers['X-V2-Operator-Token'] = opToken;
+      }
+    } catch {
+      // Ignore storage read errors in constrained contexts
+    }
+  }
   const res = await fetch(`${root}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(payload),
   });
   let body = null;
@@ -61,6 +76,10 @@ export async function fetchV2LivePositions() {
 
 export async function fetchV2LiveAuditLog(limit = 50) {
   return liveJsonFetch(`/audit-log?limit=${limit}`);
+}
+
+export async function postV2LiveArmChallenge() {
+  return jsonPostFetch(V2_LIVE_API_ROOT, '/arm-challenge', {});
 }
 
 export async function postV2LiveArm(payload) {

@@ -246,6 +246,7 @@ class V2UnifiedEventEngine:
         self.open_basis_fail_counts: Dict[str, int] = {}
         self.stress_kill_warnings_by_date: Dict[str, str] = {}
         self._last_persisted_opp_sig: Dict[str, Tuple[Any, ...]] = {}
+        self._pending_leg2_meta: Dict[str, Dict[str, Any]] = {}
 
         # Intraday quotes & references (strict NIFTY identity only)
         self.open_basis_ref: Optional[Dict[str, Any]] = None
@@ -798,6 +799,7 @@ class V2UnifiedEventEngine:
         trigger_ts_ms: int,
         allow_post_session: bool = False,
         uncertainty_blocks: Optional[List[str]] = None,
+        is_discrete_bar_close_check: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Finalizes the completed `[bar_open, bar_close)` bar using ONLY ticks belonging to that bar
@@ -1530,55 +1532,77 @@ class V2UnifiedEventEngine:
                         spot_price=ind["spot_close"],
                         vix_val=vix_now,
                         is_bull=sig_a["is_bull"],
+                        initial_short_quote_ts_ms=extract_observed_timestamp_ms(sig_a["short_quote"]),
                     )
                     l2 = None
-                    if l1.get("ok"):
-                        l2 = self.sim.complete_or_unwind_pending_leg2(
-                            package_id=l1["package_id"],
-                            short_quote=sig_a["short_quote"],
-                            wing_quote=sig_a["wing_quote"],
-                            decision_ts_ms=decision_ts_ms + 250,
+                    if l1.get("ok") and not is_discrete_bar_close_check:
+                        self._pending_leg2_meta[l1["package_id"]] = {
+                            "signal_id": sid_a,
+                            "session_date": dt,
+                            "bar_ts": bar_open_ts,
+                            "eval_hhmm": eval_hhmm,
+                            "decision_ts_ms": decision_ts_ms,
+                            "book_id": cfg_a["book_id"],
+                            "candidate_variant": sig_a["candidate_variant"],
+                            "direction": sig_a.get("option_type"),
+                            "wing_contract": sig_a["wing_contract"],
+                            "short_contract": sig_a["short_contract"],
+                            "min_live_credit_pts": None,
+                            "gates": sig_a.get("gates", []),
+                            "ind": ind,
+                            "extra_inputs": {"est_credit_pts": sig_a.get("est_credit_pts"), "skew_ms": sig_a.get("skew_ms")},
+                            "sig_obj": sig_a,
+                        }
+                    else:
+                        if l1.get("ok"):
+                            l2 = self.sim.complete_or_unwind_pending_leg2(
+                                package_id=l1["package_id"],
+                                short_quote=sig_a["short_quote"],
+                                wing_quote=sig_a["wing_quote"],
+                                decision_ts_ms=decision_ts_ms,
+                                session_date=dt,
+                                bar_ts=bar_open_ts,
+                                require_subsequent_quote=False,
+                                leg2_execution_mode="DISCRETE_1M_SINGLE_SNAPSHOT",
+                            )
+                            if isinstance(l2, dict) and l2.get("state") == "OPEN":
+                                if self.on_package_opened_cb:
+                                    self.on_package_opened_cb(
+                                        l1["package_id"], [sig_a["wing_contract"], sig_a["short_contract"]]
+                                    )
+                                self._emit_lifecycle_event(
+                                    {
+                                        "event_type": "PACKAGE_OPENED",
+                                        "run_mode": self.run_mode,
+                                        "package_id": l1["package_id"],
+                                        "signal_id": sid_a,
+                                        "session_date": dt,
+                                        "bar_ts": bar_open_ts,
+                                        "decision_ts_ms": decision_ts_ms,
+                                        "book_id": cfg_a["book_id"],
+                                        "structure": "DEFINED_RISK_SPREAD",
+                                        "package_snapshot": dict(self.sim.open_packages.get(l1["package_id"]) or {}),
+                                        "quote_snapshot": dict(sig_a["short_quote"]),
+                                        "wing_quote_snapshot": dict(sig_a["wing_quote"]),
+                                    }
+                                )
+                        self._record_opportunity_with_dedup(
                             session_date=dt,
                             bar_ts=bar_open_ts,
+                            eval_hhmm=eval_hhmm,
+                            decision_ts_ms=decision_ts_ms,
+                            book_id=cfg_a["book_id"],
+                            candidate_variant=sig_a["candidate_variant"],
+                            direction=sig_a.get("option_type"),
+                            decision_status="ACCEPTED" if (isinstance(l2, dict) and l2.get("state") == "OPEN") else "BLOCKED",
+                            primary_reject_reason=None if (isinstance(l2, dict) and l2.get("state") == "OPEN") else str((l2 or l1).get("reason") or "LEG2_NOT_OPEN"),
+                            gates=sig_a.get("gates", []),
+                            ind=ind,
+                            extra_inputs={"est_credit_pts": sig_a.get("est_credit_pts"), "skew_ms": sig_a.get("skew_ms")},
+                            contract=sig_a.get("short_contract"),
+                            quote=sig_a.get("short_quote"),
+                            sig_obj=sig_a,
                         )
-                        if isinstance(l2, dict) and l2.get("state") == "OPEN":
-                            if self.on_package_opened_cb:
-                                self.on_package_opened_cb(
-                                    l1["package_id"], [sig_a["wing_contract"], sig_a["short_contract"]]
-                                )
-                            self._emit_lifecycle_event(
-                                {
-                                    "event_type": "PACKAGE_OPENED",
-                                    "run_mode": self.run_mode,
-                                    "package_id": l1["package_id"],
-                                    "signal_id": sid_a,
-                                    "session_date": dt,
-                                    "bar_ts": bar_open_ts,
-                                    "decision_ts_ms": decision_ts_ms,
-                                    "book_id": cfg_a["book_id"],
-                                    "structure": "DEFINED_RISK_SPREAD",
-                                    "package_snapshot": dict(self.sim.open_packages.get(l1["package_id"]) or {}),
-                                    "quote_snapshot": dict(sig_a["short_quote"]),
-                                    "wing_quote_snapshot": dict(sig_a["wing_quote"]),
-                                }
-                            )
-                    self._record_opportunity_with_dedup(
-                        session_date=dt,
-                        bar_ts=bar_open_ts,
-                        eval_hhmm=eval_hhmm,
-                        decision_ts_ms=decision_ts_ms,
-                        book_id=cfg_a["book_id"],
-                        candidate_variant=sig_a["candidate_variant"],
-                        direction=sig_a.get("option_type"),
-                        decision_status="ACCEPTED" if (isinstance(l2, dict) and l2.get("state") == "OPEN") else "BLOCKED",
-                        primary_reject_reason=None if (isinstance(l2, dict) and l2.get("state") == "OPEN") else str((l2 or l1).get("reason") or "LEG2_NOT_OPEN"),
-                        gates=sig_a.get("gates", []),
-                        ind=ind,
-                        extra_inputs={"est_credit_pts": sig_a.get("est_credit_pts"), "skew_ms": sig_a.get("skew_ms")},
-                        contract=sig_a.get("short_contract"),
-                        quote=sig_a.get("short_quote"),
-                        sig_obj=sig_a,
-                    )
             else:
                 self._record_opportunity_with_dedup(
                     session_date=dt,
@@ -1718,56 +1742,78 @@ class V2UnifiedEventEngine:
                             is_bull=bool(sig_ai["is_bull"]),
                             book_id_override=book_ai_id,
                             lot_count_override=self.lots_per_book,
+                            initial_short_quote_ts_ms=extract_observed_timestamp_ms(sig_ai["short_quote"]),
                         )
                         l2_ai = None
-                        if l1_ai.get("ok"):
-                            l2_ai = self.sim.complete_or_unwind_pending_leg2(
-                                package_id=l1_ai["package_id"],
-                                short_quote=sig_ai["short_quote"],
-                                wing_quote=sig_ai["wing_quote"],
-                                decision_ts_ms=decision_ts_ms + 250,
+                        if l1_ai.get("ok") and not is_discrete_bar_close_check:
+                            self._pending_leg2_meta[l1_ai["package_id"]] = {
+                                "signal_id": sid_ai,
+                                "session_date": dt,
+                                "bar_ts": bar_open_ts,
+                                "eval_hhmm": eval_hhmm,
+                                "decision_ts_ms": decision_ts_ms,
+                                "book_id": book_ai_id,
+                                "candidate_variant": sig_ai["candidate_variant"],
+                                "direction": sig_ai.get("option_type"),
+                                "wing_contract": sig_ai["wing_contract"],
+                                "short_contract": sig_ai["short_contract"],
+                                "min_live_credit_pts": float(V2_BOOK_A_INTRADAY_CREDIT_SPEC["min_live_credit_pts"]),
+                                "gates": sig_ai.get("gates", []),
+                                "ind": ind,
+                                "extra_inputs": ai_extra,
+                                "sig_obj": sig_ai,
+                            }
+                        else:
+                            if l1_ai.get("ok"):
+                                l2_ai = self.sim.complete_or_unwind_pending_leg2(
+                                    package_id=l1_ai["package_id"],
+                                    short_quote=sig_ai["short_quote"],
+                                    wing_quote=sig_ai["wing_quote"],
+                                    decision_ts_ms=decision_ts_ms,
+                                    session_date=dt,
+                                    bar_ts=bar_open_ts,
+                                    require_subsequent_quote=False,
+                                    leg2_execution_mode="DISCRETE_1M_SINGLE_SNAPSHOT",
+                                )
+                                if isinstance(l2_ai, dict) and l2_ai.get("state") == "OPEN":
+                                    if self.on_package_opened_cb:
+                                        self.on_package_opened_cb(
+                                            l1_ai["package_id"], [sig_ai["wing_contract"], sig_ai["short_contract"]]
+                                        )
+                                    self._emit_lifecycle_event(
+                                        {
+                                            "event_type": "PACKAGE_OPENED",
+                                            "run_mode": self.run_mode,
+                                            "package_id": l1_ai["package_id"],
+                                            "signal_id": sid_ai,
+                                            "session_date": dt,
+                                            "bar_ts": bar_open_ts,
+                                            "decision_ts_ms": decision_ts_ms,
+                                            "book_id": book_ai_id,
+                                            "min_live_credit_pts": float(V2_BOOK_A_INTRADAY_CREDIT_SPEC["min_live_credit_pts"]),
+                                            "structure": "DEFINED_RISK_SPREAD",
+                                            "package_snapshot": dict(self.sim.open_packages.get(l1_ai["package_id"]) or {}),
+                                            "quote_snapshot": dict(sig_ai["short_quote"]),
+                                            "wing_quote_snapshot": dict(sig_ai["wing_quote"]),
+                                        }
+                                    )
+                            self._record_opportunity_with_dedup(
                                 session_date=dt,
                                 bar_ts=bar_open_ts,
+                                eval_hhmm=eval_hhmm,
+                                decision_ts_ms=decision_ts_ms,
+                                book_id=book_ai_id,
+                                candidate_variant=sig_ai["candidate_variant"],
+                                direction=sig_ai.get("option_type"),
+                                decision_status="ACCEPTED" if (isinstance(l2_ai, dict) and l2_ai.get("state") == "OPEN") else "BLOCKED",
+                                primary_reject_reason=None if (isinstance(l2_ai, dict) and l2_ai.get("state") == "OPEN") else str((l2_ai or l1_ai).get("reason") or "LEG2_NOT_OPEN"),
+                                gates=sig_ai.get("gates", []),
+                                ind=ind,
+                                extra_inputs=ai_extra,
+                                contract=sig_ai.get("short_contract"),
+                                quote=sig_ai.get("short_quote"),
+                                sig_obj=sig_ai,
                             )
-                            if isinstance(l2_ai, dict) and l2_ai.get("state") == "OPEN":
-                                if self.on_package_opened_cb:
-                                    self.on_package_opened_cb(
-                                        l1_ai["package_id"], [sig_ai["wing_contract"], sig_ai["short_contract"]]
-                                    )
-                                self._emit_lifecycle_event(
-                                    {
-                                        "event_type": "PACKAGE_OPENED",
-                                        "run_mode": self.run_mode,
-                                        "package_id": l1_ai["package_id"],
-                                        "signal_id": sid_ai,
-                                        "session_date": dt,
-                                        "bar_ts": bar_open_ts,
-                                        "decision_ts_ms": decision_ts_ms,
-                                        "book_id": book_ai_id,
-                                        "min_live_credit_pts": float(V2_BOOK_A_INTRADAY_CREDIT_SPEC["min_live_credit_pts"]),
-                                        "structure": "DEFINED_RISK_SPREAD",
-                                        "package_snapshot": dict(self.sim.open_packages.get(l1_ai["package_id"]) or {}),
-                                        "quote_snapshot": dict(sig_ai["short_quote"]),
-                                        "wing_quote_snapshot": dict(sig_ai["wing_quote"]),
-                                    }
-                                )
-                        self._record_opportunity_with_dedup(
-                            session_date=dt,
-                            bar_ts=bar_open_ts,
-                            eval_hhmm=eval_hhmm,
-                            decision_ts_ms=decision_ts_ms,
-                            book_id=book_ai_id,
-                            candidate_variant=sig_ai["candidate_variant"],
-                            direction=sig_ai.get("option_type"),
-                            decision_status="ACCEPTED" if (isinstance(l2_ai, dict) and l2_ai.get("state") == "OPEN") else "BLOCKED",
-                            primary_reject_reason=None if (isinstance(l2_ai, dict) and l2_ai.get("state") == "OPEN") else str((l2_ai or l1_ai).get("reason") or "LEG2_NOT_OPEN"),
-                            gates=sig_ai.get("gates", []),
-                            ind=ind,
-                            extra_inputs=ai_extra,
-                            contract=sig_ai.get("short_contract"),
-                            quote=sig_ai.get("short_quote"),
-                            sig_obj=sig_ai,
-                        )
                 else:
                     self._record_opportunity_with_dedup(
                         session_date=dt,
@@ -1902,11 +1948,17 @@ class V2UnifiedEventEngine:
         # Synthetic bar-close boundary check event (used at discrete archive timestamps)
         kind_u = str(kind).upper().strip()
         if kind_u == "BAR_CLOSE_CHECK":
+            self._advance_pending_leg2_packages(
+                now_ms=avail_ms,
+                session_date=self.session_date,
+                bar_ts=(self.building_bar or {}).get("bar_open_ts") or self.last_finalized_bar_open_ts,
+            )
             if self.building_bar is not None and avail_ms >= int(self.building_bar["bar_close_ms"]):
                 return self._finalize_building_bar_and_decide(
                     trigger_ts_ms=avail_ms,
                     allow_post_session=False,
                     uncertainty_blocks=uncertainty_blocks,
+                    is_discrete_bar_close_check=True,
                 )
             return None
 
@@ -2053,7 +2105,113 @@ class V2UnifiedEventEngine:
                 if self.building_bar is not None:
                     self.building_bar["max_avail_ts_ms"] = max(self.building_bar["max_avail_ts_ms"], avail_ms)
 
+        self._advance_pending_leg2_packages(
+            now_ms=avail_ms,
+            session_date=session_d,
+            bar_ts=bar_open_ts,
+        )
         return finalized_result
+
+    def _advance_pending_leg2_packages(
+        self,
+        now_ms: int,
+        session_date: Optional[str],
+        bar_ts: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Advances any Book A packages waiting in PENDING_LEG2_SHORT using strictly subsequent quotes."""
+        results: List[Dict[str, Any]] = []
+        pending_pkgs = [
+            p for p in list(self.sim.open_packages.values())
+            if isinstance(p, dict) and p.get("state") == "PENDING_LEG2_SHORT"
+        ]
+        if not pending_pkgs:
+            return results
+        resolved_any = False
+        for pkg in pending_pkgs:
+            pkg_id = str(pkg["package_id"])
+            ls = pkg.get("legs_state") or {}
+            short_ikey = str((ls.get("short_target") or {}).get("instrument_key") or "")
+            wing_ikey = str((ls.get("wing_leg") or {}).get("instrument_key") or "")
+            sq = self.latest_opt_quotes.get(short_ikey)
+            wq = self.latest_opt_quotes.get(wing_ikey)
+            l2 = self.sim.complete_or_unwind_pending_leg2(
+                package_id=pkg_id,
+                short_quote=sq,
+                wing_quote=wq,
+                decision_ts_ms=int(now_ms),
+                session_date=str(session_date or pkg.get("session_date") or ""),
+                bar_ts=str(bar_ts or pkg.get("entry_bar_ts") or ""),
+                require_subsequent_quote=True,
+                leg2_execution_mode="SUBSEQUENT_OBSERVED_QUOTE",
+            )
+            results.append(l2)
+            if l2.get("pending"):
+                continue
+            resolved_any = True
+            meta = self._pending_leg2_meta.pop(pkg_id, None)
+            if l2.get("state") == "OPEN":
+                contracts = []
+                if meta and meta.get("wing_contract") and meta.get("short_contract"):
+                    contracts = [meta["wing_contract"], meta["short_contract"]]
+                if self.on_package_opened_cb and contracts:
+                    self.on_package_opened_cb(pkg_id, contracts)
+                evt: Dict[str, Any] = {
+                    "event_type": "PACKAGE_OPENED",
+                    "run_mode": self.run_mode,
+                    "package_id": pkg_id,
+                    "signal_id": (meta or {}).get("signal_id") or pkg.get("signal_id"),
+                    "session_date": (meta or {}).get("session_date") or pkg.get("session_date"),
+                    "bar_ts": (meta or {}).get("bar_ts") or pkg.get("entry_bar_ts"),
+                    "decision_ts_ms": int(now_ms),
+                    "book_id": (meta or {}).get("book_id") or pkg.get("book_id"),
+                    "structure": "DEFINED_RISK_SPREAD",
+                    "package_snapshot": dict(self.sim.open_packages.get(pkg_id) or {}),
+                    "quote_snapshot": dict(sq or {}),
+                    "wing_quote_snapshot": dict(wq or {}),
+                }
+                if meta and meta.get("min_live_credit_pts") is not None:
+                    evt["min_live_credit_pts"] = float(meta["min_live_credit_pts"])
+                self._emit_lifecycle_event(evt)
+                if meta:
+                    self._record_opportunity_with_dedup(
+                        session_date=meta["session_date"],
+                        bar_ts=meta["bar_ts"],
+                        eval_hhmm=meta["eval_hhmm"],
+                        decision_ts_ms=int(now_ms),
+                        book_id=meta["book_id"],
+                        candidate_variant=meta["candidate_variant"],
+                        direction=meta["direction"],
+                        decision_status="ACCEPTED",
+                        primary_reject_reason=None,
+                        gates=meta["gates"],
+                        ind=meta["ind"],
+                        extra_inputs=meta["extra_inputs"],
+                        contract=meta.get("short_contract"),
+                        quote=sq,
+                        sig_obj=meta.get("sig_obj"),
+                    )
+            else:
+                if meta:
+                    self._record_opportunity_with_dedup(
+                        session_date=meta["session_date"],
+                        bar_ts=meta["bar_ts"],
+                        eval_hhmm=meta["eval_hhmm"],
+                        decision_ts_ms=int(now_ms),
+                        book_id=meta["book_id"],
+                        candidate_variant=meta["candidate_variant"],
+                        direction=meta["direction"],
+                        decision_status="BLOCKED",
+                        primary_reject_reason=str(l2.get("reason") or "LEG2_NOT_OPEN"),
+                        gates=meta["gates"],
+                        ind=meta["ind"],
+                        extra_inputs=meta["extra_inputs"],
+                        contract=meta.get("short_contract"),
+                        quote=sq,
+                        sig_obj=meta.get("sig_obj"),
+                    )
+        if resolved_any and self.persist_bars_and_checkpoints and self.session_date:
+            self._persist_session_snapshot_locked(self.session_date)
+        return results
 
     def backfill_missing_completed_bars(
         self,
@@ -2181,6 +2339,12 @@ class V2UnifiedEventEngine:
                 trigger_ts_ms=max(int(self.building_bar["bar_close_ms"]), int(self.building_bar["max_avail_ts_ms"])),
                 allow_post_session=False,
                 uncertainty_blocks=uncertainty_blocks,
+            )
+        if self.last_usable_event_ts_ms > 0:
+            self._advance_pending_leg2_packages(
+                now_ms=self.last_usable_event_ts_ms,
+                session_date=self.session_date,
+                bar_ts=self.last_finalized_bar_open_ts,
             )
         if self.session_date is not None:
             self._persist_session_snapshot_locked(self.session_date)

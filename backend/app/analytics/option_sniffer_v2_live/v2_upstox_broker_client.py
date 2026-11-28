@@ -418,6 +418,7 @@ class MockV2BrokerClient:
         self.inject_partial_fill_ratio: Dict[str, float] = {}
         self.inject_unwind_fail: bool = False
         self.inject_gtt_place_fail: bool = False
+        self.inject_gtt_cancel_fail: bool = False
         self.inject_gtt_timeout_applied: bool = False
         self.inject_order_delay_sec: float = 0.0
         self.inject_resting_polls_before_fill: Dict[str, int] = {}
@@ -425,6 +426,8 @@ class MockV2BrokerClient:
         self._resting_poll_counters: Dict[str, Tuple[int, float]] = {}
         # Map of gtt_id (or "*") -> fill_price when triggered during cancel
         self.inject_gtt_triggers_during_cancel: Dict[str, float] = {}
+        # Map of gtt_id (or "*") -> (partial_filled_qty, avg_px) for open/working GTT child sell
+        self.inject_working_gtt_child_on_cancel: Dict[str, Tuple[int, float]] = {}
         self.injected_margin_required_inr: Optional[float] = None
 
     def _next_id(self, prefix: str) -> str:
@@ -432,19 +435,30 @@ class MockV2BrokerClient:
         return f"{prefix}_{self._seq:06d}"
 
     def _record_fill_into_positions(
-        self, instrument_key: str, trading_symbol: str, side: str, qty: int, price: float
+        self,
+        instrument_key: str,
+        trading_symbol: str,
+        side: str,
+        qty: int,
+        price: float,
+        *,
+        product: str = "D",
     ) -> None:
         if qty <= 0:
             return
-        cur = self._positions.get(instrument_key) or {
+        prod_u = str(product or "D").upper().strip()
+        pos_k = instrument_key if prod_u == "D" else f"{instrument_key}|{prod_u}"
+        cur = self._positions.get(pos_k) or {
             "instrument_token": instrument_key,
             "trading_symbol": trading_symbol,
+            "product": prod_u,
             "quantity": 0,
             "buy_quantity": 0,
             "sell_quantity": 0,
             "average_price": 0.0,
             "last_price": float(price),
         }
+        cur["product"] = prod_u
         cur_qty = int(cur["quantity"])
         if str(side).upper() == "BUY":
             cur["buy_quantity"] = int(cur["buy_quantity"]) + int(qty)
@@ -456,7 +470,7 @@ class MockV2BrokerClient:
         cur["last_price"] = float(price)
         if cur["average_price"] == 0.0:
             cur["average_price"] = float(price)
-        self._positions[instrument_key] = cur
+        self._positions[pos_k] = cur
 
     def _advance_resting_order_if_ready(self, oid: str) -> None:
         rec = self._orders.get(oid)
@@ -476,7 +490,12 @@ class MockV2BrokerClient:
         rec["status"] = "complete"
         self._order_history.setdefault(oid, []).append(dict(rec))
         self._record_fill_into_positions(
-            rec["instrument_token"], rec["trading_symbol"], rec["transaction_type"], qty, rec["average_price"]
+            rec["instrument_token"],
+            rec["trading_symbol"],
+            rec["transaction_type"],
+            qty,
+            rec["average_price"],
+            product=str(rec.get("product") or "D").upper(),
         )
 
     def get_funds_and_margin(self) -> Dict[str, Any]:
@@ -621,12 +640,14 @@ class MockV2BrokerClient:
                 status = "complete" if filled_qty == qty else ("open" if filled_qty > 0 else "rejected")
                 avg_recorded = round_to_nse_tick(exec_px) if filled_qty > 0 else 0.0
 
+            prod_u = str(body.get("product") or "D").upper().strip()
             order_rec = {
                 "order_id": oid,
                 "instrument_token": ikey,
                 "trading_symbol": tsym,
                 "transaction_type": side,
                 "order_type": order_type,
+                "product": prod_u,
                 "quantity": qty,
                 "filled_quantity": filled_qty,
                 "average_price": avg_recorded,
@@ -637,7 +658,7 @@ class MockV2BrokerClient:
                 "order_timestamp": now_ist_iso()[:19].replace("T", " "),
             }
             if filled_qty > 0:
-                self._record_fill_into_positions(ikey, tsym, side, filled_qty, avg_recorded)
+                self._record_fill_into_positions(ikey, tsym, side, filled_qty, avg_recorded, product=prod_u)
             self._orders[oid] = order_rec
             self._order_history[oid] = [dict(order_rec)]
 
@@ -690,11 +711,54 @@ class MockV2BrokerClient:
     def cancel_gtt_order(self, gtt_id: str, *, is_emergency: bool = True) -> Dict[str, Any]:
         with self._lock:
             self.call_log.append({"method": "cancel_gtt_order", "gtt_order_id": gtt_id})
+            if self.inject_gtt_cancel_fail:
+                raise BrokerTimeoutAmbiguousError(f"Injected GTT cancel failure for {gtt_id}")
             rec = self._gtts.get(gtt_id)
+            work_spec = (
+                self.inject_working_gtt_child_on_cancel.get(gtt_id)
+                or self.inject_working_gtt_child_on_cancel.get("*")
+            )
+            if rec and work_spec is not None:
+                part_qty = int(work_spec[0])
+                fill_px = round_to_nse_tick(float(work_spec[1])) if part_qty > 0 else 0.0
+                ikey = str(rec["instrument_token"])
+                prod_u = str(rec.get("product") or "D").upper().strip()
+                qty = int(rec["quantity"])
+                tsym = str((self._positions.get(ikey) or {}).get("trading_symbol") or ikey)
+                oid = self._next_id("ORD_GTT")
+                ord_rec = {
+                    "order_id": oid,
+                    "instrument_token": ikey,
+                    "trading_symbol": tsym,
+                    "transaction_type": str(rec.get("transaction_type", "SELL")).upper(),
+                    "order_type": "MARKET",
+                    "product": prod_u,
+                    "quantity": qty,
+                    "filled_quantity": part_qty,
+                    "average_price": fill_px,
+                    "price": 0.0,
+                    "status": "open",
+                    "tag": "",
+                    "order_timestamp": now_ist_iso()[:19].replace("T", " "),
+                }
+                self._orders[oid] = ord_rec
+                self._order_history[oid] = [dict(ord_rec)]
+                if part_qty > 0:
+                    self._record_fill_into_positions(
+                        ikey,
+                        tsym,
+                        str(rec.get("transaction_type", "SELL")).upper(),
+                        part_qty,
+                        fill_px,
+                        product=prod_u,
+                    )
+                rec["status"] = "TRIGGERED"
+                return {"status": "success", "data": {"gtt_order_ids": [gtt_id], "message": "Cancel ack (working child)"}}
             trig_px = self.inject_gtt_triggers_during_cancel.get(gtt_id) or self.inject_gtt_triggers_during_cancel.get("*")
             if rec and trig_px is not None:
                 # Real Upstox V3 GTT child order: NO parent_gtt_id and NO custom "GTT-" tag!
                 ikey = str(rec["instrument_token"])
+                prod_u = str(rec.get("product") or "D").upper().strip()
                 qty = int(rec["quantity"])
                 tsym = str((self._positions.get(ikey) or {}).get("trading_symbol") or ikey)
                 fill_px = round_to_nse_tick(float(trig_px))
@@ -705,6 +769,7 @@ class MockV2BrokerClient:
                     "trading_symbol": tsym,
                     "transaction_type": str(rec.get("transaction_type", "SELL")).upper(),
                     "order_type": "MARKET",
+                    "product": prod_u,
                     "quantity": qty,
                     "filled_quantity": qty,
                     "average_price": fill_px,
@@ -716,7 +781,7 @@ class MockV2BrokerClient:
                 self._orders[oid] = ord_rec
                 self._order_history[oid] = [dict(ord_rec)]
                 self._record_fill_into_positions(
-                    ikey, tsym, str(rec.get("transaction_type", "SELL")).upper(), qty, fill_px
+                    ikey, tsym, str(rec.get("transaction_type", "SELL")).upper(), qty, fill_px, product=prod_u
                 )
                 rec["status"] = "TRIGGERED"
                 return {"status": "success", "data": {"gtt_order_ids": [gtt_id], "message": "Cancel ack (race)"}}

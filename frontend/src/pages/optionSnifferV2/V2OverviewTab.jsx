@@ -191,6 +191,9 @@ export default function V2OverviewTab({ overview, liveStatus, fundsPreview }) {
               Alloc ({lots}L): &#8377;{(75000 * lots).toLocaleString('en-IN')} min
             </span>
           </div>
+          <div className="text-[11px] text-slate-500">
+            Stop trigger budget &#8377;{(1950 * lots).toLocaleString('en-IN')} (1.8x target) &bull; 100pt Wing Structural Cap &#8377;{(4875 * lots).toLocaleString('en-IN')} (actual gap/fill loss can exceed trigger budget).
+          </div>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
@@ -236,6 +239,9 @@ export default function V2OverviewTab({ overview, liveStatus, fundsPreview }) {
             <span className="text-emerald-300/90 font-mono">
               Alloc ({lots}L): &#8377;{(18500 * lots).toLocaleString('en-IN')} cap / &#8377;{(25000 * lots).toLocaleString('en-IN')} min
             </span>
+          </div>
+          <div className="text-[11px] text-slate-500">
+            Outlay ceiling &#8377;{(18500 * lots).toLocaleString('en-IN')} at live limit &bull; Actual-fill GTT stop trigger budget &#8377;{(1800 * lots).toLocaleString('en-IN')} (gap loss bounded by premium paid).
           </div>
         </div>
       </div>

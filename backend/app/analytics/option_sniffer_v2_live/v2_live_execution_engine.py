@@ -20,13 +20,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+import json
 import logging
 import os
 import queue
 import secrets
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.analytics.common.options_accounting import (
     OptionLeg,
@@ -150,6 +151,11 @@ class V2LiveExecutionEngine:
         order_poll_interval_sec: float = 0.02,
         attach_paper_listener: bool = False,
         async_observer_dispatch: Optional[bool] = None,
+        short_not_found_min_checks: int = 2,
+        short_not_found_grace_ms: Optional[int] = None,
+        enforce_wall_clock_guards: Optional[bool] = None,
+        max_observer_queue_age_ms: int = 5000,
+        max_signal_decision_age_ms: int = 10000,
     ):
         self._lock = threading.RLock()
         self.store = V2LiveLedgerStore(db_path)
@@ -157,6 +163,19 @@ class V2LiveExecutionEngine:
         self._has_custom_broker = broker_client is not None
         self.order_poll_attempts = max(1, int(order_poll_attempts))
         self.order_poll_interval_sec = max(0.0, float(order_poll_interval_sec))
+        self.short_not_found_min_checks = max(1, int(short_not_found_min_checks))
+        self.short_not_found_grace_ms = (
+            int(short_not_found_grace_ms)
+            if short_not_found_grace_ms is not None
+            else (0 if self._has_custom_broker else 5000)
+        )
+        self._enforce_wall_clock_guards: bool = (
+            bool(enforce_wall_clock_guards)
+            if enforce_wall_clock_guards is not None
+            else (not self._has_custom_broker)
+        )
+        self.max_observer_queue_age_ms = max(500, int(max_observer_queue_age_ms))
+        self.max_signal_decision_age_ms = max(1000, int(max_signal_decision_age_ms))
         self._paper_svc_ref: Any = None
 
         # Real HTTP execution uses non-blocking observer worker so broker HTTP never stalls OSV2-QueueWorker
@@ -165,7 +184,12 @@ class V2LiveExecutionEngine:
             if async_observer_dispatch is not None
             else (not self._has_custom_broker)
         )
+        self._priority_exit_queue: queue.Queue[Dict[str, Any]] = queue.Queue()
         self._observer_queue: queue.Queue[Optional[Dict[str, Any]]] = queue.Queue(maxsize=256)
+        self._heartbeat_lock = threading.Lock()
+        self._latest_heartbeat: Optional[Dict[str, Any]] = None
+        self._hb_inflight: bool = False
+        self._observer_wakeup = threading.Event()
         self._observer_stop = threading.Event()
         self._observer_thread: Optional[threading.Thread] = None
         # Dedicated lock so non-blocking event enqueue NEVER stalls on self._lock held during HTTP I/O
@@ -173,6 +197,7 @@ class V2LiveExecutionEngine:
         self._cached_available_margin_inr: Optional[float] = None
         self._cached_margin_as_of_iso: Optional[str] = None
         self._cached_margin_epoch: float = 0.0
+        self._last_position_collisions: List[Dict[str, Any]] = []
 
         env_pin = (os.environ.get("OSV2_LIVE_PIN") or "").strip()
         if initial_pin is not None:
@@ -237,42 +262,104 @@ class V2LiveExecutionEngine:
                 )
                 self._observer_thread.start()
 
+    def _drain_priority_exits_in_worker(self) -> bool:
+        did_work = False
+        while True:
+            try:
+                ex_ev = self._priority_exit_queue.get_nowait()
+            except queue.Empty:
+                break
+            did_work = True
+            try:
+                self._process_paper_lifecycle_event_sync(ex_ev)
+            except Exception as exc:
+                logger.error("Priority live exit event error: %s", exc)
+            finally:
+                self._priority_exit_queue.task_done()
+        return did_work
+
     def _observer_worker_loop(self) -> None:
         last_reconcile_mono = time.monotonic()
+        last_guardian_mono = time.monotonic()
         while not self._observer_stop.is_set():
+            did_work = self._drain_priority_exits_in_worker()
+
             try:
-                ev = self._observer_queue.get(timeout=0.25)
+                ev = self._observer_queue.get_nowait()
             except queue.Empty:
-                if (
-                    not self._has_custom_broker
-                    and (time.monotonic() - last_reconcile_mono) >= 30.0
-                ):
-                    last_reconcile_mono = time.monotonic()
-                    try:
-                        if self.store.db_exists() and self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES):
-                            self.reconcile_with_broker(actor="AUTO_PERIODIC_RECONCILE")
-                    except Exception as exc:
-                        logger.debug("Periodic V2 live broker reconcile skipped: %s", exc)
+                ev = None
+            if ev is not None:
+                did_work = True
+                try:
+                    self._process_paper_lifecycle_event_sync(ev)
+                except Exception as exc:
+                    logger.error("Async live observer event error: %s", exc)
+                finally:
+                    self._observer_queue.task_done()
+                self._drain_priority_exits_in_worker()
                 continue
-            try:
-                if ev is None:
-                    return
-                self._process_paper_lifecycle_event_sync(ev)
-            except Exception as exc:
-                logger.error("Async live observer event error: %s", exc)
-            finally:
-                self._observer_queue.task_done()
+
+            hb_ev: Optional[Dict[str, Any]] = None
+            with self._heartbeat_lock:
+                if self._latest_heartbeat is not None:
+                    hb_ev = self._latest_heartbeat
+                    self._latest_heartbeat = None
+                    self._hb_inflight = True
+            if hb_ev is not None:
+                did_work = True
+                try:
+                    self._process_paper_lifecycle_event_sync(hb_ev)
+                except Exception as exc:
+                    logger.error("Async live heartbeat event error: %s", exc)
+                finally:
+                    with self._heartbeat_lock:
+                        self._hb_inflight = False
+                self._drain_priority_exits_in_worker()
+                continue
+
+            now_mono = time.monotonic()
+            if not self._has_custom_broker and (now_mono - last_guardian_mono) >= 5.0:
+                last_guardian_mono = now_mono
+                try:
+                    if self.store.db_exists() and self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES):
+                        self.evaluate_independent_live_exits()
+                except Exception as exc:
+                    logger.debug("Independent live exit guardian check skipped: %s", exc)
+
+            if not self._has_custom_broker and (now_mono - last_reconcile_mono) >= 30.0:
+                last_reconcile_mono = now_mono
+                try:
+                    if self.store.db_exists() and self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES):
+                        self.reconcile_with_broker(actor="AUTO_PERIODIC_RECONCILE")
+                except Exception as exc:
+                    logger.debug("Periodic V2 live broker reconcile skipped: %s", exc)
+
+            if not did_work:
+                self._observer_wakeup.wait(timeout=0.20)
+                self._observer_wakeup.clear()
 
     def flush_observer_events(self, timeout_sec: float = 5.0) -> bool:
-        """Waits cleanly for queued async observer events (used in tests/shutdown)."""
+        """Waits cleanly for queued async observer, priority-exit, and heartbeat events."""
         if not self._async_observer_dispatch:
             return True
         deadline = time.monotonic() + float(timeout_sec)
         while time.monotonic() < deadline:
-            if self._observer_queue.unfinished_tasks == 0:
+            with self._heartbeat_lock:
+                hb_busy = (self._latest_heartbeat is not None) or self._hb_inflight
+            if (
+                self._priority_exit_queue.unfinished_tasks == 0
+                and self._observer_queue.unfinished_tasks == 0
+                and not hb_busy
+            ):
                 return True
             time.sleep(0.01)
-        return self._observer_queue.unfinished_tasks == 0
+        with self._heartbeat_lock:
+            hb_busy = (self._latest_heartbeat is not None) or self._hb_inflight
+        return (
+            self._priority_exit_queue.unfinished_tasks == 0
+            and self._observer_queue.unfinished_tasks == 0
+            and not hb_busy
+        )
 
     def attach_to_paper_service(self, svc: Any = None) -> None:
         """Attaches passive lifecycle listener to OptionSnifferV2Service without mutating cold DBs."""
@@ -300,10 +387,7 @@ class V2LiveExecutionEngine:
         self._paper_svc_ref = None
         if self._observer_thread is not None and self._observer_thread.is_alive():
             self._observer_stop.set()
-            try:
-                self._observer_queue.put_nowait(None)
-            except queue.Full:
-                pass
+            self._observer_wakeup.set()
             self._observer_thread.join(timeout=1.5)
         self._observer_thread = None
 
@@ -390,6 +474,8 @@ class V2LiveExecutionEngine:
                     broker_pos_px = {}
                     try:
                         for bp in self.broker.get_positions():
+                            if str(bp.get("product") or "D").upper() != "D":
+                                continue
                             lp = float(bp.get("last_price") or 0.0)
                             if lp > 0.0:
                                 broker_pos_px[str(bp.get("instrument_token") or "")] = lp
@@ -424,8 +510,97 @@ class V2LiveExecutionEngine:
                     total_mtm += (s_ent - s_mark) * s_qty
         return round(total_mtm, 2), has_unpriced
 
-    def get_status(self, *, include_paper_baseline: bool = True) -> Dict[str, Any]:
-        """Cold-start safe read-only status (zero DB creation; shows rotating UI confirmation code)."""
+    @staticmethod
+    def _index_broker_positions(
+        broker_positions: List[Dict[str, Any]],
+    ) -> Tuple[Dict[str, int], Dict[str, List[Dict[str, Any]]]]:
+        """
+        Indexes broker net quantities strictly by `(instrument_token, product="D")`.
+        Tracks non-"D" product positions separately so V2 never conflates Delivery and Intraday exposure.
+        """
+        d_pos: Dict[str, int] = {}
+        non_d_by_key: Dict[str, List[Dict[str, Any]]] = {}
+        for p in broker_positions or []:
+            ikey = str(p.get("instrument_token") or "")
+            if not ikey:
+                continue
+            prod = str(p.get("product") or "D").upper().strip()
+            qty = int(p.get("quantity") or 0)
+            if prod == "D":
+                d_pos[ikey] = d_pos.get(ikey, 0) + qty
+            elif qty != 0:
+                non_d_by_key.setdefault(ikey, []).append({"product": prod, "quantity": qty})
+        return d_pos, non_d_by_key
+
+    @staticmethod
+    def _detect_d_position_collisions(
+        d_pos_by_key: Dict[str, int],
+        non_d_by_key: Dict[str, List[Dict[str, Any]]],
+        open_pkgs: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Computes transparent instrument+product collision markers across active V2 packages."""
+        expected_v2_d: Dict[str, int] = {}
+        for pkg in open_pkgs or []:
+            legs = pkg.get("legs") or {}
+            bl = legs.get("buy_leg") or {}
+            if bl.get("instrument_key") and bl.get("exit_price") is None:
+                rem_b = max(0, int(bl.get("qty") or 0) - int(bl.get("exited_qty") or 0))
+                if rem_b > 0:
+                    k = str(bl["instrument_key"])
+                    expected_v2_d[k] = expected_v2_d.get(k, 0) + rem_b
+            sl = legs.get("short_leg") or {}
+            if sl.get("instrument_key") and sl.get("exit_price") is None:
+                rem_s = max(0, int(sl.get("qty") or 0) - int(sl.get("exited_qty") or 0))
+                if rem_s > 0:
+                    k = str(sl["instrument_key"])
+                    expected_v2_d[k] = expected_v2_d.get(k, 0) - rem_s
+        collisions: List[Dict[str, Any]] = []
+        for ikey, exp_q in expected_v2_d.items():
+            brok_d_q = int(d_pos_by_key.get(ikey, 0))
+            if brok_d_q != exp_q:
+                collisions.append(
+                    {
+                        "instrument_key": ikey,
+                        "product": "D",
+                        "expected_v2_qty": exp_q,
+                        "broker_qty": brok_d_q,
+                        "collision_type": "SHARED_PRODUCT_D_POSITION_DIFF",
+                    }
+                )
+            if ikey in non_d_by_key:
+                collisions.append(
+                    {
+                        "instrument_key": ikey,
+                        "product": "NON_D",
+                        "expected_v2_qty": exp_q,
+                        "other_products": list(non_d_by_key[ikey]),
+                        "collision_type": "OTHER_PRODUCT_POSITION_PRESENT",
+                    }
+                )
+        return collisions
+
+    def get_operator_arm_challenge(self) -> Dict[str, Any]:
+        """Returns session arm challenge strictly behind authenticated operator POST routes."""
+        hide_challenge = os.environ.get("OSV2_HIDE_UI_PIN_CHALLENGE", "").strip().lower() in ("1", "true", "yes")
+        if hide_challenge:
+            return {
+                "ok": True,
+                "pin_delivery": "OUT_OF_BAND_TERMINAL_ONLY",
+                "challenge_pin": None,
+            }
+        return {
+            "ok": True,
+            "pin_delivery": "OPERATOR_CHALLENGE_ONLY",
+            "challenge_pin": self._session_pin,
+        }
+
+    def get_status(
+        self,
+        *,
+        include_paper_baseline: bool = True,
+        include_pin: bool = True,
+    ) -> Dict[str, Any]:
+        """Cold-start safe read-only status (HTTP route omits current_pin)."""
         arm_state = self.store.get_arm_state()
         faults = self.store.count_unresolved_faults()
         open_pkgs = self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES)
@@ -451,7 +626,7 @@ class V2LiveExecutionEngine:
         else:
             cur_scope, base_floor = "PAPER_ONLY", 0.0
         cur_floor = float(base_floor * max_lots_arm) if base_floor > 0.0 else 0.0
-        return {
+        res = {
             "service": "OPTION_SNIFFER_ADVANCE_V2_LIVE",
             "isolated_db_path": self.store.db_path,
             "db_exists": self.store.db_exists(),
@@ -465,12 +640,14 @@ class V2LiveExecutionEngine:
             "available_margin_inr": self._cached_available_margin_inr,
             "available_margin_as_of_iso": self._cached_margin_as_of_iso,
             "pin_required": True,
-            "current_pin": self._session_pin,
+            "operator_auth_required": True,
+            "pin_delivery": "OPERATOR_CHALLENGE_ONLY",
             "paper_observer_attached": self._paper_svc_ref is not None,
             "arm_state": arm_state,
             "open_packages": open_pkgs,
             "open_package_count": len(open_pkgs),
             "closed_package_count": len(closed_pkgs),
+            "position_collisions": list(self._last_position_collisions),
             "daily_realized_net_inr": daily_realized,
             "daily_unrealized_mtm_inr": daily_unrealized,
             "daily_unrealized_mtm_unpriced": has_unpriced,
@@ -480,6 +657,9 @@ class V2LiveExecutionEngine:
             "upstox_verified_api_facts": UPSTOX_VERIFIED_API_FACTS,
             "disclaimer": "An AI backtest or paper baseline does not prove future income. Broker orders execute only when armed by human PIN.",
         }
+        if include_pin:
+            res["current_pin"] = self._session_pin
+        return res
 
     def get_funds_preview(self, *, force_refresh: bool = False) -> Dict[str, Any]:
         """
@@ -785,7 +965,7 @@ class V2LiveExecutionEngine:
             return 0, 0.0
         return tot_qty, round_to_nse_tick(tot_notional / tot_qty)
 
-    def _find_unclaimed_gtt_child_sell(
+    def _inspect_gtt_child_candidates(
         self,
         *,
         live_package_id: str,
@@ -793,10 +973,14 @@ class V2LiveExecutionEngine:
         entry_ts_ms: int,
         broker_orders: List[Dict[str, Any]],
         gtt_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+        gtt_registered_qty: Optional[int] = None,
+        gtt_was_scheduled: bool = False,
+        pre_cancel_order_ids: Optional[Set[str]] = None,
+    ) -> Dict[str, Any]:
         """
-        Matches a triggered Upstox V3 GTT child SELL strictly against untagged / GTT-tagged
-        post-entry completed orders, excluding ALL foreign V1 (`INTENT_...`) and claimed V2 orders.
+        Inspects unclaimed post-entry SELL orders on `(ikey, product="D")` excluding terminal
+        0-fill rejects/cancels. Distinguishes confirmed GTT child orders (including still-open
+        or partial fills) from ambiguous untagged manual SELL collisions.
         """
         claimed_ids = {
             str(it.get("broker_order_id") or "")
@@ -806,40 +990,170 @@ class V2LiveExecutionEngine:
         for p in self.store.list_packages(limit=500):
             if p["live_package_id"] == live_package_id:
                 continue
-            cid = str(((p.get("legs") or {}).get("buy_leg") or {}).get("gtt_child_order_id") or "")
+            bl = (p.get("legs") or {}).get("buy_leg") or {}
+            cid = str(bl.get("gtt_child_order_id") or ((bl.get("protective_gtt") or {}).get("child_order_id")) or "")
             if cid:
                 claimed_ids.add(cid)
 
-        candidates: List[Tuple[str, str, Dict[str, Any]]] = []
-        for bo in broker_orders:
+        gtt_children: List[Tuple[str, str, Dict[str, Any]]] = []
+        ambiguous_manual: List[Dict[str, Any]] = []
+        pre_ids = pre_cancel_order_ids or set()
+
+        for bo in broker_orders or []:
             if str(bo.get("instrument_token") or "") != ikey:
+                continue
+            if str(bo.get("product") or "D").upper().strip() != "D":
                 continue
             if str(bo.get("transaction_type") or "").upper() != "SELL":
                 continue
-            if str(bo.get("status") or "").lower() != "complete":
+            st_l = str(bo.get("status") or "").lower().strip()
+            fqty = int(bo.get("filled_quantity") or 0)
+            if st_l == "rejected" or (st_l in ("cancelled", "canceled") and fqty <= 0):
                 continue
             oid_s = str(bo.get("order_id") or "")
             if oid_s and oid_s in claimed_ids:
                 continue
-            tag_s = str(bo.get("tag") or "").strip()
-            parent_gtt = str(bo.get("parent_gtt_id") or "").strip()
-            # Real Upstox V3 GTT child orders carry blank tag (never foreign V1/OS tags!)
-            is_gtt_shape = (
-                tag_s == ""
-                or tag_s.startswith("GTT-")
-                or (gtt_id and parent_gtt == str(gtt_id))
-            )
-            if not is_gtt_shape:
-                continue
             ord_ms = _parse_broker_order_ts_ms(bo.get("order_timestamp"))
             if ord_ms is not None and entry_ts_ms > 0 and ord_ms < int(entry_ts_ms) - 1000:
                 continue
-            candidates.append((str(bo.get("order_timestamp") or ""), oid_s, bo))
 
-        if not candidates:
-            return None
-        candidates.sort(key=lambda x: (x[0], x[1]))
-        return candidates[-1][2]
+            tag_s = str(bo.get("tag") or "").strip()
+            parent_gtt = str(bo.get("parent_gtt_id") or "").strip()
+            if gtt_id and parent_gtt == str(gtt_id):
+                gtt_children.append((str(bo.get("order_timestamp") or ""), oid_s, bo))
+                continue
+            if tag_s.startswith("GTT-"):
+                gtt_children.append((str(bo.get("order_timestamp") or ""), oid_s, bo))
+                continue
+            if tag_s == "":
+                otype = str(bo.get("order_type") or "").upper().strip()
+                oqty = int(bo.get("quantity") or 0)
+                existed_while_scheduled = bool(gtt_was_scheduled and oid_s and oid_s in pre_ids)
+                qty_matches = gtt_registered_qty is None or gtt_registered_qty <= 0 or oqty == int(gtt_registered_qty)
+                if gtt_id and otype == "MARKET" and qty_matches and not existed_while_scheduled:
+                    gtt_children.append((str(bo.get("order_timestamp") or ""), oid_s, bo))
+                else:
+                    ambiguous_manual.append(bo)
+
+        gtt_children.sort(key=lambda x: (x[0], x[1]))
+        return {
+            "gtt_child": gtt_children[-1][2] if gtt_children else None,
+            "all_gtt_children": [x[2] for x in gtt_children],
+            "ambiguous_manual": ambiguous_manual,
+        }
+
+    def _find_unclaimed_gtt_child_sell(
+        self,
+        *,
+        live_package_id: str,
+        ikey: str,
+        entry_ts_ms: int,
+        broker_orders: List[Dict[str, Any]],
+        gtt_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        res = self._inspect_gtt_child_candidates(
+            live_package_id=live_package_id,
+            ikey=ikey,
+            entry_ts_ms=entry_ts_ms,
+            broker_orders=broker_orders,
+            gtt_id=gtt_id,
+        )
+        return res.get("gtt_child")
+
+    @staticmethod
+    def _build_protective_gtt_record(
+        gtt_id: Optional[str],
+        registered_qty: int,
+        trigger_price: float,
+        *,
+        state: str = "SCHEDULED",
+        child_order_id: Optional[str] = None,
+        child_order_status: Optional[str] = None,
+        child_filled_qty: int = 0,
+        child_avg_price: float = 0.0,
+        ownership_status: str = "ACTIVE_RULE",
+    ) -> Dict[str, Any]:
+        return {
+            "gtt_id": gtt_id,
+            "registered_qty": int(registered_qty),
+            "trigger_price": float(trigger_price),
+            "state": state,
+            "child_order_id": child_order_id,
+            "child_order_status": child_order_status,
+            "child_filled_qty": int(child_filled_qty),
+            "child_avg_price": float(child_avg_price),
+            "ownership_status": ownership_status,
+        }
+
+    def _record_confirmed_gtt_child_intent(
+        self,
+        *,
+        pkg: Dict[str, Any],
+        gtt_id: Optional[str],
+        child_ord: Dict[str, Any],
+        registered_qty: int,
+    ) -> int:
+        buy_leg = pkg["legs"]["buy_leg"]
+        child_oid = str(child_ord.get("order_id") or "").strip()
+        fqty = int(child_ord.get("filled_quantity") or 0)
+        fpx = round_to_nse_tick(
+            float(
+                child_ord.get("average_price")
+                or buy_leg.get("stop_trigger_price")
+                or buy_leg.get("entry_price")
+                or 0.0
+            )
+        )
+        action_key = f"EXIT_GTT_CHILD_{child_oid or 'UNID'}"
+        intent_id = make_deterministic_intent_id(
+            pkg["signal_id"], pkg["book_id"], "BUY_WING", action_key, pkg["session_date"]
+        )
+        now_ms = _now_ms()
+        tag = sanitize_upstox_tag(f"V2G-{pkg['live_package_id'][-10:]}")
+        req_q = max(1, int(registered_qty or buy_leg.get("qty") or fqty or 1))
+        st_name = "FILLED" if fqty >= req_q else ("PARTIAL_FILL" if fqty > 0 else "CANCELLED")
+        self.store.create_or_get_intent(
+            {
+                "intent_id": intent_id,
+                "signal_id": pkg["signal_id"],
+                "live_package_id": pkg["live_package_id"],
+                "book_id": pkg["book_id"],
+                "leg_role": "BUY_WING",
+                "action": action_key,
+                "session_date": pkg["session_date"],
+                "instrument_key": buy_leg["instrument_key"],
+                "trading_symbol": buy_leg["trading_symbol"],
+                "side": "SELL",
+                "order_type": str(child_ord.get("order_type") or "MARKET"),
+                "product": "D",
+                "requested_qty": req_q,
+                "filled_qty": fqty,
+                "avg_fill_price": fpx if fqty > 0 else None,
+                "limit_price": None,
+                "trigger_price": buy_leg.get("stop_trigger_price"),
+                "market_protection": None,
+                "tag": tag,
+                "broker_order_id": child_oid or None,
+                "broker_gtt_id": str(gtt_id or "") or None,
+                "state": st_name,
+                "error_detail": None,
+                "created_ts_ms": now_ms,
+                "updated_ts_ms": now_ms,
+                "raw_response": child_ord,
+            }
+        )
+        if fqty > 0:
+            self.store.update_intent(
+                intent_id,
+                state=st_name,
+                updated_ts_ms=now_ms,
+                filled_qty=fqty,
+                avg_fill_price=fpx,
+                broker_order_id=child_oid or None,
+                broker_gtt_id=str(gtt_id or "") or None,
+                raw_response=child_ord,
+            )
+        return fqty
 
     def _fetch_order_snapshot(self, oid: str, tag: str) -> Optional[Dict[str, Any]]:
         if oid and hasattr(self.broker, "get_order_history"):
@@ -1088,6 +1402,32 @@ class V2LiveExecutionEngine:
         leg_role: str = "BUY_WING_UNWIND",
     ) -> Dict[str, Any]:
         buy_leg = pkg["legs"]["buy_leg"]
+        if leg_role == "BUY_WING_EXCESS_UNWIND":
+            try:
+                d_pos_map, _ = self._index_broker_positions(self.broker.get_positions())
+                wing_d_pos = int(d_pos_map.get(str(buy_leg["instrument_key"]), 0))
+                short_leg = pkg["legs"].get("short_leg") or {}
+                short_open_q = max(
+                    0, int(short_leg.get("qty") or 0) - int(short_leg.get("exited_qty") or 0)
+                )
+                max_safe_unwind = max(0, wing_d_pos - short_open_q)
+                if max_safe_unwind <= 0 or int(qty_to_unwind) > max_safe_unwind:
+                    return {
+                        "ok": False,
+                        "status": "HEDGE_FLOOR_GUARD_BLOCKED",
+                        "filled_qty": 0,
+                        "avg_price": float(unwind_price),
+                        "error": f"Hedge floor blocked unwinding {qty_to_unwind}: D_wing={wing_d_pos}, open_short={short_open_q}",
+                    }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "status": "HEDGE_FLOOR_POS_CHECK_FAILED",
+                    "filled_qty": 0,
+                    "avg_price": float(unwind_price),
+                    "error": f"Position check failed before excess unwind: {exc}",
+                }
+
         prior_role_intents = [
             it
             for it in self.store.list_intents(live_package_id=pkg["live_package_id"], limit=250)
@@ -1101,6 +1441,8 @@ class V2LiveExecutionEngine:
             return {
                 "ok": False,
                 "status": "UNKNOWN_AMBIGUOUS",
+                "filled_qty": int(amb_prior.get("filled_qty") or 0),
+                "avg_price": float(amb_prior.get("avg_fill_price") or unwind_price),
                 "error": "PRIOR_UNWIND_AMBIGUOUS",
                 "intent": amb_prior,
             }
@@ -1123,14 +1465,64 @@ class V2LiveExecutionEngine:
             is_emergency=True,
         )
         intent = res["intent"]
-        if res["status"] == "FILLED" and int(intent.get("filled_qty") or 0) == int(qty_to_unwind):
+        f_q = int(intent.get("filled_qty") or 0)
+        f_px = float(intent.get("avg_fill_price") or unwind_price)
+        if res["status"] == "FILLED" and f_q == int(qty_to_unwind):
             return {
                 "ok": True,
-                "filled_qty": int(intent["filled_qty"]),
-                "avg_price": float(intent["avg_fill_price"] or unwind_price),
+                "filled_qty": f_q,
+                "avg_price": f_px,
                 "intent": intent,
             }
-        return {"ok": False, "status": res["status"], "error": res.get("error") or intent.get("error_detail"), "intent": intent}
+        return {
+            "ok": False,
+            "status": res["status"],
+            "filled_qty": f_q,
+            "avg_price": f_px,
+            "error": res.get("error") or intent.get("error_detail"),
+            "intent": intent,
+        }
+
+    def _sync_excess_buy_unwind_from_intents(self, pkg: Dict[str, Any]) -> int:
+        """
+        Idempotently reconciles cumulative `BUY_WING_EXCESS_UNWIND` fills from durable intent
+        records onto `pkg["legs"]["buy_leg"]["qty"]` and `excess_unwound_buy_leg`.
+        Never double-subtracts on repeated reconcile cycles.
+        """
+        buy_leg = pkg["legs"]["buy_leg"]
+        prev_ex = pkg["legs"].get("excess_unwound_buy_leg") or {}
+        if buy_leg.get("initial_filled_qty") is not None:
+            initial_q = int(buy_leg["initial_filled_qty"])
+        else:
+            initial_q = int(buy_leg.get("qty") or 0) + int(prev_ex.get("qty") or 0)
+            buy_leg["initial_filled_qty"] = initial_q
+
+        tot_q = 0
+        tot_notional = 0.0
+        for it in self.store.list_intents(live_package_id=pkg["live_package_id"], limit=250):
+            if it["leg_role"] == "BUY_WING_EXCESS_UNWIND" and int(it.get("filled_qty") or 0) > 0:
+                fq = int(it["filled_qty"])
+                fp = float(it.get("avg_fill_price") or buy_leg.get("entry_price") or 0.0)
+                tot_q += fq
+                tot_notional += fq * fp
+
+        if tot_q <= 0:
+            return 0
+        lot_size = int(buy_leg.get("lot_size") or 65)
+        entry_px = float(buy_leg.get("entry_price") or 0.0)
+        vwap_exit = round_to_nse_tick(tot_notional / tot_q) if tot_notional > 0 else entry_px
+        pkg["legs"]["excess_unwound_buy_leg"] = {
+            "instrument_key": buy_leg["instrument_key"],
+            "trading_symbol": buy_leg["trading_symbol"],
+            "option_type": buy_leg.get("option_type", "CE"),
+            "strike": float(buy_leg.get("strike") or 0.0),
+            "lot_size": lot_size,
+            "qty": tot_q,
+            "entry_price": entry_px,
+            "exit_price": vwap_exit,
+        }
+        pkg["legs"]["buy_leg"]["qty"] = max(0, initial_q - tot_q)
+        return tot_q
 
     def _place_or_recover_protective_gtt(
         self,
@@ -1140,20 +1532,29 @@ class V2LiveExecutionEngine:
     ) -> Dict[str, Any]:
         """
         Places mandatory Upstox V3 SINGLE ENTRY GTT protection for a SINGLE_LONG entry.
-        If stop_trigger_price was absent/<=0, computes safe 20% / Rs 1,800 stop fallback.
-        On transport timeout, checks get_gtt_orders() to adopt existing broker GTT before unwinding.
+        Derives protective stop from actual broker fill (capped at min(20%, Rs 1,800*lots))
+        whenever `derive_stop_from_actual_fill` is True or `stop_trigger_price` is absent.
         """
         buy_leg = pkg["legs"]["buy_leg"]
+        lot_sz = int(buy_leg.get("lot_size") or 65)
+        lots_filled = max(1.0, float(buy_filled_qty) / float(lot_sz))
+        budget_per_unit = (1800.0 * lots_filled) / max(1, int(buy_filled_qty))
+        risk_per_unit = min(float(buy_avg_px) * 0.20, budget_per_unit)
+        fill_derived_stop = round_to_nse_tick(
+            max(0.05, float(buy_avg_px) - risk_per_unit),
+            mode="adverse_buy",
+            allow_zero_settlement=False,
+        )
         raw_trig = buy_leg.get("stop_trigger_price")
-        if raw_trig is not None and float(raw_trig) > 0:
+        if bool(buy_leg.get("derive_stop_from_actual_fill")):
+            if raw_trig is not None and float(raw_trig) > 0:
+                stop_trig_r = max(round_to_nse_tick(float(raw_trig)), fill_derived_stop)
+            else:
+                stop_trig_r = fill_derived_stop
+        elif raw_trig is not None and float(raw_trig) > 0:
             stop_trig_r = round_to_nse_tick(float(raw_trig))
         else:
-            risk_per_unit = min(float(buy_avg_px) * 0.20, 1800.0 / max(1, int(buy_filled_qty)))
-            stop_trig_r = round_to_nse_tick(
-                max(0.05, float(buy_avg_px) - risk_per_unit),
-                mode="adverse_buy",
-                allow_zero_settlement=False,
-            )
+            stop_trig_r = fill_derived_stop
 
         try:
             gtt_resp = self.broker.place_gtt_order(
@@ -1258,6 +1659,14 @@ class V2LiveExecutionEngine:
                 return {"ok": False, "status": "GTT_MODIFY_FAILED", "error": str(exc)}
 
             pkg["legs"]["buy_leg"]["stop_trigger_price"] = new_trig_r
+            pg = pkg["legs"]["buy_leg"].get("protective_gtt")
+            if isinstance(pg, dict):
+                pg["trigger_price"] = new_trig_r
+                pg["registered_qty"] = qty
+            else:
+                pkg["legs"]["buy_leg"]["protective_gtt"] = self._build_protective_gtt_record(
+                    str(gtt_id), qty, new_trig_r, state="SCHEDULED", ownership_status="ACTIVE_RULE"
+                )
             self.store.upsert_package(pkg)
             self.store.append_audit(
                 "GTT_RATCHET_MODIFIED",
@@ -1336,8 +1745,62 @@ class V2LiveExecutionEngine:
             if book_id not in (arm_state.get("selected_books") or []) or book_id not in ALLOWED_LIVE_BOOKS:
                 return {"ok": False, "status": "BOOK_NOT_ARMED_OR_BLOCKED"}
 
+            armed_for_date = str(arm_state.get("armed_for_date") or "").strip()
+            if armed_for_date and session_date > armed_for_date:
+                self.disarm_live(
+                    reason="ARM_EXPIRED_SESSION_ROLLOVER",
+                    actor="SAFETY_GUARD",
+                    include_paper_baseline=False,
+                )
+                return {"ok": False, "status": "ARM_DATE_EXPIRED_DISARMED"}
+
+            if signal.get("enqueued_wall_ts_ms") is not None:
+                q_age_ms = _now_ms() - int(signal["enqueued_wall_ts_ms"])
+                if q_age_ms > self.max_observer_queue_age_ms:
+                    return {
+                        "ok": False,
+                        "status": "STALE_QUEUED_ENTRY_EXPIRED",
+                        "queue_age_ms": q_age_ms,
+                    }
+
+            if self._enforce_wall_clock_guards:
+                today_s = now_ist_date()
+                if (armed_for_date and armed_for_date != today_s) or session_date != today_s:
+                    self.disarm_live(
+                        reason="ARM_EXPIRED_SESSION_ROLLOVER",
+                        actor="SAFETY_GUARD",
+                        include_paper_baseline=False,
+                    )
+                    return {"ok": False, "status": "ARM_DATE_EXPIRED_DISARMED"}
+                armed_at_ms = _parse_broker_order_ts_ms(arm_state.get("armed_at_iso")) or 0
+                dec_ms = int(signal.get("decision_ts_ms") or 0)
+                if armed_at_ms > 0 and dec_ms > 0 and dec_ms < armed_at_ms:
+                    return {"ok": False, "status": "PRE_ARM_SIGNAL_BLOCKED"}
+                if dec_ms <= 0 or (_now_ms() - dec_ms) > self.max_signal_decision_age_ms:
+                    return {"ok": False, "status": "STALE_SIGNAL_DECISION_AGE_EXCEEDED"}
+
             if not bool(signal.get("quote_fresh_ok", True)):
                 return {"ok": False, "status": "STALE_OR_MISSING_QUOTE"}
+
+            for q_field in ("quote_snapshot", "wing_quote_snapshot"):
+                q_snap_chk = signal.get(q_field)
+                if isinstance(q_snap_chk, dict) and q_snap_chk:
+                    q_bid = float(q_snap_chk.get("raw_bid") or q_snap_chk.get("bid") or 0.0)
+                    q_ask = float(q_snap_chk.get("raw_ask") or q_snap_chk.get("ask") or 0.0)
+                    q_ltp = float(q_snap_chk.get("ltp") or 0.0)
+                    if q_bid > 0 and q_ask > 0 and q_ask < q_bid:
+                        return {"ok": False, "status": "STALE_OR_CROSSED_QUOTE"}
+                    if q_ask <= 0 and q_bid <= 0 and q_ltp <= 0:
+                        return {"ok": False, "status": "STALE_OR_MISSING_QUOTE"}
+                    if self._enforce_wall_clock_guards:
+                        q_ts = int(
+                            q_snap_chk.get("l1_book_timestamp_ms")
+                            or q_snap_chk.get("availability_ts_ms")
+                            or q_snap_chk.get("exchange_ltt_ms")
+                            or 0
+                        )
+                        if q_ts <= 0 or (_now_ms() - q_ts) > 5000:
+                            return {"ok": False, "status": "STALE_OR_MISSING_QUOTE"}
 
             # Idempotency check BEFORE fault or limit rejection on duplicate replays
             existing_pkg = self.store.get_package_by_signal(signal_id)
@@ -1378,6 +1841,17 @@ class V2LiveExecutionEngine:
                 return {"ok": False, "status": "INVALID_BUY_LEG"}
             if buy_qty > max_qty:
                 return {"ok": False, "status": "LOT_LIMIT_EXCEEDED", "requested_qty": buy_qty, "max_qty": max_qty}
+            if structure == "SINGLE_LONG" and book_id == "V2_BOOK_B_PAID_FLOW":
+                lots_req = max(1.0, float(buy_qty) / float(lot_size))
+                max_outlay = float(signal.get("max_entry_outlay_inr") or (18500.0 * lots_req))
+                outlay_limit = round(float(buy_leg["limit_price"]) * float(buy_qty), 2)
+                if outlay_limit > max_outlay + 1e-6:
+                    return {
+                        "ok": False,
+                        "status": "LIVE_CASH_CAP_EXCEEDED",
+                        "outlay_at_limit_inr": outlay_limit,
+                        "max_outlay_inr": max_outlay,
+                    }
 
             live_package_id = _make_live_package_id(signal_id, book_id, session_date)
             pkg: Dict[str, Any] = {
@@ -1399,6 +1873,7 @@ class V2LiveExecutionEngine:
                         "strike": float(buy_leg.get("strike") or 0.0),
                         "lot_size": lot_size,
                         "requested_qty": buy_qty,
+                        "initial_filled_qty": 0,
                         "qty": 0,
                         "exited_qty": 0,
                         "limit_price": round_to_nse_tick(float(buy_leg["limit_price"])),
@@ -1406,8 +1881,10 @@ class V2LiveExecutionEngine:
                         "exit_price": None,
                         "stop_trigger_price": buy_leg.get("stop_trigger_price"),
                         "stop_limit_price": buy_leg.get("stop_limit_price"),
+                        "derive_stop_from_actual_fill": bool(buy_leg.get("derive_stop_from_actual_fill", False)),
                         "gtt_id": None,
                         "gtt_child_order_id": None,
+                        "protective_gtt": None,
                     }
                 },
                 "realized_gross_inr": 0.0,
@@ -1521,6 +1998,7 @@ class V2LiveExecutionEngine:
 
             buy_avg_px = float(buy_res["intent"].get("avg_fill_price") or buy_leg["limit_price"])
             pkg["legs"]["buy_leg"]["qty"] = buy_filled_qty
+            pkg["legs"]["buy_leg"]["initial_filled_qty"] = buy_filled_qty
             pkg["legs"]["buy_leg"]["entry_price"] = buy_avg_px
 
             if structure == "SINGLE_LONG":
@@ -1529,6 +2007,13 @@ class V2LiveExecutionEngine:
                 if gtt_res["ok"]:
                     pkg["legs"]["buy_leg"]["gtt_id"] = gtt_res["gtt_id"]
                     pkg["legs"]["buy_leg"]["stop_trigger_price"] = gtt_res["stop_trigger_price"]
+                    pkg["legs"]["buy_leg"]["protective_gtt"] = self._build_protective_gtt_record(
+                        gtt_res["gtt_id"],
+                        buy_filled_qty,
+                        float(gtt_res["stop_trigger_price"]),
+                        state="SCHEDULED",
+                        ownership_status="ACTIVE_RULE",
+                    )
                 elif gtt_res.get("ambiguous_gtt"):
                     pkg["state"] = "MANUAL_INTERVENTION_REQUIRED"
                     pkg["unresolved_fault"] = str(gtt_res.get("error") or "GTT_PLACEMENT_TIMEOUT_AMBIGUOUS")
@@ -1633,6 +2118,7 @@ class V2LiveExecutionEngine:
                     reason="EXCESS_BUY_WING_UNWIND",
                     leg_role="BUY_WING_EXCESS_UNWIND",
                 )
+                self._sync_excess_buy_unwind_from_intents(pkg)
                 if not unwind_excess["ok"]:
                     pkg["state"] = "MANUAL_INTERVENTION_REQUIRED"
                     pkg["unresolved_fault"] = "EXCESS_BUY_WING_UNWIND_FAILED"
@@ -1643,7 +2129,6 @@ class V2LiveExecutionEngine:
                         include_paper_baseline=False,
                     )
                     return {"ok": False, "status": "MANUAL_INTERVENTION_REQUIRED", "package": pkg}
-                self._apply_excess_buy_unwind_to_pkg(pkg, excess, float(unwind_excess["avg_price"]))
 
             assert pkg["legs"]["short_leg"]["qty"] <= pkg["legs"]["buy_leg"]["qty"]
             pkg["state"] = "OPEN"
@@ -1861,10 +2346,10 @@ class V2LiveExecutionEngine:
             buy_leg = pkg["legs"].get("buy_leg") or {}
             short_leg = pkg["legs"].get("short_leg") or {}
 
-            # 1. Check GTT state before cancelling, then cancel active protective GTT (if present)
+            # 1. Snapshot pre-cancel GTT & working orders, then cancel active protective GTT
             gtt_id = buy_leg.get("gtt_id")
             gtt_was_scheduled = False
-            gtt_cancel_errored = False
+            pre_cancel_order_ids: Set[str] = set()
             if gtt_id:
                 try:
                     pre_gtts = self.broker.get_gtt_orders()
@@ -1872,19 +2357,39 @@ class V2LiveExecutionEngine:
                 except Exception:
                     gtt_was_scheduled = False
                 try:
+                    pre_orders = self.broker.get_orders()
+                    pre_cancel_order_ids = {str(o.get("order_id") or "") for o in pre_orders if o.get("order_id")}
+                except Exception:
+                    pre_cancel_order_ids = set()
+                try:
                     self.broker.cancel_gtt_order(str(gtt_id), is_emergency=True)
                 except Exception as exc:
-                    gtt_cancel_errored = True
                     self.store.append_audit(
                         "GTT_CANCEL_WARNING",
                         actor,
                         {"live_package_id": live_package_id, "gtt_id": gtt_id, "error": str(exc)},
                     )
+                    still_active = True
+                    try:
+                        post_gtts = self.broker.get_gtt_orders()
+                        still_active = any(str(g.get("gtt_order_id") or "") == str(gtt_id) for g in post_gtts)
+                    except Exception:
+                        still_active = True
+                    if still_active:
+                        pg = dict(buy_leg.get("protective_gtt") or {})
+                        pg["gtt_id"] = gtt_id
+                        pg["state"] = "CANCEL_FAILED_STILL_ACTIVE"
+                        pg["ownership_status"] = "CANCEL_UNCONFIRMED"
+                        pkg["legs"]["buy_leg"]["protective_gtt"] = pg
+                        pkg["state"] = "MANUAL_INTERVENTION_REQUIRED"
+                        pkg["unresolved_fault"] = "GTT_CANCEL_FAILED_RULE_STILL_ACTIVE"
+                        self.store.upsert_package(pkg)
+                        return {"ok": False, "status": "GTT_CANCEL_UNCONFIRMED_ABORT_EXIT", "package": pkg}
 
-            # 2. ALWAYS query live broker orders & net positions BEFORE placing ANY exit order
+            # 2. ALWAYS query live broker orders & net `(instrument_token, product="D")` positions BEFORE exit orders
             broker_orders = self.broker.get_orders()
             broker_positions = self.broker.get_positions()
-            pos_by_key = {str(bp.get("instrument_token") or ""): int(bp.get("quantity") or 0) for bp in broker_positions}
+            d_pos_by_key, _ = self._index_broker_positions(broker_positions)
 
             # 3. For spreads, ALWAYS cover SHORT_LEG BEFORE selling BUY_WING
             if short_leg and int(short_leg.get("qty") or 0) > 0 and short_leg.get("exit_price") is None:
@@ -1895,7 +2400,7 @@ class V2LiveExecutionEngine:
                     pkg["legs"]["short_leg"]["exit_price"] = s_vwap
                 else:
                     s_v2_rem = max(0, int(short_leg["qty"]) - s_already)
-                    s_pos = pos_by_key.get(str(short_leg["instrument_key"]), 0)
+                    s_pos = d_pos_by_key.get(str(short_leg["instrument_key"]), 0)
                     s_to_cover = min(s_v2_rem, abs(s_pos)) if s_pos < 0 else 0
                     if s_to_cover <= 0:
                         pkg["state"] = "MANUAL_INTERVENTION_REQUIRED"
@@ -1935,7 +2440,7 @@ class V2LiveExecutionEngine:
                         return {"ok": False, "status": s_res["status"], "package": pkg}
                     pkg["legs"]["short_leg"]["exit_price"] = s_vw
 
-            # 4. Close BUY_WING safely (prevents double-sell on triggered GTT & isolates foreign V1 shares)
+            # 4. Close BUY_WING safely (handles active/partial GTT child, prevents double-sell & flags manual collisions)
             if buy_leg and int(buy_leg.get("qty") or 0) > 0 and buy_leg.get("exit_price") is None:
                 b_already, b_vwap = self._recompute_leg_exit_progress(live_package_id, "BUY_WING")
                 if b_already >= int(buy_leg["qty"]):
@@ -1945,65 +2450,115 @@ class V2LiveExecutionEngine:
                     pkg["legs"]["buy_leg"]["gtt_id"] = None
                 else:
                     b_ikey = str(buy_leg["instrument_key"])
-                    account_pos_qty = max(0, pos_by_key.get(b_ikey, 0))
+                    account_pos_qty = max(0, d_pos_by_key.get(b_ikey, 0))
                     b_v2_rem = max(0, int(buy_leg["qty"]) - b_already)
 
-                    # Detect GTT-triggered flatten EVEN when shared V1/manual keeps account_pos_qty > 0!
-                    matched_gtt_sell = self._find_unclaimed_gtt_child_sell(
-                        live_package_id=live_package_id,
-                        ikey=b_ikey,
-                        entry_ts_ms=int(pkg.get("entry_ts_ms") or 0),
-                        broker_orders=broker_orders,
-                        gtt_id=str(gtt_id) if gtt_id else None,
-                    )
-                    gtt_triggered_shared = bool(
-                        pkg["structure"] == "SINGLE_LONG"
-                        and b_v2_rem > 0
-                        and (
-                            matched_gtt_sell is not None
-                            or account_pos_qty <= 0
-                            or (gtt_id and (not gtt_was_scheduled or gtt_cancel_errored))
+                    matched_gtt_sell: Optional[Dict[str, Any]] = None
+                    if pkg["structure"] == "SINGLE_LONG":
+                        pg_rec = dict(buy_leg.get("protective_gtt") or {})
+                        reg_qty = int(pg_rec.get("registered_qty") or buy_leg.get("qty") or 0)
+                        child_info = self._inspect_gtt_child_candidates(
+                            live_package_id=live_package_id,
+                            ikey=b_ikey,
+                            entry_ts_ms=int(pkg.get("entry_ts_ms") or 0),
+                            broker_orders=broker_orders,
+                            gtt_id=str(gtt_id) if gtt_id else None,
+                            gtt_registered_qty=reg_qty,
+                            gtt_was_scheduled=gtt_was_scheduled,
+                            pre_cancel_order_ids=pre_cancel_order_ids,
                         )
-                        and (account_pos_qty <= 0 or matched_gtt_sell is not None)
-                    )
-                    if gtt_triggered_shared:
-                        trig_px = float(
-                            (matched_gtt_sell or {}).get("average_price")
-                            or buy_leg.get("stop_trigger_price")
-                            or buy_leg["entry_price"]
-                        )
-                        tot_b = b_already + b_v2_rem
-                        comb_px = round_to_nse_tick(
-                            ((b_already * b_vwap) + (b_v2_rem * trig_px)) / tot_b
-                        ) if b_already > 0 else round_to_nse_tick(trig_px)
-                        pkg["legs"]["buy_leg"]["exit_price"] = comb_px
-                        pkg["legs"]["buy_leg"]["exited_qty"] = int(buy_leg["qty"])
-                        pkg["legs"]["buy_leg"]["partial_exit_vwap"] = comb_px
-                        pkg["legs"]["buy_leg"]["gtt_id"] = None
-                        pkg["legs"]["buy_leg"]["gtt_child_order_id"] = (matched_gtt_sell or {}).get("order_id")
-                        acc = self._compute_realized_pkg_accounting(pkg)
-                        pkg["state"] = "CLOSED"
-                        pkg["exit_ts_ms"] = _now_ms()
-                        pkg["exit_reason"] = "CLOSED_BY_TRIGGERED_GTT_NO_DOUBLE_SELL"
-                        pkg["realized_gross_inr"] = float(acc["gross_pnl"])
-                        pkg["realized_friction_inr"] = float(acc["total_friction"])
-                        pkg["realized_net_inr"] = float(acc["net_pnl"])
-                        pkg["reconciled_at_iso"] = now_ist_iso()
-                        pkg["unresolved_fault"] = None
-                        self.store.upsert_package(pkg)
-                        self.store.append_audit(
-                            "GTT_RACE_PREVENTED_DOUBLE_SELL",
-                            actor,
-                            {
-                                "live_package_id": live_package_id,
-                                "gtt_id": gtt_id,
-                                "child_order_id": (matched_gtt_sell or {}).get("order_id"),
-                                "exit_price": comb_px,
-                                "account_pos_qty_remaining": account_pos_qty,
-                                "net_pnl_inr": acc["net_pnl"],
-                            },
-                        )
-                        return {"ok": True, "status": "CLOSED_BY_TRIGGERED_GTT_NO_DOUBLE_SELL", "package": pkg}
+                        if child_info["ambiguous_manual"]:
+                            amb_ord = child_info["ambiguous_manual"][-1]
+                            amb_oid = str(amb_ord.get("order_id") or "")
+                            pg_rec["child_order_id"] = amb_oid or None
+                            pg_rec["ownership_status"] = "AMBIGUOUS_UNTAGGED_SELL_COLLISION"
+                            pkg["legs"]["buy_leg"]["protective_gtt"] = pg_rec
+                            pkg["state"] = "MANUAL_INTERVENTION_REQUIRED"
+                            pkg["unresolved_fault"] = f"AMBIGUOUS_UNTAGGED_SELL_COLLISION:{amb_oid}"
+                            self.store.upsert_package(pkg)
+                            return {"ok": False, "status": "AMBIGUOUS_UNTAGGED_SELL_COLLISION", "package": pkg}
+
+                        matched_gtt_sell = child_info.get("gtt_child")
+                        if matched_gtt_sell is not None:
+                            child_oid = str(matched_gtt_sell.get("order_id") or "")
+                            child_st = str(matched_gtt_sell.get("status") or "").lower().strip()
+                            if child_st not in _TERMINAL_BROKER_ORDER_STATUSES and child_oid:
+                                try:
+                                    self.broker.cancel_order(child_oid, is_emergency=True)
+                                except Exception:
+                                    pass
+                                snap_child = self._fetch_order_snapshot(child_oid, "")
+                                if snap_child is not None:
+                                    matched_gtt_sell = snap_child
+                                    child_st = str(matched_gtt_sell.get("status") or "").lower().strip()
+                                try:
+                                    d_pos_by_key, _ = self._index_broker_positions(self.broker.get_positions())
+                                    account_pos_qty = max(0, d_pos_by_key.get(b_ikey, 0))
+                                except Exception:
+                                    pass
+                                if child_st not in _TERMINAL_BROKER_ORDER_STATUSES:
+                                    pg_rec["state"] = "TRIGGERED_WORKING"
+                                    pg_rec["child_order_id"] = child_oid
+                                    pg_rec["child_order_status"] = child_st
+                                    pg_rec["ownership_status"] = "WORKING_CHILD_UNSETTLED"
+                                    pkg["legs"]["buy_leg"]["protective_gtt"] = pg_rec
+                                    pkg["state"] = "MANUAL_INTERVENTION_REQUIRED"
+                                    pkg["unresolved_fault"] = f"WORKING_GTT_CHILD_UNSETTLED:{child_oid}"
+                                    self.store.upsert_package(pkg)
+                                    return {"ok": False, "status": "WORKING_GTT_CHILD_UNSETTLED", "package": pkg}
+
+                            child_fqty = self._record_confirmed_gtt_child_intent(
+                                pkg=pkg,
+                                gtt_id=str(gtt_id) if gtt_id else None,
+                                child_ord=matched_gtt_sell,
+                                registered_qty=reg_qty,
+                            )
+                            child_avg = float(
+                                matched_gtt_sell.get("average_price")
+                                or buy_leg.get("stop_trigger_price")
+                                or buy_leg["entry_price"]
+                            )
+                            pg_rec["state"] = "TRIGGERED"
+                            pg_rec["child_order_id"] = child_oid or None
+                            pg_rec["child_order_status"] = child_st
+                            pg_rec["child_filled_qty"] = child_fqty
+                            pg_rec["child_avg_price"] = child_avg
+                            pg_rec["ownership_status"] = "CONFIRMED_GTT_CHILD"
+                            pkg["legs"]["buy_leg"]["protective_gtt"] = pg_rec
+                            pkg["legs"]["buy_leg"]["gtt_child_order_id"] = child_oid or None
+                            pkg["legs"]["buy_leg"]["gtt_id"] = None
+
+                            b_already, b_vwap = self._recompute_leg_exit_progress(live_package_id, "BUY_WING")
+                            pkg["legs"]["buy_leg"]["exited_qty"] = b_already
+                            if b_vwap > 0:
+                                pkg["legs"]["buy_leg"]["partial_exit_vwap"] = b_vwap
+                            b_v2_rem = max(0, int(buy_leg["qty"]) - b_already)
+
+                            if b_already >= int(buy_leg["qty"]):
+                                pkg["legs"]["buy_leg"]["exit_price"] = b_vwap
+                                acc = self._compute_realized_pkg_accounting(pkg)
+                                pkg["state"] = "CLOSED"
+                                pkg["exit_ts_ms"] = _now_ms()
+                                pkg["exit_reason"] = "CLOSED_BY_TRIGGERED_GTT_NO_DOUBLE_SELL"
+                                pkg["realized_gross_inr"] = float(acc["gross_pnl"])
+                                pkg["realized_friction_inr"] = float(acc["total_friction"])
+                                pkg["realized_net_inr"] = float(acc["net_pnl"])
+                                pkg["reconciled_at_iso"] = now_ist_iso()
+                                pkg["unresolved_fault"] = None
+                                self.store.upsert_package(pkg)
+                                self.store.append_audit(
+                                    "GTT_RACE_PREVENTED_DOUBLE_SELL",
+                                    actor,
+                                    {
+                                        "live_package_id": live_package_id,
+                                        "gtt_id": gtt_id,
+                                        "child_order_id": child_oid or None,
+                                        "exit_price": b_vwap,
+                                        "account_pos_qty_remaining": account_pos_qty,
+                                        "net_pnl_inr": acc["net_pnl"],
+                                    },
+                                )
+                                return {"ok": True, "status": "CLOSED_BY_TRIGGERED_GTT_NO_DOUBLE_SELL", "package": pkg}
 
                     target_sell_qty = min(b_v2_rem, account_pos_qty)
                     if target_sell_qty <= 0:
@@ -2011,6 +2566,11 @@ class V2LiveExecutionEngine:
                         pkg["unresolved_fault"] = "BUY_POSITION_FLAT_WITHOUT_MATCHED_EXIT"
                         self.store.upsert_package(pkg)
                         return {"ok": False, "status": "RECONCILE_REQUIRED_BUY_FLAT", "package": pkg}
+
+                    pkg["legs"]["buy_leg"]["gtt_id"] = None
+                    if isinstance(buy_leg.get("protective_gtt"), dict) and matched_gtt_sell is None:
+                        pkg["legs"]["buy_leg"]["protective_gtt"]["state"] = "CANCELLED"
+                        pkg["legs"]["buy_leg"]["protective_gtt"]["ownership_status"] = "MANAGED_EXIT_REPLACED_GTT"
 
                     b_attempts = sum(
                         1 for it in pkg_intents if it["leg_role"] == "BUY_WING" and str(it["action"]).startswith("EXIT")
@@ -2065,20 +2625,115 @@ class V2LiveExecutionEngine:
 
     def on_paper_lifecycle_event(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        Non-blocking paper -> live bridge: enqueues onto OSV2Live-ObserverWorker when async
-        dispatch is enabled so broker HTTP timeouts NEVER stall V2 queue worker ticks.
+        Non-blocking paper -> live bridge: routes PACKAGE_CLOSED onto an unbounded priority
+        queue (zero dropped exits), coalesces heartbeats, and keeps entry dispatches bounded.
         """
         if not isinstance(event, dict) or event.get("run_mode") != "FORWARD_PAPER":
             return None
+        ev_copy = dict(event)
+        ev_copy.setdefault("enqueued_wall_ts_ms", _now_ms())
+        etype = str(ev_copy.get("event_type") or "")
         if self._async_observer_dispatch:
             self._ensure_observer_worker_started()
+            if etype == "PACKAGE_CLOSED":
+                self._priority_exit_queue.put(ev_copy)
+                self._observer_wakeup.set()
+                return {"ok": True, "status": "QUEUED_PRIORITY_EXIT"}
+            if etype == "BAR_MTM_HEARTBEAT":
+                with self._heartbeat_lock:
+                    self._latest_heartbeat = ev_copy
+                self._observer_wakeup.set()
+                return {"ok": True, "status": "QUEUED_COALESCED_HEARTBEAT"}
             try:
-                self._observer_queue.put_nowait(dict(event))
+                self._observer_queue.put_nowait(ev_copy)
+                self._observer_wakeup.set()
                 return {"ok": True, "status": "QUEUED_ASYNC"}
             except queue.Full:
-                logger.error("OSV2Live-ObserverWorker queue full (256); dropping lifecycle event %s", event.get("event_type"))
+                logger.error("OSV2Live-ObserverWorker queue full (256); dropping lifecycle event %s", etype)
                 return {"ok": False, "status": "OBSERVER_QUEUE_FULL"}
-        return self._process_paper_lifecycle_event_sync(event)
+        return self._process_paper_lifecycle_event_sync(ev_copy)
+
+    def evaluate_independent_live_exits(self, *, now_ms: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Independent live position guardian running without waiting on paper lifecycle events:
+        enforces 15:15 IST EOD squareoff, Book A live spread target/stop, and daily MTM loss kill.
+        """
+        if not self.store.db_exists():
+            return []
+        eff_now_ms = int(now_ms if now_ms is not None else _now_ms())
+        dt_ist = datetime.fromtimestamp(float(eff_now_ms) / 1000.0, tz=_IST_TZ)
+        now_d = dt_ist.strftime("%Y-%m-%d")
+        now_hhmm = dt_ist.hour * 100 + dt_ist.minute
+
+        quotes: Dict[str, Dict[str, Any]] = {}
+        try:
+            if self._paper_svc_ref is not None:
+                quotes = dict(getattr(self._paper_svc_ref.unified_engine, "latest_opt_quotes", {}) or {})
+        except Exception:
+            quotes = {}
+
+        actions: List[Dict[str, Any]] = []
+        for pkg in self.store.list_packages(states=["OPEN"]):
+            pid = str(pkg["live_package_id"])
+            pkg_dt = str(pkg.get("session_date") or "")
+            should_eod = (
+                (pkg_dt == now_d and now_hhmm >= 1515)
+                or (pkg_dt < now_d and (self._enforce_wall_clock_guards or now_ms is not None))
+            )
+            if should_eod:
+                res = self.exit_live_package(
+                    live_package_id=pid,
+                    reason="AUTO_LIVE_GUARDIAN_EOD_1515",
+                    actor="LIVE_POSITION_GUARDIAN",
+                )
+                actions.append({"live_package_id": pid, "trigger": "EOD_1515", "result": res})
+                continue
+
+            if pkg.get("structure") == "DEFINED_RISK_SPREAD":
+                legs = pkg.get("legs") or {}
+                bl = legs.get("buy_leg") or {}
+                sl = legs.get("short_leg") or {}
+                s_qty = int(sl.get("qty") or 0)
+                s_lot = int(sl.get("lot_size") or 65)
+                s_ent = float(sl.get("entry_price") or 0.0)
+                w_ent = float(bl.get("entry_price") or 0.0)
+                sq = quotes.get(str(sl.get("instrument_key") or "")) or {}
+                wq = quotes.get(str(bl.get("instrument_key") or "")) or {}
+                s_ts = int(sq.get("l1_book_timestamp_ms") or sq.get("availability_ts_ms") or sq.get("exchange_ltt_ms") or 0)
+                w_ts = int(wq.get("l1_book_timestamp_ms") or wq.get("availability_ts_ms") or wq.get("exchange_ltt_ms") or 0)
+                fresh_s = s_ts > 0 and 0 <= (eff_now_ms - s_ts) <= _QUOTE_STALE_MS
+                fresh_w = w_ts > 0 and 0 <= (eff_now_ms - w_ts) <= _QUOTE_STALE_MS
+                if fresh_s and fresh_w and s_qty > 0 and s_ent > w_ent > 0:
+                    s_ask = float(sq.get("raw_ask") or sq.get("ask") or 0.0)
+                    w_bid = float(wq.get("raw_bid") or wq.get("bid") or 0.0)
+                    if s_ask > 0 and w_bid > 0:
+                        net_cr = s_ent - w_ent
+                        curr_deb = s_ask - w_bid
+                        lots_s = max(1.0, float(s_qty) / float(s_lot))
+                        per_pt_cap = (1950.0 * lots_s) / float(s_qty)
+                        tgt_deb = round(net_cr * 0.30, 2)
+                        stop_deb = round(min(net_cr * 1.80, net_cr + per_pt_cap), 2)
+                        if curr_deb <= tgt_deb or curr_deb >= stop_deb:
+                            rsn = "AUTO_LIVE_GUARDIAN_SPREAD_TARGET" if curr_deb <= tgt_deb else "AUTO_LIVE_GUARDIAN_SPREAD_STOP"
+                            res = self.exit_live_package(
+                                live_package_id=pid,
+                                reason=rsn,
+                                exit_price=compute_smart_limit_collar(w_bid, "SELL"),
+                                short_exit_price=compute_smart_limit_collar(s_ask, "BUY"),
+                                actor="LIVE_POSITION_GUARDIAN",
+                            )
+                            actions.append({"live_package_id": pid, "trigger": rsn, "result": res})
+
+        with self._lock:
+            rem_open = self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES)
+            if rem_open:
+                arm_state = self.store.get_arm_state()
+                loss_res = self._check_and_enforce_daily_loss_limit(
+                    now_d, arm_state, rem_open, flatten_on_breach=True
+                )
+                if loss_res is not None:
+                    actions.append({"trigger": "DAILY_LOSS_LIMIT", "result": loss_res})
+        return actions
 
     def _process_paper_lifecycle_event_sync(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(event, dict) or event.get("run_mode") != "FORWARD_PAPER":
@@ -2105,13 +2760,26 @@ class V2LiveExecutionEngine:
                 q_snap = event.get("quote_snapshot") or {}
                 ref_px = float(q_snap.get("raw_ask") or q_snap.get("ask") or ll.get("entry_price") or 0.0)
                 lot_sz = int(ll.get("lot_size") or 65)
+                cap_unit_px = round_to_nse_tick(18500.0 / float(max(1, lot_sz)), mode="adverse_sell")
+                if ref_px <= 0 or ref_px > cap_unit_px:
+                    return {
+                        "ok": False,
+                        "status": "LIVE_CASH_CAP_EXCEEDED",
+                        "ref_px": ref_px,
+                        "cap_unit_px": cap_unit_px,
+                    }
+                collar_px = min(compute_smart_limit_collar(ref_px, "BUY"), cap_unit_px)
                 live_sig = {
                     "signal_id": str(event.get("signal_id") or pkg_snap.get("signal_id") or ""),
                     "session_date": str(event.get("session_date") or pkg_snap.get("session_date") or ""),
+                    "decision_ts_ms": event.get("decision_ts_ms"),
+                    "enqueued_wall_ts_ms": event.get("enqueued_wall_ts_ms"),
                     "book_id": book_id_ev,
                     "protocol_profile_id": str(arm_state.get("protocol_profile_id") or "V2_BOOK_B_FROZEN_PAPER"),
                     "structure": "SINGLE_LONG",
                     "quote_fresh_ok": True,
+                    "quote_snapshot": dict(q_snap) if isinstance(q_snap, dict) else {},
+                    "max_entry_outlay_inr": round(18500.0 * max_lots, 2),
                     "buy_leg": {
                         "instrument_key": ll["instrument_key"],
                         "trading_symbol": ll.get("trading_symbol") or ll["instrument_key"],
@@ -2119,9 +2787,10 @@ class V2LiveExecutionEngine:
                         "strike": float(ll.get("strike") or 0.0),
                         "qty": max_lots * lot_sz,
                         "lot_size": lot_sz,
-                        "limit_price": compute_smart_limit_collar(ref_px, "BUY") if ref_px > 0 else 0.0,
+                        "limit_price": collar_px,
                         "order_type": "LIMIT",
                         "stop_trigger_price": ls.get("hard_stop"),
+                        "derive_stop_from_actual_fill": True,
                     },
                 }
                 return self.submit_entry_signal(live_sig)
@@ -2138,10 +2807,14 @@ class V2LiveExecutionEngine:
                 live_sig = {
                     "signal_id": str(event.get("signal_id") or pkg_snap.get("signal_id") or ""),
                     "session_date": str(event.get("session_date") or pkg_snap.get("session_date") or ""),
+                    "decision_ts_ms": event.get("decision_ts_ms"),
+                    "enqueued_wall_ts_ms": event.get("enqueued_wall_ts_ms"),
                     "book_id": book_id_ev,
                     "protocol_profile_id": str(arm_state.get("protocol_profile_id") or "V2_4_PAPER_DUAL_BOOK"),
                     "structure": "DEFINED_RISK_SPREAD",
                     "quote_fresh_ok": True,
+                    "quote_snapshot": dict(sq) if isinstance(sq, dict) else {},
+                    "wing_quote_snapshot": dict(wq) if isinstance(wq, dict) else {},
                     "min_live_credit_pts": min_cr,
                     "buy_leg": {
                         "instrument_key": wl["instrument_key"],
@@ -2236,7 +2909,7 @@ class V2LiveExecutionEngine:
         return None
 
     def reconcile_with_broker(self, *, actor: str = "RECONCILER") -> Dict[str, Any]:
-        """Reconciles pending/ambiguous V2 intents, GTT protection, partial exits, and positions."""
+        """Reconciles pending/ambiguous V2 intents, GTT protection, partial exits, and product-scoped positions."""
         with self._lock:
             broker_orders = self.broker.get_orders()
             broker_positions = self.broker.get_positions()
@@ -2248,7 +2921,7 @@ class V2LiveExecutionEngine:
                 if str(o.get("tag") or "").startswith("V2-")
             }
             orders_by_id = {str(o.get("order_id") or ""): o for o in broker_orders if o.get("order_id")}
-            pos_by_key = {str(p.get("instrument_token") or ""): int(p.get("quantity") or 0) for p in broker_positions}
+            d_pos_by_key, non_d_by_key = self._index_broker_positions(broker_positions)
             active_gtt_ids = {str(g.get("gtt_order_id") or "") for g in active_gtts if g.get("gtt_order_id")}
 
             resolved_intents: List[Dict[str, Any]] = []
@@ -2256,6 +2929,21 @@ class V2LiveExecutionEngine:
             refresh_positions_after_intents = False
             for intent in ambiguous_intents:
                 matched = orders_by_id.get(str(intent.get("broker_order_id") or "")) or v2_orders_by_tag.get(str(intent["tag"]))
+                hist_timeout = False
+                if matched is None and intent.get("broker_order_id") and hasattr(self.broker, "get_order_history"):
+                    try:
+                        hist = self.broker.get_order_history(str(intent["broker_order_id"]))
+                        if hist:
+                            matched = dict(hist[-1])
+                    except BrokerTimeoutAmbiguousError:
+                        hist_timeout = True
+                    except Exception:
+                        pass
+                if hist_timeout:
+                    resolved_intents.append(
+                        {"intent_id": intent["intent_id"], "resolution": "ORDER_HISTORY_TIMEOUT_STILL_AMBIGUOUS"}
+                    )
+                    continue
                 pkg = self.store.get_package(intent["live_package_id"])
                 if matched is not None:
                     m_status = str(matched.get("status") or "").lower().strip()
@@ -2302,6 +2990,7 @@ class V2LiveExecutionEngine:
                     if pkg and intent["leg_role"] == "BUY_WING" and intent["action"] == "ENTRY":
                         if fqty > 0:
                             pkg["legs"]["buy_leg"]["qty"] = fqty
+                            pkg["legs"]["buy_leg"]["initial_filled_qty"] = fqty
                             pkg["legs"]["buy_leg"]["entry_price"] = fpx
                             if pkg["structure"] == "SINGLE_LONG":
                                 existing_gid = str(pkg["legs"]["buy_leg"].get("gtt_id") or "")
@@ -2313,6 +3002,13 @@ class V2LiveExecutionEngine:
                                     if gtt_res["ok"]:
                                         pkg["legs"]["buy_leg"]["gtt_id"] = gtt_res["gtt_id"]
                                         pkg["legs"]["buy_leg"]["stop_trigger_price"] = gtt_res["stop_trigger_price"]
+                                        pkg["legs"]["buy_leg"]["protective_gtt"] = self._build_protective_gtt_record(
+                                            gtt_res["gtt_id"],
+                                            fqty,
+                                            float(gtt_res["stop_trigger_price"]),
+                                            state="SCHEDULED",
+                                            ownership_status="ACTIVE_RULE",
+                                        )
                                         active_gtt_ids.add(str(gtt_res["gtt_id"]))
                                         pkg["state"] = "OPEN"
                                         pkg["unresolved_fault"] = None
@@ -2347,6 +3043,7 @@ class V2LiveExecutionEngine:
                             pkg["unresolved_fault"] = None
                             self.store.upsert_package(pkg)
                     elif pkg and intent["leg_role"] == "SHORT_LEG" and intent["action"] == "ENTRY":
+                        self._sync_excess_buy_unwind_from_intents(pkg)
                         b_leg = pkg["legs"].get("buy_leg") or {}
                         b_qty = int(b_leg.get("qty") or 0)
                         b_px = float(b_leg.get("entry_price") or 0.0)
@@ -2362,8 +3059,8 @@ class V2LiveExecutionEngine:
                                     leg_role="BUY_WING_EXCESS_UNWIND",
                                 )
                                 refresh_positions_after_intents = True
-                                if unw_ex["ok"]:
-                                    self._apply_excess_buy_unwind_to_pkg(pkg, (b_qty - fqty), float(unw_ex["avg_price"]))
+                                self._sync_excess_buy_unwind_from_intents(pkg)
+                                if unw_ex["ok"] or int(pkg["legs"]["buy_leg"].get("qty") or 0) <= fqty:
                                     pkg["state"] = "OPEN"
                                     pkg["unresolved_fault"] = None
                                 else:
@@ -2384,14 +3081,58 @@ class V2LiveExecutionEngine:
                             refresh_positions_after_intents = True
                             self._finalize_failed_short_entry(pkg, b_px, b_qty, unw, f"RECONCILED_SHORT_{new_state}_UNWOUND")
                     elif pkg and intent["leg_role"] == "BUY_WING_EXCESS_UNWIND" and fqty > 0:
-                        b_leg = pkg["legs"].get("buy_leg") or {}
-                        s_qty_cur = int((pkg["legs"].get("short_leg") or {}).get("qty") or 0)
-                        if s_qty_cur > 0 and int(b_leg.get("qty") or 0) > s_qty_cur and not pkg["legs"].get("excess_unwound_buy_leg"):
-                            deduct = min(fqty, int(b_leg["qty"]) - s_qty_cur)
-                            self._apply_excess_buy_unwind_to_pkg(pkg, deduct, fpx)
-                            pkg["reconciled_at_iso"] = now_ist_iso()
-                            self.store.upsert_package(pkg)
+                        self._sync_excess_buy_unwind_from_intents(pkg)
+                        pkg["reconciled_at_iso"] = now_ist_iso()
+                        self.store.upsert_package(pkg)
                 else:
+                    if pkg and intent["action"] == "ENTRY" and intent["leg_role"] == "SHORT_LEG":
+                        short_d_pos = int(d_pos_by_key.get(str(intent["instrument_key"]), 0))
+                        if short_d_pos < 0:
+                            self.store.update_intent(
+                                intent["intent_id"],
+                                state="UNKNOWN_AMBIGUOUS",
+                                updated_ts_ms=_now_ms(),
+                                error_detail="SHORT_POSITION_OPEN_WITHOUT_MATCHED_ORDER_HOLDING_HEDGE",
+                            )
+                            pkg["state"] = "MANUAL_INTERVENTION_REQUIRED"
+                            pkg["unresolved_fault"] = "SHORT_POSITION_DETECTED_HOLDING_PROTECTIVE_WING"
+                            self.store.upsert_package(pkg)
+                            resolved_intents.append(
+                                {"intent_id": intent["intent_id"], "resolution": "SHORT_POS_PRESENT_HOLDING_WING"}
+                            )
+                            continue
+                        prev_meta: Dict[str, Any] = {}
+                        try:
+                            parsed = json.loads(intent.get("raw_response_json") or "{}")
+                            if isinstance(parsed, dict):
+                                prev_meta = parsed
+                        except Exception:
+                            prev_meta = {}
+                        checks = int(prev_meta.get("reconcile_not_found_checks") or 0) + 1
+                        first_miss_ms = int(
+                            prev_meta.get("first_not_found_ts_ms") or intent.get("created_ts_ms") or _now_ms()
+                        )
+                        elapsed_ms = max(0, _now_ms() - first_miss_ms)
+                        if checks < self.short_not_found_min_checks or elapsed_ms < self.short_not_found_grace_ms:
+                            self.store.update_intent(
+                                intent["intent_id"],
+                                state="UNKNOWN_AMBIGUOUS",
+                                updated_ts_ms=_now_ms(),
+                                error_detail=f"AWAITING_BROKER_CONFIRMATION_CHECK_{checks}",
+                                raw_response={
+                                    "reconcile_not_found_checks": checks,
+                                    "first_not_found_ts_ms": first_miss_ms,
+                                },
+                            )
+                            resolved_intents.append(
+                                {
+                                    "intent_id": intent["intent_id"],
+                                    "resolution": "AWAITING_BROKER_CONFIRMATION_HOLDING_HEDGE",
+                                    "checks": checks,
+                                }
+                            )
+                            continue
+
                     self.store.update_intent(
                         intent["intent_id"],
                         state="EXPIRED_NOT_FOUND",
@@ -2421,7 +3162,7 @@ class V2LiveExecutionEngine:
             if refresh_positions_after_intents:
                 try:
                     broker_positions = self.broker.get_positions()
-                    pos_by_key = {str(p.get("instrument_token") or ""): int(p.get("quantity") or 0) for p in broker_positions}
+                    d_pos_by_key, non_d_by_key = self._index_broker_positions(broker_positions)
                 except Exception:
                     pass
 
@@ -2429,10 +3170,12 @@ class V2LiveExecutionEngine:
             pkg_reconciliations: List[Dict[str, Any]] = []
             for pkg in self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES):
                 pid = pkg["live_package_id"]
+                if pkg["structure"] == "DEFINED_RISK_SPREAD":
+                    self._sync_excess_buy_unwind_from_intents(pkg)
                 buy_leg = pkg["legs"].get("buy_leg") or {}
                 short_leg = pkg["legs"].get("short_leg") or {}
                 ikey = str(buy_leg.get("instrument_key") or "")
-                actual_qty = pos_by_key.get(ikey, 0)
+                actual_qty = d_pos_by_key.get(ikey, 0)
 
                 # Update exit progress from settled EXIT / BUY_WING_UNWIND intents (EXCLUDE BUY_WING_EXCESS_UNWIND!)
                 if int(buy_leg.get("qty") or 0) > 0:
@@ -2478,7 +3221,7 @@ class V2LiveExecutionEngine:
                     pkg_reconciliations.append({"live_package_id": pid, "status": "CLOSED_RECONCILED_EXITS"})
                     continue
 
-                # Check GTT / broker exit strictly with untagged/GTT filter + timestamp lower bound
+                # Check GTT / broker exit strictly with untagged/GTT filter + timestamp lower bound + partial fill tracking
                 gtt_id = buy_leg.get("gtt_id")
                 gtt_missing_now = bool(gtt_id and str(gtt_id) not in active_gtt_ids)
                 if (
@@ -2487,35 +3230,89 @@ class V2LiveExecutionEngine:
                     and int(buy_leg.get("qty") or 0) > 0
                     and (actual_qty <= 0 or gtt_missing_now)
                 ):
-                    child_sell = self._find_unclaimed_gtt_child_sell(
+                    pg_rec = dict(buy_leg.get("protective_gtt") or {})
+                    reg_qty = int(pg_rec.get("registered_qty") or buy_leg.get("qty") or 0)
+                    gtt_still_scheduled = bool(gtt_id and not gtt_missing_now)
+                    child_info = self._inspect_gtt_child_candidates(
                         live_package_id=pid,
                         ikey=ikey,
                         entry_ts_ms=int(pkg.get("entry_ts_ms") or 0),
                         broker_orders=broker_orders,
                         gtt_id=str(gtt_id) if gtt_id else None,
+                        gtt_registered_qty=reg_qty,
+                        gtt_was_scheduled=gtt_still_scheduled,
+                        pre_cancel_order_ids=(
+                            {str(o.get("order_id") or "") for o in broker_orders if o.get("order_id")}
+                            if gtt_still_scheduled
+                            else set()
+                        ),
                     )
-                    if child_sell is not None:
-                        b_alr = int(pkg["legs"]["buy_leg"].get("exited_qty") or 0)
-                        b_vw0 = float(pkg["legs"]["buy_leg"].get("partial_exit_vwap") or 0.0)
-                        rem_q = max(1, int(buy_leg["qty"]) - b_alr)
-                        cs_px = float(child_sell.get("average_price") or buy_leg["entry_price"])
-                        comb_px = round_to_nse_tick(((b_alr * b_vw0) + (rem_q * cs_px)) / (b_alr + rem_q)) if b_alr > 0 else round_to_nse_tick(cs_px)
-                        pkg["legs"]["buy_leg"]["exit_price"] = comb_px
-                        pkg["legs"]["buy_leg"]["exited_qty"] = int(buy_leg["qty"])
-                        pkg["legs"]["buy_leg"]["gtt_id"] = None
-                        pkg["legs"]["buy_leg"]["gtt_child_order_id"] = child_sell.get("order_id")
-                        acc = self._compute_realized_pkg_accounting(pkg)
-                        pkg["state"] = "CLOSED"
-                        pkg["exit_ts_ms"] = _now_ms()
-                        pkg["exit_reason"] = "RECONCILED_BROKER_EXIT_OR_GTT"
-                        pkg["realized_gross_inr"] = float(acc["gross_pnl"])
-                        pkg["realized_friction_inr"] = float(acc["total_friction"])
-                        pkg["realized_net_inr"] = float(acc["net_pnl"])
+                    if child_info["ambiguous_manual"]:
+                        amb_oid = str(child_info["ambiguous_manual"][-1].get("order_id") or "")
+                        pg_rec["child_order_id"] = amb_oid or None
+                        pg_rec["ownership_status"] = "AMBIGUOUS_UNTAGGED_SELL_COLLISION"
+                        pkg["legs"]["buy_leg"]["protective_gtt"] = pg_rec
+                        pkg["state"] = "MANUAL_INTERVENTION_REQUIRED"
+                        pkg["unresolved_fault"] = f"AMBIGUOUS_UNTAGGED_SELL_COLLISION:{amb_oid}"
                         pkg["reconciled_at_iso"] = now_ist_iso()
-                        pkg["unresolved_fault"] = None
                         self.store.upsert_package(pkg)
-                        pkg_reconciliations.append({"live_package_id": pid, "status": "CLOSED_FROM_BROKER_EXIT"})
+                        pkg_reconciliations.append({"live_package_id": pid, "status": "AMBIGUOUS_UNTAGGED_SELL_COLLISION"})
                         continue
+
+                    child_sell = child_info.get("gtt_child")
+                    if child_sell is not None:
+                        child_oid = str(child_sell.get("order_id") or "")
+                        child_st = str(child_sell.get("status") or "").lower().strip()
+                        if child_st not in _TERMINAL_BROKER_ORDER_STATUSES:
+                            pg_rec["state"] = "TRIGGERED_WORKING"
+                            pg_rec["child_order_id"] = child_oid or None
+                            pg_rec["child_order_status"] = child_st
+                            pg_rec["ownership_status"] = "WORKING_GTT_CHILD"
+                            pkg["legs"]["buy_leg"]["protective_gtt"] = pg_rec
+                            pkg["state"] = "CLOSING"
+                            pkg["reconciled_at_iso"] = now_ist_iso()
+                            self.store.upsert_package(pkg)
+                            pkg_reconciliations.append({"live_package_id": pid, "status": "WORKING_GTT_CHILD"})
+                            continue
+
+                        child_fqty = self._record_confirmed_gtt_child_intent(
+                            pkg=pkg,
+                            gtt_id=str(gtt_id) if gtt_id else None,
+                            child_ord=child_sell,
+                            registered_qty=reg_qty,
+                        )
+                        pg_rec["state"] = "TRIGGERED"
+                        pg_rec["child_order_id"] = child_oid or None
+                        pg_rec["child_order_status"] = child_st
+                        pg_rec["child_filled_qty"] = child_fqty
+                        pg_rec["child_avg_price"] = float(
+                            child_sell.get("average_price")
+                            or buy_leg.get("stop_trigger_price")
+                            or buy_leg["entry_price"]
+                        )
+                        pg_rec["ownership_status"] = "CONFIRMED_GTT_CHILD"
+                        pkg["legs"]["buy_leg"]["protective_gtt"] = pg_rec
+                        pkg["legs"]["buy_leg"]["gtt_child_order_id"] = child_oid or None
+                        pkg["legs"]["buy_leg"]["gtt_id"] = None
+
+                        b_alr, b_vw0 = self._recompute_leg_exit_progress(pid, "BUY_WING")
+                        pkg["legs"]["buy_leg"]["exited_qty"] = b_alr
+                        if b_vw0 > 0:
+                            pkg["legs"]["buy_leg"]["partial_exit_vwap"] = b_vw0
+                        if b_alr >= int(buy_leg["qty"]):
+                            pkg["legs"]["buy_leg"]["exit_price"] = b_vw0
+                            acc = self._compute_realized_pkg_accounting(pkg)
+                            pkg["state"] = "CLOSED"
+                            pkg["exit_ts_ms"] = _now_ms()
+                            pkg["exit_reason"] = "RECONCILED_BROKER_EXIT_OR_GTT"
+                            pkg["realized_gross_inr"] = float(acc["gross_pnl"])
+                            pkg["realized_friction_inr"] = float(acc["total_friction"])
+                            pkg["realized_net_inr"] = float(acc["net_pnl"])
+                            pkg["reconciled_at_iso"] = now_ist_iso()
+                            pkg["unresolved_fault"] = None
+                            self.store.upsert_package(pkg)
+                            pkg_reconciliations.append({"live_package_id": pid, "status": "CLOSED_FROM_BROKER_EXIT"})
+                            continue
 
                 # Hard structural & GTT invariants: NEVER promote incomplete spread or unprotected long to OPEN
                 rem_amb = [
@@ -2548,8 +3345,8 @@ class V2LiveExecutionEngine:
                                 reason="RECONCILE_EXCESS_BUY_UNWIND",
                                 leg_role="BUY_WING_EXCESS_UNWIND",
                             )
-                            if unw_ex["ok"]:
-                                self._apply_excess_buy_unwind_to_pkg(pkg, (b_q - s_q), float(unw_ex["avg_price"]))
+                            self._sync_excess_buy_unwind_from_intents(pkg)
+                            if unw_ex["ok"] or int(pkg["legs"]["buy_leg"].get("qty") or 0) <= s_q:
                                 pkg["state"] = "OPEN"
                                 pkg["unresolved_fault"] = None
                             else:
@@ -2570,6 +3367,13 @@ class V2LiveExecutionEngine:
                             if gtt_res["ok"]:
                                 pkg["legs"]["buy_leg"]["gtt_id"] = gtt_res["gtt_id"]
                                 pkg["legs"]["buy_leg"]["stop_trigger_price"] = gtt_res["stop_trigger_price"]
+                                pkg["legs"]["buy_leg"]["protective_gtt"] = self._build_protective_gtt_record(
+                                    gtt_res["gtt_id"],
+                                    rem_b_qty,
+                                    float(gtt_res["stop_trigger_price"]),
+                                    state="SCHEDULED",
+                                    ownership_status="ACTIVE_RULE",
+                                )
                                 active_gtt_ids.add(str(gtt_res["gtt_id"]))
                                 pkg["state"] = "OPEN"
                                 pkg["unresolved_fault"] = None
@@ -2606,6 +3410,10 @@ class V2LiveExecutionEngine:
                 self.store.upsert_package(pkg)
                 pkg_reconciliations.append({"live_package_id": pid, "status": pkg["state"], "broker_pos_qty": actual_qty})
 
+            collisions = self._detect_d_position_collisions(
+                d_pos_by_key, non_d_by_key, self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES)
+            )
+            self._last_position_collisions = collisions
             faults = self.store.count_unresolved_faults()
             if self.store.db_exists():
                 self.store.append_audit(
@@ -2614,6 +3422,7 @@ class V2LiveExecutionEngine:
                     {
                         "resolved_intents": resolved_intents,
                         "package_reconciliations": pkg_reconciliations,
+                        "position_collisions": collisions,
                         "active_gtts_count": len(active_gtts),
                         "blocking_faults_remaining": faults["total_blocking_faults"],
                     },
@@ -2622,6 +3431,7 @@ class V2LiveExecutionEngine:
                 "ok": True,
                 "resolved_intents": resolved_intents,
                 "package_reconciliations": pkg_reconciliations,
+                "position_collisions": collisions,
                 "active_gtts_count": len(active_gtts),
                 "unresolved_faults": faults,
             }

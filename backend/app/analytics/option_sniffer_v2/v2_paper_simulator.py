@@ -32,6 +32,7 @@ from app.analytics.option_sniffer_v2.v2_config import (
 )
 from app.analytics.option_sniffer_v2.v2_data_contract import (
     check_cross_leg_skew,
+    extract_observed_timestamp_ms,
     resolve_strict_quote_age_ms,
     sweep_observed_l5_book,
 )
@@ -808,6 +809,7 @@ class V2PaperSimulator:
         allow_partial_lot: bool = True,
         book_id_override: Optional[str] = None,
         lot_count_override: Optional[int] = None,
+        initial_short_quote_ts_ms: Optional[int] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             cfg_a = self._resolve_book_a_cfg(book_id_override)
@@ -913,6 +915,7 @@ class V2PaperSimulator:
                     "qty": -confirmed_qty,
                 },
                 "leg1_ts_ms": decision_ts_ms,
+                "leg1_short_quote_ts_ms": int(initial_short_quote_ts_ms) if initial_short_quote_ts_ms is not None else None,
                 "deadline_ts_ms": decision_ts_ms + int(hyg["leg2_timeout_ms"]),
                 "spot_at_entry": float(spot_price),
                 "vix_at_entry": vix_val,
@@ -1013,6 +1016,8 @@ class V2PaperSimulator:
         decision_ts_ms: int,
         session_date: str,
         bar_ts: str,
+        require_subsequent_quote: bool = False,
+        leg2_execution_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Attempts Leg-2 short sell bounded by `min_permitted_short_px = actual_wing_fill + min_credit_pts`.
@@ -1038,8 +1043,26 @@ class V2PaperSimulator:
                 allow_zero_settlement=False,
             )
 
+            eff_mode = str(
+                leg2_execution_mode
+                or ("SUBSEQUENT_OBSERVED_QUOTE" if require_subsequent_quote else "DISCRETE_1M_SINGLE_SNAPSHOT")
+            )
             timed_out = decision_ts_ms >= int(ls["deadline_ts_ms"])
             sw_s: Dict[str, Any] = {"ok": False, "reason": "LEG2_TIMEOUT"}
+            short_obs_ts = extract_observed_timestamp_ms(short_quote) if short_quote is not None else None
+            if not timed_out and require_subsequent_quote:
+                leg1_short_ts = ls.get("leg1_short_quote_ts_ms")
+                prior_ts = int(leg1_short_ts) if leg1_short_ts is not None else int(ls["leg1_ts_ms"])
+                if short_quote is None or short_obs_ts is None or int(short_obs_ts) <= prior_ts:
+                    return {
+                        "ok": False,
+                        "state": "PENDING_LEG2_SHORT",
+                        "pending": True,
+                        "package_id": package_id,
+                        "reason": "AWAITING_SUBSEQUENT_SHORT_QUOTE",
+                        "leg2_execution_mode": eff_mode,
+                    }
+
             skew_ok, skew_ms, skew_reason = check_cross_leg_skew(
                 short_quote, wing_quote, max_skew_ms=int(hyg["max_cross_leg_skew_ms"]), require_depth_ts=True
             )
@@ -1109,6 +1132,8 @@ class V2PaperSimulator:
                     ls["hard_stop_debit_pts"] = hard_stop_debit
                     ls["target_debit_pts"] = target_debit
                     ls["prev_eod_mtm_inr"] = 0.0
+                    ls["leg2_execution_mode"] = eff_mode
+                    ls["leg2_short_quote_ts_ms"] = int(short_obs_ts) if short_obs_ts is not None else int(decision_ts_ms)
 
                     intent_row = {
                         "intent_id": intent_id,
@@ -1178,7 +1203,13 @@ class V2PaperSimulator:
                         return {"ok": False, "reason": err_rsn}
                     self.open_packages[package_id] = pkg_upd
                     self._all_pkgs_by_id[package_id] = pkg_upd
-                    return {"ok": True, "state": "OPEN", "package_id": package_id, "net_credit_pts": net_credit}
+                    return {
+                        "ok": True,
+                        "state": "OPEN",
+                        "package_id": package_id,
+                        "net_credit_pts": net_credit,
+                        "leg2_execution_mode": eff_mode,
+                    }
 
                 sw_s = {"ok": False, "reason": f"STRUCTURAL_LOSS_EXCEEDED:{struct_loss:.2f}"}
 

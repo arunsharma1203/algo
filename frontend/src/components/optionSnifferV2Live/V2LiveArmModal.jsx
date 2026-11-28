@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Shield, ShieldAlert, Lock, X, AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
 import {
   postV2LiveArm,
+  postV2LiveArmChallenge,
   postV2LiveDisarm,
   postV2PaperMode,
   fetchV2LiveFundsPreview,
@@ -72,6 +73,7 @@ export default function V2LiveArmModal({
   const [pinInput, setPinInput] = useState('');
   const [humanConfirmed, setHumanConfirmed] = useState(false);
   const [localFunds, setLocalFunds] = useState(null);
+  const [challengeState, setChallengeState] = useState({ pin: null, pinMode: null });
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -103,13 +105,24 @@ export default function V2LiveArmModal({
     fetchV2LiveFundsPreview(false)
       .then((res) => setLocalFunds(res))
       .catch(() => {});
+    postV2LiveArmChallenge()
+      .then((ch) =>
+        setChallengeState({
+          pin: ch?.challenge_pin ? String(ch.challenge_pin) : ch?.current_pin ? String(ch.current_pin) : null,
+          pinMode: ch?.pin_delivery || ch?.pin_mode || null,
+        })
+      )
+      .catch(() => setChallengeState({ pin: null, pinMode: 'OUT_OF_BAND_REQUIRED' }));
   }, [isOpen, liveStatus, overview]);
 
   if (!isOpen) return null;
 
   const activeCard = MODE_CARDS.find((c) => c.id === selectedMode) || MODE_CARDS[0];
   const isPaperSelected = activeCard.id === 'PAPER_ONLY';
-  const expectedPin = liveStatus?.current_pin ? String(liveStatus.current_pin) : null;
+  const expectedPin = challengeState.pin || (liveStatus?.current_pin ? String(liveStatus.current_pin) : null);
+  const pinMatchOk = expectedPin
+    ? pinInput.trim() === expectedPin
+    : /^\d{4}$/.test(pinInput.trim());
   const faults = liveStatus?.unresolved_faults || { total_blocking_faults: 0 };
 
   const effFunds = localFunds || fundsPreview || null;
@@ -125,11 +138,10 @@ export default function V2LiveArmModal({
   const canSubmit = isPaperSelected
     ? !submitting
     : Boolean(liveStatus) &&
-      Boolean(expectedPin) &&
       faults.total_blocking_faults === 0 &&
       !marginInsufficient &&
       humanConfirmed &&
-      pinInput.trim() === expectedPin &&
+      pinMatchOk &&
       !submitting;
 
   const handleLotsChange = (rawVal) => {
@@ -176,8 +188,17 @@ export default function V2LiveArmModal({
     if (refreshing) return;
     setRefreshing(true);
     try {
-      const f = await fetchV2LiveFundsPreview(true).catch(() => null);
+      const [f, ch] = await Promise.all([
+        fetchV2LiveFundsPreview(true).catch(() => null),
+        postV2LiveArmChallenge().catch(() => null),
+      ]);
       if (f) setLocalFunds(f);
+      if (ch) {
+        setChallengeState({
+          pin: ch?.challenge_pin ? String(ch.challenge_pin) : ch?.current_pin ? String(ch.current_pin) : null,
+          pinMode: ch?.pin_delivery || ch?.pin_mode || null,
+        });
+      }
       if (onRefreshStatus) await onRefreshStatus();
     } finally {
       setRefreshing(false);
@@ -353,17 +374,16 @@ export default function V2LiveArmModal({
                       : 'Margin verified at submit'}
                   </span>
                 </div>
-                <div className="text-[11px] text-slate-400">
+                <div className="text-[11px] text-slate-400 space-y-1">
                   {(activeCard.id === 'BOOK_B_ONLY' || activeCard.id === 'AUTO_DUAL') && (
-                    <span>
-                      Book B Outlay Cap: &#8377;{(18500 * maxLots).toLocaleString('en-IN')} &bull; Exchange V3 GTT Stop active.{' '}
-                    </span>
+                    <div>
+                      Book B Outlay Cap: &#8377;{(18500 * maxLots).toLocaleString('en-IN')} (enforced at live limit collar) &bull; Exchange V3 GTT Stop derived from actual fill (&#8377;{(1800 * maxLots).toLocaleString('en-IN')} trigger budget; gap/slippage loss bounded by premium paid).
+                    </div>
                   )}
                   {(activeCard.id === 'BOOK_A_ONLY' || activeCard.id === 'AUTO_DUAL') && (
-                    <span>
-                      Book A 100pt Spread Wing Cap: &#8377;{(4875 * maxLots).toLocaleString('en-IN')} &bull;{' '}
-                      Close-only 1m bar-observer stop (1.8x / &#8377;{(1950 * maxLots).toLocaleString('en-IN')} target SL, no exchange GTT).
-                    </span>
+                    <div>
+                      Book A 100pt Wing Structural Cap: &#8377;{(4875 * maxLots).toLocaleString('en-IN')} &bull; Close-only 1m stop trigger budget &#8377;{(1950 * maxLots).toLocaleString('en-IN')} + 5s live guardian (actual gap/fill loss can exceed trigger budget up to wing width).
+                    </div>
                   )}
                 </div>
               </div>
@@ -376,14 +396,14 @@ export default function V2LiveArmModal({
                     <span>4-Digit Session Security PIN</span>
                   </div>
                   <div className="px-2.5 py-1 rounded bg-slate-900 border border-slate-700 font-mono text-sm font-bold tracking-widest text-amber-300">
-                    {expectedPin || '----'}
+                    {expectedPin || (challengeState.pinMode === 'OUT_OF_BAND_TERMINAL_ONLY' ? 'SERVER LOG' : '----')}
                   </div>
                 </div>
                 <input
                   type="text"
                   inputMode="numeric"
                   maxLength={4}
-                  placeholder="Type the 4-digit PIN shown above"
+                  placeholder={expectedPin ? 'Type the 4-digit PIN shown above' : 'Enter 4-digit PIN from backend startup log'}
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white text-sm font-mono tracking-widest focus:outline-none focus:border-amber-500"
