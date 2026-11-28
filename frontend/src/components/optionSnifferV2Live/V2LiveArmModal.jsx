@@ -1,42 +1,128 @@
-import React, { useState } from 'react';
-import { ShieldAlert, Lock, X, CheckCircle2, AlertTriangle, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Shield, ShieldAlert, Lock, X, AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
+import { postV2LiveArm, postV2LiveDisarm } from './v2LiveApiClient';
 
-const fmtInr = (val) => {
-  if (val === null || val === undefined || Number.isNaN(Number(val))) return 'Unavailable';
-  return `₹${Number(val).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-};
+const MODE_CARDS = [
+  {
+    id: 'PAPER_ONLY',
+    title: 'Paper Only',
+    minMarginInr: 0,
+    minLabel: '₹0 (0 Live Orders)',
+    desc: 'Runs paper simulation & live L5 telemetry without placing any broker orders.',
+    books: [],
+    scope: 'PAPER_ONLY',
+  },
+  {
+    id: 'BOOK_B_ONLY',
+    title: 'Live • Book B Only',
+    minMarginInr: 25000,
+    minLabel: '₹25k min margin',
+    desc: 'Single-leg Paid Convexity (VRP <= 1.15, 45m exit, mandatory V3 GTT stop).',
+    books: ['V2_BOOK_B_PAID_FLOW'],
+    scope: 'BOOK_B_ONLY',
+  },
+  {
+    id: 'BOOK_A_ONLY',
+    title: 'Live • Book A Only',
+    minMarginInr: 75000,
+    minLabel: '₹75k min margin',
+    desc: 'Friday Intraday 50/100w Spread (Buy-Wing-First + SPAN check + 24pt min credit).',
+    books: ['V2_BOOK_A_INTRADAY_CREDIT'],
+    scope: 'BOOK_A_ONLY',
+  },
+  {
+    id: 'AUTO_DUAL',
+    title: 'Live • Auto Book A + B',
+    minMarginInr: 85000,
+    minLabel: '₹85k min margin',
+    desc: 'Dual-book live routing under anti-self-hedge guard and SPAN margin buffer.',
+    books: ['V2_BOOK_B_PAID_FLOW', 'V2_BOOK_A_INTRADAY_CREDIT'],
+    scope: 'AUTO_DUAL',
+  },
+];
 
 export default function V2LiveArmModal({
   isOpen,
   onClose,
   liveStatus,
-  paperOpenCount = 0,
-  onConfirmArm,
-  statusError = '',
-  onRefreshStatus = null,
+  onCompleted,
+  onRefreshStatus,
 }) {
-  const [selectedBook, setSelectedBook] = useState('V2_BOOK_B_PAID_FLOW');
-  const [maxLots, setMaxLots] = useState(liveStatus?.arm_state?.max_lots_per_book || 1);
-  const [maxDailyLoss, setMaxDailyLoss] = useState(liveStatus?.arm_state?.max_daily_loss_inr || 2500);
-  const [maxOpenPkgs, setMaxOpenPkgs] = useState(liveStatus?.arm_state?.max_open_packages || 1);
-  const [pin, setPin] = useState('');
+  const [selectedMode, setSelectedMode] = useState('BOOK_B_ONLY');
+  const [maxLots, setMaxLots] = useState(1);
+  const [maxDailyLoss, setMaxDailyLoss] = useState(2500);
+  const [maxOpenPkgs, setMaxOpenPkgs] = useState(1);
+  const [pinInput, setPinInput] = useState('');
   const [humanConfirmed, setHumanConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
+  const prevOpenRef = useRef(false);
+
+  useEffect(() => {
+    const wasOpen = prevOpenRef.current;
+    prevOpenRef.current = Boolean(isOpen);
+    if (!isOpen || wasOpen) return;
+    setPinInput('');
+    setHumanConfirmed(false);
+    setErrorMsg('');
+    if (liveStatus?.armed) {
+      setSelectedMode(liveStatus?.live_book_scope || 'BOOK_B_ONLY');
+      setMaxLots(liveStatus?.arm_state?.max_lots_per_book || 1);
+      setMaxDailyLoss(liveStatus?.arm_state?.max_daily_loss_inr || 2500);
+      setMaxOpenPkgs(liveStatus?.arm_state?.max_open_packages || 1);
+    } else {
+      setSelectedMode('BOOK_B_ONLY');
+    }
+  }, [isOpen, liveStatus]);
+
   if (!isOpen) return null;
 
-  const faults = liveStatus?.unresolved_faults || { total_blocking_faults: 0, items: [] };
-  const paper = liveStatus?.paper_baseline_summary || {};
+  const activeCard = MODE_CARDS.find((c) => c.id === selectedMode) || MODE_CARDS[0];
+  const isPaperSelected = activeCard.id === 'PAPER_ONLY';
   const expectedPin = liveStatus?.current_pin ? String(liveStatus.current_pin) : null;
-  const canArm =
-    Boolean(liveStatus) &&
-    Boolean(expectedPin) &&
-    faults.total_blocking_faults === 0 &&
-    humanConfirmed &&
-    pin.trim() === expectedPin &&
-    !submitting;
+  const faults = liveStatus?.unresolved_faults || { total_blocking_faults: 0 };
+
+  const canSubmit = isPaperSelected
+    ? !submitting
+    : Boolean(liveStatus) &&
+      Boolean(expectedPin) &&
+      faults.total_blocking_faults === 0 &&
+      humanConfirmed &&
+      pinInput.trim() === expectedPin &&
+      !submitting;
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setErrorMsg('');
+    try {
+      if (isPaperSelected) {
+        if (liveStatus?.armed) {
+          await postV2LiveDisarm('HUMAN_SWITCHED_TO_PAPER_ONLY');
+        }
+      } else {
+        await postV2LiveArm({
+          pin: pinInput.trim(),
+          human_confirmed: humanConfirmed,
+          selected_books: activeCard.books,
+          live_book_scope: activeCard.scope,
+          protocol_profile_id: 'V2_4_PAPER_DUAL_BOOK',
+          max_lots_per_book: Number(maxLots),
+          max_daily_loss_inr: Number(maxDailyLoss),
+          max_open_packages: Number(maxOpenPkgs),
+        });
+      }
+      if (onCompleted) await onCompleted();
+      onClose();
+    } catch (err) {
+      setErrorMsg(err?.message || 'Failed to update execution mode');
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const handleRefresh = async () => {
     if (!onRefreshStatus || refreshing) return;
@@ -48,282 +134,191 @@ export default function V2LiveArmModal({
     }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!canArm) return;
-    setErrorMsg('');
-    setSubmitting(true);
-    try {
-      await onConfirmArm({
-        pin: pin.trim(),
-        human_confirmed: true,
-        selected_books: [selectedBook],
-        protocol_profile_id: 'V2_BOOK_B_FROZEN_PAPER',
-        max_lots_per_book: Number(maxLots),
-        max_daily_loss_inr: Number(maxDailyLoss),
-        max_open_packages: Number(maxOpenPkgs),
-      });
-      setPin('');
-      setHumanConfirmed(false);
-      onClose();
-    } catch (err) {
-      setErrorMsg(err?.message || 'Failed to arm V2 live execution.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-      <div className="w-full max-w-2xl rounded-2xl border border-rose-500/40 bg-slate-950 text-slate-100 shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800 bg-rose-950/20">
+      <div className="w-full max-w-2xl bg-slate-900 border border-slate-700 rounded-xl shadow-2xl overflow-hidden text-slate-100">
+        <div className="flex items-center justify-between px-5 py-3.5 bg-slate-950 border-b border-slate-800">
           <div className="flex items-center gap-2.5">
-            <ShieldAlert className="w-5 h-5 text-rose-400" />
-            <div>
-              <h3 className="text-sm font-bold uppercase tracking-wide text-rose-200">
-                Arm Option Sniffer V2 Real-Capital Execution
-              </h3>
-              <p className="text-[11px] text-slate-400">
-                Human-exclusive control • V2 Paper baseline continues untouched in parallel
-              </p>
-            </div>
+            {isPaperSelected ? (
+              <Shield className="h-5 w-5 text-emerald-400" />
+            ) : (
+              <ShieldAlert className="h-5 w-5 text-amber-400" />
+            )}
+            <h2 className="text-sm sm:text-base font-bold text-white">
+              V2 Execution &amp; Live Safety Interlock
+            </h2>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            {onRefreshStatus && (
+              <button
+                type="button"
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
+                title="Refresh PIN and fault state"
+              >
+                <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         <form onSubmit={handleSubmit} className="p-5 space-y-4 max-h-[82vh] overflow-y-auto">
-          {!liveStatus && (
-            <div className="rounded-xl border border-rose-500/50 bg-rose-950/35 p-3 text-xs text-rose-200 flex items-start justify-between gap-2">
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                <div>
-                  <div className="font-bold">Live Control Status Unavailable — Arming Blocked</div>
-                  <div className="text-[11px] mt-0.5 text-rose-200/90">
-                    {statusError || 'Cannot reach /api/option-sniffer-advance-v2-live/status (backend restart may be required).'}
+          {/* 4 Clickable Execution Mode Cards */}
+          <div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+              Select Execution Mode
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {MODE_CARDS.map((card) => {
+                const selected = selectedMode === card.id;
+                return (
+                  <button
+                    key={card.id}
+                    type="button"
+                    onClick={() => setSelectedMode(card.id)}
+                    className={`text-left p-3 rounded-lg border transition ${
+                      selected
+                        ? card.id === 'PAPER_ONLY'
+                          ? 'bg-emerald-950/50 border-emerald-500 ring-1 ring-emerald-500/40'
+                          : 'bg-amber-950/40 border-amber-500 ring-1 ring-amber-500/40'
+                        : 'bg-slate-950/70 border-slate-800 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <span className="text-xs font-bold text-white">{card.title}</span>
+                      <span className="px-2 py-0.5 text-[10px] font-semibold rounded bg-slate-800 text-slate-300 border border-slate-700">
+                        {card.minLabel}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">{card.desc}</p>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {!isPaperSelected && (
+            <>
+              {faults.total_blocking_faults > 0 && (
+                <div className="p-3 rounded-lg bg-rose-950/60 border border-rose-700 text-xs text-rose-200 flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+                  <span>
+                    {faults.total_blocking_faults} unresolved live fault(s) present. Run broker reconciliation before arming.
+                  </span>
+                </div>
+              )}
+
+              {/* Risk Controls */}
+              <div className="grid grid-cols-3 gap-3 bg-slate-950/60 border border-slate-800 rounded-lg p-3">
+                <label className="text-xs text-slate-300">
+                  <span className="block text-[11px] text-slate-400 mb-1">Lots / Book (1-5)</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={5}
+                    value={maxLots}
+                    onChange={(e) => setMaxLots(Math.max(1, Math.min(5, Number(e.target.value) || 1)))}
+                    className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 text-white text-xs"
+                  />
+                </label>
+                <label className="text-xs text-slate-300">
+                  <span className="block text-[11px] text-slate-400 mb-1">Max Daily Loss (&#8377;)</span>
+                  <input
+                    type="number"
+                    min={500}
+                    step={250}
+                    value={maxDailyLoss}
+                    onChange={(e) => setMaxDailyLoss(Math.max(500, Number(e.target.value) || 2500))}
+                    className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 text-white text-xs"
+                  />
+                </label>
+                <label className="text-xs text-slate-300">
+                  <span className="block text-[11px] text-slate-400 mb-1">Max Open Slots</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={2}
+                    value={maxOpenPkgs}
+                    onChange={(e) => setMaxOpenPkgs(Math.max(1, Math.min(2, Number(e.target.value) || 1)))}
+                    className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 text-white text-xs"
+                  />
+                </label>
+              </div>
+
+              {/* 4-Digit Human Session PIN Interlock */}
+              <div className="p-3.5 rounded-lg bg-slate-950/80 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-xs text-slate-300">
+                    <Lock className="h-4 w-4 text-amber-400" />
+                    <span>4-Digit Session Security PIN</span>
+                  </div>
+                  <div className="px-2.5 py-1 rounded bg-slate-900 border border-slate-700 font-mono text-sm font-bold tracking-widest text-amber-300">
+                    {expectedPin || '----'}
                   </div>
                 </div>
-              </div>
-              {onRefreshStatus && (
-                <button
-                  type="button"
-                  onClick={handleRefresh}
-                  disabled={refreshing}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-rose-400/40 bg-rose-900/40 hover:bg-rose-800/50 text-[11px] font-semibold text-rose-100 shrink-0"
-                >
-                  <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} />
-                  Refresh
-                </button>
-              )}
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-              <div className="text-[10px] text-slate-400 uppercase">Current Mode</div>
-              <div className="font-bold text-amber-300 mt-1">{liveStatus?.execution_mode || 'UNAVAILABLE'}</div>
-              <div className="text-[11px] text-slate-400 mt-1">
-                Live Open: {liveStatus?.open_package_count ?? '—'} • Paper Open: {paperOpenCount}
-              </div>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-              <div className="text-[10px] text-slate-400 uppercase">Paper Baseline Evidence</div>
-              <div className="font-bold text-slate-100 mt-1">
-                {paper?.available ? `${paper.closed_trades} closed (${fmtInr(paper.realized_net_pnl_inr)})` : 'Cold DB'}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-1">
-                {paper?.available
-                  ? `Obs DD: ${fmtInr(paper.observed_mark_max_dd_inr)} • Stress: ${fmtInr(paper.stress_max_dd_inr)}`
-                  : paper?.reason || (liveStatus ? 'No forward DB' : 'Status unavailable')}
-              </div>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
-              <div className="text-[10px] text-slate-400 uppercase">Unresolved Faults</div>
-              <div
-                className={`font-bold mt-1 ${
-                  !liveStatus
-                    ? 'text-amber-400'
-                    : faults.total_blocking_faults > 0
-                      ? 'text-rose-400'
-                      : 'text-emerald-400'
-                }`}
-              >
-                {!liveStatus ? 'Unavailable' : `${faults.total_blocking_faults} Blocking`}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-1">
-                {!liveStatus
-                  ? 'Live endpoint unreachable'
-                  : faults.total_blocking_faults > 0
-                    ? 'Reconcile before arming'
-                    : 'Clean intent ledger'}
-              </div>
-            </div>
-          </div>
-
-          {faults.total_blocking_faults > 0 && (
-            <div className="rounded-xl border border-rose-500/50 bg-rose-950/30 p-3 text-xs text-rose-200 flex items-start gap-2">
-              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-              <div>
-                <div className="font-bold">Arming Blocked by Unresolved Broker Faults</div>
-                <div className="text-[11px] mt-1">
-                  {faults.items.map((f) => `${f.kind}:${f.id} (${f.state})`).join(', ')}
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3.5 space-y-2.5 text-xs">
-            <div className="font-semibold text-slate-200">Select Strategy Book</div>
-            <label className="flex items-center justify-between p-2.5 rounded-lg border border-cyan-500/40 bg-cyan-950/20 cursor-pointer">
-              <div className="flex items-center gap-2">
                 <input
-                  type="radio"
-                  name="v2LiveBook"
-                  value="V2_BOOK_B_PAID_FLOW"
-                  checked={selectedBook === 'V2_BOOK_B_PAID_FLOW'}
-                  onChange={() => setSelectedBook('V2_BOOK_B_PAID_FLOW')}
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={4}
+                  placeholder="Type the 4-digit PIN shown above"
+                  value={pinInput}
+                  onChange={(e) => setPinInput(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white text-sm font-mono tracking-widest focus:outline-none focus:border-amber-500"
                 />
-                <div>
-                  <div className="font-semibold text-cyan-200">V2_BOOK_B_PAID_FLOW (V2_BOOK_B_FROZEN_PAPER)</div>
-                  <div className="text-[11px] text-slate-400">Paid intraday breakout flow with buy-wing-first protection</div>
-                </div>
+                <label className="flex items-start gap-2.5 text-xs text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={humanConfirmed}
+                    onChange={(e) => setHumanConfirmed(e.target.checked)}
+                    className="mt-0.5 rounded border-slate-600 bg-slate-900 text-amber-500"
+                  />
+                  <span>
+                    I explicitly authorize live Upstox orders for <strong>{activeCard.title}</strong> with verified minimum margin &#8377;{(activeCard.minMarginInr * (activeCard.id === 'BOOK_B_ONLY' ? 1 : maxLots)).toLocaleString('en-IN')}.
+                  </span>
+                </label>
               </div>
-              <CheckCircle2 className="w-4 h-4 text-cyan-400" />
-            </label>
-            <div className="flex items-center justify-between p-2.5 rounded-lg border border-slate-800 bg-slate-950/50 opacity-60">
-              <div>
-                <div className="font-semibold text-slate-400">V2_BOOK_A_PROPOSED_O3</div>
-                <div className="text-[11px] text-amber-400">Blocked: UNVERIFIED_SPEC_CONFLICT vs historical Phase-4 O3</div>
-              </div>
-              <span className="px-2 py-0.5 rounded bg-slate-800 text-[10px] text-slate-400">DISABLED</span>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-            <label className="block">
-              <span className="text-slate-400 text-[11px]">Max Lots / Book</span>
-              <input
-                type="number"
-                min={1}
-                max={10}
-                value={maxLots}
-                onChange={(e) => setMaxLots(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100"
-              />
-            </label>
-            <label className="block">
-              <span className="text-slate-400 text-[11px]">Max Daily Loss (INR)</span>
-              <input
-                type="number"
-                min={500}
-                step={250}
-                value={maxDailyLoss}
-                onChange={(e) => setMaxDailyLoss(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100"
-              />
-            </label>
-            <label className="block">
-              <span className="text-slate-400 text-[11px]">Max Open Packages</span>
-              <input
-                type="number"
-                min={1}
-                max={5}
-                value={maxOpenPkgs}
-                onChange={(e) => setMaxOpenPkgs(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100"
-              />
-            </label>
-          </div>
-
-          <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3 text-[11px] text-amber-200/90 space-y-2">
-            <div>
-              <strong>Disclosure:</strong> An AI backtest or forward paper baseline does not prove future income.
-              Option Sniffer V2 boots disarmed on every restart. Disarming stops new entries while keeping position
-              management and manual square-off active.
-            </div>
-            <label className="flex items-start gap-2 cursor-pointer text-slate-100 font-medium">
-              <input
-                type="checkbox"
-                checked={humanConfirmed}
-                onChange={(e) => setHumanConfirmed(e.target.checked)}
-                className="mt-0.5"
-              />
-              <span>I have reviewed open exposure, limits, and faults, and authorize live Upstox execution.</span>
-            </label>
-          </div>
-
-          <div>
-            <div className="rounded-xl border border-cyan-500/40 bg-cyan-950/25 p-3 mb-3 flex items-center justify-between gap-3">
-              <div>
-                <div className="text-[11px] font-bold uppercase tracking-wide text-cyan-200">
-                  Human Confirmation Interlock Code
-                </div>
-                <div className="text-[11px] text-slate-300 mt-0.5">
-                  Type the 4-digit session code shown here to confirm intentional human arming. Rotates after arm/disarm.
-                </div>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <div
-                  data-testid="v2-live-session-pin"
-                  className="px-3.5 py-2 rounded-lg border border-cyan-400/50 bg-slate-950 font-mono text-lg font-extrabold tracking-[0.25em] text-cyan-200 select-all"
-                >
-                  {expectedPin || 'Unavailable'}
-                </div>
-                {onRefreshStatus && (
-                  <button
-                    type="button"
-                    onClick={handleRefresh}
-                    disabled={refreshing}
-                    title="Refresh session interlock code"
-                    className="p-2 rounded-lg border border-cyan-500/40 bg-slate-900 hover:bg-slate-800 text-cyan-200"
-                  >
-                    <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-                  </button>
-                )}
-              </div>
-            </div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1">
-              Type 4-Digit Human Confirmation Code
-            </label>
-            <div className="relative">
-              <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-              <input
-                type="text"
-                inputMode="numeric"
-                maxLength={4}
-                value={pin}
-                onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
-                placeholder="Enter 4-digit code shown above"
-                className="w-full rounded-lg border border-slate-700 bg-slate-900 pl-9 pr-3 py-2 text-sm font-mono tracking-widest text-slate-100"
-              />
-            </div>
-          </div>
+            </>
+          )}
 
           {errorMsg && (
-            <div className="rounded-lg border border-rose-500/50 bg-rose-950/40 px-3 py-2 text-xs text-rose-200">
+            <div className="p-2.5 rounded-lg bg-rose-950/60 border border-rose-700 text-xs text-rose-200">
               {errorMsg}
             </div>
           )}
 
-          <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+          <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 rounded-lg border border-slate-700 text-xs font-medium text-slate-300 hover:bg-slate-800"
+              className="px-4 py-2 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
             >
-              Cancel (Stay Disarmed)
+              Cancel
             </button>
             <button
               type="submit"
-              disabled={!canArm}
-              className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-xs font-bold text-white"
+              disabled={!canSubmit}
+              className={`inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-lg transition disabled:opacity-40 ${
+                isPaperSelected
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                  : 'bg-amber-600 hover:bg-amber-500 text-white'
+              }`}
             >
-              {submitting ? 'Verifying & Arming...' : 'Confirm Human Arm Live'}
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              {submitting
+                ? 'Applying...'
+                : isPaperSelected
+                ? liveStatus?.armed
+                  ? 'Switch to Paper Only (Disarm Live)'
+                  : 'Confirm Paper Baseline'
+                : `Arm ${activeCard.title}`}
             </button>
           </div>
         </form>

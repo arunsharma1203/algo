@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List
 
 try:
-    from fastapi import APIRouter, Query
+    from fastapi import APIRouter, Body, HTTPException, Query
 
     _HAS_FASTAPI = True
 except ImportError:  # Allows stdlib `/usr/bin/python3 -B` tests without FastAPI installed
@@ -21,6 +21,15 @@ except ImportError:  # Allows stdlib `/usr/bin/python3 -B` tests without FastAPI
 
     def Query(default: Any = None, **_: Any) -> Any:  # type: ignore
         return default
+
+    def Body(default: Any = None, **_: Any) -> Any:  # type: ignore
+        return default
+
+    class HTTPException(Exception):  # type: ignore
+        def __init__(self, status_code: int, detail: str) -> None:
+            self.status_code = status_code
+            self.detail = detail
+            super().__init__(detail)
 
     class APIRouter:  # type: ignore
         def __init__(self, prefix: str = "", tags: List[str] | None = None) -> None:
@@ -157,3 +166,14 @@ def post_v2_shutdown_only() -> Dict[str, Any]:
 def post_v2_reconcile_booking_fault() -> Dict[str, Any]:
     """Explicit operator action to reconcile paper ledger and clear latched booking fault (paper only)."""
     return get_option_sniffer_v2_service().reconcile_booking_fault()
+
+
+@router.post("/control/paper-mode")
+def post_v2_paper_mode(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """Explicit operator control to route V2 Paper evaluation (`AUTO`, `BOOK_A_ONLY`, `BOOK_B_ONLY`)."""
+    raw = getattr(payload, "default", payload)
+    mode = str((raw or {}).get("paper_mode") or "").upper().strip()
+    try:
+        return get_option_sniffer_v2_service().set_paper_execution_mode(mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -17,6 +17,7 @@ Strict Governance Invariant:
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.analytics.option_sniffer_v2.v2_config import (
@@ -26,11 +27,35 @@ from app.analytics.option_sniffer_v2.v2_config import (
 from app.analytics.option_sniffer_v2.v2_data_contract import (
     check_cross_leg_skew,
     sweep_observed_l5_book,
+    validate_nifty_option_identity,
 )
 from app.analytics.option_sniffer_v2.v2_paper_simulator import (
     V2PaperSimulator,
     make_stable_id,
 )
+
+V2_BOOK_A_INTRADAY_CREDIT_SPEC: Dict[str, Any] = {
+    "book_id": "V2_BOOK_A_INTRADAY_CREDIT",
+    "enabled_in_paper": True,
+    "live_arm_eligible": True,
+    "calendar_dte_allowed": [3, 4],
+    "entry_window_start_hhmm": 1130,
+    "entry_window_end_hhmm": 1315,
+    "require_no_vwap_flip_exit": True,
+    "short_otm_pts": 50.0,
+    "spread_width_pts": 100.0,
+    "min_net_credit_pts": 25.0,
+    "min_live_credit_pts": 24.0,
+    "credit_capture_target_pct": 70.0,
+    "close_only_stop_debit_mult": 1.8,
+    "max_planned_stop_loss_inr": 1950.0,
+    "breakeven_ratchet_decay_pct": 45.0,
+    "max_structural_loss_inr": 6500.0,
+    "eod_squareoff_ist_hhmm": 1515,
+    "max_spread_pct": 6.0,
+    "lot_count": 1,
+    "fallback_unverified_margin_reserve_inr": 75000.0,
+}
 
 
 def compute_vix_prior_10d_sma(prior_vix_closes: List[float], lookback: int = 10) -> Optional[float]:
@@ -369,6 +394,361 @@ def manage_open_book_a_on_bar(
             "CLOSE_ONLY_BREAKEVEN_RATCHET"
             if (ratchet_debit is not None and float(ratchet_debit) < hard_debit - 0.01)
             else "CLOSE_ONLY_STOP_1P65X"
+        )
+
+    if exit_reason:
+        return sim.close_package_market_or_expiry(
+            package_id=pkg["package_id"],
+            session_date=session_date,
+            bar_ts=bar_ts,
+            decision_ts_ms=decision_ts_ms,
+            exit_reason=exit_reason,
+            long_or_wing_quote=wq,
+            short_quote=sq,
+            reference_spot=spot_close,
+        )
+    return None
+
+
+def _calendar_dte_days(session_date: str, expiry_date: str) -> Optional[int]:
+    try:
+        sd = date.fromisoformat(str(session_date)[:10])
+        ed = date.fromisoformat(str(expiry_date)[:10])
+        return (ed - sd).days
+    except Exception:
+        return None
+
+
+def evaluate_book_a_intraday_credit_signal(
+    cfg: Dict[str, Any],
+    session_date: str,
+    bar_ts: str,
+    ist_hhmm: int,
+    decision_ts_ms: int,
+    spot_close: float,
+    spot_vwap: Optional[float],
+    orb30_h: Optional[float],
+    orb30_l: Optional[float],
+    expiries: List[str],
+    contracts_lookup: Dict[Tuple[str, float, str], Dict[str, Any]],
+    quote_lookup: Dict[Tuple[str, float, str], Dict[str, Any]],
+    observed_sessions: Optional[Set[str]] = None,
+    extra_holidays: Optional[List[str]] = None,
+    spec_override: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Evaluate V2 Book A Intraday Defined-Risk Credit Spread (Friday cal_dte in {3,4},
+    11:30-13:15 IST, 50pt OTM / 100pt width, cr >= 25pt, intraday 15:15 EOD squareoff,
+    NO_VFLIP exit policy). Zero overnight carry.
+    """
+    spec = dict(V2_BOOK_A_INTRADAY_CREDIT_SPEC)
+    if spec_override:
+        spec.update(spec_override)
+    hyg = cfg["quote_hygiene"]
+
+    win_start = int(spec["entry_window_start_hhmm"])
+    win_end = int(spec["entry_window_end_hhmm"])
+    win_ok = win_start <= ist_hhmm <= win_end
+
+    if (
+        orb30_h is None
+        or orb30_l is None
+        or orb30_h <= 0.0
+        or orb30_l <= 0.0
+        or spot_close <= 0.0
+        or not spot_vwap
+        or spot_vwap <= 0.0
+    ):
+        return {
+            "book_id": spec["book_id"],
+            "candidate_variant": "V2_BOOK_A_INTRADAY_CREDIT_FRI_50_100",
+            "passed": False,
+            "state": "WARMUP",
+            "reject_reason": "ORB30_OR_VWAP_INCOMPLETE",
+            "gates": [],
+        }
+
+    # Nearest active expiry >= session_date
+    nearest_exp: Optional[str] = None
+    nearest_cal_dte: Optional[int] = None
+    nearest_tdte: Optional[int] = None
+    for exp_s in sorted(set(expiries)):
+        cd = _calendar_dte_days(session_date, exp_s)
+        if cd is None or cd < 0:
+            continue
+        nearest_exp = exp_s
+        nearest_cal_dte = cd
+        nearest_tdte = trading_sessions_between(
+            session_date, exp_s, observed_sessions=observed_sessions, extra_holidays=extra_holidays
+        )
+        break
+
+    allowed_cal_dtes = {int(x) for x in spec["calendar_dte_allowed"]}
+    dte_ok = (nearest_exp is not None) and (nearest_cal_dte in allowed_cal_dtes)
+
+    # Trend bias via VWAP: Bull Put Spread (PE) above VWAP, Bear Call Spread (CE) below VWAP
+    is_bull = float(spot_close) > float(spot_vwap)
+    is_bear = float(spot_close) < float(spot_vwap)
+    dir_ok = is_bull or is_bear
+    ot = "PE" if is_bull else "CE"
+
+    atm = round(float(spot_close) / 50.0) * 50.0
+    otm_off = float(spec["short_otm_pts"])
+    width = float(spec["spread_width_pts"])
+    short_k = (atm - otm_off) if ot == "PE" else (atm + otm_off)
+    wing_k = (short_k - width) if ot == "PE" else (short_k + width)
+
+    short_meta = contracts_lookup.get((nearest_exp or "", short_k, ot)) if nearest_exp else None
+    wing_meta = contracts_lookup.get((nearest_exp or "", wing_k, ot)) if nearest_exp else None
+    short_q = quote_lookup.get((nearest_exp or "", short_k, ot)) if nearest_exp else None
+    wing_q = quote_lookup.get((nearest_exp or "", wing_k, ot)) if nearest_exp else None
+
+    l5_ok = False
+    credit_ok = False
+    struct_ok = False
+    l5_reason = "MISSING_CONTRACT_OR_QUOTE"
+    est_credit = 0.0
+    est_struct_loss = 0.0
+    lot_sz = 65
+
+    if short_meta and wing_meta and short_q and wing_q:
+        id_s_ok, id_s_rsn = validate_nifty_option_identity(short_meta)
+        id_w_ok, id_w_rsn = validate_nifty_option_identity(wing_meta)
+        if not id_s_ok:
+            l5_reason = id_s_rsn
+        elif not id_w_ok:
+            l5_reason = id_w_rsn
+        elif int(short_meta["lot_size"]) != int(wing_meta["lot_size"]):
+            l5_reason = "LOT_SIZE_MISMATCH"
+        else:
+            lot_sz = int(wing_meta["lot_size"])
+            target_qty = int(spec["lot_count"]) * lot_sz
+            skew_ok, _, skew_rsn = check_cross_leg_skew(
+                short_q, wing_q, max_skew_ms=int(hyg["max_cross_leg_skew_ms"]), require_depth_ts=True
+            )
+            if not skew_ok:
+                l5_reason = skew_rsn
+            else:
+                max_sp = float(spec.get("max_spread_pct") or hyg["max_primary_spread_pct"])
+                sw_w = sweep_observed_l5_book(
+                    quote=wing_q,
+                    side="BUY",
+                    target_qty=target_qty,
+                    lot_size=lot_sz,
+                    adverse_ticks=int(hyg["adverse_latency_ticks"]),
+                    max_age_ms=int(hyg["max_entry_quote_age_ms"]),
+                    now_ms=decision_ts_ms,
+                    max_spread_pct=min(max_sp, float(hyg["max_wing_spread_pct"])),
+                    max_spread_pts=float(hyg["max_wing_spread_pts"]),
+                    require_observed_l5=bool(hyg["require_observed_l5_book_for_entry"]),
+                )
+                sw_s = sweep_observed_l5_book(
+                    quote=short_q,
+                    side="SELL",
+                    target_qty=target_qty,
+                    lot_size=lot_sz,
+                    adverse_ticks=int(hyg["adverse_latency_ticks"]),
+                    max_age_ms=int(hyg["max_entry_quote_age_ms"]),
+                    now_ms=decision_ts_ms,
+                    max_spread_pct=max_sp,
+                    require_observed_l5=bool(hyg["require_observed_l5_book_for_entry"]),
+                )
+                if not sw_w.get("ok"):
+                    l5_reason = f"WING:{sw_w.get('reason')}"
+                elif not sw_s.get("ok"):
+                    l5_reason = f"SHORT:{sw_s.get('reason')}"
+                else:
+                    l5_ok = True
+                    l5_reason = "OK"
+                    est_credit = round(float(sw_s["fill_price"]) - float(sw_w["fill_price"]), 2)
+                    credit_ok = est_credit >= float(spec["min_net_credit_pts"])
+                    est_struct_loss = round(max(0.0, (width - est_credit) * target_qty + 120.0), 2)
+                    struct_ok = est_struct_loss <= float(spec["max_structural_loss_inr"])
+
+    gates = [
+        {
+            "name": "FriCalDTE",
+            "passed": dte_ok,
+            "current": f"calDTE={nearest_cal_dte}" if nearest_cal_dte is not None else "NONE",
+            "target": f"in {sorted(allowed_cal_dtes)}",
+        },
+        {
+            "name": "Window",
+            "passed": win_ok,
+            "current": f"{ist_hhmm:04d}",
+            "target": f"{win_start:04d}..{win_end:04d}",
+        },
+        {
+            "name": "VWAPBias",
+            "passed": dir_ok,
+            "current": f"{ot} ({spot_close:.1f} vs {spot_vwap:.1f})",
+            "target": "spot!=vwap",
+        },
+        {
+            "name": "SpreadL5",
+            "passed": l5_ok,
+            "current": l5_reason,
+            "target": "sync L5 BUY wing + SELL short",
+        },
+        {
+            "name": "MinCredit",
+            "passed": credit_ok,
+            "current": f"{est_credit:.1f}pt",
+            "target": f">={float(spec['min_net_credit_pts']):.1f}pt",
+        },
+        {
+            "name": "StructRisk",
+            "passed": struct_ok,
+            "current": f"Rs{est_struct_loss:,.0f}",
+            "target": f"<=Rs{float(spec['max_structural_loss_inr']):,.0f}",
+        },
+    ]
+    all_passed = all(g["passed"] for g in gates)
+    reject_reason = None if all_passed else next((f"{g['name']}:{g['current']}" for g in gates if not g["passed"]), "BLOCKED")
+    return {
+        "book_id": spec["book_id"],
+        "candidate_variant": "V2_BOOK_A_INTRADAY_CREDIT_FRI_50_100",
+        "passed": all_passed,
+        "state": "READY_FIRE" if all_passed else "WATCHING",
+        "reject_reason": reject_reason,
+        "is_bull": is_bull,
+        "option_type": ot,
+        "expiry": nearest_exp,
+        "cal_dte": nearest_cal_dte,
+        "trading_dte": nearest_tdte,
+        "short_strike": short_k,
+        "wing_strike": wing_k,
+        "wing_contract": wing_meta,
+        "short_contract": short_meta,
+        "wing_quote": wing_q,
+        "short_quote": short_q,
+        "est_credit_pts": est_credit,
+        "gates": gates,
+    }
+
+
+def manage_open_book_a_intraday_on_bar(
+    sim: V2PaperSimulator,
+    pkg: Dict[str, Any],
+    session_date: str,
+    bar_ts: str,
+    ist_hhmm: int,
+    decision_ts_ms: int,
+    spot_close: float,
+    spot_vwap: Optional[float],
+    quotes_by_ikey: Dict[str, Dict[str, Any]],
+    is_eod_bar: bool = False,
+    eod_squareoff_hhmm: int = 1515,
+) -> Optional[Dict[str, Any]]:
+    """
+    Intraday lifecycle management for V2_BOOK_A_INTRADAY_CREDIT:
+    - Completes or unwinds PENDING_LEG2_SHORT within timeout.
+    - Enforces 70% credit decay target, 45% breakeven ratchet, 1.8x (capped Rs 1,950) close-only stop.
+    - Hard intraday EOD exit at >= 15:15 IST (ZERO overnight hold, ZERO premature VWAP_FLIP exit).
+    """
+    ls = dict(pkg["legs_state"])
+    wl = ls["wing_leg"]
+    sl = ls.get("short_leg")
+    st = ls["short_target"]
+    hyg = sim.config["quote_hygiene"]
+    spec = V2_BOOK_A_INTRADAY_CREDIT_SPEC
+
+    wq = quotes_by_ikey.get(wl["instrument_key"])
+    sq = quotes_by_ikey.get((sl or st)["instrument_key"])
+
+    if pkg["state"] == "PENDING_LEG2_SHORT":
+        return sim.complete_or_unwind_pending_leg2(
+            package_id=pkg["package_id"],
+            short_quote=sq,
+            wing_quote=wq,
+            decision_ts_ms=decision_ts_ms,
+            session_date=session_date,
+            bar_ts=bar_ts,
+        )
+
+    if sl is None:
+        return None
+
+    # Intraday forced exit >= 15:15 IST or session roll boundary (NO OVERNIGHT HOLD)
+    if (
+        str(session_date) > str(pkg.get("session_date") or session_date)
+        or ist_hhmm >= int(eod_squareoff_hhmm)
+        or is_eod_bar
+    ):
+        return sim.close_package_market_or_expiry(
+            package_id=pkg["package_id"],
+            session_date=session_date,
+            bar_ts=bar_ts,
+            decision_ts_ms=decision_ts_ms,
+            exit_reason="BOOK_A_INTRADAY_EOD_1515",
+            long_or_wing_quote=wq,
+            short_quote=sq,
+            reference_spot=spot_close,
+        )
+
+    w_qty = int(wl["qty"])
+    lot_sz = int(wl["lot_size"])
+    sw_w = sweep_observed_l5_book(
+        wq,
+        "SELL",
+        w_qty,
+        lot_sz,
+        sim._effective_slippage_ticks(),
+        int(hyg["max_exit_quote_age_ms"]),
+        decision_ts_ms,
+        max_spread_pct=None,
+        require_observed_l5=False,
+        allow_fresh_l1_only=True,
+    )
+    sw_s = sweep_observed_l5_book(
+        sq,
+        "BUY",
+        w_qty,
+        lot_sz,
+        sim._effective_slippage_ticks(),
+        int(hyg["max_exit_quote_age_ms"]),
+        decision_ts_ms,
+        max_spread_pct=None,
+        require_observed_l5=False,
+        allow_fresh_l1_only=True,
+    )
+    if not sw_w.get("ok") or not sw_s.get("ok"):
+        return None
+    skew_ok, _, _ = check_cross_leg_skew(
+        wq,
+        sq,
+        max_skew_ms=int(hyg["max_cross_leg_skew_ms"]),
+        consumed_ts_a=sw_w.get("consumed_ts_ms"),
+        consumed_ts_b=sw_s.get("consumed_ts_ms"),
+    )
+    if not skew_ok:
+        return None
+
+    cur_debit = round(float(sw_s["fill_price"]) - float(sw_w["fill_price"]), 2)
+    init_credit = float(ls["net_entry_credit_pts"])
+    target_debit = float(ls["target_debit_pts"])
+    hard_debit = float(ls["hard_stop_debit_pts"])
+    ratchet_debit = ls.get("ratchet_max_debit_pts")
+
+    decay_pct = ((init_credit - cur_debit) / max(0.05, init_credit)) * 100.0
+    if decay_pct >= float(spec["breakeven_ratchet_decay_pct"]):
+        ratchet_debit = init_credit if ratchet_debit is None else min(float(ratchet_debit), init_credit)
+        ls["ratchet_max_debit_pts"] = ratchet_debit
+        ls["best_close_credit_decay_pts"] = min(float(ls.get("best_close_credit_decay_pts") or init_credit), max(0.05, cur_debit))
+        upd = {**pkg, "legs_state": ls}
+        sim.open_packages[pkg["package_id"]] = upd
+        sim._all_pkgs_by_id[pkg["package_id"]] = upd
+        sim.store.execute_atomic_transition([], [], upd, None)
+
+    eff_stop = min(hard_debit, float(ratchet_debit)) if ratchet_debit is not None else hard_debit
+    exit_reason: Optional[str] = None
+    if cur_debit <= target_debit:
+        exit_reason = "CREDIT_DECAY_TARGET_70PCT"
+    elif cur_debit >= eff_stop:
+        exit_reason = (
+            "CLOSE_ONLY_BREAKEVEN_RATCHET"
+            if (ratchet_debit is not None and float(ratchet_debit) < hard_debit - 0.01)
+            else "CLOSE_ONLY_STOP_1P8X"
         )
 
     if exit_reason:

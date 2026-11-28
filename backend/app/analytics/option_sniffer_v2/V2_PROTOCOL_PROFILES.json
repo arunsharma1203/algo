@@ -1,8 +1,63 @@
 {
-  "schema_version": "1.0.0",
-  "note": "Versioned V2 strategy research profiles. V2_2_FROZEN_BASELINE remains active and untouched; research profiles NEVER auto-promote or override production without explicit operator selection.",
-  "active_profile_id": "V2_2_FROZEN_BASELINE",
+  "schema_version": "2.4.0",
+  "note": "Versioned V2 strategy profiles. V2_PREREGISTRATION_V1.json (V2_2_FROZEN_BASELINE) remains untouched for golden parity; V2_4_PAPER_DUAL_BOOK governs paper-by-default dual-book evaluation and user-armed live execution.",
+  "active_profile_id": "V2_4_PAPER_DUAL_BOOK",
   "profiles": {
+    "V2_4_PAPER_DUAL_BOOK": {
+      "protocol_ref": "V2_PROTOCOL_PROFILES.json#V2_4_PAPER_DUAL_BOOK",
+      "engine_version": "2.4.0-dual-book-vrp",
+      "default_execution_mode": "PAPER",
+      "default_paper_mode": "AUTO",
+      "human_live_arm_allowed": true,
+      "book_a_intraday": {
+        "book_id": "V2_BOOK_A_INTRADAY_CREDIT",
+        "enabled_in_paper": true,
+        "live_arm_eligible": true,
+        "calendar_dte_allowed": [3, 4],
+        "entry_window": "1130..1315",
+        "require_no_vwap_flip": true,
+        "short_otm_pts": 50.0,
+        "hedge_width_pts": 100.0,
+        "min_credit_pts": 25.0,
+        "min_live_credit_pts": 24.0,
+        "target_credit_capture_pct": 70.0,
+        "stop_multiple": 1.8,
+        "max_planned_stop_loss_inr": 1950.0,
+        "eod_squareoff_ist_hhmm": 1515,
+        "max_spread_pct": 6.0,
+        "lot_count": 1,
+        "min_l5_qty": 65,
+        "min_research_depth_qty_tested": 195
+      },
+      "book_b_paid_flow": {
+        "book_id": "V2_BOOK_B_PAID_FLOW",
+        "enabled_in_paper": true,
+        "live_arm_eligible": true,
+        "entry_window": "1015..1300",
+        "min_adx14": 22.0,
+        "min_er20": 0.32,
+        "min_delta_basis_abs_pts": 3.0,
+        "min_l5_obi": 0.05,
+        "enforce_vrp_gate": true,
+        "max_vrp_ratio": 1.15,
+        "stagnation_mins": 45,
+        "stagnation_min_gain_pct": 10.0,
+        "planned_loss_max_inr": 1800.0,
+        "max_entry_outlay_inr": 18500.0,
+        "ratchet_mode": "STEP_RATCHET",
+        "allow_single_otm_fallback": true
+      },
+      "regime_arbitration": {
+        "anti_self_hedge_opposing_delta_block": true,
+        "single_slot_trend_priority": "V2_BOOK_B_PAID_FLOW",
+        "max_total_open_packages": 2
+      },
+      "passive_aiml_telemetry": {
+        "enabled": true,
+        "advisory_gate_applied": false,
+        "weights_file": "v2_har_breach_weights_v1.json"
+      }
+    },
     "V2_2_FROZEN_BASELINE": {
       "protocol_ref": "V2_PREREGISTRATION_V1.json",
       "engine_version": "2.2.0-causal",

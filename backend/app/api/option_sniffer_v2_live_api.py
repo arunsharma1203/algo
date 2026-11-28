@@ -81,7 +81,8 @@ def post_v2_live_arm(payload: Dict[str, Any] = Body(default={})) -> Dict[str, An
             pin=str(payload.get("pin") or ""),
             human_confirmed=bool(payload.get("human_confirmed", False)),
             selected_books=list(payload.get("selected_books") or []),
-            protocol_profile_id=str(payload.get("protocol_profile_id") or "V2_BOOK_B_FROZEN_PAPER"),
+            live_book_scope=payload.get("live_book_scope"),
+            protocol_profile_id=str(payload.get("protocol_profile_id") or "V2_4_PAPER_DUAL_BOOK"),
             max_lots_per_book=int(payload.get("max_lots_per_book") or 1),
             max_daily_loss_inr=float(payload.get("max_daily_loss_inr") or 2500.0),
             max_open_packages=int(payload.get("max_open_packages") or 1),
@@ -101,6 +102,15 @@ def post_v2_live_disarm(payload: Optional[Dict[str, Any]] = Body(default=None)) 
     return get_option_sniffer_v2_live_engine().disarm_live(
         reason=str(body.get("reason") or "HUMAN_UI_DISARM"),
         actor="HUMAN_UI",
+    )
+
+
+@router.post("/sos-flatten")
+def post_v2_live_sos_flatten(payload: Optional[Dict[str, Any]] = Body(default=None)) -> Dict[str, Any]:
+    body = payload or {}
+    return get_option_sniffer_v2_live_engine().sos_flatten_all_and_disarm(
+        reason=str(body.get("reason") or "OPERATOR_SOS_FLATTEN"),
+        actor="HUMAN_UI_SOS",
     )
 
 

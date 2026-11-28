@@ -569,6 +569,7 @@ class TestV2UpgradesAndIsolatedLiveLayer(unittest.TestCase):
                 svc.on_live_feed_events(
                     [
                         ("INDEX", "NIFTY", {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": round(spot, 2), "availability_ts_ms": ts_tick, "exchange_ltt_ms": ts_tick, "source_ts_proven": True}),
+                        ("INDEX", "INDIA_VIX", {"instrument_key": "NSE_INDEX|India VIX", "underlying": "INDIA_VIX", "spot_ltp": 13.5, "availability_ts_ms": ts_tick, "exchange_ltt_ms": ts_tick, "source_ts_proven": True}),
                         ("FUTURES", "NIFTY", {"instrument_key": "NSE_FO|NIFTYFUT_W1", "underlying": "NIFTY", "trading_symbol": "NIFTY FUT 26 NOV 26", "expiry": exp, "fut_ltp": round(fut, 2), "availability_ts_ms": ts_tick, "exchange_ltt_ms": ts_tick, "source_ts_proven": True}),
                     ]
                 )
@@ -581,7 +582,10 @@ class TestV2UpgradesAndIsolatedLiveLayer(unittest.TestCase):
                     elif m >= 65 and int(k) == 25750:
                         px = 70.0
                     svc.on_live_feed_events(
-                        [("OPTION", f"NSE_FO|CE_{int(k)}", _mk_obs_quote(f"NSE_FO|CE_{int(k)}", round(px - 0.25, 2), round(px + 0.25, 2), ts_tick, strike=k, ot="CE", expiry=exp))]
+                        [
+                            ("OPTION", f"NSE_FO|CE_{int(k)}", _mk_obs_quote(f"NSE_FO|CE_{int(k)}", round(px - 0.25, 2), round(px + 0.25, 2), ts_tick, strike=k, ot="CE", expiry=exp)),
+                            ("OPTION", f"NSE_FO|PE_{int(k)}", _mk_obs_quote(f"NSE_FO|PE_{int(k)}", 27.75, 28.25, ts_tick, strike=k, ot="PE", expiry=exp)),
+                        ]
                     )
                 svc.on_live_feed_events([("BAR_CLOSE_CHECK", "CLOCK", {"availability_ts_ms": bar_close_check})])
                 svc.process_queued_events(max_items=60)

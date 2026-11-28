@@ -1,18 +1,36 @@
-const resolveLiveApiRoot = () => {
+const resolveApiBase = () => {
   const host = (typeof window !== 'undefined' && window.location && window.location.hostname) || '127.0.0.1';
   const envBase =
     (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL) ||
     `http://${host}:8000`;
   const clean = String(envBase).replace(/\/+$/, '');
-  const apiBase = clean.endsWith('/api') ? clean : `${clean}/api`;
-  return `${apiBase}/option-sniffer-advance-v2-live`;
+  return clean.endsWith('/api') ? clean : `${clean}/api`;
 };
 
-export const V2_LIVE_API_ROOT = resolveLiveApiRoot();
+export const V2_LIVE_API_ROOT = `${resolveApiBase()}/option-sniffer-advance-v2-live`;
+export const V2_PAPER_API_ROOT = `${resolveApiBase()}/option-sniffer-advance-v2`;
+
+async function jsonPostFetch(root, path, payload = {}) {
+  const res = await fetch(`${root}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  if (!res.ok) {
+    const msg = (body && (body.detail || body.message)) || `HTTP ${res.status} on ${path}`;
+    throw new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+  }
+  return body;
+}
 
 async function liveJsonFetch(path, options = {}) {
-  const url = `${V2_LIVE_API_ROOT}${path}`;
-  const res = await fetch(url, {
+  const res = await fetch(`${V2_LIVE_API_ROOT}${path}`, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
   });
@@ -42,29 +60,37 @@ export async function fetchV2LiveAuditLog(limit = 50) {
 }
 
 export async function postV2LiveArm(payload) {
-  return liveJsonFetch('/arm', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
+  return jsonPostFetch(V2_LIVE_API_ROOT, '/arm', payload);
 }
 
 export async function postV2LiveDisarm(reason = 'HUMAN_UI_DISARM') {
-  return liveJsonFetch('/disarm', {
-    method: 'POST',
-    body: JSON.stringify({ reason }),
-  });
+  return jsonPostFetch(V2_LIVE_API_ROOT, '/disarm', { reason });
+}
+
+export async function postV2LiveSosFlatten(reason = 'OPERATOR_SOS_FLATTEN') {
+  return jsonPostFetch(V2_LIVE_API_ROOT, '/sos-flatten', { reason });
 }
 
 export async function postV2LiveReconcile() {
-  return liveJsonFetch('/reconcile', {
-    method: 'POST',
-    body: JSON.stringify({}),
-  });
+  return jsonPostFetch(V2_LIVE_API_ROOT, '/reconcile', {});
 }
 
 export async function postV2LiveExitPosition(livePackageId, payload = {}) {
-  return liveJsonFetch(`/positions/${encodeURIComponent(livePackageId)}/exit`, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
+  return jsonPostFetch(V2_LIVE_API_ROOT, `/positions/${encodeURIComponent(livePackageId)}/exit`, payload);
+}
+
+export async function postV2PaperMode(paperMode) {
+  return jsonPostFetch(V2_PAPER_API_ROOT, '/control/paper-mode', { paper_mode: paperMode });
+}
+
+export async function postV2StartCollector() {
+  return jsonPostFetch(V2_PAPER_API_ROOT, '/control/start-collector', {});
+}
+
+export async function postV2ShutdownCollector() {
+  return jsonPostFetch(V2_PAPER_API_ROOT, '/control/shutdown-v2-only', {});
+}
+
+export async function postV2ReconcileBookingFault() {
+  return jsonPostFetch(V2_PAPER_API_ROOT, '/control/reconcile-booking-fault', {});
 }

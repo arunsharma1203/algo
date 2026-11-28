@@ -134,8 +134,8 @@ def evaluate_v2_regime_arbitration(
         reason = "Awaiting ORB30/VWAP warmup completion."
     elif nearest_trading_dte == 1:
         regime_code = "EXPIRY_EVE_THETA_ZONE_DTE1"
-        preferred_book = "V2_BOOK_A_PROPOSED_O3" if book_a_enabled else "NONE_BOOK_A_DISABLED"
-        reason = "Trading DTE=1 violates Book B min_trading_dte=2; only Theta spread candidate zone applies (Book A currently disabled)."
+        preferred_book = "V2_BOOK_A_INTRADAY_CREDIT" if book_a_enabled else "NONE_BOOK_A_DISABLED"
+        reason = "Trading DTE=1 violates Book B min_trading_dte=2; Theta spread zone applies."
     elif nearest_trading_dte is not None and nearest_trading_dte >= 5:
         regime_code = "HIGH_DTE_CONVEXITY_ONLY_ZONE"
         preferred_book = "V2_BOOK_B_PAID_FLOW" if book_b_enabled else "NONE"
@@ -151,11 +151,11 @@ def evaluate_v2_regime_arbitration(
             )
         elif ist_hhmm > 1300:
             regime_code = "LATE_SESSION_POST_BOOK_B_WINDOW"
-            preferred_book = "V2_BOOK_A_PROPOSED_O3" if book_a_enabled else "STANDBY_POST_WINDOW"
-            reason = "Past 13:00 IST Book B cutoff; intraday Theta candidate zone (Book A disabled in frozen baseline)."
+            preferred_book = "V2_BOOK_A_INTRADAY_CREDIT" if book_a_enabled else "STANDBY_POST_WINDOW"
+            reason = "Past 13:00 IST Book B cutoff; intraday Theta candidate zone."
         else:
             regime_code = "RANGE_OR_THETA_DECAY_ZONE_DTE2_4"
-            preferred_book = "V2_BOOK_A_PROPOSED_O3" if book_a_enabled else "STANDBY_AWAITING_BREAKOUT"
+            preferred_book = "V2_BOOK_A_INTRADAY_CREDIT" if book_a_enabled else "STANDBY_AWAITING_BREAKOUT"
             reason = "No confirmed ADX>=22/ER>=0.32 ORB30 breakout yet; standing by."
 
     return {
@@ -215,8 +215,9 @@ def check_candidate_arbitration_gate(
     if (not is_bull) and not bool(arb_state.get("allowed_bear", True)):
         return False, "BLOCKED_ANTI_SELF_HEDGE_OPPOSING_BULL_OPEN"
 
+    _BOOK_A_IDS = ("V2_BOOK_A_PROPOSED_O3", "V2_BOOK_A_INTRADAY_CREDIT")
     if (
-        book_id == "V2_BOOK_A_PROPOSED_O3"
+        book_id in _BOOK_A_IDS
         and enforce_intraday_dte4_on_book_a
         and candidate_dte is not None
         and int(candidate_dte) > 4
@@ -227,7 +228,7 @@ def check_candidate_arbitration_gate(
         int(max_open_packages_total) == 1
         and book_a_enabled
         and book_b_enabled
-        and book_id == "V2_BOOK_A_PROPOSED_O3"
+        and book_id in _BOOK_A_IDS
         and arb_state.get("regime_code") == "TREND_EXPANSION_CONVEXITY_PRIORITY"
     ):
         return False, "YIELDED_SINGLE_SLOT_TO_BOOK_B_CONVEXITY"

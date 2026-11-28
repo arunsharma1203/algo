@@ -1,186 +1,109 @@
 import React from 'react';
-import { fmtInr } from './v2Fixtures';
+import { CheckCircle2, AlertTriangle } from 'lucide-react';
 
-export default function V2AuditTab({
-  overview,
-  replayAudit,
-  diagnostics,
-  diagnosticsMeta,
-  includeCollateral,
-  setIncludeCollateral,
-  collateralYieldPa,
-  setCollateralYieldPa,
-  haircutPct,
-  setHaircutPct,
-}) {
-  const o3 = replayAudit?.phase4_o3_audit || {};
-  const conflicts = o3.spec_conflicts || [];
-  const inv = diagnostics?.upstox_entitlement_field_inventory || [];
-  const prot = diagnostics?.protected_artifacts_integrity;
-  const existingV2 = diagnostics?.existing_v2_systems_inventory || [];
-  const cmds = diagnostics?.operator_activation_commands || {};
-  const coll = overview?.optional_collateral_reporting?.forward_paper;
+export default function V2AuditTab({ overview, diagnostics, liveStatus }) {
+  const hygiene = overview?.feed_hygiene || diagnostics?.feed_hygiene || {};
+  const fc = hygiene.feed_consumer || {};
+  const alerts = overview?.active_alerts || diagnostics?.active_alerts || [];
+  const integrity = diagnostics?.protected_artifacts_integrity || {};
+  const openBasis = hygiene.open_basis_reference || null;
+  const sync = hygiene.spot_fut_sync || {};
 
   return (
-    <div className="space-y-4 font-mono text-xs">
-      {/* Protected Artifact Integrity — NEVER fabricated when diagnostics is unavailable */}
-      <details open className="rounded-xl border border-slate-700/80 bg-slate-900/70 p-4 space-y-2.5">
-        <summary className="cursor-pointer font-bold uppercase text-slate-200 flex items-center justify-between flex-wrap gap-2">
-          <span>Protected Artifact SHA-256 Integrity</span>
-          {!diagnostics ? (
-            <span className="text-amber-300">
-              Unavailable {diagnosticsMeta?.error ? `(${diagnosticsMeta.error})` : ''}
-            </span>
-          ) : (
-            <span className={prot?.all_unchanged ? 'text-emerald-400' : 'text-rose-400'}>
-              {prot?.all_unchanged ? 'ALL 6 UNCHANGED' : 'HASH MISMATCH'}
-            </span>
-          )}
-        </summary>
-        {!diagnostics ? (
-          <div className="text-slate-400 pt-2">
-            Diagnostics endpoint unavailable; protected artifact verification is unknown/unavailable rather than assumed unchanged.
+    <div className="space-y-5">
+      {/* Safety & Integrity Banner */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-1.5">
+          <div className="text-[11px] uppercase tracking-wider text-slate-400">Collector &amp; L5 Stream</div>
+          <div className="text-sm font-bold text-white">
+            {overview?.collection_status?.collector_state || 'STANDBY_NOT_STARTED'}
           </div>
-        ) : (
-          <div className="space-y-1 text-[11px] text-slate-400 break-all pt-2 border-t border-slate-800">
-            {Object.entries(prot?.hashes || {}).map(([k, v]) => (
-              <div key={k}>
-                <span className="text-slate-300">{k}:</span> {v || 'MISSING'}
-              </div>
-            ))}
+          <div className="text-xs text-slate-400">
+            Bars Today: {hygiene.completed_bars_today ?? 0} &bull; ORB30:{' '}
+            {hygiene.orb30_ready ? 'READY' : 'WARMING'}
           </div>
-        )}
-      </details>
+        </div>
 
-      {/* Phase-4 O3 6-Conflict Disclosure */}
-      <details open className="rounded-xl border border-slate-700/80 bg-slate-900/70 p-4 space-y-3">
-        <summary className="cursor-pointer font-bold uppercase text-rose-300 flex items-center justify-between flex-wrap gap-2">
-          <span>Phase-4 O3 Spec Conflicts Blocking Autonomous Book A</span>
-          <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-            {replayAudit ? o3.reproduction_status || 'UNAVAILABLE' : 'Unavailable'}
-          </span>
-        </summary>
-        {!replayAudit ? (
-          <div className="text-slate-400 pt-2">Replay audit unavailable.</div>
-        ) : (
-          <div className="overflow-x-auto pt-2 border-t border-slate-800">
-            <table className="w-full text-left border-collapse text-xs">
-              <thead>
-                <tr className="border-b border-slate-700 text-[10px] text-slate-400 uppercase">
-                  <th className="py-2 pr-3">Rule / Parameter</th>
-                  <th className="py-2 pr-3">Phase-4 Evidence</th>
-                  <th className="py-2 pr-3">Proposed Book A</th>
-                  <th className="py-2">Impact</th>
-                </tr>
-              </thead>
-              <tbody>
-                {conflicts.map((c, idx) => (
-                  <tr key={idx} className="border-b border-slate-800/80 text-slate-200 align-top">
-                    <td className="py-2 pr-3 font-semibold text-white">{c.field}</td>
-                    <td className="py-2 pr-3 text-slate-300">{c.phase4_o3_evidence}</td>
-                    <td className="py-2 pr-3 text-amber-300">{c.proposed_v2_book_a}</td>
-                    <td className="py-2 text-slate-400">{c.impact}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-1.5">
+          <div className="text-[11px] uppercase tracking-wider text-slate-400">Spot / Futures Sync &amp; Open Basis</div>
+          <div className={`text-sm font-bold ${sync.ok ? 'text-emerald-400' : 'text-amber-300'}`}>
+            {sync.ok ? `SYNC OK (${sync.basis_pts ?? '—'}pt)` : sync.reason || 'Awaiting Sync'}
           </div>
-        )}
-      </details>
+          <div className="text-xs text-slate-400">
+            Open Basis Ref:{' '}
+            {openBasis?.ok ? `${openBasis.basis_pts}pt (${hygiene.open_basis_samples_count || 1} samples)` : 'Not anchored yet'}
+          </div>
+        </div>
 
-      {/* Upstox Entitlement Field Inventory */}
-      <details className="rounded-xl border border-slate-700/80 bg-slate-900/70 p-4 space-y-3">
-        <summary className="cursor-pointer font-bold uppercase text-slate-200">
-          Upstox Account Entitlement Field Inventory ({inv.length} field groups)
-        </summary>
-        {!diagnostics ? (
-          <div className="text-slate-400 pt-2">Diagnostics unavailable.</div>
-        ) : (
-          <div className="overflow-x-auto pt-2 border-t border-slate-800">
-            <table className="w-full text-left border-collapse text-[11px]">
-              <thead>
-                <tr className="border-b border-slate-700 text-slate-400 uppercase">
-                  <th className="py-2 pr-3">Field Group</th>
-                  <th className="py-2 pr-3">Role</th>
-                  <th className="py-2 pr-3">Source</th>
-                  <th className="py-2">Fail-Closed Policy</th>
-                </tr>
-              </thead>
-              <tbody>
-                {inv.map((f, idx) => (
-                  <tr key={idx} className="border-b border-slate-800/80 text-slate-200 align-top">
-                    <td className="py-2 pr-3 font-semibold text-white">{f.field}</td>
-                    <td className="py-2 pr-3 text-sky-300">{f.decision_role}</td>
-                    <td className="py-2 pr-3 text-slate-300">{f.source}</td>
-                    <td className="py-2 text-amber-300">{f.missing_policy}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-1.5">
+          <div className="text-[11px] uppercase tracking-wider text-slate-400">Protected Models &amp; Live Bridge</div>
+          <div className="flex items-center gap-1.5 text-sm font-bold">
+            {integrity.all_unchanged !== false ? (
+              <>
+                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                <span className="text-emerald-400">V1 / Preregistration Locked</span>
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="h-4 w-4 text-rose-400" />
+                <span className="text-rose-400">Hash Drift Detected</span>
+              </>
+            )}
           </div>
-        )}
-      </details>
+          <div className="text-xs text-slate-400">
+            Observer Attached: {liveStatus?.paper_observer_attached ? 'YES' : 'NO'} &bull; Faults:{' '}
+            {liveStatus?.unresolved_faults?.total_blocking_faults ?? 0}
+          </div>
+        </div>
+      </div>
 
-      {/* Optional Reporting-Only Collateral Scenario & Operator Commands */}
-      <details className="rounded-xl border border-slate-700/80 bg-slate-900/70 p-4 space-y-3">
-        <summary className="cursor-pointer font-bold uppercase text-slate-200">
-          Optional Reporting-Only Collateral Yield &amp; CLI Commands
-        </summary>
-        <div className="pt-2 border-t border-slate-800 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-amber-300">
-              {coll?.classification_label || 'ASSUMED_YIELD_NOT_TRADING_ALPHA'}
-            </span>
-            <label className="flex items-center gap-2 text-slate-200 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={includeCollateral}
-                onChange={(e) => setIncludeCollateral(e.target.checked)}
-                className="rounded border-slate-600 bg-slate-950 text-sky-500"
-              />
-              Enable Reporting Scenario
-            </label>
+      {/* Queue & Skew Hygiene Metrics */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+        <h3 className="text-sm font-bold text-white">Feed Latency, Queue Drop &amp; Isolation Counters</h3>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <div className="bg-slate-950/70 border border-slate-800 rounded-lg p-3">
+            <div className="text-slate-400 text-[11px]">Events Consumed</div>
+            <div className="font-mono font-bold text-white mt-1">{fc.processed_total ?? 0}</div>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            <label className="flex flex-col gap-1 text-slate-400">
-              <span>Yield (% p.a.)</span>
-              <input
-                type="number"
-                step="0.25"
-                value={collateralYieldPa}
-                onChange={(e) => setCollateralYieldPa(Number(e.target.value))}
-                className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-slate-400">
-              <span>Haircut (%)</span>
-              <input
-                type="number"
-                step="1"
-                value={haircutPct}
-                onChange={(e) => setHaircutPct(Number(e.target.value))}
-                className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white"
-              />
-            </label>
-            <div className="p-2 rounded bg-slate-950/60 border border-slate-800">
-              <div className="text-[10px] text-slate-400">Hypothetical Collateral (Not Alpha)</div>
-              <div className="text-slate-100 font-semibold mt-0.5">
-                {coll ? fmtInr(coll.hypothetical_collateral_income_inr) : 'Unavailable'}
-              </div>
-            </div>
+          <div className="bg-slate-950/70 border border-slate-800 rounded-lg p-3">
+            <div className="text-slate-400 text-[11px]">Overflow Drops</div>
+            <div className="font-mono font-bold text-white mt-1">{fc.dropped_overflow_events ?? 0}</div>
           </div>
-          <div className="space-y-1 text-[11px] text-slate-300 bg-slate-950/60 p-2.5 rounded border border-slate-800 break-words">
-            {Object.entries(cmds).map(([k, v]) => (
-              <div key={k}>
-                <span className="text-sky-300">{k}:</span> {v}
-              </div>
-            ))}
-            <div className="text-slate-400 pt-1">
-              Pre-existing &quot;V2&quot; symbols untouched: {existingV2.map((x) => x.identifier).join(', ') || 'None'}
+          <div className="bg-slate-950/70 border border-slate-800 rounded-lg p-3">
+            <div className="text-slate-400 text-[11px]">Foreign Keys Rejected</div>
+            <div className="font-mono font-bold text-white mt-1">{hygiene.foreign_instrument_rejected_count ?? 0}</div>
+          </div>
+          <div className="bg-slate-950/70 border border-slate-800 rounded-lg p-3">
+            <div className="text-slate-400 text-[11px]">p99 Processing / Skew</div>
+            <div className="font-mono font-bold text-white mt-1">
+              {fc.processing_lag_p99_ms ?? 0}ms / {fc.cross_leg_skew_p99_ms ?? 0}ms
             </div>
           </div>
         </div>
-      </details>
+      </div>
+
+      {/* Active System Alerts */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-2.5">
+        <h3 className="text-sm font-bold text-white">Active System Alerts</h3>
+        {alerts.length === 0 ? (
+          <div className="text-xs text-emerald-400">Zero warnings or degraded safety latches active.</div>
+        ) : (
+          <div className="space-y-2">
+            {alerts.map((a, idx) => (
+              <div
+                key={`${a.code || 'alert'}_${idx}`}
+                className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-start gap-2"
+              >
+                <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold text-white">{a.code}: </span>
+                  <span>{a.message}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

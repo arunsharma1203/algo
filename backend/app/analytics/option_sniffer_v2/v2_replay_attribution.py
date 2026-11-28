@@ -415,6 +415,8 @@ def run_event_stream_replay(
     run_mode: str = "REPLAY_STREAM",
     book_b_params: Optional[Dict[str, Any]] = None,
     enable_book_a_opt_in: bool = False,
+    enable_v2_4_dual_book: bool = False,
+    paper_execution_mode: str = "AUTO",
     cost_multiplier: float = 1.0,
     extra_adverse_slippage_ticks: int = 0,
     prior_vix_override_by_date: Optional[Dict[str, List[float]]] = None,
@@ -446,6 +448,8 @@ def run_event_stream_replay(
             run_mode=run_mode,
             book_b_params=book_b_params,
             enable_book_a_opt_in=enable_book_a_opt_in,
+            enable_v2_4_dual_book=enable_v2_4_dual_book,
+            paper_execution_mode=paper_execution_mode,
             persist_bars_and_checkpoints=persist,
         )
         if fsp_by_expiry:

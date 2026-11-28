@@ -523,6 +523,7 @@ class TestV2ComprehensiveSuite(unittest.TestCase):
                 fut = spot + 24.0
 
             events.append(("INDEX", "NIFTY", {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": round(spot, 2), "availability_ts_ms": ts_tick, "exchange_ltt_ms": ts_tick, "source_ts_proven": True}))
+            events.append(("INDEX", "INDIA_VIX", {"instrument_key": "NSE_INDEX|India VIX", "underlying": "INDIA_VIX", "spot_ltp": 13.5, "availability_ts_ms": ts_tick, "exchange_ltt_ms": ts_tick, "source_ts_proven": True}))
             events.append(("FUTURES", "NIFTY", {"instrument_key": "NSE_FO|NIFTYFUT_W1", "underlying": "NIFTY", "trading_symbol": "NIFTY FUT 26 NOV 26", "expiry": "2026-11-26", "fut_ltp": round(fut, 2), "availability_ts_ms": ts_tick, "exchange_ltt_ms": ts_tick, "source_ts_proven": True}))
 
             atm_k = round(spot / 50.0) * 50.0
@@ -533,6 +534,13 @@ class TestV2ComprehensiveSuite(unittest.TestCase):
                         "OPTION",
                         f"NSE_FO|CE_{int(k)}",
                         _mk_obs_quote(f"NSE_FO|CE_{int(k)}", round(px - 0.25, 2), round(px + 0.25, 2), ts_tick, strike=k, ot="CE", expiry=exp),
+                    )
+                )
+                events.append(
+                    (
+                        "OPTION",
+                        f"NSE_FO|PE_{int(k)}",
+                        _mk_obs_quote(f"NSE_FO|PE_{int(k)}", 27.75, 28.25, ts_tick, strike=k, ot="PE", expiry=exp),
                     )
                 )
             events.append(("BAR_CLOSE_CHECK", "CLOCK", {"availability_ts_ms": bar_close_check}))

@@ -53,7 +53,39 @@ from app.analytics.option_sniffer_v2_live.v2_upstox_broker_client import (
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_LIVE_BOOKS = {"V2_BOOK_B_PAID_FLOW"}
+ALLOWED_LIVE_BOOKS = {"V2_BOOK_B_PAID_FLOW", "V2_BOOK_A_INTRADAY_CREDIT"}
+LIVE_SCOPE_CONFIG: Dict[str, Tuple[List[str], float]] = {
+    "BOOK_B_ONLY": (["V2_BOOK_B_PAID_FLOW"], 25000.0),
+    "BOOK_A_ONLY": (["V2_BOOK_A_INTRADAY_CREDIT"], 75000.0),
+    "AUTO_DUAL": (["V2_BOOK_B_PAID_FLOW", "V2_BOOK_A_INTRADAY_CREDIT"], 85000.0),
+}
+
+
+def _resolve_live_scope_and_floor(
+    live_book_scope: Optional[str], selected_books: Optional[List[str]]
+) -> Tuple[str, List[str], float]:
+    if live_book_scope:
+        scope_u = str(live_book_scope).upper().strip()
+        if scope_u not in LIVE_SCOPE_CONFIG:
+            raise ValueError(f"Unsupported live_book_scope: {live_book_scope!r}")
+        books_def, floor_inr = LIVE_SCOPE_CONFIG[scope_u]
+        if selected_books:
+            dis = [b for b in selected_books if b not in ALLOWED_LIVE_BOOKS]
+            if dis:
+                raise ValueError(f"Book(s) {dis} are blocked from live execution due to unverified spec conflicts.")
+        return scope_u, list(books_def), float(floor_inr)
+    books = [str(b).strip() for b in (selected_books or []) if str(b).strip()]
+    if not books:
+        raise ValueError("At least one book must be selected to arm live execution.")
+    dis = [b for b in books if b not in ALLOWED_LIVE_BOOKS]
+    if dis:
+        raise ValueError(f"Book(s) {dis} are blocked from live execution due to unverified spec conflicts.")
+    bset = set(books)
+    if "V2_BOOK_B_PAID_FLOW" in bset and "V2_BOOK_A_INTRADAY_CREDIT" in bset:
+        return "AUTO_DUAL", books, 85000.0
+    if "V2_BOOK_A_INTRADAY_CREDIT" in bset:
+        return "BOOK_A_ONLY", books, 75000.0
+    return "BOOK_B_ONLY", books, 25000.0
 OPEN_LIKE_PACKAGE_STATES = [
     "OPENING_BUY_WING",
     "OPENING_SHORT",
@@ -370,6 +402,15 @@ class V2LiveExecutionEngine:
             open_pkgs, allow_broker_fallback=False
         )
         daily_combined = round(daily_realized + daily_unrealized, 2)
+        sel_books = arm_state.get("selected_books") or []
+        if "V2_BOOK_B_PAID_FLOW" in sel_books and "V2_BOOK_A_INTRADAY_CREDIT" in sel_books:
+            cur_scope, cur_floor = "AUTO_DUAL", 85000.0
+        elif "V2_BOOK_A_INTRADAY_CREDIT" in sel_books:
+            cur_scope, cur_floor = "BOOK_A_ONLY", 75000.0
+        elif "V2_BOOK_B_PAID_FLOW" in sel_books:
+            cur_scope, cur_floor = "BOOK_B_ONLY", 25000.0
+        else:
+            cur_scope, cur_floor = "PAPER_ONLY", 0.0
         return {
             "service": "OPTION_SNIFFER_ADVANCE_V2_LIVE",
             "isolated_db_path": self.store.db_path,
@@ -377,6 +418,8 @@ class V2LiveExecutionEngine:
             "simulation_mode_baseline_preserved": True,
             "execution_mode": "LIVE_ARMED" if arm_state.get("armed") else "DISARMED_PAPER_BASELINE_ONLY",
             "armed": bool(arm_state.get("armed")),
+            "live_book_scope": cur_scope if arm_state.get("armed") else "PAPER_ONLY",
+            "min_required_margin_inr": cur_floor,
             "pin_required": True,
             "current_pin": self._session_pin,
             "paper_observer_attached": self._paper_svc_ref is not None,
@@ -414,7 +457,8 @@ class V2LiveExecutionEngine:
         *,
         pin: str,
         human_confirmed: bool,
-        selected_books: List[str],
+        selected_books: Optional[List[str]] = None,
+        live_book_scope: Optional[str] = None,
         protocol_profile_id: str = "V2_BOOK_B_FROZEN_PAPER",
         max_lots_per_book: int = 1,
         max_daily_loss_inr: float = 2500.0,
@@ -430,14 +474,7 @@ class V2LiveExecutionEngine:
                     self.store.append_audit("ARM_REJECTED_BAD_PIN", actor, {"ts_iso": now_ist_iso()})
                 raise PermissionError("Invalid 4-digit human security PIN.")
 
-            books = [str(b).strip() for b in (selected_books or []) if str(b).strip()]
-            if not books:
-                raise ValueError("At least one book must be selected to arm live execution.")
-            disallowed = [b for b in books if b not in ALLOWED_LIVE_BOOKS]
-            if disallowed:
-                raise ValueError(
-                    f"Book(s) {disallowed} are blocked from live execution due to unverified spec conflicts."
-                )
+            scope_u, books, min_floor_inr = _resolve_live_scope_and_floor(live_book_scope, selected_books)
             if int(max_lots_per_book) < 1 or int(max_lots_per_book) > 10:
                 raise ValueError("max_lots_per_book must be between 1 and 10.")
             if float(max_daily_loss_inr) <= 0:
@@ -457,6 +494,15 @@ class V2LiveExecutionEngine:
             except Exception as exc:
                 raise RuntimeError(f"Broker pre-flight funds check failed; refusing to arm: {exc}") from exc
 
+            avail_margin = float(
+                (((funds_snapshot or {}).get("data") or {}).get("equity") or {}).get("available_margin") or 0.0
+            )
+            req_floor = float(min_floor_inr) * (int(max_lots_per_book) if scope_u != "BOOK_B_ONLY" else 1)
+            if avail_margin < req_floor:
+                raise RuntimeError(
+                    f"Insufficient available margin Rs{avail_margin:,.0f}; minimum Rs{req_floor:,.0f} required for live scope {scope_u}."
+                )
+
             if not self._has_custom_broker and self._paper_svc_ref is None:
                 self.attach_to_paper_service()
 
@@ -467,13 +513,18 @@ class V2LiveExecutionEngine:
                 max_lots_per_book=int(max_lots_per_book),
                 max_daily_loss_inr=float(max_daily_loss_inr),
                 max_open_packages=int(max_open_packages),
-                reason="ARMED_BY_HUMAN_PIN",
+                reason=f"ARMED_BY_HUMAN_PIN:{scope_u}",
                 actor=actor,
             )
             self.store.append_audit(
                 "PREFLIGHT_FUNDS_VERIFIED",
                 actor,
-                {"funds": funds_snapshot, "armed_for_date": state.get("armed_for_date")},
+                {
+                    "funds": funds_snapshot,
+                    "live_book_scope": scope_u,
+                    "min_required_margin_inr": req_floor,
+                    "armed_for_date": state.get("armed_for_date"),
+                },
             )
             self._maybe_rotate_pin()
             return self.get_status()
@@ -499,6 +550,67 @@ class V2LiveExecutionEngine:
             )
             self._maybe_rotate_pin()
             return self.get_status(include_paper_baseline=include_paper_baseline)
+
+    def sos_flatten_all_and_disarm(
+        self,
+        *,
+        reason: str = "OPERATOR_SOS_FLATTEN",
+        actor: str = "HUMAN_UI_SOS",
+    ) -> Dict[str, Any]:
+        """Emergency operator panic control: disarm immediately, cancel working orders, and flatten open live packages."""
+        with self._lock:
+            self.disarm_live(reason=reason, actor=actor, include_paper_baseline=False)
+            cancelled_orders: List[str] = []
+            errors: List[Dict[str, Any]] = []
+            try:
+                for ord_row in self.broker.get_orders() or []:
+                    oid = str(ord_row.get("order_id") or "")
+                    st = str(ord_row.get("status") or "").lower().strip()
+                    tag = str(ord_row.get("tag") or "")
+                    if oid and tag.startswith("V2-") and st not in _TERMINAL_BROKER_ORDER_STATUSES:
+                        try:
+                            self.broker.cancel_order(oid)
+                            cancelled_orders.append(oid)
+                        except Exception as exc:
+                            errors.append({"order_id": oid, "stage": "CANCEL_ORDER", "error": str(exc)})
+            except Exception as exc:
+                errors.append({"stage": "LIST_ORDERS", "error": str(exc)})
+
+            flattened_ids: List[str] = []
+            open_pkgs = self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES)
+            for pkg in open_pkgs:
+                pid = str(pkg["live_package_id"])
+                try:
+                    ex_res = self.exit_live_package(live_package_id=pid, reason=reason, actor=actor)
+                    if ex_res.get("ok"):
+                        flattened_ids.append(pid)
+                    else:
+                        errors.append({"live_package_id": pid, "stage": "EXIT_PACKAGE", "detail": ex_res})
+                except Exception as exc:
+                    errors.append({"live_package_id": pid, "stage": "EXIT_PACKAGE", "error": str(exc)})
+
+            if self.store.db_exists():
+                self.store.append_audit(
+                    "LIVE_SOS_FLATTEN_EXECUTED",
+                    actor,
+                    {
+                        "reason": reason,
+                        "cancelled_orders": cancelled_orders,
+                        "flattened_package_ids": flattened_ids,
+                        "errors": errors,
+                    },
+                )
+            st_now = self.get_status(include_paper_baseline=True)
+            return {
+                "ok": len(errors) == 0,
+                "reason": reason,
+                "armed": False,
+                "cancelled_orders": cancelled_orders,
+                "flattened_package_ids": flattened_ids,
+                "flattened_count": len(flattened_ids),
+                "errors": errors,
+                "live_status": st_now,
+            }
 
     def _compute_realized_pkg_accounting(self, pkg: Dict[str, Any]) -> Dict[str, Any]:
         legs = pkg.get("legs") or {}
@@ -1180,16 +1292,62 @@ class V2LiveExecutionEngine:
                 short_leg = dict(signal.get("short_leg") or {})
                 if not short_leg.get("instrument_key") or float(short_leg.get("limit_price") or 0) <= 0:
                     return {"ok": False, "status": "INVALID_SHORT_LEG"}
+                short_req_qty = int(short_leg.get("qty") or buy_qty)
+                try:
+                    span_res = self.broker.calculate_margin(
+                        [
+                            {
+                                "instrument_key": buy_leg["instrument_key"],
+                                "quantity": buy_qty,
+                                "transaction_type": "BUY",
+                                "product": "D",
+                                "price": float(buy_leg["limit_price"]),
+                            },
+                            {
+                                "instrument_key": short_leg["instrument_key"],
+                                "quantity": short_req_qty,
+                                "transaction_type": "SELL",
+                                "product": "D",
+                                "price": float(short_leg["limit_price"]),
+                            },
+                        ]
+                    )
+                    funds_res = self.broker.get_funds_and_margin()
+                    req_span = float(((span_res or {}).get("data") or {}).get("required_margin") or 0.0)
+                    avail_m = float(
+                        (((funds_res or {}).get("data") or {}).get("equity") or {}).get("available_margin") or 0.0
+                    )
+                except Exception as exc:
+                    return {"ok": False, "status": "LIVE_SPREAD_MARGIN_UNVERIFIED", "error": str(exc)}
+                min_span_floor = max(75000.0 * max(1.0, float(short_req_qty) / float(lot_size)), 1.15 * req_span)
+                if req_span <= 0.0 or avail_m < min_span_floor:
+                    self.store.append_audit(
+                        "LIVE_SPREAD_SPAN_REJECTED",
+                        "SAFETY_GUARD",
+                        {
+                            "signal_id": signal_id,
+                            "required_margin_inr": req_span,
+                            "min_required_with_buffer_inr": round(min_span_floor, 2),
+                            "available_margin_inr": avail_m,
+                        },
+                    )
+                    return {
+                        "ok": False,
+                        "status": "LIVE_SPREAD_SPAN_MARGIN_INSUFFICIENT",
+                        "required_margin_inr": req_span,
+                        "available_margin_inr": avail_m,
+                    }
                 pkg["legs"]["short_leg"] = {
                     "instrument_key": short_leg["instrument_key"],
                     "trading_symbol": short_leg["trading_symbol"],
                     "option_type": short_leg.get("option_type", "CE"),
                     "strike": float(short_leg.get("strike") or 0.0),
                     "lot_size": int(short_leg.get("lot_size") or lot_size),
-                    "requested_qty": int(short_leg.get("qty") or buy_qty),
+                    "requested_qty": short_req_qty,
                     "qty": 0,
                     "exited_qty": 0,
                     "limit_price": round_to_nse_tick(float(short_leg["limit_price"])),
+                    "min_live_credit_pts": float(signal.get("min_live_credit_pts") or short_leg.get("min_live_credit_pts") or 24.0),
                     "entry_price": 0.0,
                     "exit_price": None,
                 }
@@ -1283,7 +1441,7 @@ class V2LiveExecutionEngine:
                 )
                 return {"ok": True, "status": "OPEN", "package": pkg, "buy_intent": buy_res["intent"]}
 
-            # DEFINED_RISK_SPREAD: Cap short quantity strictly at confirmed_protected_qty
+            # DEFINED_RISK_SPREAD: Cap short quantity strictly at confirmed_protected_qty + apply credit floor
             short_info = pkg["legs"]["short_leg"]
             s_lot = int(short_info.get("lot_size") or lot_size)
             short_target_qty = (min(int(short_info["requested_qty"]), buy_filled_qty) // s_lot) * s_lot
@@ -1293,6 +1451,10 @@ class V2LiveExecutionEngine:
                 )
                 return self._finalize_failed_short_entry(pkg, buy_avg_px, buy_filled_qty, unwind_res, "PARTIAL_BUY_BELOW_LOT")
 
+            min_live_cr = float(short_info.get("min_live_credit_pts") or 24.0)
+            credit_floor_px = round_to_nse_tick(buy_avg_px + min_live_cr, mode="adverse_buy", allow_zero_settlement=False)
+            short_limit_px = max(float(short_info["limit_price"]), credit_floor_px)
+            pkg["legs"]["short_leg"]["limit_price"] = short_limit_px
             pkg["state"] = "OPENING_SHORT"
             self.store.upsert_package(pkg)
 
@@ -1308,7 +1470,7 @@ class V2LiveExecutionEngine:
                 side="SELL",
                 order_type=str(signal["short_leg"].get("order_type") or "LIMIT"),
                 qty=short_target_qty,
-                limit_price=float(short_info["limit_price"]),
+                limit_price=short_limit_px,
                 market_protection=signal["short_leg"].get("market_protection"),
             )
             if short_res["status"] == "UNKNOWN_AMBIGUOUS":
@@ -1804,6 +1966,11 @@ class V2LiveExecutionEngine:
             pkg_snap = event.get("package_snapshot") or {}
             ls = pkg_snap.get("legs_state") or {}
             structure = str(event.get("structure") or "SINGLE_LONG")
+            book_id_ev = str(event.get("book_id") or pkg_snap.get("book_id") or "")
+            selected_live = set(arm_state.get("selected_books") or [])
+            if book_id_ev not in selected_live or book_id_ev not in ALLOWED_LIVE_BOOKS:
+                return {"ok": False, "status": f"BOOK_EXCLUDED_BY_LIVE_SCOPE:{book_id_ev}"}
+
             max_lots = max(1, int(arm_state.get("max_lots_per_book") or 1))
             if structure == "SINGLE_LONG":
                 ll = ls.get("long_leg") or {}
@@ -1813,7 +1980,7 @@ class V2LiveExecutionEngine:
                 live_sig = {
                     "signal_id": str(event.get("signal_id") or pkg_snap.get("signal_id") or ""),
                     "session_date": str(event.get("session_date") or pkg_snap.get("session_date") or ""),
-                    "book_id": str(event.get("book_id") or pkg_snap.get("book_id") or ""),
+                    "book_id": book_id_ev,
                     "protocol_profile_id": str(arm_state.get("protocol_profile_id") or "V2_BOOK_B_FROZEN_PAPER"),
                     "structure": "SINGLE_LONG",
                     "quote_fresh_ok": True,
@@ -1830,6 +1997,47 @@ class V2LiveExecutionEngine:
                     },
                 }
                 return self.submit_entry_signal(live_sig)
+            if structure == "DEFINED_RISK_SPREAD" and book_id_ev == "V2_BOOK_A_INTRADAY_CREDIT":
+                wl = ls.get("wing_leg") or {}
+                sl = ls.get("short_leg") or ls.get("short_target") or {}
+                wq = event.get("wing_quote_snapshot") or {}
+                sq = event.get("quote_snapshot") or {}
+                w_ref = float(wq.get("raw_ask") or wq.get("ask") or wl.get("entry_price") or 0.0)
+                s_ref = float(sq.get("raw_bid") or sq.get("bid") or sl.get("entry_price") or 0.0)
+                lot_sz = int(wl.get("lot_size") or sl.get("lot_size") or 65)
+                qty_l = max_lots * lot_sz
+                min_cr = float(event.get("min_live_credit_pts") or 24.0)
+                live_sig = {
+                    "signal_id": str(event.get("signal_id") or pkg_snap.get("signal_id") or ""),
+                    "session_date": str(event.get("session_date") or pkg_snap.get("session_date") or ""),
+                    "book_id": book_id_ev,
+                    "protocol_profile_id": str(arm_state.get("protocol_profile_id") or "V2_4_PAPER_DUAL_BOOK"),
+                    "structure": "DEFINED_RISK_SPREAD",
+                    "quote_fresh_ok": True,
+                    "min_live_credit_pts": min_cr,
+                    "buy_leg": {
+                        "instrument_key": wl["instrument_key"],
+                        "trading_symbol": wl.get("trading_symbol") or wl["instrument_key"],
+                        "option_type": wl.get("option_type", "PE"),
+                        "strike": float(wl.get("strike") or 0.0),
+                        "qty": qty_l,
+                        "lot_size": lot_sz,
+                        "limit_price": compute_smart_limit_collar(w_ref, "BUY") if w_ref > 0 else 0.0,
+                        "order_type": "LIMIT",
+                    },
+                    "short_leg": {
+                        "instrument_key": sl["instrument_key"],
+                        "trading_symbol": sl.get("trading_symbol") or sl["instrument_key"],
+                        "option_type": sl.get("option_type", "PE"),
+                        "strike": float(sl.get("strike") or 0.0),
+                        "qty": qty_l,
+                        "lot_size": lot_sz,
+                        "limit_price": compute_smart_limit_collar(s_ref, "SELL") if s_ref > 0 else 0.0,
+                        "min_live_credit_pts": min_cr,
+                        "order_type": "LIMIT",
+                    },
+                }
+                return self.submit_entry_signal(live_sig)
             return {"ok": False, "status": f"UNSUPPORTED_AUTONOMOUS_STRUCTURE:{structure}"}
 
         if etype == "RATCHET_UPDATED":
@@ -1838,7 +2046,7 @@ class V2LiveExecutionEngine:
             sig_id = str(event.get("signal_id") or "")
             pkg = self.store.get_package_by_signal(sig_id)
             res = None
-            if pkg and pkg["state"] == "OPEN" and event.get("new_ratchet_stop") is not None:
+            if pkg and pkg["state"] == "OPEN" and pkg["structure"] == "SINGLE_LONG" and event.get("new_ratchet_stop") is not None:
                 res = self.sync_protective_ratchet_stop(
                     live_package_id=pkg["live_package_id"],
                     new_stop_trigger=float(event["new_ratchet_stop"]),
@@ -1864,10 +2072,17 @@ class V2LiveExecutionEngine:
                 qb = q_map.get(buy_ikey) or {}
                 raw_bid = float(qb.get("raw_bid") or qb.get("bid") or 0.0)
                 exit_collar = compute_smart_limit_collar(raw_bid, "SELL") if raw_bid > 0 else None
+                short_leg_p = pkg["legs"].get("short_leg") or {}
+                short_exit_collar = None
+                if short_leg_p.get("instrument_key"):
+                    qs = q_map.get(str(short_leg_p["instrument_key"])) or {}
+                    raw_ask_s = float(qs.get("raw_ask") or qs.get("ask") or 0.0)
+                    short_exit_collar = compute_smart_limit_collar(raw_ask_s, "BUY") if raw_ask_s > 0 else None
                 return self.exit_live_package(
                     live_package_id=pkg["live_package_id"],
                     reason=f"AUTO_{event.get('exit_reason') or 'STRATEGY_EXIT'}",
                     exit_price=exit_collar,
+                    short_exit_price=short_exit_collar,
                     actor="V2_STRATEGY_OBSERVER",
                 )
             return None

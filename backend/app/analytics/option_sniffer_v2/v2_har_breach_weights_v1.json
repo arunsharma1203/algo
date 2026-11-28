@@ -1,0 +1,32 @@
+{
+  "schema_version": "2.4.0",
+  "frozen_train_cutoff_excl": "2026-04-22",
+  "provenance": {
+    "description": "Causal point-in-time HAR-RV and Underlying Breach Probability weights fitted strictly on pre-2026-04-22 NIFTY 1m trajectories.",
+    "har_vrp_source": "STEP 1834 5-param ridge OLS on 2025-08-28..2026-04-21 completed intraday segments",
+    "breach_model_source": "book_a_lib2 UnderlyingBreachProbabilityModel (N=21804 causal Spot+VIX checkpoints, L2=10.0, zero option P&L leakage)"
+  },
+  "har_vrp_beta": [0.7729, 0.4062, 0.1107, 0.3123, -0.0201],
+  "har_breach_beta": [0.971301, 0.383238, 0.123734, 0.326821, -0.022372],
+  "vrp_book_b_threshold": 1.15,
+  "breach_model": {
+    "feature_names": [
+      "barrier_z",
+      "har_vol_scaled",
+      "vix_to_sma10",
+      "adx14_scaled",
+      "er20",
+      "atrr_5_20",
+      "vwap_z_cushion",
+      "sma20_aligned_pct",
+      "day_rng_exhaustion",
+      "extreme_cushion_z"
+    ],
+    "means": [0.673493, 0.555627, 1.025219, 0.804336, 0.229439, 0.995979, 0.0, 0.0, 1.266945, 0.933789],
+    "stds": [0.32771, 0.179421, 0.114336, 0.322611, 0.168768, 0.19148, 0.566016, 2.410266, 0.455412, 0.83942],
+    "w": [-0.6891, 0.09274, 0.175939, 0.03375, -0.004137, 0.014594, -0.056996, 0.163316, 0.114622, -0.115739],
+    "b": -0.050697,
+    "z_clip": 5.0,
+    "train_q65_reference": 0.495
+  }
+}

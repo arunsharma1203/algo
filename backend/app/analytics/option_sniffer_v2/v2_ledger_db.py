@@ -403,6 +403,21 @@ def init_v2_tables(db_path: Optional[str] = None) -> str:
                     evidence_json TEXT NOT NULL,
                     created_ts_ms INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS osv2_session_summaries (
+                    session_date TEXT PRIMARY KEY,
+                    rv_ann_pct REAL,
+                    spot_close REAL,
+                    vix_close REAL,
+                    bars_count INTEGER NOT NULL DEFAULT 0,
+                    updated_ts_ms INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS osv2_operator_settings (
+                    setting_key TEXT PRIMARY KEY,
+                    setting_value TEXT NOT NULL,
+                    updated_ts_ms INTEGER NOT NULL
+                );
                 """
             )
             # Idempotent additive migrations for older V2 DBs
@@ -1530,3 +1545,99 @@ class V2LedgerStore:
             return hashlib.sha256(blob.encode("utf-8")).hexdigest()
         finally:
             conn.close()
+
+    def get_prior_session_summaries(self, before_session_date: str) -> List[Dict[str, Any]]:
+        """Read-only lookup of completed prior sessions strictly `< before_session_date`."""
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return []
+        try:
+            tbl = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='osv2_session_summaries';"
+            ).fetchone()
+            if tbl is None:
+                return []
+            rows = conn.execute(
+                """
+                SELECT session_date, rv_ann_pct, spot_close, vix_close, bars_count, updated_ts_ms
+                FROM osv2_session_summaries
+                WHERE session_date < ?
+                ORDER BY session_date ASC;
+                """,
+                (str(before_session_date),),
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def upsert_session_summary(
+        self,
+        *,
+        session_date: str,
+        rv_ann_pct: Optional[float],
+        spot_close: Optional[float],
+        vix_close: Optional[float],
+        bars_count: int,
+        updated_ts_ms: int,
+    ) -> None:
+        with self._write_lock:
+            with self._write_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO osv2_session_summaries (
+                        session_date, rv_ann_pct, spot_close, vix_close, bars_count, updated_ts_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_date) DO UPDATE SET
+                        rv_ann_pct = COALESCE(excluded.rv_ann_pct, osv2_session_summaries.rv_ann_pct),
+                        spot_close = COALESCE(excluded.spot_close, osv2_session_summaries.spot_close),
+                        vix_close = COALESCE(excluded.vix_close, osv2_session_summaries.vix_close),
+                        bars_count = MAX(osv2_session_summaries.bars_count, excluded.bars_count),
+                        updated_ts_ms = excluded.updated_ts_ms;
+                    """,
+                    (
+                        str(session_date)[:10],
+                        float(rv_ann_pct) if rv_ann_pct is not None else None,
+                        float(spot_close) if spot_close is not None else None,
+                        float(vix_close) if vix_close is not None else None,
+                        int(bars_count),
+                        int(updated_ts_ms),
+                    ),
+                )
+                conn.commit()
+
+    def get_operator_settings(self) -> Dict[str, Any]:
+        """Read-only lookup of persisted V2 operator settings; defaults without creating DB."""
+        defaults: Dict[str, Any] = {"paper_execution_mode": "AUTO"}
+        conn = self._connect_readonly_if_exists()
+        if conn is None:
+            return defaults
+        try:
+            tbl = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='osv2_operator_settings';"
+            ).fetchone()
+            if tbl is None:
+                return defaults
+            rows = conn.execute(
+                "SELECT setting_key, setting_value FROM osv2_operator_settings;"
+            ).fetchall()
+            out = dict(defaults)
+            for r in rows:
+                out[str(r["setting_key"])] = str(r["setting_value"])
+            return out
+        finally:
+            conn.close()
+
+    def set_operator_setting(self, setting_key: str, setting_value: str, updated_ts_ms: int) -> None:
+        with self._write_lock:
+            with self._write_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO osv2_operator_settings (setting_key, setting_value, updated_ts_ms)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(setting_key) DO UPDATE SET
+                        setting_value = excluded.setting_value,
+                        updated_ts_ms = excluded.updated_ts_ms;
+                    """,
+                    (str(setting_key), str(setting_value), int(updated_ts_ms)),
+                )
+                conn.commit()

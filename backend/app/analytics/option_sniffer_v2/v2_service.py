@@ -14,7 +14,7 @@ Hard Guarantees:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 import hashlib
 import logging
 import os
@@ -23,7 +23,9 @@ import time
 import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from app.analytics.option_sniffer_v2.v2_book_a_engine import V2_BOOK_A_INTRADAY_CREDIT_SPEC
 from app.analytics.option_sniffer_v2.v2_book_b_engine import reconcile_v1_book_b_stop_and_overshoot
+from app.analytics.option_sniffer_v2.v2_vrp_and_breach_model import load_prior_nifty_daily_history_readonly
 from app.analytics.option_sniffer_v2.v2_collateral_report import compute_optional_collateral_report
 from app.analytics.option_sniffer_v2.v2_config import (
     EXISTING_V2_SYSTEMS_INVENTORY,
@@ -161,12 +163,19 @@ class OptionSnifferV2Service:
         self._lifecycle_lock = threading.RLock()
         self._lifecycle_listeners: List[Callable[[Dict[str, Any]], None]] = []
 
+        init_op_settings = self.store.get_operator_settings()
+        init_paper_mode = str(init_op_settings.get("paper_execution_mode") or "AUTO").upper().strip()
+        if init_paper_mode not in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY"):
+            init_paper_mode = "AUTO"
+
         self.unified_engine = V2UnifiedEventEngine(
             cfg=self.config,
             cfg_hash=self.config_hash,
             store=self.store,
             simulator=self.simulator,
             run_mode="FORWARD_PAPER",
+            enable_v2_4_dual_book=True,
+            paper_execution_mode=init_paper_mode,
             persist_bars_and_checkpoints=True,
             on_package_opened_cb=self._on_package_opened,
             on_package_closed_cb=self._on_package_closed,
@@ -176,6 +185,26 @@ class OptionSnifferV2Service:
 
         # Cached read-only archive report populated only by explicit CLI/control actions
         self._archive_audit_cache: Optional[Dict[str, Any]] = None
+
+    def get_paper_execution_mode(self) -> str:
+        """Read-only paper execution mode (`AUTO`, `BOOK_A_ONLY`, `BOOK_B_ONLY`); never writes DB."""
+        if self.store.db_exists():
+            val = str(self.store.get_operator_settings().get("paper_execution_mode") or "").upper().strip()
+            if val in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY"):
+                return val
+        val_mem = str(getattr(self.unified_engine, "paper_execution_mode", "AUTO")).upper().strip()
+        return val_mem if val_mem in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY") else "AUTO"
+
+    def set_paper_execution_mode(self, paper_mode: str) -> Dict[str, Any]:
+        """Explicit operator control to route Paper evaluation across `AUTO`, `BOOK_A_ONLY`, or `BOOK_B_ONLY`."""
+        mode = str(paper_mode or "").upper().strip()
+        if mode not in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY"):
+            raise ValueError(f"Unsupported paper_mode: {paper_mode!r}; expected AUTO, BOOK_A_ONLY, or BOOK_B_ONLY.")
+        with self._op_lock:
+            self.store.ensure_initialized()
+            self.store.set_operator_setting("paper_execution_mode", mode, int(time.time() * 1000))
+            self.unified_engine.set_paper_execution_mode(mode)
+        return {"ok": True, "paper_execution_mode": mode, "simulation_mode": True}
 
     # ──────────────────────────────────────────────────────────────────────────
     # LIFECYCLE: PASSIVE FAN-OUT START, OWNER PINS & V2-ONLY SHUTDOWN
@@ -567,8 +596,8 @@ class OptionSnifferV2Service:
 
         mgr = self._stream_mgr_ref
         session_d, _, _, _, now_hhmm = bar_open_label_from_ms(now_ms)
-        if not is_nse_trading_session(session_d) or now_hhmm > 1305:
-            # Release Book B watchlist pins after 13:05 entry window closes
+        if not is_nse_trading_session(session_d) or now_hhmm > 1320:
+            # Release Book B + Book A Intraday watchlist pins after 13:20 entry window closes
             self.subscription_registry.sync_for_package(
                 package_id=self._dte2_watchlist_pkg_id,
                 contracts=[],
@@ -590,19 +619,25 @@ class OptionSnifferV2Service:
             return
         atm = round(spot_px / 50.0) * 50.0
 
+        pin_phase = "B" if now_hhmm <= 1305 else "A"
         now_epoch = time.time()
         if (
             self._last_dte2_pin_check_epoch > 0.0
+            and getattr(self, "_last_pin_phase", None) == pin_phase
             and abs(atm - self._last_dte2_pin_atm) < 50.0
             and (now_epoch - self._last_dte2_pin_check_epoch) < 60.0
         ):
             return
+        self._last_pin_phase = pin_phase
         self._last_dte2_pin_check_epoch = now_epoch
         self._last_dte2_pin_atm = atm
 
         min_dte = int(self.config["books"]["V2_BOOK_B_PAID_FLOW"]["min_trading_dte"])
         max_dte = int(self.config["books"]["V2_BOOK_B_PAID_FLOW"].get("max_trading_dte", 12))
-        target_strikes = (atm - 50.0, atm, atm + 50.0)
+        target_strikes_b = (atm - 50.0, atm, atm + 50.0)
+        target_strikes_a = (atm - 150.0, atm - 50.0, atm + 50.0, atm + 150.0)
+        book_b_win = 915 <= now_hhmm <= 1305
+        book_a_win = 1125 <= now_hhmm <= 1316
 
         v1_covered_by_tuple: Dict[Tuple[str, float, str], Dict[str, Any]] = {}
         if mgr is not None and hasattr(mgr, "_lock") and hasattr(mgr, "_key_to_contract"):
@@ -630,10 +665,10 @@ class OptionSnifferV2Service:
                 if exp >= session_d and min_dte <= trading_sessions_between(session_d, exp) <= max_dte
             }
         )
-        if v1_dte2_expiries:
+        raw_catalog = cat_fn() if cat_fn is not None else self._default_fetch_nifty_option_catalog()
+        if not raw_catalog and v1_dte2_expiries:
             v1_exp = v1_dte2_expiries[0]
-            if all((v1_exp, k, ot) in v1_covered_by_tuple for k in target_strikes for ot in ("CE", "PE")):
-                # V1 already covers all 6 strikes of earliest DTE >= 2 expiry -> 0 V2 pins needed!
+            if all((v1_exp, k, ot) in v1_covered_by_tuple for k in target_strikes_b for ot in ("CE", "PE")):
                 self.subscription_registry.sync_for_package(
                     package_id=self._dte2_watchlist_pkg_id,
                     contracts=[],
@@ -642,9 +677,7 @@ class OptionSnifferV2Service:
                     subscribe_additive_fn=self._subscribe_v2_only_additive,
                     unpin_v2_only_fn=self._unpin_v2_only_keys,
                 )
-                return
-
-        raw_catalog = cat_fn() if cat_fn is not None else self._default_fetch_nifty_option_catalog()
+            return
         if not raw_catalog:
             return
 
@@ -679,25 +712,48 @@ class OptionSnifferV2Service:
                 "lot_size": int(item.get("lot_size") or default_lot),
             }
 
-        cand_expiries = sorted(
+        cand_expiries_b = sorted(
             {
                 exp
                 for (exp, _, _) in catalog_by_tuple.keys()
                 if exp >= session_d and min_dte <= trading_sessions_between(session_d, exp) <= max_dte
             }
         )
-        if not cand_expiries:
-            return
-        target_exp = cand_expiries[0]
+        sd_obj = date.fromisoformat(session_d)
+        fri_a_expiries = sorted(
+            {
+                exp
+                for (exp, _, _) in catalog_by_tuple.keys()
+                if exp >= session_d and (date.fromisoformat(exp) - sd_obj).days in (3, 4)
+            }
+        )
 
         missing_contracts: List[Dict[str, Any]] = []
-        for k in target_strikes:
-            for ot in ("CE", "PE"):
-                tup = (target_exp, k, ot)
-                if tup in v1_covered_by_tuple:
-                    continue
-                if tup in catalog_by_tuple:
-                    missing_contracts.append(catalog_by_tuple[tup])
+        seen_pin_keys: Set[str] = set()
+        if book_b_win and cand_expiries_b:
+            target_exp_b = cand_expiries_b[0]
+            for k in target_strikes_b:
+                for ot in ("CE", "PE"):
+                    tup = (target_exp_b, k, ot)
+                    if tup not in v1_covered_by_tuple and tup in catalog_by_tuple:
+                        c = catalog_by_tuple[tup]
+                        if c["instrument_key"] not in seen_pin_keys:
+                            seen_pin_keys.add(c["instrument_key"])
+                            missing_contracts.append(c)
+
+        if book_a_win and fri_a_expiries:
+            target_exp_a = fri_a_expiries[0]
+            for k in target_strikes_a:
+                for ot in ("CE", "PE"):
+                    tup = (target_exp_a, k, ot)
+                    if tup not in v1_covered_by_tuple and tup in catalog_by_tuple:
+                        c = catalog_by_tuple[tup]
+                        if c["instrument_key"] not in seen_pin_keys:
+                            seen_pin_keys.add(c["instrument_key"])
+                            missing_contracts.append(c)
+
+        if not cand_expiries_b and not fri_a_expiries and not missing_contracts:
+            return
 
         res_sync = self.subscription_registry.sync_for_package(
             package_id=self._dte2_watchlist_pkg_id,
@@ -1166,9 +1222,17 @@ class OptionSnifferV2Service:
     ) -> List[Dict[str, Any]]:
         cfg_a = self.config["books"]["V2_BOOK_A_PROPOSED_O3"]
         cfg_b = self.config["books"]["V2_BOOK_B_PAID_FLOW"]
+        book_ai_id = V2_BOOK_A_INTRADAY_CREDIT_SPEC["book_id"]
+        paper_mode = self.get_paper_execution_mode()
         last_dec = self.unified_engine.latest_decision_by_book
-        open_by_book = {b: [p for p in fwd_open if p["book_id"] == b] for b in (cfg_a["book_id"], cfg_b["book_id"])}
-        closed_by_book = {b: [p for p in fwd_closed if p["book_id"] == b] for b in (cfg_a["book_id"], cfg_b["book_id"])}
+        open_by_book = {
+            b: [p for p in fwd_open if p["book_id"] == b]
+            for b in (cfg_a["book_id"], book_ai_id, cfg_b["book_id"])
+        }
+        closed_by_book = {
+            b: [p for p in fwd_closed if p["book_id"] == b]
+            for b in (cfg_a["book_id"], book_ai_id, cfg_b["book_id"])
+        }
         fills_by_pkg: Dict[str, List[Dict[str, Any]]] = {}
         for f in fwd_fills:
             fills_by_pkg.setdefault(f["package_id"], []).append(f)
@@ -1185,15 +1249,20 @@ class OptionSnifferV2Service:
         dec_a = last_dec.get(cfg_a["book_id"]) or next(
             (s for s in fwd_signals if s["book_id"] == cfg_a["book_id"]), None
         )
+        dec_ai = last_dec.get(book_ai_id) or next(
+            (s for s in fwd_signals if s["book_id"] == book_ai_id), None
+        )
         dec_b = last_dec.get(cfg_b["book_id"]) or next(
             (s for s in fwd_signals if s["book_id"] == cfg_b["book_id"]), None
         )
+        ai_enabled = paper_mode in ("AUTO", "BOOK_A_ONLY")
+        b_enabled = paper_mode in ("AUTO", "BOOK_B_ONLY")
 
         rows = [
             {
                 "book_id": cfg_a["book_id"],
-                "book_label": "Book A (Phase-4 O3 T-1->T0 Credit Spread)",
-                "config_summary": "Disabled (T-1 Mondays only • Unverified 15m vs L5 O3 spec)",
+                "book_label": "Book A Legacy O3 (Disabled / Unverified Spec Conflict)",
+                "config_summary": "Disabled (Replaced by v2.4 Intraday Friday Credit Spread)",
                 "enabled": False,
                 "eligibility": "DISABLED_UNVERIFIED",
                 "eligibility_reason": "BLOCKED_UNVERIFIED_O3_SPEC_CONFLICT (Phase-4 O3 uses 15m Open[t+1], 70% decay, 100pt grid vs V2 50% / 50pt draft).",
@@ -1203,27 +1272,76 @@ class OptionSnifferV2Service:
                 "last_fill": _last_fill_for_book(cfg_a["book_id"]),
             },
             {
-                "book_id": cfg_b["book_id"],
-                "book_label": "Book B (Paid Convexity Flow: Median Open-Basis + 10:15-13:00)",
+                "book_id": book_ai_id,
+                "book_label": "Book A Intraday Credit (Friday cal_dte 3-4 • 50pt OTM / 100w • NO_VFLIP)",
                 "config_summary": (
-                    f"CashCap Rs{int(float(cfg_b['max_entry_outlay_inr'])):,} (+1-OTM) • "
-                    f"Max Planned SL Rs{int(float(cfg_b['planned_loss_max_inr'])):,} • "
-                    f"{int(cfg_b['entry_window_start_hhmm']):04d}-{int(cfg_b['entry_window_end_hhmm']):04d} IST"
+                    "Friday cal_dte in {3,4} • 11:30-13:15 IST • Min Cr 25pt (Live 24pt) • "
+                    "70% Target / 1.8x SL (Rs 1,950 cap) • 15:15 EOD"
                 ),
-                "enabled": True,
+                "enabled": ai_enabled,
                 "eligibility": (
                     "HALTED_BOOKING_FAULT"
                     if self.simulator.is_booking_halted()
-                    else ("IN_POSITION" if open_by_book[cfg_b["book_id"]] else ((dec_b or {}).get("state") or "WAITING_STREAM"))
+                    else (
+                        "IN_POSITION"
+                        if open_by_book[book_ai_id]
+                        else (
+                            f"PAUSED_BY_PAPER_MODE:{paper_mode}"
+                            if not ai_enabled
+                            else ((dec_ai or {}).get("state") or "WAITING_STREAM")
+                        )
+                    )
                 ),
                 "eligibility_reason": (
                     str((self.simulator.booking_fault or {}).get("error"))
                     if self.simulator.is_booking_halted()
-                    else ((dec_b or {}).get("reject_reason") or "ACTIVE_ELIGIBLE_1015_1300_IST")
+                    else (
+                        f"PAUSED_BY_PAPER_MODE:{paper_mode}"
+                        if not ai_enabled
+                        else ((dec_ai or {}).get("reject_reason") or "ACTIVE_ELIGIBLE_FRI_1130_1315_IST")
+                    )
+                ),
+                "current_position": open_by_book[book_ai_id][0]["direction_label"] if open_by_book[book_ai_id] else "NONE",
+                "latest_decision": (dec_ai or {}).get("state") or ("PAUSED" if not ai_enabled else "NO_BARS_EVALUATED"),
+                "latest_rejection_reason": (dec_ai or {}).get("reject_reason"),
+                "gates": (dec_ai or {}).get("gates") or [],
+                "last_fill": _last_fill_for_book(book_ai_id),
+            },
+            {
+                "book_id": cfg_b["book_id"],
+                "book_label": "Book B (Paid Convexity Flow: VRP <= 1.15 + 45m Exit)",
+                "config_summary": (
+                    f"VRP <= 1.15 • CashCap Rs{int(float(cfg_b['max_entry_outlay_inr'])):,} (+1-OTM) • "
+                    f"Max Planned SL Rs{int(float(cfg_b['planned_loss_max_inr'])):,} • 45m Stagnation • "
+                    f"{int(cfg_b['entry_window_start_hhmm']):04d}-{int(cfg_b['entry_window_end_hhmm']):04d} IST"
+                ),
+                "enabled": b_enabled,
+                "eligibility": (
+                    "HALTED_BOOKING_FAULT"
+                    if self.simulator.is_booking_halted()
+                    else (
+                        "IN_POSITION"
+                        if open_by_book[cfg_b["book_id"]]
+                        else (
+                            f"PAUSED_BY_PAPER_MODE:{paper_mode}"
+                            if not b_enabled
+                            else ((dec_b or {}).get("state") or "WAITING_STREAM")
+                        )
+                    )
+                ),
+                "eligibility_reason": (
+                    str((self.simulator.booking_fault or {}).get("error"))
+                    if self.simulator.is_booking_halted()
+                    else (
+                        f"PAUSED_BY_PAPER_MODE:{paper_mode}"
+                        if not b_enabled
+                        else ((dec_b or {}).get("reject_reason") or "ACTIVE_ELIGIBLE_1015_1300_IST")
+                    )
                 ),
                 "current_position": open_by_book[cfg_b["book_id"]][0]["direction_label"] if open_by_book[cfg_b["book_id"]] else "NONE",
-                "latest_decision": (dec_b or {}).get("state") or ("TRIGGERED" if (dec_b or {}).get("passed") else "NO_BARS_EVALUATED"),
+                "latest_decision": (dec_b or {}).get("state") or ("TRIGGERED" if (dec_b or {}).get("passed") else ("PAUSED" if not b_enabled else "NO_BARS_EVALUATED")),
                 "latest_rejection_reason": (dec_b or {}).get("reject_reason"),
+                "gates": (dec_b or {}).get("gates") or [],
                 "last_fill": _last_fill_for_book(cfg_b["book_id"]),
             },
         ]
@@ -1288,11 +1406,67 @@ class OptionSnifferV2Service:
             enabled=include_collateral,
         )
 
+        today_ist = to_ist_aware(datetime.now()).strftime("%Y-%m-%d")
+        prior_hist_ro = self.unified_engine.prior_nifty_history or load_prior_nifty_daily_history_readonly(
+            self.store, self.unified_engine.session_date or today_ist
+        )
+        vrp_telemetry = self.unified_engine.latest_vrp_telemetry or {
+            "status": (
+                "AWAITING_LIVE_BAR"
+                if prior_hist_ro.get("warmup_ready")
+                else f"WARMING_UP_{int(prior_hist_ro.get('prior_days_count') or 0)}D"
+            ),
+            "warmup_ready": bool(prior_hist_ro.get("warmup_ready")),
+            "prior_days_count": int(prior_hist_ro.get("prior_days_count") or 0),
+            "har_rv_pct": None,
+            "atm_iv_pct": None,
+            "vrp_ratio": None,
+            "vrp_diff_pct": None,
+        }
+        aiml_telemetry = self.unified_engine.latest_aiml_telemetry or {
+            "passive_only": True,
+            "advisory_gate_applied": False,
+            "p_breach": None,
+            "status": "AWAITING_LIVE_BAR",
+        }
+        paper_mode = self.get_paper_execution_mode()
+
+        def _book_pnl_bucket(bid_set: Set[str]) -> Dict[str, Any]:
+            rows_b = [p for p in fwd_closed if p.get("book_id") in bid_set]
+            g_b = round(sum(float(p.get("gross_pnl_inr") or 0.0) for p in rows_b), 2)
+            c_b = round(sum(float(p.get("total_friction_inr") or 0.0) for p in rows_b), 2)
+            n_b = round(sum(float(p.get("net_pnl_inr") or 0.0) for p in rows_b), 2)
+            w_b = sum(1 for p in rows_b if float(p.get("net_pnl_inr") or 0.0) > 0.0)
+            return {
+                "trades": len(rows_b),
+                "wins": w_b,
+                "win_rate_pct": round((w_b / len(rows_b)) * 100.0, 1) if rows_b else 0.0,
+                "gross_pnl_inr": g_b,
+                "total_charges_inr": c_b,
+                "net_pnl_inr": n_b,
+                "net_2x_charges_inr": round(g_b - 2.0 * c_b, 2),
+                "open_count": sum(1 for p in fwd_open if p.get("book_id") in bid_set),
+            }
+
+        book_perf_split = {
+            "book_a_intraday": _book_pnl_bucket({V2_BOOK_A_INTRADAY_CREDIT_SPEC["book_id"]}),
+            "book_b_paid_flow": _book_pnl_bucket({"V2_BOOK_B_PAID_FLOW"}),
+            "combined": _book_pnl_bucket({V2_BOOK_A_INTRADAY_CREDIT_SPEC["book_id"], "V2_BOOK_B_PAID_FLOW"}),
+        }
+
         return {
             "service_name": "V2 Option Sniffer",
             "package": "option_sniffer_v2",
             "protocol_id": self.config["protocol_id"],
             "engine_version": self.engine_version,
+            "active_profile_id": "V2_4_PAPER_DUAL_BOOK",
+            "v2_release_version": "2.4.0-dual-book-vrp",
+            "paper_execution_mode": paper_mode,
+            "warmup_20d_ready": bool(prior_hist_ro.get("warmup_ready")),
+            "warmup_prior_days_count": int(prior_hist_ro.get("prior_days_count") or 0),
+            "vrp_telemetry": vrp_telemetry,
+            "aiml_passive_telemetry": aiml_telemetry,
+            "book_performance_split": book_perf_split,
             "replay_run_mode": self.replay_run_mode,
             "config_hash": self.config_hash,
             "simulation_mode": True,
@@ -1310,9 +1484,18 @@ class OptionSnifferV2Service:
                     **self.config["books"]["V2_BOOK_A_PROPOSED_O3"],
                     "status_banner": "DISABLED FOR AUTONOMOUS FORWARD ENTRIES: UNVERIFIED_SPEC_CONFLICT",
                 },
+                "V2_BOOK_A_INTRADAY_CREDIT": {
+                    **V2_BOOK_A_INTRADAY_CREDIT_SPEC,
+                    "autonomous_entries_enabled": paper_mode in ("AUTO", "BOOK_A_ONLY"),
+                    "status_banner": "ACTIVE INTRADAY FRIDAY CREDIT SPREAD (cal_dte 3-4 • 50/100w • NO_VFLIP • 15:15 EOD)",
+                },
                 "V2_BOOK_B_PAID_FLOW": {
                     **self.config["books"]["V2_BOOK_B_PAID_FLOW"],
-                    "status_banner": "ACTIVE PAPER HYPOTHESIS (Median Open-Basis + 10:15-13:00 + CashCap Rs18.5k + 20%/Rs1800 + 1-OTM)",
+                    "autonomous_entries_enabled": paper_mode in ("AUTO", "BOOK_B_ONLY"),
+                    "enforce_vrp_gate": True,
+                    "max_vrp_ratio": 1.15,
+                    "stagnation_mins": 45,
+                    "status_banner": "ACTIVE PAPER HYPOTHESIS (VRP <= 1.15 + 45m B4/Step + CashCap Rs18.5k)",
                 },
             },
             "forward_paper_summary": {

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import importlib.util
+import math
 import os
 import statistics
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -35,8 +36,12 @@ _s205_mm_mod = importlib.util.module_from_spec(_s205_mm_spec)
 _s205_mm_spec.loader.exec_module(_s205_mm_mod)
 compute_adx_series_causal = _s205_mm_mod.compute_adx_series_causal
 compute_er_series_causal = _s205_mm_mod.compute_er_series_causal
+compute_atrr_series_causal = _s205_mm_mod.compute_atrr_series_causal
 from app.analytics.option_sniffer_v2.v2_book_a_engine import (
+    V2_BOOK_A_INTRADAY_CREDIT_SPEC,
     evaluate_book_a_entry_signal,
+    evaluate_book_a_intraday_credit_signal,
+    manage_open_book_a_intraday_on_bar,
     manage_open_book_a_on_bar,
 )
 from app.analytics.option_sniffer_v2.v2_book_b_engine import (
@@ -48,11 +53,13 @@ from app.analytics.option_sniffer_v2.v2_config import (
     bar_open_label_from_ms,
     ist_hhmm_from_ms,
     parse_ist_timestamp_ms,
+    trading_sessions_between,
 )
 from app.analytics.option_sniffer_v2.v2_data_contract import (
     check_cross_leg_skew,
     check_spot_futures_sync,
     extract_observed_timestamp_ms,
+    resolve_strict_quote_age_ms,
     validate_nifty_futures_identity,
     validate_nifty_option_identity,
     validate_nifty_spot_identity,
@@ -67,6 +74,18 @@ from app.analytics.option_sniffer_v2.v2_regime_arbitrator import (
     check_candidate_arbitration_gate,
     evaluate_v2_regime_arbitration,
 )
+from app.analytics.option_sniffer_v2.v2_vrp_and_breach_model import (
+    compute_passive_aiml_breach_telemetry,
+    compute_vrp_metrics,
+    load_prior_nifty_daily_history_readonly,
+)
+
+
+def _normalize_paper_mode(mode: Optional[str]) -> str:
+    val = str(mode or "AUTO").upper().strip()
+    if val in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY"):
+        return val
+    return "AUTO"
 
 
 def compute_causal_bar_indicators(completed_bars: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -87,9 +106,13 @@ def compute_causal_bar_indicators(completed_bars: List[Dict[str, Any]]) -> Dict[
             "tpb_vwap": None,
             "adx14": None,
             "er20": None,
+            "atrr_5_20": None,
             "orb30_h": None,
             "orb30_l": None,
             "orb30_ready": False,
+            "r2_sum_today": 0.0,
+            "session_high": None,
+            "session_low": None,
         }
 
     h_list = [float(b["spot_h"]) for b in completed_bars]
@@ -111,6 +134,17 @@ def compute_causal_bar_indicators(completed_bars: List[Dict[str, Any]]) -> Dict[
         er_arr = compute_er_series_causal(c_list, 20)
         er20 = float(er_arr[-1])
 
+    atrr_5_20: Optional[float] = None
+    if n >= 21:
+        atrr_arr = compute_atrr_series_causal(h_list, l_list, c_list, 5, 20)
+        atrr_5_20 = float(atrr_arr[-1])
+
+    r2_sum_today = 0.0
+    for i in range(1, n):
+        if c_list[i - 1] > 0.0 and c_list[i] > 0.0:
+            lr = math.log(c_list[i] / c_list[i - 1])
+            r2_sum_today += lr * lr
+
     orb_bars = [b for b in completed_bars if "09:15" <= b["bar_open_ts"][11:16] <= "09:44"]
     last_hm = completed_bars[-1]["bar_open_ts"][11:16]
     # ORB30 requires bars from session start covering up to 09:44 (i.e. decision >= 09:45) without gaps
@@ -125,9 +159,13 @@ def compute_causal_bar_indicators(completed_bars: List[Dict[str, Any]]) -> Dict[
         "tpb_vwap": tpb_vwap,
         "adx14": adx14,
         "er20": er20,
+        "atrr_5_20": atrr_5_20,
         "orb30_h": orb_h,
         "orb30_l": orb_l,
         "orb30_ready": orb_ready,
+        "r2_sum_today": r2_sum_today,
+        "session_high": max(h_list),
+        "session_low": min(l_list),
     }
 
 
@@ -146,6 +184,9 @@ class V2UnifiedEventEngine:
         run_mode: str = "FORWARD_PAPER",
         book_b_params: Optional[Dict[str, Any]] = None,
         enable_book_a_opt_in: bool = False,
+        enable_v2_4_dual_book: bool = False,
+        paper_execution_mode: str = "AUTO",
+        market_db_path: Optional[str] = None,
         persist_bars_and_checkpoints: bool = True,
         on_package_opened_cb: Optional[Callable[[str, List[Dict[str, Any]]], None]] = None,
         on_package_closed_cb: Optional[Callable[[str], None]] = None,
@@ -170,6 +211,9 @@ class V2UnifiedEventEngine:
             }
         )
         self.enable_book_a_opt_in = bool(enable_book_a_opt_in)
+        self.enable_v2_4_dual_book = bool(enable_v2_4_dual_book)
+        self.paper_execution_mode = _normalize_paper_mode(paper_execution_mode)
+        self.market_db_path = market_db_path
         self.persist_bars_and_checkpoints = bool(persist_bars_and_checkpoints)
         self.on_package_opened_cb = on_package_opened_cb
         self.on_package_closed_cb = on_package_closed_cb
@@ -207,6 +251,11 @@ class V2UnifiedEventEngine:
         self.fsp_by_expiry: Dict[str, float] = {}
         self.prior_daily_vix: List[float] = []
         self.prior_daily_spots: List[float] = []
+        self.prior_daily_rvs: List[float] = []
+        self._prior_history_date: Optional[str] = None
+        self.prior_nifty_history: Dict[str, Any] = {}
+        self.latest_vrp_telemetry: Optional[Dict[str, Any]] = None
+        self.latest_aiml_telemetry: Optional[Dict[str, Any]] = None
         self.session_decision_trace: List[Dict[str, Any]] = []
         self.latest_decision_by_book: Dict[str, Dict[str, Any]] = {}
         self.latest_regime_arbitration: Optional[Dict[str, Any]] = None
@@ -214,6 +263,37 @@ class V2UnifiedEventEngine:
 
         if self.persist_bars_and_checkpoints:
             self.recover_from_db()
+
+    def set_paper_execution_mode(self, mode: str) -> str:
+        self.paper_execution_mode = _normalize_paper_mode(mode)
+        return self.paper_execution_mode
+
+    def _ensure_prior_history(self, session_date: str) -> Dict[str, Any]:
+        if self._prior_history_date == session_date and self.prior_nifty_history:
+            return self.prior_nifty_history
+        hist = load_prior_nifty_daily_history_readonly(
+            self.store, session_date, market_db_path=self.market_db_path
+        )
+        # Overlay any in-memory completed sessions carried across multi-day unpersisted replay
+        if self.prior_daily_rvs and len(hist.get("daily_rv_ann") or []) < len(self.prior_daily_rvs):
+            rvs = list(self.prior_daily_rvs)
+            spots = list(self.prior_daily_spots)
+            vixes = list(self.prior_daily_vix)
+            hist["daily_rv_ann"] = rvs
+            hist["prior_days_count"] = len(rvs)
+            hist["warmup_ready"] = len(rvs) >= 20
+            hist["rv1"] = round(rvs[-1], 4) if len(rvs) >= 1 else None
+            hist["rv5"] = round(sum(rvs[-5:]) / 5.0, 4) if len(rvs) >= 5 else None
+            hist["rv20"] = round(sum(rvs[-20:]) / 20.0, 4) if len(rvs) >= 20 else None
+            if len(spots) >= 20:
+                hist["sma20"] = round(sum(spots[-20:]) / 20.0, 4)
+            if len(vixes) >= 10:
+                hist["vix_sma10"] = round(sum(vixes[-10:]) / 10.0, 4)
+        elif self.prior_daily_vix and hist.get("vix_sma10") is None and len(self.prior_daily_vix) >= 10:
+            hist["vix_sma10"] = round(sum(self.prior_daily_vix[-10:]) / 10.0, 4)
+        self._prior_history_date = session_date
+        self.prior_nifty_history = hist
+        return hist
 
     def _emit_lifecycle_event(self, event_payload: Dict[str, Any]) -> None:
         if self.on_lifecycle_event_cb is not None:
@@ -272,12 +352,34 @@ class V2UnifiedEventEngine:
                 self._finalize_building_bar_and_decide(self.building_bar["bar_close_ts_ms"], allow_post_session=False)
             self._persist_session_snapshot_locked(self.session_date)
             if self.completed_bars:
-                self.prior_daily_spots.append(float(self.completed_bars[-1]["spot_c"]))
+                spot_last = float(self.completed_bars[-1]["spot_c"])
+                self.prior_daily_spots.append(spot_last)
                 v_last = next((b["vix_c"] for b in reversed(self.completed_bars) if b.get("vix_c")), None)
                 if v_last:
                     self.prior_daily_vix.append(float(v_last))
+                if len(self.completed_bars) >= 120:
+                    prev_ind = compute_causal_bar_indicators(self.completed_bars)
+                    n_ret = max(1, len(self.completed_bars) - 1)
+                    rv_d = round(
+                        math.sqrt(252.0 * (374.0 / float(n_ret)) * max(0.0, float(prev_ind.get("r2_sum_today") or 0.0))) * 100.0,
+                        4,
+                    )
+                    self.prior_daily_rvs.append(rv_d)
+                    if self.persist_bars_and_checkpoints:
+                        self.store.upsert_session_summary(
+                            session_date=self.session_date,
+                            rv_ann_pct=rv_d,
+                            spot_close=spot_last,
+                            vix_close=float(v_last) if v_last else None,
+                            bars_count=len(self.completed_bars),
+                            updated_ts_ms=self.last_usable_event_ts_ms,
+                        )
 
         self.session_date = new_session_date
+        self._prior_history_date = None
+        self._ensure_prior_history(new_session_date)
+        self.latest_vrp_telemetry = None
+        self.latest_aiml_telemetry = None
         open_mtm = self.sim.current_open_conservative_mtm()
         self.sod_equity_inr = round(self.sim.realized_equity_inr + open_mtm, 2)
         self.sim.intraday_min_equity_by_date[new_session_date] = self.sod_equity_inr
@@ -678,8 +780,19 @@ class V2UnifiedEventEngine:
         # 2. Manage open packages
         for pid, pkg in list(self.sim.open_packages.items()):
             prev_ratchet = (pkg.get("legs_state") or {}).get("ratchet_stop")
+            prev_ratchet_debit = (pkg.get("legs_state") or {}).get("ratchet_max_debit_pts")
             res_close = None
             if pkg["book_id"] == "V2_BOOK_B_PAID_FLOW":
+                stag_mins = (
+                    self.book_b_params.get("stagnation_mins_override")
+                    if self.book_b_params.get("stagnation_mins_override") is not None
+                    else (45 if self.enable_v2_4_dual_book else None)
+                )
+                stag_gain = (
+                    self.book_b_params.get("stagnation_min_gain_override")
+                    if self.book_b_params.get("stagnation_min_gain_override") is not None
+                    else (10.0 if self.enable_v2_4_dual_book else None)
+                )
                 res_close = manage_open_book_b_on_bar(
                     sim=self.sim,
                     pkg=pkg,
@@ -692,8 +805,22 @@ class V2UnifiedEventEngine:
                     quote_by_ikey=self.latest_opt_quotes,
                     stop_pct_override=self.book_b_params.get("stop_pct_override"),
                     stop_max_inr_override=self.book_b_params.get("stop_max_inr_override"),
-                    stagnation_mins_override=self.book_b_params.get("stagnation_mins_override"),
-                    stagnation_min_gain_override=self.book_b_params.get("stagnation_min_gain_override"),
+                    stagnation_mins_override=stag_mins,
+                    stagnation_min_gain_override=stag_gain,
+                )
+            elif pkg["book_id"] == "V2_BOOK_A_INTRADAY_CREDIT":
+                res_close = manage_open_book_a_intraday_on_bar(
+                    sim=self.sim,
+                    pkg=pkg,
+                    session_date=dt,
+                    bar_ts=bar_open_ts,
+                    ist_hhmm=eval_hhmm,
+                    decision_ts_ms=decision_ts_ms,
+                    spot_close=ind["spot_close"],
+                    spot_vwap=ind["tpb_vwap"] or ind["spot_close"],
+                    quotes_by_ikey=self.latest_opt_quotes,
+                    is_eod_bar=(eval_hhmm >= 1525),
+                    eod_squareoff_hhmm=int(V2_BOOK_A_INTRADAY_CREDIT_SPEC["eod_squareoff_ist_hhmm"]),
                 )
             else:
                 res_close = manage_open_book_a_on_bar(
@@ -753,17 +880,111 @@ class V2UnifiedEventEngine:
                             "hard_stop": ls_upd.get("hard_stop"),
                         }
                     )
+            elif pid in self.sim.open_packages and pkg["book_id"] == "V2_BOOK_A_INTRADAY_CREDIT":
+                upd_pkg = self.sim.open_packages[pid]
+                ls_upd = upd_pkg.get("legs_state") or {}
+                new_ratchet_deb = ls_upd.get("ratchet_max_debit_pts")
+                if new_ratchet_deb is not None and (
+                    prev_ratchet_debit is None or float(new_ratchet_deb) < float(prev_ratchet_debit) - 1e-6
+                ):
+                    self._emit_lifecycle_event(
+                        {
+                            "event_type": "RATCHET_UPDATED",
+                            "run_mode": self.run_mode,
+                            "package_id": pid,
+                            "signal_id": upd_pkg.get("signal_id"),
+                            "session_date": dt,
+                            "bar_ts": bar_open_ts,
+                            "decision_ts_ms": decision_ts_ms,
+                            "book_id": upd_pkg.get("book_id"),
+                            "previous_ratchet_stop": prev_ratchet_debit,
+                            "new_ratchet_stop": float(new_ratchet_deb),
+                            "hard_stop": ls_upd.get("hard_stop_debit_pts"),
+                        }
+                    )
 
         # 3. Evaluate new entries strictly after exits (`active_slots_and_reserves` locks same-bar exit slots)
         slots = self.sim.active_slots_and_reserves(bar_open_ts, dt)
         env = self.cfg["account_envelope"]
         cfg_b = self.cfg["books"]["V2_BOOK_B_PAID_FLOW"]
         cfg_a = self.cfg["books"]["V2_BOOK_A_PROPOSED_O3"]
+        hyg = self.cfg["quote_hygiene"]
         entered_b = False
         sig_b_record: Optional[Dict[str, Any]] = None
         expiries_all = sorted({k[0] for k in self.opt_contracts.keys()})
         vix_now_val = float((self.latest_vix_q or {}).get("spot_ltp") or (b.get("vix_c") or 0.0)) or None
         book_a_active = bool(cfg_a.get("autonomous_entries_enabled", False) or self.enable_book_a_opt_in)
+
+        prior_hist = self._ensure_prior_history(dt)
+        quotes_lk = {
+            k: self.latest_opt_quotes[c["instrument_key"]]
+            for k, c in self.opt_contracts.items()
+            if c["instrument_key"] in self.latest_opt_quotes
+        }
+
+        if self.enable_v2_4_dual_book:
+            book_b_mode_allowed = self.paper_execution_mode in ("AUTO", "BOOK_B_ONLY")
+            book_a_intraday_allowed = self.paper_execution_mode in ("AUTO", "BOOK_A_ONLY")
+            vrp_exp = next(
+                (
+                    e
+                    for e in expiries_all
+                    if e >= dt and int(cfg_b["min_trading_dte"]) <= trading_sessions_between(dt, e) <= int(cfg_b.get("max_trading_dte", 12))
+                ),
+                None,
+            ) or next((e for e in expiries_all if e >= dt), None)
+            vrp_tdte = trading_sessions_between(dt, vrp_exp) if vrp_exp else 0
+            atm_vrp = round(float(ind["spot_close"]) / 50.0) * 50.0 if ind["spot_close"] > 0 else None
+            ce_q_vrp = quotes_lk.get((vrp_exp or "", atm_vrp, "CE")) if (vrp_exp and atm_vrp) else None
+            pe_q_vrp = quotes_lk.get((vrp_exp or "", atm_vrp, "PE")) if (vrp_exp and atm_vrp) else None
+            ce_mid_vrp: Optional[float] = None
+            pe_mid_vrp: Optional[float] = None
+            if ce_q_vrp and pe_q_vrp:
+                skew_ok_v, _, _ = check_cross_leg_skew(
+                    ce_q_vrp, pe_q_vrp, max_skew_ms=int(hyg["max_cross_leg_skew_ms"]), require_depth_ts=False
+                )
+                max_age_v = int(hyg["max_entry_quote_age_ms"])
+                ce_age = resolve_strict_quote_age_ms(ce_q_vrp, now_ms=decision_ts_ms, require_observed_l5=False)
+                pe_age = resolve_strict_quote_age_ms(pe_q_vrp, now_ms=decision_ts_ms, require_observed_l5=False)
+                ce_ts_ok = ce_age is not None and 0 <= ce_age <= max_age_v
+                pe_ts_ok = pe_age is not None and 0 <= pe_age <= max_age_v
+                cb, ca = float(ce_q_vrp.get("raw_bid") or 0.0), float(ce_q_vrp.get("raw_ask") or 0.0)
+                pb, pa = float(pe_q_vrp.get("raw_bid") or 0.0), float(pe_q_vrp.get("raw_ask") or 0.0)
+                if skew_ok_v and ce_ts_ok and pe_ts_ok and cb > 0.0 and ca >= cb and pb > 0.0 and pa >= pb:
+                    ce_mid_vrp = 0.5 * (cb + ca)
+                    pe_mid_vrp = 0.5 * (pb + pa)
+            self.latest_vrp_telemetry = compute_vrp_metrics(
+                atm_ce_mid=ce_mid_vrp,
+                atm_pe_mid=pe_mid_vrp,
+                atm_strike=atm_vrp,
+                spot_close=ind["spot_close"],
+                ist_hhmm=eval_hhmm,
+                trading_dte=vrp_tdte,
+                r2_sum_today=ind.get("r2_sum_today"),
+                elapsed_bars_today=ind["bars_count"],
+                prior_history=prior_hist,
+            )
+            dir_bull = bool(ind["tpb_vwap"] and ind["spot_close"] >= ind["tpb_vwap"])
+            self.latest_aiml_telemetry = compute_passive_aiml_breach_telemetry(
+                spot_close=ind["spot_close"],
+                vwap=ind["tpb_vwap"],
+                session_high=ind.get("session_high"),
+                session_low=ind.get("session_low"),
+                adx14=ind.get("adx14"),
+                er20=ind.get("er20"),
+                atrr_5_20=ind.get("atrr_5_20"),
+                live_vix=vix_now_val,
+                direction_bullish=dir_bull,
+                barrier_pts=50.0,
+                ist_hhmm=eval_hhmm,
+                r2_sum_today=ind.get("r2_sum_today"),
+                elapsed_bars_today=ind["bars_count"],
+                prior_history=prior_hist,
+            )
+        else:
+            book_b_mode_allowed = bool(cfg_b.get("autonomous_entries_enabled", True))
+            book_a_intraday_allowed = False
+
         self.latest_regime_arbitration = evaluate_v2_regime_arbitration(
             session_date=dt,
             ist_hhmm=eval_hhmm,
@@ -779,8 +1000,8 @@ class V2UnifiedEventEngine:
             prior_vix_closes=self.prior_daily_vix,
             open_packages=list(self.sim.open_packages.values()),
             max_open_packages_total=int(env["max_open_packages_total"]),
-            book_a_enabled=book_a_active,
-            book_b_enabled=bool(cfg_b.get("autonomous_entries_enabled", True)),
+            book_a_enabled=(book_a_active or book_a_intraday_allowed),
+            book_b_enabled=book_b_mode_allowed,
         )
 
         blocks = list(uncertainty_blocks or [])
@@ -791,7 +1012,18 @@ class V2UnifiedEventEngine:
         if mtm_info["unpriced_count"] > 0:
             blocks.append("UNPRICED_OPEN_EXPOSURE")
 
-        if (
+        if not book_b_mode_allowed:
+            paused_obj_b = {
+                "bar_ts": bar_open_ts,
+                "decision_ts_ms": decision_ts_ms,
+                "passed": False,
+                "state": "PAUSED_BY_PAPER_MODE",
+                "reject_reason": f"PAUSED_BY_PAPER_MODE:{self.paper_execution_mode}",
+                "gates": [],
+                "indicators": dict(ind),
+            }
+            self.latest_decision_by_book[cfg_b["book_id"]] = paused_obj_b
+        elif (
             not blocks
             and slots["open_total"] < int(env["max_open_packages_total"])
             and slots["trades_today_total"] < int(env["max_total_trades_per_day"])
@@ -799,12 +1031,8 @@ class V2UnifiedEventEngine:
             and slots["trades_today_by_book"].get(cfg_b["book_id"], 0) < int(cfg_b["max_trades_day"])
             and decision_ts_ms >= self.sim.cooldown_until_ms.get(cfg_b["book_id"], 0)
         ):
-            quotes_lk = {
-                k: self.latest_opt_quotes[c["instrument_key"]]
-                for k, c in self.opt_contracts.items()
-                if c["instrument_key"] in self.latest_opt_quotes
-            }
             expiries = expiries_all
+            vrp_t = self.latest_vrp_telemetry or {}
             sig_b = evaluate_book_b_entry_signal(
                 cfg=self.cfg,
                 session_date=dt,
@@ -830,6 +1058,14 @@ class V2UnifiedEventEngine:
                 window_end_override=self.book_b_params.get("window_end"),
                 allow_single_otm_fallback=self.book_b_params.get("allow_otm_fallback"),
                 min_er_override=self.book_b_params.get("min_er_override"),
+                min_adx_override=self.book_b_params.get("min_adx_override"),
+                min_obi_override=self.book_b_params.get("min_obi_override"),
+                vrp_ratio=vrp_t.get("vrp_ratio"),
+                atm_iv_pct=vrp_t.get("atm_iv_pct"),
+                har_rv_pct=vrp_t.get("har_rv_pct"),
+                enforce_vrp_gate=bool(self.enable_v2_4_dual_book and self.book_b_params.get("enforce_vrp_gate", True)),
+                max_vrp_ratio=float(self.book_b_params.get("max_vrp_ratio", 1.15)),
+                vrp_status=vrp_t.get("status"),
             )
             sig_b_record = {
                 "bar_ts": bar_open_ts,
@@ -923,6 +1159,11 @@ class V2UnifiedEventEngine:
                                 "quote_snapshot": dict(sig_b["quote"]),
                             }
                         )
+                    b_extra = {
+                        **(sig_b.get("basis_meta") or {}),
+                        **(sig_b.get("vrp_meta") or {}),
+                        "aiml_p_breach_passive": (self.latest_aiml_telemetry or {}).get("p_breach"),
+                    }
                     self._record_opportunity_with_dedup(
                         session_date=dt,
                         bar_ts=bar_open_ts,
@@ -935,12 +1176,17 @@ class V2UnifiedEventEngine:
                         primary_reject_reason=None if op.get("ok") else str(op.get("reason") or "OPEN_FAILED"),
                         gates=sig_b.get("gates", []),
                         ind=ind,
-                        extra_inputs=sig_b.get("basis_meta") or {},
+                        extra_inputs=b_extra,
                         contract=sig_b.get("contract"),
                         quote=sig_b.get("quote"),
                         sig_obj=sig_b,
                     )
             else:
+                b_extra = {
+                    **(sig_b.get("basis_meta") or {}),
+                    **(sig_b.get("vrp_meta") or {}),
+                    "aiml_p_breach_passive": (self.latest_aiml_telemetry or {}).get("p_breach"),
+                }
                 self._record_opportunity_with_dedup(
                     session_date=dt,
                     bar_ts=bar_open_ts,
@@ -953,7 +1199,7 @@ class V2UnifiedEventEngine:
                     primary_reject_reason=sig_b.get("reject_reason"),
                     gates=sig_b.get("gates", []),
                     ind=ind,
-                    extra_inputs=sig_b.get("basis_meta") or {},
+                    extra_inputs=b_extra,
                     contract=sig_b.get("contract"),
                     quote=sig_b.get("quote"),
                     sig_obj=sig_b,
@@ -1006,8 +1252,8 @@ class V2UnifiedEventEngine:
                 prior_vix_closes=self.prior_daily_vix,
                 open_packages=list(self.sim.open_packages.values()),
                 max_open_packages_total=int(env["max_open_packages_total"]),
-                book_a_enabled=book_a_active,
-                book_b_enabled=bool(cfg_b.get("autonomous_entries_enabled", True)),
+                book_a_enabled=(book_a_active or book_a_intraday_allowed),
+                book_b_enabled=book_b_mode_allowed,
             )
 
         # Book A check (strictly disabled by default unless opt-in in research replay)
@@ -1190,6 +1436,176 @@ class V2UnifiedEventEngine:
                     quote=sig_a.get("short_quote"),
                     sig_obj=sig_a,
                 )
+
+        # Book A v2.4 Intraday Defined-Risk Credit Spread (Friday cal_dte in {3,4}, 11:30-13:15, 50/100w, NO_VFLIP)
+        if self.enable_v2_4_dual_book:
+            book_ai_id = V2_BOOK_A_INTRADAY_CREDIT_SPEC["book_id"]
+            if not book_a_intraday_allowed:
+                self.latest_decision_by_book[book_ai_id] = {
+                    "bar_ts": bar_open_ts,
+                    "decision_ts_ms": decision_ts_ms,
+                    "passed": False,
+                    "state": "PAUSED_BY_PAPER_MODE",
+                    "reject_reason": f"PAUSED_BY_PAPER_MODE:{self.paper_execution_mode}",
+                    "gates": [],
+                }
+            elif (
+                not blocks
+                and slots["open_total"] < int(env["max_open_packages_total"])
+                and slots["trades_today_total"] < int(env["max_total_trades_per_day"])
+                and slots["open_by_book"].get(book_ai_id, 0) < 1
+                and slots["trades_today_by_book"].get(book_ai_id, 0) < 1
+                and decision_ts_ms >= self.sim.cooldown_until_ms.get(book_ai_id, 0)
+            ):
+                sig_ai = evaluate_book_a_intraday_credit_signal(
+                    cfg=self.cfg,
+                    session_date=dt,
+                    bar_ts=bar_open_ts,
+                    ist_hhmm=eval_hhmm,
+                    decision_ts_ms=decision_ts_ms,
+                    spot_close=ind["spot_close"],
+                    spot_vwap=ind["tpb_vwap"],
+                    orb30_h=ind["orb30_h"],
+                    orb30_l=ind["orb30_l"],
+                    expiries=expiries_all,
+                    contracts_lookup=self.opt_contracts,
+                    quote_lookup=quotes_lk,
+                )
+                ai_extra = {
+                    "est_credit_pts": sig_ai.get("est_credit_pts"),
+                    "cal_dte": sig_ai.get("cal_dte"),
+                    "vrp_ratio": (self.latest_vrp_telemetry or {}).get("vrp_ratio"),
+                    "aiml_p_breach_passive": (self.latest_aiml_telemetry or {}).get("p_breach"),
+                }
+                self.latest_decision_by_book[book_ai_id] = {
+                    "bar_ts": bar_open_ts,
+                    "decision_ts_ms": decision_ts_ms,
+                    "passed": bool(sig_ai["passed"]),
+                    "state": sig_ai.get("state"),
+                    "reject_reason": sig_ai.get("reject_reason"),
+                    "gates": sig_ai.get("gates", []),
+                    "vrp_ratio": ai_extra["vrp_ratio"],
+                    "aiml_p_breach_passive": ai_extra["aiml_p_breach_passive"],
+                }
+                if sig_ai["passed"] and sig_ai.get("wing_contract") and sig_ai.get("short_contract"):
+                    arb_ok_ai, arb_rsn_ai = check_candidate_arbitration_gate(
+                        self.latest_regime_arbitration,
+                        book_id=book_ai_id,
+                        is_bull=bool(sig_ai["is_bull"]),
+                        open_total=slots["open_total"],
+                        max_open_packages_total=int(env["max_open_packages_total"]),
+                        book_a_enabled=True,
+                        book_b_enabled=book_b_mode_allowed,
+                        candidate_dte=sig_ai.get("trading_dte"),
+                        enforce_intraday_dte4_on_book_a=True,
+                    )
+                    if not arb_ok_ai:
+                        self._record_opportunity_with_dedup(
+                            session_date=dt,
+                            bar_ts=bar_open_ts,
+                            eval_hhmm=eval_hhmm,
+                            decision_ts_ms=decision_ts_ms,
+                            book_id=book_ai_id,
+                            candidate_variant=sig_ai["candidate_variant"],
+                            direction=sig_ai.get("option_type"),
+                            decision_status="BLOCKED",
+                            primary_reject_reason=str(arb_rsn_ai),
+                            gates=sig_ai.get("gates", []),
+                            ind=ind,
+                            extra_inputs=ai_extra,
+                            contract=sig_ai.get("short_contract"),
+                            quote=sig_ai.get("short_quote"),
+                            sig_obj=sig_ai,
+                        )
+                    else:
+                        sid_ai = make_stable_id(
+                            "osv2_sig",
+                            self.run_mode,
+                            sig_ai["candidate_variant"],
+                            bar_open_ts,
+                            sig_ai["short_contract"]["instrument_key"],
+                        )
+                        l1_ai = self.sim.open_book_a_leg1_hedge(
+                            signal_id=sid_ai,
+                            candidate_variant=sig_ai["candidate_variant"],
+                            session_date=dt,
+                            bar_ts=bar_open_ts,
+                            decision_ts_ms=decision_ts_ms,
+                            wing_contract=sig_ai["wing_contract"],
+                            short_contract=sig_ai["short_contract"],
+                            wing_quote=sig_ai["wing_quote"],
+                            spot_price=ind["spot_close"],
+                            vix_val=vix_now_val,
+                            is_bull=bool(sig_ai["is_bull"]),
+                            book_id_override=book_ai_id,
+                        )
+                        l2_ai = None
+                        if l1_ai.get("ok"):
+                            l2_ai = self.sim.complete_or_unwind_pending_leg2(
+                                package_id=l1_ai["package_id"],
+                                short_quote=sig_ai["short_quote"],
+                                wing_quote=sig_ai["wing_quote"],
+                                decision_ts_ms=decision_ts_ms + 250,
+                                session_date=dt,
+                                bar_ts=bar_open_ts,
+                            )
+                            if isinstance(l2_ai, dict) and l2_ai.get("state") == "OPEN":
+                                if self.on_package_opened_cb:
+                                    self.on_package_opened_cb(
+                                        l1_ai["package_id"], [sig_ai["wing_contract"], sig_ai["short_contract"]]
+                                    )
+                                self._emit_lifecycle_event(
+                                    {
+                                        "event_type": "PACKAGE_OPENED",
+                                        "run_mode": self.run_mode,
+                                        "package_id": l1_ai["package_id"],
+                                        "signal_id": sid_ai,
+                                        "session_date": dt,
+                                        "bar_ts": bar_open_ts,
+                                        "decision_ts_ms": decision_ts_ms,
+                                        "book_id": book_ai_id,
+                                        "min_live_credit_pts": float(V2_BOOK_A_INTRADAY_CREDIT_SPEC["min_live_credit_pts"]),
+                                        "structure": "DEFINED_RISK_SPREAD",
+                                        "package_snapshot": dict(self.sim.open_packages.get(l1_ai["package_id"]) or {}),
+                                        "quote_snapshot": dict(sig_ai["short_quote"]),
+                                        "wing_quote_snapshot": dict(sig_ai["wing_quote"]),
+                                    }
+                                )
+                        self._record_opportunity_with_dedup(
+                            session_date=dt,
+                            bar_ts=bar_open_ts,
+                            eval_hhmm=eval_hhmm,
+                            decision_ts_ms=decision_ts_ms,
+                            book_id=book_ai_id,
+                            candidate_variant=sig_ai["candidate_variant"],
+                            direction=sig_ai.get("option_type"),
+                            decision_status="ACCEPTED" if (isinstance(l2_ai, dict) and l2_ai.get("state") == "OPEN") else "BLOCKED",
+                            primary_reject_reason=None if (isinstance(l2_ai, dict) and l2_ai.get("state") == "OPEN") else str((l2_ai or l1_ai).get("reason") or "LEG2_NOT_OPEN"),
+                            gates=sig_ai.get("gates", []),
+                            ind=ind,
+                            extra_inputs=ai_extra,
+                            contract=sig_ai.get("short_contract"),
+                            quote=sig_ai.get("short_quote"),
+                            sig_obj=sig_ai,
+                        )
+                else:
+                    self._record_opportunity_with_dedup(
+                        session_date=dt,
+                        bar_ts=bar_open_ts,
+                        eval_hhmm=eval_hhmm,
+                        decision_ts_ms=decision_ts_ms,
+                        book_id=book_ai_id,
+                        candidate_variant=sig_ai["candidate_variant"],
+                        direction=sig_ai.get("option_type"),
+                        decision_status="REJECTED",
+                        primary_reject_reason=sig_ai.get("reject_reason"),
+                        gates=sig_ai.get("gates", []),
+                        ind=ind,
+                        extra_inputs=ai_extra,
+                        contract=sig_ai.get("short_contract"),
+                        quote=sig_ai.get("short_quote"),
+                        sig_obj=sig_ai,
+                    )
 
         trace_entry = {
             "bar_open_ts": bar_open_ts,

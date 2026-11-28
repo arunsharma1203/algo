@@ -425,6 +425,7 @@ class MockV2BrokerClient:
         self._resting_poll_counters: Dict[str, Tuple[int, float]] = {}
         # Map of gtt_id (or "*") -> fill_price when triggered during cancel
         self.inject_gtt_triggers_during_cancel: Dict[str, float] = {}
+        self.injected_margin_required_inr: Optional[float] = None
 
     def _next_id(self, prefix: str) -> str:
         self._seq += 1
@@ -492,14 +493,27 @@ class MockV2BrokerClient:
 
     def calculate_margin(self, instruments: List[Dict[str, Any]]) -> Dict[str, Any]:
         with self._lock:
+            if self.injected_margin_required_inr is not None:
+                return {
+                    "status": "success",
+                    "data": {"required_margin": round(float(self.injected_margin_required_inr), 2)},
+                }
+            buys = [i for i in instruments if str(i.get("transaction_type", "BUY")).upper() == "BUY"]
+            sells = [i for i in instruments if str(i.get("transaction_type", "")).upper() == "SELL"]
+            if buys and sells:
+                # Hedged vertical spread SPAN margin (~Rs 48,500 per 65-unit NIFTY lot)
+                sell_qty = sum(int(i.get("quantity", 0)) for i in sells)
+                lots = max(1.0, float(sell_qty) / 65.0)
+                return {"status": "success", "data": {"required_margin": round(48500.0 * lots, 2)}}
+            if sells:
+                sell_qty = sum(int(i.get("quantity", 0)) for i in sells)
+                lots = max(1.0, float(sell_qty) / 65.0)
+                return {"status": "success", "data": {"required_margin": round(135000.0 * lots, 2)}}
             total = 0.0
-            for item in instruments:
+            for item in buys:
                 q = int(item.get("quantity", 0))
                 p = float(item.get("price", 150.0) or 150.0)
-                if str(item.get("transaction_type", "BUY")).upper() == "BUY":
-                    total += q * p
-                else:
-                    total += q * 500.0
+                total += q * p
             return {"status": "success", "data": {"required_margin": round(total, 2)}}
 
     def get_positions(self) -> List[Dict[str, Any]]:

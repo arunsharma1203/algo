@@ -759,6 +759,15 @@ class V2PaperSimulator:
     # BOOK A: BUY-FIRST LEG-1 HEDGE -> LEG-2 SHORT CREDIT SPREAD OR UNWIND
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _resolve_book_a_cfg(self, book_id: Optional[str]) -> Dict[str, Any]:
+        """Resolve config parameters for O3 legacy Book A or v2.4 Intraday Book A Credit Spread."""
+        if str(book_id or "") == "V2_BOOK_A_INTRADAY_CREDIT":
+            from app.analytics.option_sniffer_v2.v2_book_a_engine import (
+                V2_BOOK_A_INTRADAY_CREDIT_SPEC,
+            )
+            return dict(V2_BOOK_A_INTRADAY_CREDIT_SPEC)
+        return dict(self.config["books"]["V2_BOOK_A_PROPOSED_O3"])
+
     def open_book_a_leg1_hedge(
         self,
         signal_id: str,
@@ -773,15 +782,17 @@ class V2PaperSimulator:
         vix_val: Optional[float],
         is_bull: bool,
         allow_partial_lot: bool = True,
+        book_id_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._lock:
-            if self.is_booking_halted(self.config["books"]["V2_BOOK_A_PROPOSED_O3"]["book_id"]):
+            cfg_a = self._resolve_book_a_cfg(book_id_override)
+            target_book_id = str(book_id_override or cfg_a["book_id"])
+            if self.is_booking_halted(target_book_id):
                 return {"ok": False, "reason": "BLOCKED_BY_BOOKING_FAULT", "fault": self.booking_fault}
             if signal_id in self.seen_signal_ids:
                 return {"ok": False, "reason": "DUPLICATE_SIGNAL_SUPPRESSED"}
 
             hyg = self.config["quote_hygiene"]
-            cfg_a = self.config["books"]["V2_BOOK_A_PROPOSED_O3"]
             env = self.config["account_envelope"]
             lot_sz = int(wing_contract["lot_size"])
             if int(short_contract["lot_size"]) != lot_sz:
@@ -888,7 +899,7 @@ class V2PaperSimulator:
                 "signal_id": signal_id,
                 "run_mode": self.run_mode,
                 "config_hash": self.config_hash,
-                "book_id": cfg_a["book_id"],
+                "book_id": target_book_id,
                 "candidate_variant": candidate_variant,
                 "session_date": session_date,
                 "expiry": wing_contract["expiry"],
@@ -989,7 +1000,7 @@ class V2PaperSimulator:
                 return {"ok": False, "reason": "NOT_PENDING_LEG2"}
 
             hyg = self.config["quote_hygiene"]
-            cfg_a = self.config["books"]["V2_BOOK_A_PROPOSED_O3"]
+            cfg_a = self._resolve_book_a_cfg(pkg.get("book_id"))
             ls = dict(pkg["legs_state"])
             wl = ls["wing_leg"]
             st = ls["short_target"]
@@ -1046,10 +1057,13 @@ class V2PaperSimulator:
                     intent_id = make_stable_id("osv2_int", package_id, "SHORT_LEG", "SELL")
                     fill_id = make_stable_id("osv2_fil", intent_id, sw_s["ts_ms"])
                     seq = int(pkg["transition_seq"]) + 1
+                    per_pt_cap = float(
+                        cfg_a.get("max_planned_stop_loss_inr") or cfg_a["max_structural_loss_inr"]
+                    ) / float(confirmed_qty)
                     hard_stop_debit = round(
                         min(
                             net_credit * float(cfg_a["close_only_stop_debit_mult"]),
-                            net_credit + float(cfg_a["max_structural_loss_inr"]) / float(confirmed_qty),
+                            net_credit + per_pt_cap,
                         ),
                         2,
                     )

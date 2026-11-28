@@ -227,6 +227,14 @@ def evaluate_book_b_entry_signal(
     allow_single_otm_fallback: Optional[bool] = None,
     min_raw_basis_abs_v1: float = 5.0,
     min_er_override: Optional[float] = None,
+    min_adx_override: Optional[float] = None,
+    min_obi_override: Optional[float] = None,
+    vrp_ratio: Optional[float] = None,
+    atm_iv_pct: Optional[float] = None,
+    har_rv_pct: Optional[float] = None,
+    enforce_vrp_gate: bool = False,
+    max_vrp_ratio: float = 1.15,
+    vrp_status: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Evaluates V2 Book B (and single-factor ablation variants cleanly when flags are explicitly passed).
@@ -313,12 +321,14 @@ def evaluate_book_b_entry_signal(
             basis_ok = (raw_b >= min_raw_basis_abs_v1) if ot == "CE" else (raw_b <= -min_raw_basis_abs_v1)
             basis_reason = f"rawBasis={raw_b:+.1f}pt"
 
+    adx_min = float(min_adx_override if min_adx_override is not None else cfg_b["min_adx14"])
     er_min = float(min_er_override if min_er_override is not None else cfg_b["min_er20"])
+    obi_min = float(min_obi_override if min_obi_override is not None else cfg_b["min_l5_obi"])
     if adx14 is None or er20 is None:
         adx_ok = False
         adx_cur = "WARMUP"
     else:
-        adx_ok = bool(float(adx14) >= float(cfg_b["min_adx14"]) and float(er20) >= er_min)
+        adx_ok = bool(float(adx14) >= adx_min and float(er20) >= er_min)
         adx_cur = f"{float(adx14):.1f}/{float(er20):.2f}"
 
     def _eval_strike(k_val: float) -> Dict[str, Any]:
@@ -342,7 +352,7 @@ def evaluate_book_b_entry_signal(
             require_observed_l5=bool(hyg["require_observed_l5_book_for_entry"]),
         )
         obi = float(q.get("book_obi_l5") if q.get("book_obi_l5") is not None else -999.0)
-        l5_ok = bool(sw.get("ok") and obi >= float(cfg_b["min_l5_obi"]))
+        l5_ok = bool(sw.get("ok") and obi >= obi_min)
         outlay = round(float(sw["fill_price"]) * lot_sz, 2) if sw.get("ok") else 0.0
         cash_ok = bool(sw.get("ok") and 0.0 < outlay <= float(cfg_b["max_entry_outlay_inr"]))
         rsn = "OK" if (l5_ok and cash_ok) else (sw.get("reason") if not sw.get("ok") else (f"LOW_OBI:{obi:+.2f}" if not l5_ok else f"CASHCAP:{outlay:.0f}"))
@@ -384,10 +394,14 @@ def evaluate_book_b_entry_signal(
         {"name": "Window", "passed": win_ok, "current": f"{ist_hhmm:04d}", "target": f"{win_start:04d}..{win_end:04d}"},
         {"name": "ORB30+VWAP", "passed": dir_ok, "current": f"{spot_close:.1f}", "target": f">{orb30_h:.0f} or <{orb30_l:.0f}"},
         {"name": "BasisGate", "passed": basis_ok, "current": basis_reason, "target": ">=+3 / <=-3" if use_basis_delta else "abs>=5"},
-        {"name": "ADX/ER", "passed": adx_ok, "current": adx_cur, "target": f">={cfg_b['min_adx14']:.0f}/{er_min:.2f}"},
-        {"name": "ObsL5Depth", "passed": bool(chosen_eval.get("l5_ok")), "current": chosen_eval.get("reason", "NA"), "target": f">=1lot & OBI>={cfg_b['min_l5_obi']:.2f}"},
+        {"name": "ADX/ER", "passed": adx_ok, "current": adx_cur, "target": f">={adx_min:.0f}/{er_min:.2f}"},
+        {"name": "ObsL5Depth", "passed": bool(chosen_eval.get("l5_ok")), "current": chosen_eval.get("reason", "NA"), "target": f">=1lot & OBI>={obi_min:.2f}"},
         {"name": "CashCap", "passed": bool(chosen_eval.get("cash_ok")), "current": f"Rs{chosen_eval.get('outlay', 0):,.0f}", "target": f"<=Rs{cfg_b['max_entry_outlay_inr']:,.0f}"},
     ]
+    if enforce_vrp_gate:
+        vrp_ok = vrp_ratio is not None and float(vrp_ratio) <= float(max_vrp_ratio)
+        vrp_cur = f"{float(vrp_ratio):.2f}" if vrp_ratio is not None else str(vrp_status or "NA")
+        gates.append({"name": "VRPRatio", "passed": vrp_ok, "current": vrp_cur, "target": f"<={float(max_vrp_ratio):.2f}"})
 
     all_passed = all(g["passed"] for g in gates)
     reject_reason = None if all_passed else next((f"{g['name']}:{g['current']}" for g in gates if not g["passed"]), "BLOCKED")
@@ -409,6 +423,14 @@ def evaluate_book_b_entry_signal(
             "open_basis_pts": (open_basis_ref or {}).get("basis_pts"),
             "fut_instrument_key": sync_fut.get("fut_instrument_key"),
             "weekly_synthetic_basis_pts": syn_weekly_basis,
+        },
+        "vrp_meta": {
+            "vrp_ratio": vrp_ratio,
+            "atm_iv_pct": atm_iv_pct,
+            "har_rv_pct": har_rv_pct,
+            "enforce_vrp_gate": enforce_vrp_gate,
+            "max_vrp_ratio": max_vrp_ratio,
+            "vrp_status": vrp_status,
         },
         "gates": gates,
     }
