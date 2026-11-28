@@ -14,15 +14,15 @@ export default function V2PositionsTab({ positions, liveSubPanel = null }) {
     <div className="space-y-5">
       {liveSubPanel}
 
-      {/* Open Paper Positions */}
+      {/* Open Simulated Positions */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-bold text-white">Open Forward Paper Packages</h3>
+          <h3 className="text-sm font-bold text-white">Open Simulated Packages</h3>
           <span className="text-xs text-slate-400">{openPkgs.length} active</span>
         </div>
 
         {openPkgs.length === 0 ? (
-          <div className="text-xs text-slate-400 py-4 text-center">No open paper positions right now.</div>
+          <div className="text-xs text-slate-400 py-4 text-center">No open simulated positions right now.</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-xs text-left">
@@ -55,15 +55,15 @@ export default function V2PositionsTab({ positions, liveSubPanel = null }) {
         )}
       </div>
 
-      {/* Closed Paper Ledger */}
+      {/* Closed Simulated Ledger */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-bold text-white">Closed Paper Trade Ledger (Reconciled Canonical Accounting)</h3>
+          <h3 className="text-sm font-bold text-white">Closed Trade Ledger (Simulation Baseline • Reconciled Canonical Accounting)</h3>
           <span className="text-xs text-slate-400">{closedPkgs.length} trades</span>
         </div>
 
         {closedPkgs.length === 0 ? (
-          <div className="text-xs text-slate-400 py-4 text-center">No closed paper trades recorded yet.</div>
+          <div className="text-xs text-slate-400 py-4 text-center">No closed trades recorded yet.</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-xs text-left">

@@ -170,10 +170,22 @@ def post_v2_reconcile_booking_fault() -> Dict[str, Any]:
 
 @router.post("/control/paper-mode")
 def post_v2_paper_mode(payload: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
-    """Explicit operator control to route V2 Paper evaluation (`AUTO`, `BOOK_A_ONLY`, `BOOK_B_ONLY`)."""
-    raw = getattr(payload, "default", payload)
-    mode = str((raw or {}).get("paper_mode") or "").upper().strip()
+    """Explicit operator control to route V2 Paper evaluation (`AUTO`, `BOOK_A_ONLY`, `BOOK_B_ONLY`) & `lots_per_book`."""
+    raw = getattr(payload, "default", payload) or {}
+    svc = get_option_sniffer_v2_service()
+    mode = (
+        str(raw.get("paper_mode") or "").upper().strip()
+        if ("paper_mode" in raw and raw.get("paper_mode") is not None)
+        else svc.get_paper_execution_mode()
+    )
+    lots_raw = raw.get("lots_per_book")
+    lots_val = None
+    if lots_raw is not None:
+        try:
+            lots_val = int(lots_raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid lots_per_book: {lots_raw!r}") from exc
     try:
-        return get_option_sniffer_v2_service().set_paper_execution_mode(mode)
+        return svc.set_paper_execution_mode(mode, lots_per_book=lots_val)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -19,11 +19,13 @@ import {
   postV2ReconcileBookingFault,
 } from './v2LiveApiClient';
 
-const PAPER_MODES = [
-  { id: 'AUTO', label: 'Auto' },
+const STRATEGY_MODES = [
+  { id: 'AUTO', label: 'Auto A+B' },
   { id: 'BOOK_A_ONLY', label: 'Book A' },
   { id: 'BOOK_B_ONLY', label: 'Book B' },
 ];
+
+const LOT_OPTIONS = [1, 2, 3, 4, 5];
 
 const NAV_TABS = [
   { id: 'overview', label: 'Overview', icon: Activity },
@@ -36,7 +38,9 @@ export default function V2WorkspaceHeader({
   activeTab,
   onSelectTab,
   overview,
+  endpoints,
   liveStatus,
+  fundsPreview,
   isLoading,
   onRefreshAll,
   onOpenArmModal,
@@ -46,7 +50,16 @@ export default function V2WorkspaceHeader({
 
   const armed = Boolean(liveStatus?.armed);
   const liveScope = liveStatus?.live_book_scope || 'PAPER_ONLY';
+  const scopeToStrategy = (sc) =>
+    sc === 'BOOK_A_ONLY' ? 'BOOK_A_ONLY' : sc === 'BOOK_B_ONLY' ? 'BOOK_B_ONLY' : 'AUTO';
   const paperMode = String(overview?.paper_execution_mode || 'AUTO').toUpperCase();
+  const activeStrategyMode = armed ? scopeToStrategy(liveScope) : paperMode;
+  const activeLots = armed
+    ? Number(liveStatus?.max_lots_per_book || liveStatus?.arm_state?.max_lots_per_book || 1)
+    : Number(overview?.lots_per_book || 1);
+  const availMargin =
+    fundsPreview?.available_margin_inr ?? liveStatus?.available_margin_inr ?? null;
+
   const collectorState = overview?.collection_status?.collector_state || 'STANDBY_NOT_STARTED';
   const isCollectorRunning =
     Boolean(overview?.collection_status?.listener_attached) ||
@@ -56,6 +69,10 @@ export default function V2WorkspaceHeader({
     collectorState === 'DEGRADED_BOOKING_FAULT';
   const hasOpenLivePositions = Number(liveStatus?.open_package_count || 0) > 0;
   const isBookingHalted = Boolean(overview?.collection_status?.booking_halted);
+
+  const schemaMismatch = Boolean(overview && !overview.v2_release_version);
+  const overviewUnavailable = Boolean(endpoints?.overview?.unavailable);
+  const overviewStale = Boolean(endpoints?.overview?.stale);
 
   const runAction = async (key, fn) => {
     setBusyAction(key);
@@ -68,6 +85,22 @@ export default function V2WorkspaceHeader({
     } finally {
       setBusyAction('');
     }
+  };
+
+  const handleStrategySelect = (modeId) => {
+    if (armed) {
+      onOpenArmModal();
+      return;
+    }
+    runAction(`mode_${modeId}`, () => postV2PaperMode(modeId, activeLots));
+  };
+
+  const handleLotSelect = (lotCount) => {
+    if (armed) {
+      onOpenArmModal();
+      return;
+    }
+    runAction(`lots_${lotCount}`, () => postV2PaperMode(activeStrategyMode, lotCount));
   };
 
   return (
@@ -101,29 +134,66 @@ export default function V2WorkspaceHeader({
             }`}
           >
             {armed ? <ShieldAlert className="h-3.5 w-3.5" /> : <Shield className="h-3.5 w-3.5" />}
-            {armed ? `LIVE ARMED • ${liveScope}` : 'DISARMED • PAPER BASELINE ACTIVE'}
+            {armed
+              ? `LIVE ARMED • ${liveScope} (${activeLots}L)`
+              : `SIMULATION • ${activeStrategyMode} (${activeLots}L)`}
           </span>
+
+          {availMargin !== null && availMargin !== undefined && (
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-slate-950 text-sky-300 border border-slate-700">
+              Upstox Margin: &#8377;{Number(availMargin).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Paper Mode Selector */}
+          {/* Unified Strategy Routing Selector */}
           <div className="inline-flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5">
-            <span className="px-2 text-[11px] font-medium text-slate-400 hidden sm:inline">Paper:</span>
-            {PAPER_MODES.map((m) => {
-              const active = paperMode === m.id;
+            <span className="px-2 text-[11px] font-medium text-slate-400 hidden sm:inline">Strategy:</span>
+            {STRATEGY_MODES.map((m) => {
+              const active = activeStrategyMode === m.id;
               return (
                 <button
                   key={m.id}
                   type="button"
                   disabled={Boolean(busyAction)}
-                  onClick={() => runAction(`mode_${m.id}`, () => postV2PaperMode(m.id))}
+                  title={armed ? 'Click to confirm live book change via PIN modal' : `Route evaluation to ${m.label}`}
+                  onClick={() => handleStrategySelect(m.id)}
                   className={`px-2.5 py-1 text-xs font-semibold rounded-md transition ${
                     active
-                      ? 'bg-sky-600 text-white shadow-sm'
+                      ? armed
+                        ? 'bg-amber-600 text-white shadow-sm'
+                        : 'bg-sky-600 text-white shadow-sm'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
                   }`}
                 >
                   {m.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Inline Unified Lot Multiplier */}
+          <div className="inline-flex items-center bg-slate-950 border border-slate-800 rounded-lg p-0.5">
+            <span className="px-2 text-[11px] font-medium text-slate-400 hidden md:inline">Lots:</span>
+            {LOT_OPTIONS.map((l) => {
+              const active = activeLots === l;
+              return (
+                <button
+                  key={l}
+                  type="button"
+                  disabled={Boolean(busyAction)}
+                  title={armed ? 'Click to adjust live lot size via PIN modal' : `Set V2 lot multiplier to ${l} lot (${l * 65} qty)`}
+                  onClick={() => handleLotSelect(l)}
+                  className={`px-2 py-1 text-xs font-semibold rounded-md transition ${
+                    active
+                      ? armed
+                        ? 'bg-amber-600 text-white'
+                        : 'bg-sky-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                  }`}
+                >
+                  {l}L
                 </button>
               );
             })}
@@ -202,6 +272,18 @@ export default function V2WorkspaceHeader({
           </button>
         </div>
       </div>
+
+      {(schemaMismatch || overviewUnavailable || overviewStale) && (
+        <div className="px-4 py-2 bg-amber-950/60 border-b border-amber-700/70 text-xs text-amber-200 flex items-center justify-between gap-2">
+          <span>
+            {schemaMismatch
+              ? 'Backend service (:8000) is running a prior API build without v2.4.1 fields — reload :8000 to activate Book A Intraday, VRP telemetry & Strategy routing.'
+              : overviewUnavailable
+              ? `V2 API unreachable (${endpoints?.overview?.error || 'HTTP error'}). Start or check backend :8000.`
+              : `Showing cached telemetry (as of ${endpoints?.overview?.asOfIst || 'prior poll'}) — latest poll failed: ${endpoints?.overview?.error || 'error'}.`}
+          </span>
+        </div>
+      )}
 
       {actionError && (
         <div className="px-4 py-2 bg-rose-950/70 border-b border-rose-800 text-xs text-rose-200 flex items-center justify-between">

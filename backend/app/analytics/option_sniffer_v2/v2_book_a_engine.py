@@ -435,6 +435,7 @@ def evaluate_book_a_intraday_credit_signal(
     observed_sessions: Optional[Set[str]] = None,
     extra_holidays: Optional[List[str]] = None,
     spec_override: Optional[Dict[str, Any]] = None,
+    lot_count_override: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate V2 Book A Intraday Defined-Risk Credit Spread (Friday cal_dte in {3,4},
@@ -444,6 +445,8 @@ def evaluate_book_a_intraday_credit_signal(
     spec = dict(V2_BOOK_A_INTRADAY_CREDIT_SPEC)
     if spec_override:
         spec.update(spec_override)
+    eff_lots = max(1, int(lot_count_override if lot_count_override is not None else spec["lot_count"]))
+    eff_max_struct_inr = round(float(spec["max_structural_loss_inr"]) * eff_lots, 2)
     hyg = cfg["quote_hygiene"]
 
     win_start = int(spec["entry_window_start_hhmm"])
@@ -522,7 +525,7 @@ def evaluate_book_a_intraday_credit_signal(
             l5_reason = "LOT_SIZE_MISMATCH"
         else:
             lot_sz = int(wing_meta["lot_size"])
-            target_qty = int(spec["lot_count"]) * lot_sz
+            target_qty = eff_lots * lot_sz
             skew_ok, _, skew_rsn = check_cross_leg_skew(
                 short_q, wing_q, max_skew_ms=int(hyg["max_cross_leg_skew_ms"]), require_depth_ts=True
             )
@@ -562,8 +565,8 @@ def evaluate_book_a_intraday_credit_signal(
                     l5_reason = "OK"
                     est_credit = round(float(sw_s["fill_price"]) - float(sw_w["fill_price"]), 2)
                     credit_ok = est_credit >= float(spec["min_net_credit_pts"])
-                    est_struct_loss = round(max(0.0, (width - est_credit) * target_qty + 120.0), 2)
-                    struct_ok = est_struct_loss <= float(spec["max_structural_loss_inr"])
+                    est_struct_loss = round(max(0.0, (width - est_credit) * target_qty + 120.0 * eff_lots), 2)
+                    struct_ok = est_struct_loss <= eff_max_struct_inr
 
     gates = [
         {
@@ -588,7 +591,7 @@ def evaluate_book_a_intraday_credit_signal(
             "name": "SpreadL5",
             "passed": l5_ok,
             "current": l5_reason,
-            "target": "sync L5 BUY wing + SELL short",
+            "target": f"sync {eff_lots}L BUY wing + SELL short",
         },
         {
             "name": "MinCredit",
@@ -600,7 +603,7 @@ def evaluate_book_a_intraday_credit_signal(
             "name": "StructRisk",
             "passed": struct_ok,
             "current": f"Rs{est_struct_loss:,.0f}",
-            "target": f"<=Rs{float(spec['max_structural_loss_inr']):,.0f}",
+            "target": f"<=Rs{eff_max_struct_inr:,.0f}",
         },
     ]
     all_passed = all(g["passed"] for g in gates)

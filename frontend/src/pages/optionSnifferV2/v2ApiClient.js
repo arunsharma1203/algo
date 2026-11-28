@@ -137,13 +137,14 @@ export async function fetchAllV2EndpointsReadOnly({
   collateralYieldPa = 6.0,
   haircutPct = 10.0,
   previousState = {},
+  keys = null,
 } = {}) {
   const overviewQuery = {
     include_collateral: includeCollateral ? 'true' : 'false',
     collateral_yield_pa: collateralYieldPa,
     haircut_pct: haircutPct,
   };
-  const targets = [
+  const allTargets = [
     ['overview', buildV2EndpointUrl(V2_ENDPOINTS.overview, overviewQuery)],
     ['positions', buildV2EndpointUrl(V2_ENDPOINTS.positions)],
     ['dailyComparison', buildV2EndpointUrl(V2_ENDPOINTS.dailyComparison)],
@@ -152,6 +153,8 @@ export async function fetchAllV2EndpointsReadOnly({
     ['diagnostics', buildV2EndpointUrl(V2_ENDPOINTS.diagnostics)],
     ['opportunities', buildV2EndpointUrl(V2_ENDPOINTS.opportunities)],
   ];
+  const allowedSet = Array.isArray(keys) ? new Set(keys) : null;
+  const targets = allowedSet ? allTargets.filter(([k]) => allowedSet.has(k)) : allTargets;
 
   const settled = await Promise.allSettled(
     targets.map(([key, url]) =>

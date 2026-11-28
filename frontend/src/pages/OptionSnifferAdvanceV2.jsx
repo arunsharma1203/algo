@@ -3,6 +3,7 @@ import { fetchAllV2EndpointsReadOnly } from './optionSnifferV2/v2ApiClient';
 import {
   fetchV2LiveStatus,
   fetchV2LivePositions,
+  fetchV2LiveFundsPreview,
 } from '../components/optionSnifferV2Live/v2LiveApiClient';
 import V2WorkspaceHeader from '../components/optionSnifferV2Live/V2WorkspaceHeader';
 import V2LiveArmModal from '../components/optionSnifferV2Live/V2LiveArmModal';
@@ -17,22 +18,30 @@ export default function OptionSnifferAdvanceV2() {
   const [endpoints, setEndpoints] = useState(null);
   const [liveStatus, setLiveStatus] = useState(null);
   const [livePositions, setLivePositions] = useState(null);
+  const [fundsPreview, setFundsPreview] = useState(null);
   const [loading, setLoading] = useState(true);
   const [armModalOpen, setArmModalOpen] = useState(false);
   const refreshBusyRef = useRef(false);
+  const endpointsRef = useRef({});
 
-  const refreshAll = useCallback(async () => {
+  const refreshAll = useCallback(async ({ forceFunds = false } = {}) => {
     if (refreshBusyRef.current) return;
     refreshBusyRef.current = true;
     try {
-      const [paperRes, lStatus, lPos] = await Promise.all([
-        fetchAllV2EndpointsReadOnly(),
-        fetchV2LiveStatus(true).catch(() => null),
+      const [paperRes, lStatus, lPos, lFunds] = await Promise.all([
+        fetchAllV2EndpointsReadOnly({
+          previousState: endpointsRef.current || {},
+          keys: ['overview', 'positions', 'diagnostics', 'opportunities'],
+        }),
+        fetchV2LiveStatus(false).catch(() => null),
         fetchV2LivePositions().catch(() => null),
+        fetchV2LiveFundsPreview(forceFunds).catch(() => null),
       ]);
+      endpointsRef.current = paperRes;
       setEndpoints(paperRes);
       if (lStatus) setLiveStatus(lStatus);
       if (lPos) setLivePositions(lPos);
+      if (lFunds) setFundsPreview(lFunds);
     } finally {
       refreshBusyRef.current = false;
       setLoading(false);
@@ -41,7 +50,7 @@ export default function OptionSnifferAdvanceV2() {
 
   useEffect(() => {
     refreshAll();
-    const timer = setInterval(refreshAll, 10000);
+    const timer = setInterval(() => refreshAll(), 10000);
     return () => clearInterval(timer);
   }, [refreshAll]);
 
@@ -57,15 +66,21 @@ export default function OptionSnifferAdvanceV2() {
           activeTab={activeTab}
           onSelectTab={setActiveTab}
           overview={overview}
+          endpoints={endpoints}
           liveStatus={liveStatus}
+          fundsPreview={fundsPreview}
           isLoading={loading}
-          onRefreshAll={refreshAll}
+          onRefreshAll={() => refreshAll({ forceFunds: true })}
           onOpenArmModal={() => setArmModalOpen(true)}
         />
 
         <main>
           {activeTab === 'overview' && (
-            <V2OverviewTab overview={overview} liveStatus={liveStatus} />
+            <V2OverviewTab
+              overview={overview}
+              liveStatus={liveStatus}
+              fundsPreview={fundsPreview}
+            />
           )}
           {activeTab === 'signals' && (
             <V2SignalsTab overview={overview} opportunities={opportunities} />
@@ -90,9 +105,11 @@ export default function OptionSnifferAdvanceV2() {
         <V2LiveArmModal
           isOpen={armModalOpen}
           onClose={() => setArmModalOpen(false)}
+          overview={overview}
           liveStatus={liveStatus}
-          onCompleted={refreshAll}
-          onRefreshStatus={refreshAll}
+          fundsPreview={fundsPreview}
+          onCompleted={() => refreshAll({ forceFunds: true })}
+          onRefreshStatus={() => refreshAll({ forceFunds: true })}
         />
       </div>
     </div>

@@ -51,6 +51,7 @@ from app.analytics.option_sniffer_v2.v2_book_b_engine import (
 from app.analytics.option_sniffer_v2.v2_config import (
     IST_TZ,
     bar_open_label_from_ms,
+    is_nse_trading_session,
     ist_hhmm_from_ms,
     parse_ist_timestamp_ms,
     trading_sessions_between,
@@ -186,6 +187,7 @@ class V2UnifiedEventEngine:
         enable_book_a_opt_in: bool = False,
         enable_v2_4_dual_book: bool = False,
         paper_execution_mode: str = "AUTO",
+        lots_per_book: int = 1,
         market_db_path: Optional[str] = None,
         persist_bars_and_checkpoints: bool = True,
         on_package_opened_cb: Optional[Callable[[str, List[Dict[str, Any]]], None]] = None,
@@ -213,6 +215,11 @@ class V2UnifiedEventEngine:
         self.enable_book_a_opt_in = bool(enable_book_a_opt_in)
         self.enable_v2_4_dual_book = bool(enable_v2_4_dual_book)
         self.paper_execution_mode = _normalize_paper_mode(paper_execution_mode)
+        self.lots_per_book = max(1, min(5, int(lots_per_book)))
+        if hasattr(self.sim, "set_runtime_lot_multiplier"):
+            self.sim.set_runtime_lot_multiplier(
+                self.lots_per_book, enable_v2_4_dual_book=self.enable_v2_4_dual_book
+            )
         self.market_db_path = market_db_path
         self.persist_bars_and_checkpoints = bool(persist_bars_and_checkpoints)
         self.on_package_opened_cb = on_package_opened_cb
@@ -267,6 +274,14 @@ class V2UnifiedEventEngine:
     def set_paper_execution_mode(self, mode: str) -> str:
         self.paper_execution_mode = _normalize_paper_mode(mode)
         return self.paper_execution_mode
+
+    def set_lots_per_book(self, lots: int) -> int:
+        self.lots_per_book = max(1, min(5, int(lots)))
+        if hasattr(self.sim, "set_runtime_lot_multiplier"):
+            self.sim.set_runtime_lot_multiplier(
+                self.lots_per_book, enable_v2_4_dual_book=self.enable_v2_4_dual_book
+            )
+        return self.lots_per_book
 
     def _ensure_prior_history(self, session_date: str) -> Dict[str, Any]:
         if self._prior_history_date == session_date and self.prior_nifty_history:
@@ -342,6 +357,139 @@ class V2UnifiedEventEngine:
             if s["session_date"] == dt:
                 self.sod_equity_inr = float(s["sod_equity_inr"])
                 break
+
+        # Restore read-only VRP, AIML, regime arbitration & last book decisions across restarts (`B-10`)
+        if self.enable_v2_4_dual_book and self.completed_bars:
+            ind = self.last_indicators
+            last_hm_str = str(self.completed_bars[-1].get("bar_open_ts") or "")[11:16]
+            last_hhmm = (
+                int(last_hm_str[:2]) * 100 + int(last_hm_str[3:5])
+                if len(last_hm_str) == 5 and last_hm_str[2] == ":"
+                else 1529
+            )
+            prior_hist = self._ensure_prior_history(dt)
+            v_last_rec = next((b.get("vix_c") for b in reversed(self.completed_bars) if b.get("vix_c")), None)
+            atm_vrp = round(float(ind["spot_close"]) / 50.0) * 50.0 if ind.get("spot_close", 0.0) > 0.0 else None
+            self.latest_vrp_telemetry = compute_vrp_metrics(
+                atm_ce_mid=None,
+                atm_pe_mid=None,
+                atm_strike=atm_vrp,
+                spot_close=ind["spot_close"],
+                ist_hhmm=last_hhmm,
+                trading_dte=3,
+                r2_sum_today=ind.get("r2_sum_today"),
+                elapsed_bars_today=ind["bars_count"],
+                prior_history=prior_hist,
+            )
+            dir_bull = bool(ind.get("tpb_vwap") and ind["spot_close"] >= ind["tpb_vwap"])
+            self.latest_aiml_telemetry = compute_passive_aiml_breach_telemetry(
+                spot_close=ind["spot_close"],
+                vwap=ind["tpb_vwap"],
+                session_high=ind.get("session_high"),
+                session_low=ind.get("session_low"),
+                adx14=ind.get("adx14"),
+                er20=ind.get("er20"),
+                atrr_5_20=ind.get("atrr_5_20"),
+                live_vix=float(v_last_rec) if v_last_rec else None,
+                direction_bullish=dir_bull,
+                barrier_pts=50.0,
+                ist_hhmm=last_hhmm,
+                r2_sum_today=ind.get("r2_sum_today"),
+                elapsed_bars_today=ind["bars_count"],
+                prior_history=prior_hist,
+            )
+            env = self.cfg["account_envelope"]
+            self.latest_regime_arbitration = evaluate_v2_regime_arbitration(
+                session_date=dt,
+                ist_hhmm=last_hhmm,
+                expiries=[],
+                spot_close=ind["spot_close"],
+                spot_vwap=ind["tpb_vwap"],
+                orb30_h=ind["orb30_h"],
+                orb30_l=ind["orb30_l"],
+                orb30_ready=bool(ind["orb30_ready"]),
+                adx14=ind["adx14"],
+                er20=ind["er20"],
+                vix_now=float(v_last_rec) if v_last_rec else None,
+                prior_vix_closes=self.prior_daily_vix,
+                open_packages=list(self.sim.open_packages.values()),
+                max_open_packages_total=int(env["max_open_packages_total"]),
+                book_a_enabled=(self.paper_execution_mode in ("AUTO", "BOOK_A_ONLY")),
+                book_b_enabled=(self.paper_execution_mode in ("AUTO", "BOOK_B_ONLY")),
+            )
+
+        # Restore latest persisted signal/opportunity state for each book without mutating DB
+        rec_expiries: List[str] = []
+        try:
+            for sig in self.store.load_signals(self.run_mode, self.cfg_hash, limit=25):
+                if str(sig.get("session_date") or "") != dt:
+                    continue
+                prov = sig.get("provenance") if isinstance(sig.get("provenance"), dict) else {}
+                exp_val = str(sig.get("expiry") or prov.get("expiry") or "").strip()
+                if exp_val:
+                    rec_expiries.append(exp_val)
+                bid = str(sig.get("book_id") or "")
+                if bid and bid not in self.latest_decision_by_book:
+                    self.latest_decision_by_book[bid] = {
+                        "bar_ts": sig.get("bar_ts"),
+                        "decision_ts_ms": sig.get("decision_ts_ms"),
+                        "passed": str(sig.get("status") or "").upper() == "TRIGGERED",
+                        "state": sig.get("status") or "TRIGGERED",
+                        "reject_reason": sig.get("reject_reason"),
+                        "gates": sig.get("gates") if isinstance(sig.get("gates"), list) else [],
+                    }
+            for opp in self.store.load_opportunities(self.run_mode, self.cfg_hash, session_date=dt, limit=25):
+                bid = str(opp.get("book_id") or "")
+                if not bid:
+                    continue
+                cur = self.latest_decision_by_book.get(bid)
+                if cur is None or int(opp.get("decision_ts_ms") or 0) > int(cur.get("decision_ts_ms") or 0):
+                    self.latest_decision_by_book[bid] = {
+                        "bar_ts": opp.get("bar_ts"),
+                        "decision_ts_ms": opp.get("decision_ts_ms"),
+                        "passed": opp.get("decision_status") == "ACCEPTED",
+                        "state": opp.get("decision_status"),
+                        "reject_reason": opp.get("primary_reject_reason"),
+                        "gates": (cur.get("gates") if isinstance(cur, dict) else []) or [],
+                    }
+        except Exception:
+            pass
+
+        if self.enable_v2_4_dual_book and self.completed_bars:
+            book_ai_id = V2_BOOK_A_INTRADAY_CREDIT_SPEC["book_id"]
+            if book_ai_id not in self.latest_decision_by_book:
+                last_b = self.completed_bars[-1]
+                ind = self.last_indicators
+                last_hm_str = str(last_b.get("bar_open_ts") or "")[11:16]
+                last_hhmm = (
+                    int(last_hm_str[:2]) * 100 + int(last_hm_str[3:5])
+                    if len(last_hm_str) == 5 and last_hm_str[2] == ":"
+                    else 1529
+                )
+                dec_ms_rec = int(last_b.get("decision_ts_ms") or self.last_usable_event_ts_ms or 0)
+                sig_ai_rec = evaluate_book_a_intraday_credit_signal(
+                    cfg=self.cfg,
+                    session_date=dt,
+                    bar_ts=str(last_b.get("bar_open_ts") or ""),
+                    ist_hhmm=last_hhmm,
+                    decision_ts_ms=dec_ms_rec,
+                    spot_close=ind["spot_close"],
+                    spot_vwap=ind["tpb_vwap"],
+                    orb30_h=ind["orb30_h"],
+                    orb30_l=ind["orb30_l"],
+                    expiries=sorted(set(rec_expiries)),
+                    contracts_lookup={},
+                    quote_lookup={},
+                    lot_count_override=self.lots_per_book,
+                )
+                self.latest_decision_by_book[book_ai_id] = {
+                    "bar_ts": last_b.get("bar_open_ts"),
+                    "decision_ts_ms": dec_ms_rec,
+                    "passed": False,
+                    "state": sig_ai_rec.get("state") or "WATCHING",
+                    "reject_reason": sig_ai_rec.get("reject_reason"),
+                    "gates": sig_ai_rec.get("gates", []),
+                }
 
     def _roll_session_if_needed(self, new_session_date: str, bar_open_hhmm: int) -> None:
         if self.session_date == new_session_date:
@@ -903,6 +1051,17 @@ class V2UnifiedEventEngine:
                         }
                     )
 
+        if self.on_lifecycle_event_cb is not None:
+            self._emit_lifecycle_event(
+                {
+                    "event_type": "BAR_MTM_HEARTBEAT",
+                    "run_mode": self.run_mode,
+                    "session_date": dt,
+                    "bar_ts": bar_open_ts,
+                    "decision_ts_ms": decision_ts_ms,
+                }
+            )
+
         # 3. Evaluate new entries strictly after exits (`active_slots_and_reserves` locks same-bar exit slots)
         slots = self.sim.active_slots_and_reserves(bar_open_ts, dt)
         env = self.cfg["account_envelope"]
@@ -1066,6 +1225,7 @@ class V2UnifiedEventEngine:
                 enforce_vrp_gate=bool(self.enable_v2_4_dual_book and self.book_b_params.get("enforce_vrp_gate", True)),
                 max_vrp_ratio=float(self.book_b_params.get("max_vrp_ratio", 1.15)),
                 vrp_status=vrp_t.get("status"),
+                lot_count_override=self.lots_per_book,
             )
             sig_b_record = {
                 "bar_ts": bar_open_ts,
@@ -1085,8 +1245,8 @@ class V2UnifiedEventEngine:
                     is_bull=(sig_b["option_type"] == "CE"),
                     open_total=slots["open_total"],
                     max_open_packages_total=int(env["max_open_packages_total"]),
-                    book_a_enabled=book_a_active,
-                    book_b_enabled=bool(cfg_b.get("autonomous_entries_enabled", True)),
+                    book_a_enabled=(book_a_active or book_a_intraday_allowed),
+                    book_b_enabled=book_b_mode_allowed,
                 )
                 if not arb_ok_b:
                     self._record_opportunity_with_dedup(
@@ -1138,6 +1298,7 @@ class V2UnifiedEventEngine:
                         spot_price=ind["spot_close"],
                         basis_meta=sig_b["basis_meta"],
                         used_single_otm_fallback=sig_b["used_single_otm_fallback"],
+                        lot_count_override=self.lots_per_book,
                     )
                     if op.get("ok"):
                         entered_b = True
@@ -1470,6 +1631,7 @@ class V2UnifiedEventEngine:
                     expiries=expiries_all,
                     contracts_lookup=self.opt_contracts,
                     quote_lookup=quotes_lk,
+                    lot_count_override=self.lots_per_book,
                 )
                 ai_extra = {
                     "est_credit_pts": sig_ai.get("est_credit_pts"),
@@ -1525,6 +1687,23 @@ class V2UnifiedEventEngine:
                             bar_open_ts,
                             sig_ai["short_contract"]["instrument_key"],
                         )
+                        self.store.record_signal_idempotent(
+                            {
+                                "signal_id": sid_ai,
+                                "run_mode": self.run_mode,
+                                "config_hash": self.cfg_hash,
+                                "session_date": dt,
+                                "bar_ts": bar_open_ts,
+                                "decision_ts_ms": decision_ts_ms,
+                                "book_id": book_ai_id,
+                                "candidate_variant": sig_ai["candidate_variant"],
+                                "direction": sig_ai.get("option_type"),
+                                "status": "TRIGGERED",
+                                "reject_reason": None,
+                                "gates": sig_ai.get("gates", []),
+                                "provenance": ai_extra,
+                            }
+                        )
                         l1_ai = self.sim.open_book_a_leg1_hedge(
                             signal_id=sid_ai,
                             candidate_variant=sig_ai["candidate_variant"],
@@ -1538,6 +1717,7 @@ class V2UnifiedEventEngine:
                             vix_val=vix_now_val,
                             is_bull=bool(sig_ai["is_bull"]),
                             book_id_override=book_ai_id,
+                            lot_count_override=self.lots_per_book,
                         )
                         l2_ai = None
                         if l1_ai.get("ok"):
@@ -1606,6 +1786,38 @@ class V2UnifiedEventEngine:
                         quote=sig_ai.get("short_quote"),
                         sig_obj=sig_ai,
                     )
+            else:
+                blk_reason_ai = "; ".join(blocks) if blocks else f"SLOTS_OR_COOLDOWN ({slots['trades_today_by_book'].get(book_ai_id, 0)} trades)"
+                blk_obj_ai = {
+                    "bar_ts": bar_open_ts,
+                    "decision_ts_ms": decision_ts_ms,
+                    "passed": False,
+                    "state": "BLOCKED",
+                    "reject_reason": blk_reason_ai,
+                    "gates": [],
+                    "indicators": dict(ind),
+                }
+                self.latest_decision_by_book[book_ai_id] = blk_obj_ai
+                self._record_opportunity_with_dedup(
+                    session_date=dt,
+                    bar_ts=bar_open_ts,
+                    eval_hhmm=eval_hhmm,
+                    decision_ts_ms=decision_ts_ms,
+                    book_id=book_ai_id,
+                    candidate_variant="V2_BOOK_A_INTRADAY_CREDIT_FRI_50_100",
+                    direction=None,
+                    decision_status="BLOCKED",
+                    primary_reject_reason=blk_reason_ai,
+                    gates=[],
+                    ind=ind,
+                    extra_inputs={
+                        "vrp_ratio": (self.latest_vrp_telemetry or {}).get("vrp_ratio"),
+                        "aiml_p_breach_passive": (self.latest_aiml_telemetry or {}).get("p_breach"),
+                    },
+                    contract=None,
+                    quote=None,
+                    sig_obj=blk_obj_ai,
+                )
 
         trace_entry = {
             "bar_open_ts": bar_open_ts,
@@ -1704,6 +1916,27 @@ class V2UnifiedEventEngine:
             session_d, bar_open_ts, _, bar_close_ms, bar_open_hhmm = bar_open_label_from_ms(bar_open_ms)
         else:
             session_d, bar_open_ts, bar_open_ms, bar_close_ms, bar_open_hhmm = bar_open_label_from_ms(avail_ms)
+
+        # Ignore weekends and exchange holidays before session roll or event timestamp updates (B-13)
+        extra_hols = (self.cfg.get("calendar") or {}).get("extra_holidays")
+        if not is_nse_trading_session(session_d, extra_holidays=extra_hols):
+            if (
+                self.building_bar is not None
+                and avail_ms >= int(self.building_bar["bar_close_ms"])
+                and 915 <= ist_hhmm_from_ms(int(self.building_bar["max_avail_ts_ms"])) <= 1530
+            ):
+                finalized_result = self._finalize_building_bar_and_decide(
+                    trigger_ts_ms=avail_ms,
+                    allow_post_session=False,
+                    uncertainty_blocks=uncertainty_blocks,
+                )
+            else:
+                finalized_result = None
+            return finalized_result or {
+                "status": "NON_TRADING_SESSION_IGNORED",
+                "session_date": session_d,
+                "availability_ts_ms": avail_ms,
+            }
 
         # Roll session or finalize previous bar BEFORE applying incoming new-minute tick!
         finalized_result: Optional[Dict[str, Any]] = None

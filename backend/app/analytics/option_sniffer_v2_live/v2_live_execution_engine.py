@@ -170,6 +170,9 @@ class V2LiveExecutionEngine:
         self._observer_thread: Optional[threading.Thread] = None
         # Dedicated lock so non-blocking event enqueue NEVER stalls on self._lock held during HTTP I/O
         self._observer_start_lock = threading.Lock()
+        self._cached_available_margin_inr: Optional[float] = None
+        self._cached_margin_as_of_iso: Optional[str] = None
+        self._cached_margin_epoch: float = 0.0
 
         env_pin = (os.environ.get("OSV2_LIVE_PIN") or "").strip()
         if initial_pin is not None:
@@ -185,6 +188,7 @@ class V2LiveExecutionEngine:
         # Fail-safe: any pre-existing live DB boots disarmed without creating a cold DB
         if self.store.db_exists():
             self.store.force_boot_disarm_if_exists()
+            self._seed_cached_margin_from_audit_readonly()
         if log_pin_on_boot:
             logger.warning(
                 "[V2LiveExecutionEngine] Booted DISARMED (db=%s). Interactive human session PIN=%s",
@@ -193,6 +197,29 @@ class V2LiveExecutionEngine:
             )
         if attach_paper_listener:
             self.attach_to_paper_service()
+
+    @staticmethod
+    def _extract_available_margin(funds_snapshot: Any) -> Optional[float]:
+        try:
+            raw = (((funds_snapshot or {}).get("data") or {}).get("equity") or {}).get("available_margin")
+            return None if raw is None else float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _seed_cached_margin_from_audit_readonly(self) -> None:
+        if not self.store.db_exists():
+            return
+        try:
+            for entry in self.store.list_audit_log(limit=50):
+                if entry.get("event_type") == "PREFLIGHT_FUNDS_VERIFIED":
+                    detail = entry.get("detail") or {}
+                    val = self._extract_available_margin(detail.get("funds"))
+                    if val is not None:
+                        self._cached_available_margin_inr = round(val, 2)
+                        self._cached_margin_as_of_iso = entry.get("ts_iso")
+                        break
+        except Exception:
+            pass
 
     def _ensure_observer_worker_started(self) -> None:
         if not self._async_observer_dispatch:
@@ -211,10 +238,21 @@ class V2LiveExecutionEngine:
                 self._observer_thread.start()
 
     def _observer_worker_loop(self) -> None:
+        last_reconcile_mono = time.monotonic()
         while not self._observer_stop.is_set():
             try:
                 ev = self._observer_queue.get(timeout=0.25)
             except queue.Empty:
+                if (
+                    not self._has_custom_broker
+                    and (time.monotonic() - last_reconcile_mono) >= 30.0
+                ):
+                    last_reconcile_mono = time.monotonic()
+                    try:
+                        if self.store.db_exists() and self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES):
+                            self.reconcile_with_broker(actor="AUTO_PERIODIC_RECONCILE")
+                    except Exception as exc:
+                        logger.debug("Periodic V2 live broker reconcile skipped: %s", exc)
                 continue
             try:
                 if ev is None:
@@ -403,14 +441,16 @@ class V2LiveExecutionEngine:
         )
         daily_combined = round(daily_realized + daily_unrealized, 2)
         sel_books = arm_state.get("selected_books") or []
+        max_lots_arm = max(1, int(arm_state.get("max_lots_per_book") or 1))
         if "V2_BOOK_B_PAID_FLOW" in sel_books and "V2_BOOK_A_INTRADAY_CREDIT" in sel_books:
-            cur_scope, cur_floor = "AUTO_DUAL", 85000.0
+            cur_scope, base_floor = "AUTO_DUAL", 85000.0
         elif "V2_BOOK_A_INTRADAY_CREDIT" in sel_books:
-            cur_scope, cur_floor = "BOOK_A_ONLY", 75000.0
+            cur_scope, base_floor = "BOOK_A_ONLY", 75000.0
         elif "V2_BOOK_B_PAID_FLOW" in sel_books:
-            cur_scope, cur_floor = "BOOK_B_ONLY", 25000.0
+            cur_scope, base_floor = "BOOK_B_ONLY", 25000.0
         else:
-            cur_scope, cur_floor = "PAPER_ONLY", 0.0
+            cur_scope, base_floor = "PAPER_ONLY", 0.0
+        cur_floor = float(base_floor * max_lots_arm) if base_floor > 0.0 else 0.0
         return {
             "service": "OPTION_SNIFFER_ADVANCE_V2_LIVE",
             "isolated_db_path": self.store.db_path,
@@ -419,7 +459,11 @@ class V2LiveExecutionEngine:
             "execution_mode": "LIVE_ARMED" if arm_state.get("armed") else "DISARMED_PAPER_BASELINE_ONLY",
             "armed": bool(arm_state.get("armed")),
             "live_book_scope": cur_scope if arm_state.get("armed") else "PAPER_ONLY",
+            "max_lots_per_book": max_lots_arm,
+            "base_margin_per_lot_inr": base_floor,
             "min_required_margin_inr": cur_floor,
+            "available_margin_inr": self._cached_available_margin_inr,
+            "available_margin_as_of_iso": self._cached_margin_as_of_iso,
             "pin_required": True,
             "current_pin": self._session_pin,
             "paper_observer_attached": self._paper_svc_ref is not None,
@@ -437,11 +481,60 @@ class V2LiveExecutionEngine:
             "disclaimer": "An AI backtest or paper baseline does not prove future income. Broker orders execute only when armed by human PIN.",
         }
 
+    def get_funds_preview(self, *, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Read-only preview of broker available equity margin vs required margin across 1..5 lots.
+        Uses a 30s cache unless `force_refresh=True` and NEVER creates or writes SQLite files.
+        """
+        now_mono = time.monotonic()
+        source = "CACHED"
+        err_msg: Optional[str] = None
+        should_query = force_refresh or self._cached_margin_epoch <= 0.0 or (now_mono - self._cached_margin_epoch) >= 30.0
+        if should_query:
+            try:
+                snap = self.broker.get_funds_and_margin()
+                avail = self._extract_available_margin(snap)
+                if avail is not None:
+                    self._cached_available_margin_inr = round(avail, 2)
+                    self._cached_margin_as_of_iso = now_ist_iso()
+                    self._cached_margin_epoch = now_mono
+                    source = "LIVE_BROKER"
+            except Exception as exc:
+                err_msg = str(exc)
+                source = "CACHED_AUDIT" if self._cached_available_margin_inr is not None else "UNAVAILABLE"
+
+        avail_now = self._cached_available_margin_inr
+        schedule_by_lots = {
+            str(lots): {
+                "BOOK_B_ONLY": float(25000.0 * lots),
+                "BOOK_A_ONLY": float(75000.0 * lots),
+                "AUTO_DUAL": float(85000.0 * lots),
+            }
+            for lots in range(1, 6)
+        }
+        return {
+            "ok": avail_now is not None,
+            "source": source,
+            "available_margin_inr": avail_now,
+            "as_of_iso": self._cached_margin_as_of_iso,
+            "scope_margin_per_lot_inr": {
+                "BOOK_B_ONLY": 25000.0,
+                "BOOK_A_ONLY": 75000.0,
+                "AUTO_DUAL": 85000.0,
+            },
+            "schedule_by_lots": schedule_by_lots,
+            "error": err_msg,
+        }
+
     def get_positions(self) -> Dict[str, Any]:
+        open_pkgs = self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES)
+        closed_pkgs = self.store.list_packages(states=["CLOSED"], limit=100)
+        today = now_ist_date()
         return {
             "db_exists": self.store.db_exists(),
-            "open_packages": self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES),
-            "closed_packages": self.store.list_packages(states=["CLOSED"], limit=100),
+            "open_packages": open_pkgs,
+            "closed_packages": closed_pkgs,
+            "closed_today_count": sum(1 for p in closed_pkgs if p.get("session_date") == today),
             "recent_intents": self.store.list_intents(limit=100),
             "unresolved_faults": self.store.count_unresolved_faults(),
         }
@@ -497,10 +590,14 @@ class V2LiveExecutionEngine:
             avail_margin = float(
                 (((funds_snapshot or {}).get("data") or {}).get("equity") or {}).get("available_margin") or 0.0
             )
-            req_floor = float(min_floor_inr) * (int(max_lots_per_book) if scope_u != "BOOK_B_ONLY" else 1)
+            self._cached_available_margin_inr = round(avail_margin, 2)
+            self._cached_margin_as_of_iso = now_ist_iso()
+            self._cached_margin_epoch = time.monotonic()
+
+            req_floor = float(min_floor_inr) * int(max_lots_per_book)
             if avail_margin < req_floor:
                 raise RuntimeError(
-                    f"Insufficient available margin Rs{avail_margin:,.0f}; minimum Rs{req_floor:,.0f} required for live scope {scope_u}."
+                    f"Insufficient available margin Rs{avail_margin:,.0f}; minimum Rs{req_floor:,.0f} required for live scope {scope_u} ({max_lots_per_book} lot)."
                 )
 
             if not self._has_custom_broker and self._paper_svc_ref is None:
@@ -516,6 +613,16 @@ class V2LiveExecutionEngine:
                 reason=f"ARMED_BY_HUMAN_PIN:{scope_u}",
                 actor=actor,
             )
+            if self._paper_svc_ref is not None and hasattr(self._paper_svc_ref, "sync_runtime_routing_in_memory"):
+                scope_to_paper = {
+                    "BOOK_B_ONLY": "BOOK_B_ONLY",
+                    "BOOK_A_ONLY": "BOOK_A_ONLY",
+                    "AUTO_DUAL": "AUTO",
+                }
+                self._paper_svc_ref.sync_runtime_routing_in_memory(
+                    paper_mode=scope_to_paper.get(scope_u, "AUTO"),
+                    lots_per_book=int(max_lots_per_book),
+                )
             self.store.append_audit(
                 "PREFLIGHT_FUNDS_VERIFIED",
                 actor,
@@ -1160,7 +1267,12 @@ class V2LiveExecutionEngine:
             return {"ok": True, "status": "GTT_RATCHET_UPDATED", "stop_trigger_price": new_trig_r}
 
     def _check_and_enforce_daily_loss_limit(
-        self, session_date: str, arm_state: Dict[str, Any], open_pkgs: List[Dict[str, Any]]
+        self,
+        session_date: str,
+        arm_state: Dict[str, Any],
+        open_pkgs: List[Dict[str, Any]],
+        *,
+        flatten_on_breach: bool = False,
     ) -> Optional[Dict[str, Any]]:
         if not open_pkgs:
             has_unpriced = False
@@ -1173,17 +1285,33 @@ class V2LiveExecutionEngine:
         max_loss_lim = abs(float(arm_state.get("max_daily_loss_inr") or 2500.0))
 
         if daily_net <= -max_loss_lim:
-            self.disarm_live(
-                reason=f"AUTO_DISARM_DAILY_LOSS_LIMIT:{daily_net}",
-                actor="SAFETY_GUARD",
-                include_paper_baseline=False,
-            )
+            if arm_state.get("armed"):
+                self.disarm_live(
+                    reason=f"AUTO_DISARM_DAILY_LOSS_LIMIT:{daily_net}",
+                    actor="SAFETY_GUARD",
+                    include_paper_baseline=False,
+                )
+            flattened_ids: List[str] = []
+            if flatten_on_breach and open_pkgs:
+                for p_open in open_pkgs:
+                    if p_open.get("state") == "OPEN":
+                        try:
+                            ex_r = self.exit_live_package(
+                                live_package_id=str(p_open["live_package_id"]),
+                                reason=f"AUTO_DAILY_LOSS_FLATTEN:{daily_net}",
+                                actor="SAFETY_GUARD",
+                            )
+                            if ex_r.get("ok"):
+                                flattened_ids.append(str(p_open["live_package_id"]))
+                        except Exception as exc:
+                            logger.error("Daily loss auto-flatten failed on %s: %s", p_open.get("live_package_id"), exc)
             return {
                 "ok": False,
                 "status": "MAX_DAILY_LOSS_REACHED",
                 "daily_net_inr": daily_net,
                 "daily_realized_net_inr": round(daily_realized, 2),
                 "daily_unrealized_mtm_inr": round(daily_unrealized, 2),
+                "flattened_package_ids": flattened_ids,
             }
         if has_unpriced and open_pkgs:
             return {
@@ -2040,6 +2168,21 @@ class V2LiveExecutionEngine:
                 return self.submit_entry_signal(live_sig)
             return {"ok": False, "status": f"UNSUPPORTED_AUTONOMOUS_STRUCTURE:{structure}"}
 
+        if etype == "BAR_MTM_HEARTBEAT":
+            if not self.store.db_exists():
+                return None
+            with self._lock:
+                open_pkgs = self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES)
+                if not open_pkgs:
+                    return None
+                arm_state = self.store.get_arm_state()
+                return self._check_and_enforce_daily_loss_limit(
+                    str(event.get("session_date") or now_ist_date()),
+                    arm_state,
+                    open_pkgs,
+                    flatten_on_breach=True,
+                )
+
         if etype == "RATCHET_UPDATED":
             if not self.store.db_exists():
                 return None
@@ -2054,10 +2197,13 @@ class V2LiveExecutionEngine:
                 )
             with self._lock:
                 arm_state = self.store.get_arm_state()
-                if arm_state.get("armed"):
-                    open_pkgs = self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES)
+                open_pkgs = self.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES)
+                if arm_state.get("armed") or open_pkgs:
                     self._check_and_enforce_daily_loss_limit(
-                        str(event.get("session_date") or now_ist_date()), arm_state, open_pkgs
+                        str(event.get("session_date") or now_ist_date()),
+                        arm_state,
+                        open_pkgs,
+                        flatten_on_breach=True,
                     )
             return res
 

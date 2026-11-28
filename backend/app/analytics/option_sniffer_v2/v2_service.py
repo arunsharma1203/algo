@@ -139,6 +139,7 @@ class OptionSnifferV2Service:
         self.simulator.recover_state_from_db()
 
         hyg = self.config["quote_hygiene"]
+        eff_max_pins = max(int(hyg["max_v2_additive_pins"]), 16)
         self.feed_consumer = V2BoundedFeedConsumer(
             config_hash=self.config_hash,
             maxlen=int(hyg["bounded_ingress_queue_max"]),
@@ -146,7 +147,7 @@ class OptionSnifferV2Service:
         self.subscription_registry = V2SubscriptionRegistry(
             ws_total_soft_cap=int(hyg["ws_total_soft_cap"]),
             v1_reserved_headroom=int(hyg["v1_reserved_ws_headroom"]),
-            max_v2_additive_pins=int(hyg["max_v2_additive_pins"]),
+            max_v2_additive_pins=eff_max_pins,
         )
         self.feed_consumer.set_priority_keys(
             compute_v2_priority_keys(list(self.simulator.open_packages.values()))
@@ -167,6 +168,12 @@ class OptionSnifferV2Service:
         init_paper_mode = str(init_op_settings.get("paper_execution_mode") or "AUTO").upper().strip()
         if init_paper_mode not in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY"):
             init_paper_mode = "AUTO"
+        try:
+            init_lots = max(1, min(5, int(init_op_settings.get("lots_per_book") or 1)))
+        except (TypeError, ValueError):
+            init_lots = 1
+        self._in_memory_paper_mode: Optional[str] = None
+        self._in_memory_lots: Optional[int] = None
 
         self.unified_engine = V2UnifiedEventEngine(
             cfg=self.config,
@@ -176,6 +183,7 @@ class OptionSnifferV2Service:
             run_mode="FORWARD_PAPER",
             enable_v2_4_dual_book=True,
             paper_execution_mode=init_paper_mode,
+            lots_per_book=init_lots,
             persist_bars_and_checkpoints=True,
             on_package_opened_cb=self._on_package_opened,
             on_package_closed_cb=self._on_package_closed,
@@ -188,6 +196,8 @@ class OptionSnifferV2Service:
 
     def get_paper_execution_mode(self) -> str:
         """Read-only paper execution mode (`AUTO`, `BOOK_A_ONLY`, `BOOK_B_ONLY`); never writes DB."""
+        if self._in_memory_paper_mode in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY"):
+            return self._in_memory_paper_mode
         if self.store.db_exists():
             val = str(self.store.get_operator_settings().get("paper_execution_mode") or "").upper().strip()
             if val in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY"):
@@ -195,16 +205,68 @@ class OptionSnifferV2Service:
         val_mem = str(getattr(self.unified_engine, "paper_execution_mode", "AUTO")).upper().strip()
         return val_mem if val_mem in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY") else "AUTO"
 
-    def set_paper_execution_mode(self, paper_mode: str) -> Dict[str, Any]:
-        """Explicit operator control to route Paper evaluation across `AUTO`, `BOOK_A_ONLY`, or `BOOK_B_ONLY`."""
+    def get_lots_per_book(self) -> int:
+        """Read-only lots multiplier (1..5); never writes DB."""
+        if self._in_memory_lots is not None:
+            return self._in_memory_lots
+        if self.store.db_exists():
+            raw = self.store.get_operator_settings().get("lots_per_book")
+            if raw is not None:
+                try:
+                    return max(1, min(5, int(raw)))
+                except (TypeError, ValueError):
+                    pass
+        return max(1, min(5, int(getattr(self.unified_engine, "lots_per_book", 1) or 1)))
+
+    def sync_runtime_routing_in_memory(
+        self,
+        *,
+        paper_mode: Optional[str] = None,
+        lots_per_book: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Synchronizes strategy routing and lot multiplier strictly in memory (zero DB creation/writes)."""
+        with self._op_lock:
+            if paper_mode is not None:
+                norm_m = str(paper_mode).upper().strip()
+                if norm_m in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY"):
+                    self._in_memory_paper_mode = norm_m
+                    self.unified_engine.set_paper_execution_mode(norm_m)
+            if lots_per_book is not None:
+                norm_l = max(1, min(5, int(lots_per_book)))
+                self._in_memory_lots = norm_l
+                self.unified_engine.set_lots_per_book(norm_l)
+            return {
+                "paper_execution_mode": self.get_paper_execution_mode(),
+                "lots_per_book": self.get_lots_per_book(),
+            }
+
+    def set_paper_execution_mode(
+        self,
+        paper_mode: str,
+        lots_per_book: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Explicit operator control to route evaluation across `AUTO`, `BOOK_A_ONLY`, or `BOOK_B_ONLY` and optional `lots_per_book`."""
         mode = str(paper_mode or "").upper().strip()
         if mode not in ("AUTO", "BOOK_A_ONLY", "BOOK_B_ONLY"):
             raise ValueError(f"Unsupported paper_mode: {paper_mode!r}; expected AUTO, BOOK_A_ONLY, or BOOK_B_ONLY.")
+        eff_lots = self.get_lots_per_book() if lots_per_book is None else int(lots_per_book)
+        if eff_lots < 1 or eff_lots > 5:
+            raise ValueError(f"lots_per_book must be between 1 and 5, got {eff_lots}.")
+        now_ms = int(time.time() * 1000)
         with self._op_lock:
             self.store.ensure_initialized()
-            self.store.set_operator_setting("paper_execution_mode", mode, int(time.time() * 1000))
+            self.store.set_operator_setting("paper_execution_mode", mode, now_ms)
+            self.store.set_operator_setting("lots_per_book", str(eff_lots), now_ms)
+            self._in_memory_paper_mode = mode
+            self._in_memory_lots = eff_lots
             self.unified_engine.set_paper_execution_mode(mode)
-        return {"ok": True, "paper_execution_mode": mode, "simulation_mode": True}
+            self.unified_engine.set_lots_per_book(eff_lots)
+        return {
+            "ok": True,
+            "paper_execution_mode": mode,
+            "lots_per_book": eff_lots,
+            "simulation_mode": True,
+        }
 
     # ──────────────────────────────────────────────────────────────────────────
     # LIFECYCLE: PASSIVE FAN-OUT START, OWNER PINS & V2-ONLY SHUTDOWN
@@ -255,7 +317,7 @@ class OptionSnifferV2Service:
                 mgr.acquire_owned_pins(
                     owner="V2",
                     contracts=contracts,
-                    max_owner_pins=int(hyg["max_v2_additive_pins"]),
+                    max_owner_pins=max(int(hyg["max_v2_additive_pins"]), 16),
                     soft_cap=int(hyg["ws_total_soft_cap"]),
                     v1_headroom=int(hyg["v1_reserved_ws_headroom"]),
                 )
@@ -1257,6 +1319,10 @@ class OptionSnifferV2Service:
         )
         ai_enabled = paper_mode in ("AUTO", "BOOK_A_ONLY")
         b_enabled = paper_mode in ("AUTO", "BOOK_B_ONLY")
+        lots_per_book = self.get_lots_per_book()
+        a_sl_cap = int(round(float(V2_BOOK_A_INTRADAY_CREDIT_SPEC["max_planned_stop_loss_inr"]) * lots_per_book))
+        b_cash_cap = int(round(float(cfg_b["max_entry_outlay_inr"]) * lots_per_book))
+        b_sl_cap = int(round(float(cfg_b["planned_loss_max_inr"]) * lots_per_book))
 
         rows = [
             {
@@ -1275,9 +1341,10 @@ class OptionSnifferV2Service:
                 "book_id": book_ai_id,
                 "book_label": "Book A Intraday Credit (Friday cal_dte 3-4 • 50pt OTM / 100w • NO_VFLIP)",
                 "config_summary": (
-                    "Friday cal_dte in {3,4} • 11:30-13:15 IST • Min Cr 25pt (Live 24pt) • "
-                    "70% Target / 1.8x SL (Rs 1,950 cap) • 15:15 EOD"
+                    f"{lots_per_book}x Lot ({lots_per_book * 65} qty) • Friday cal_dte in {{3,4}} • 11:30-13:15 IST • Min Cr 25pt (Live 24pt) • "
+                    f"70% Target / 1.8x SL (Rs {a_sl_cap:,} cap) • 15:15 EOD"
                 ),
+                "lots_per_book": lots_per_book,
                 "enabled": ai_enabled,
                 "eligibility": (
                     "HALTED_BOOKING_FAULT"
@@ -1288,7 +1355,11 @@ class OptionSnifferV2Service:
                         else (
                             f"PAUSED_BY_PAPER_MODE:{paper_mode}"
                             if not ai_enabled
-                            else ((dec_ai or {}).get("state") or "WAITING_STREAM")
+                            else (
+                                "STANDBY_COMPLETED_TODAY"
+                                if (dec_ai or {}).get("state") == "TRIGGERED"
+                                else ((dec_ai or {}).get("state") or "WAITING_STREAM")
+                            )
                         )
                     )
                 ),
@@ -1311,10 +1382,11 @@ class OptionSnifferV2Service:
                 "book_id": cfg_b["book_id"],
                 "book_label": "Book B (Paid Convexity Flow: VRP <= 1.15 + 45m Exit)",
                 "config_summary": (
-                    f"VRP <= 1.15 • CashCap Rs{int(float(cfg_b['max_entry_outlay_inr'])):,} (+1-OTM) • "
-                    f"Max Planned SL Rs{int(float(cfg_b['planned_loss_max_inr'])):,} • 45m Stagnation • "
+                    f"{lots_per_book}x Lot ({lots_per_book * 65} qty) • VRP <= 1.15 • CashCap Rs{b_cash_cap:,} (+1-OTM) • "
+                    f"Max Planned SL Rs{b_sl_cap:,} • 45m Stagnation • "
                     f"{int(cfg_b['entry_window_start_hhmm']):04d}-{int(cfg_b['entry_window_end_hhmm']):04d} IST"
                 ),
+                "lots_per_book": lots_per_book,
                 "enabled": b_enabled,
                 "eligibility": (
                     "HALTED_BOOKING_FAULT"
@@ -1325,7 +1397,11 @@ class OptionSnifferV2Service:
                         else (
                             f"PAUSED_BY_PAPER_MODE:{paper_mode}"
                             if not b_enabled
-                            else ((dec_b or {}).get("state") or "WAITING_STREAM")
+                            else (
+                                "STANDBY_COMPLETED_TODAY"
+                                if (dec_b or {}).get("state") == "TRIGGERED"
+                                else ((dec_b or {}).get("state") or "WAITING_STREAM")
+                            )
                         )
                     )
                 ),
@@ -1430,6 +1506,8 @@ class OptionSnifferV2Service:
             "status": "AWAITING_LIVE_BAR",
         }
         paper_mode = self.get_paper_execution_mode()
+        lots_per_book = self.get_lots_per_book()
+        eff_max_reserved = self.simulator.effective_max_capital_reserved_inr(lots_per_book)
 
         def _book_pnl_bucket(bid_set: Set[str]) -> Dict[str, Any]:
             rows_b = [p for p in fwd_closed if p.get("book_id") in bid_set]
@@ -1460,8 +1538,10 @@ class OptionSnifferV2Service:
             "protocol_id": self.config["protocol_id"],
             "engine_version": self.engine_version,
             "active_profile_id": "V2_4_PAPER_DUAL_BOOK",
-            "v2_release_version": "2.4.0-dual-book-vrp",
+            "v2_release_version": "2.4.1-dual-book-vrp-unified",
             "paper_execution_mode": paper_mode,
+            "lots_per_book": lots_per_book,
+            "effective_max_capital_reserved_inr": eff_max_reserved,
             "warmup_20d_ready": bool(prior_hist_ro.get("warmup_ready")),
             "warmup_prior_days_count": int(prior_hist_ro.get("prior_days_count") or 0),
             "vrp_telemetry": vrp_telemetry,
@@ -1505,6 +1585,7 @@ class OptionSnifferV2Service:
                 "unresolved_structural_risk_charged_inr": promo["unresolved_structural_risk_charged_inr"],
                 "realized_equity_inr": self.simulator.realized_equity_inr,
                 "reserved_capital_inr": self.simulator.reserved_capital_inr,
+                "effective_max_capital_reserved_inr": eff_max_reserved,
                 "booking_halted": self.simulator.is_booking_halted(),
                 "observed_mark_dd_inr": dd_audit["observed_mark_max_dd_inr"],
                 "observed_mark_dd_pct": dd_audit["observed_mark_max_dd_pct_start"],
@@ -1811,6 +1892,41 @@ class OptionSnifferV2Service:
             book_id=book_id,
             limit=limit,
         )
+        source_kind = "OSV2_OPPORTUNITIES"
+        if not rows:
+            sig_rows = self.store.load_signals(
+                run_mode="FORWARD_PAPER",
+                config_hash=self.config_hash,
+                limit=limit,
+            )
+            fallback_rows: List[Dict[str, Any]] = []
+            for s in sig_rows:
+                if session_date and str(s.get("session_date") or "") != str(session_date):
+                    continue
+                if book_id and str(s.get("book_id") or "") != str(book_id):
+                    continue
+                st_sig = str(s.get("status") or "").upper()
+                dec_st = "ACCEPTED" if st_sig == "TRIGGERED" else (st_sig or "RECORDED")
+                fallback_rows.append(
+                    {
+                        "opportunity_id": s["signal_id"],
+                        "session_date": s.get("session_date"),
+                        "bar_ts": s.get("bar_ts"),
+                        "decision_ts_ms": s.get("decision_ts_ms"),
+                        "book_id": s.get("book_id"),
+                        "candidate_variant": s.get("candidate_variant"),
+                        "direction": s.get("direction"),
+                        "decision_status": dec_st,
+                        "primary_reject_reason": s.get("reject_reason") or "SIGNAL_TRIGGERED_FORWARD_LEDGER",
+                        "execution_availability": "PERSISTED_FORWARD_SIGNAL",
+                        "gate_inputs": s.get("provenance") or {},
+                        "gates": s.get("gates") if isinstance(s.get("gates"), list) else [],
+                        "source": "PERSISTED_SIGNAL_LEDGER",
+                    }
+                )
+            if fallback_rows:
+                rows = fallback_rows
+                source_kind = "PERSISTED_SIGNAL_LEDGER"
         by_status: Dict[str, int] = {}
         by_reason: Dict[str, int] = {}
         by_avail: Dict[str, int] = {}
@@ -1831,6 +1947,7 @@ class OptionSnifferV2Service:
             "engine_version": self.engine_version,
             "config_hash": self.config_hash,
             "db_exists": self.store.db_exists(),
+            "source": source_kind,
             "count": len(rows),
             "summary_by_status": by_status,
             "summary_by_primary_reason": by_reason,

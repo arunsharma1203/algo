@@ -374,6 +374,152 @@ class TestV24DualBookVRPAndUI(unittest.TestCase):
                     self.assertNotIn(tok, src, f"Banned error token {tok!r} found in {path}")
         self.assertTrue(os.path.exists(os.path.join(_REPO_ROOT, "frontend", "src", "components", "optionSnifferV2Live", "V2WorkspaceHeader.jsx")))
 
+    def test_06_multi_lot_scaling_split_brain_sync_recovery_and_heartbeat_kill(self) -> None:
+        from app.analytics.option_sniffer_v2.v2_paper_simulator import V2PaperSimulator
+
+        # 1. Cold-start get_funds_preview never creates live DB, and Book B margin scales with max_lots_per_book (25k * lots)
+        broker = MockV2BrokerClient(available_margin_inr=60000.0)
+        eng_l = V2LiveExecutionEngine(
+            db_path=self.live_db, broker_client=broker, initial_pin="6161", log_pin_on_boot=False, async_observer_dispatch=False
+        )
+        fp = option_sniffer_v2_live_api.get_v2_live_funds_preview(force_refresh=False) if False else eng_l.get_funds_preview(force_refresh=False)
+        self.assertFalse(os.path.exists(self.live_db), "Cold-start funds-preview MUST NOT create live DB!")
+        self.assertTrue(fp["ok"])
+        self.assertEqual(fp["available_margin_inr"], 60000.0)
+        self.assertEqual(fp["schedule_by_lots"]["3"]["BOOK_B_ONLY"], 75000.0)
+
+        with self.assertRaises(RuntimeError):
+            # 3 lots of Book B needs 75k > 60k available -> MUST refuse cleanly!
+            eng_l.arm_live(pin="6161", human_confirmed=True, live_book_scope="BOOK_B_ONLY", max_lots_per_book=3)
+
+        # 2 lots of Book B needs 50k <= 60k -> PASSES & scales status min_required_margin_inr!
+        st2 = eng_l.arm_live(pin="6161", human_confirmed=True, live_book_scope="BOOK_B_ONLY", max_lots_per_book=2)
+        self.assertEqual(st2["min_required_margin_inr"], 50000.0)
+        self.assertEqual(st2["max_lots_per_book"], 2)
+        eng_l.disarm_live()
+
+        # 2. Split-brain elimination: attach to paper service initially set to BOOK_B_ONLY; arming BOOK_A_ONLY syncs in-memory!
+        broker_big = MockV2BrokerClient(available_margin_inr=250000.0)
+        broker_big.market_ltp_by_key["NSE_FO|PE25650"] = 50.0
+        broker_big.market_ltp_by_key["NSE_FO|PE25750"] = 85.0
+        svc = OptionSnifferV2Service(db_path=self.paper_db)
+        svc.store.ensure_initialized()
+        svc.set_paper_execution_mode("BOOK_B_ONLY", lots_per_book=1)
+        self.assertGreaterEqual(svc.subscription_registry.max_v2_additive_pins, 16)
+
+        eng2 = V2LiveExecutionEngine(
+            db_path=self.live_db, broker_client=broker_big, initial_pin="7272", log_pin_on_boot=False, async_observer_dispatch=False
+        )
+        eng2.attach_to_paper_service(svc)
+        eng2.arm_live(
+            pin="7272", human_confirmed=True, live_book_scope="BOOK_A_ONLY", max_lots_per_book=2, max_daily_loss_inr=3000.0
+        )
+        self.assertEqual(svc.get_paper_execution_mode(), "BOOK_A_ONLY")
+        self.assertEqual(svc.get_lots_per_book(), 2)
+        self.assertEqual(svc.get_overview()["lots_per_book"], 2)
+
+        # 3. Book B L5 multi-lot check + Paper Dual-Book capital ceiling (75k + 18k = 93k <= 110k)
+        exp_fri = "2026-11-23"
+        ts_f = parse_ist_timestamp_ms("2026-11-20T12:00:00+05:30")
+        assert ts_f is not None
+        q_small = _mk_quote("NSE_FO|CE_SMALL", 100.0, 100.5, ts_f, 25800.0, "CE", exp_fri)
+        # Only 65 qty on ask -> 2-lot (130 qty) MUST FAIL L5 depth!
+        q_small["depth_levels"] = [{"bid_p": 100.0, "bid_q": 65, "ask_p": 100.5, "ask_q": 65}]
+        sig_thin = evaluate_book_b_entry_signal(
+            self.cfg, "2026-11-20", "2026-11-20 11:00:00", 1100, ts_f, 25810.0, 25780.0, 25790.0, 25730.0,
+            26.0, 0.45,
+            {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": 25810.0, "exchange_ltt_ms": ts_f, "availability_ts_ms": ts_f, "source_ts_proven": True},
+            {"instrument_key": "NSE_FO|FUT", "underlying": "NIFTY", "expiry": "2026-11-26", "fut_ltp": 25835.0, "exchange_ltt_ms": ts_f, "availability_ts_ms": ts_f, "source_ts_proven": True},
+            {"ok": True, "basis_pts": 20.0, "fut_instrument_key": "NSE_FO|FUT", "fut_expiry": "2026-11-26"},
+            ["2026-11-26"], {("2026-11-26", 25800.0, "CE"): _mk_contract("NSE_FO|CE_SMALL", 25800.0, "CE", "2026-11-26")},
+            {("2026-11-26", 25800.0, "CE"): {**q_small, "expiry": "2026-11-26"}}, lot_count_override=2,
+        )
+        self.assertFalse(sig_thin["passed"])
+
+        sim_dual = V2PaperSimulator(self.cfg, self.cfg_hash, svc.store, run_mode="REPLAY_STREAM")
+        sim_dual.set_runtime_lot_multiplier(1, enable_v2_4_dual_book=True)
+        self.assertGreaterEqual(sim_dual.effective_max_capital_reserved_inr(1), 110000.0)
+
+        # 4. Run Friday Book A stream -> persists osv2_signals + triggers BLOCKED on second bar + restart recovers VRP & decisions!
+        t0 = parse_ist_timestamp_ms("2026-11-20T09:15:00+05:30")
+        assert t0 is not None
+        svc.start_parallel_collector(stream_manager=None, run_archive_warmup=False, spawn_worker=False)
+        for m in range(180):
+            b_ms = t0 + m * 60_000
+            tk = b_ms + 57_000
+            hm_min = 9 * 60 + 15 + m
+            hhmm = (hm_min // 60) * 100 + (hm_min % 60)
+            spot = 25800.0 if m < 30 else 25812.0
+            q_pe_s = _mk_quote("NSE_FO|PE25750", 85.0, 85.5, tk, 25750.0, "PE", exp_fri)
+            q_pe_w = _mk_quote("NSE_FO|PE25650", 54.0, 54.5, tk, 25650.0, "PE", exp_fri)
+            q_pe_s["depth_levels"] = [{"bid_p": 85.0, "bid_q": 1300, "ask_p": 85.5, "ask_q": 1300}]
+            q_pe_w["depth_levels"] = [{"bid_p": 54.0, "bid_q": 1300, "ask_p": 54.5, "ask_q": 1300}]
+            svc.on_live_feed_events([
+                ("INDEX", "NIFTY", {"instrument_key": "NSE_INDEX|Nifty 50", "underlying": "NIFTY", "spot_ltp": spot, "availability_ts_ms": tk, "exchange_ltt_ms": tk, "source_ts_proven": True}),
+                ("FUTURES", "NIFTY", {"instrument_key": "NSE_FO|FUTNOV", "underlying": "NIFTY", "expiry": "2026-11-26", "fut_ltp": spot + 20.0, "availability_ts_ms": tk, "exchange_ltt_ms": tk, "source_ts_proven": True}),
+                ("OPTION", "NSE_FO|PE25750", q_pe_s),
+                ("OPTION", "NSE_FO|PE25650", q_pe_w),
+                ("BAR_CLOSE_CHECK", "CLOCK", {"availability_ts_ms": b_ms + 60_000}),
+            ])
+            svc.process_queued_events(max_items=20)
+
+        # Book A signal persisted in osv2_signals + live spread opened at 2 lots (130 qty) + Book A blocked state recorded!
+        book_a_sigs = [s for s in svc.store.load_signals("FORWARD_PAPER", self.cfg_hash) if s["book_id"] == "V2_BOOK_A_INTRADAY_CREDIT"]
+        self.assertGreaterEqual(len(book_a_sigs), 1)
+        self.assertEqual(svc.unified_engine.latest_decision_by_book["V2_BOOK_A_INTRADAY_CREDIT"]["state"], "BLOCKED")
+        st_live_open = eng2.get_status(include_paper_baseline=False)
+        self.assertEqual(st_live_open["open_package_count"], 1)
+        self.assertEqual(st_live_open["open_packages"][0]["legs"]["buy_leg"]["qty"], 130)
+
+        # 5. Simulate BAR_MTM_HEARTBEAT when spread moves adverse > max_daily_loss_inr -> auto-flattens & disarms!
+        broker_big._positions["NSE_FO|PE25750"]["last_price"] = 120.0  # -35 * 130 = -4550
+        broker_big._positions["NSE_FO|PE25650"]["last_price"] = 50.0   # -4 * 130 = -520 (total -5070 <= -3000)
+        hb_res = eng2.on_paper_lifecycle_event({
+            "event_type": "BAR_MTM_HEARTBEAT",
+            "run_mode": "FORWARD_PAPER",
+            "session_date": "2026-11-20",
+        })
+        self.assertIsNotNone(hb_res)
+        self.assertEqual(hb_res["status"], "MAX_DAILY_LOSS_REACHED")
+        self.assertEqual(len(hb_res["flattened_package_ids"]), 1)
+        self.assertFalse(eng2.get_status(include_paper_baseline=False)["armed"])
+        self.assertEqual(eng2.get_status(include_paper_baseline=False)["open_package_count"], 0)
+
+        # 6. Simulate backend restart: fresh OptionSnifferV2Service recovers HAR-RV + decisions without waiting for live tick!
+        eng2.detach_from_paper_service()
+        svc.stop_v2_only()
+        svc.store.close()
+
+        svc_restarted = OptionSnifferV2Service(db_path=self.paper_db)
+        try:
+            ov_r = svc_restarted.get_overview()
+            self.assertIsNotNone(ov_r["vrp_telemetry"]["har_rv_pct"])
+            self.assertEqual(ov_r["v2_release_version"], "2.4.1-dual-book-vrp-unified")
+            self.assertIn("V2_BOOK_A_INTRADAY_CREDIT", svc_restarted.unified_engine.latest_decision_by_book)
+
+            sat_ms = parse_ist_timestamp_ms("2026-11-21T11:00:00+05:30")
+            assert sat_ms is not None
+            res_sat = svc_restarted.unified_engine.ingest_event(
+                "INDEX",
+                "NIFTY",
+                {
+                    "instrument_key": "NSE_INDEX|Nifty 50",
+                    "underlying": "NIFTY",
+                    "spot_ltp": 25820.0,
+                    "availability_ts_ms": sat_ms,
+                    "exchange_ltt_ms": sat_ms,
+                    "source_ts_proven": True,
+                },
+            )
+            self.assertIsNotNone(res_sat)
+            self.assertEqual(res_sat["status"], "NON_TRADING_SESSION_IGNORED")
+            self.assertEqual(svc_restarted.unified_engine.session_date, "2026-11-20")
+            self.assertGreater(len(svc_restarted.unified_engine.completed_bars), 0)
+            self.assertIsNotNone(svc_restarted.get_overview()["vrp_telemetry"]["har_rv_pct"])
+        finally:
+            svc_restarted.stop_v2_only()
+            svc_restarted.store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

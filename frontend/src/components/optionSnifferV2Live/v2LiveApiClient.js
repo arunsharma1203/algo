@@ -51,6 +51,10 @@ export async function fetchV2LiveStatus(includePaperBaseline = true) {
   return liveJsonFetch(`/status?include_paper_baseline=${includePaperBaseline ? 'true' : 'false'}`);
 }
 
+export async function fetchV2LiveFundsPreview(forceRefresh = false) {
+  return liveJsonFetch(`/funds-preview?force_refresh=${forceRefresh ? 'true' : 'false'}`);
+}
+
 export async function fetchV2LivePositions() {
   return liveJsonFetch('/positions');
 }
@@ -79,8 +83,12 @@ export async function postV2LiveExitPosition(livePackageId, payload = {}) {
   return jsonPostFetch(V2_LIVE_API_ROOT, `/positions/${encodeURIComponent(livePackageId)}/exit`, payload);
 }
 
-export async function postV2PaperMode(paperMode) {
-  return jsonPostFetch(V2_PAPER_API_ROOT, '/control/paper-mode', { paper_mode: paperMode });
+export async function postV2PaperMode(paperMode, lotsPerBook = undefined) {
+  const payload = { paper_mode: paperMode };
+  if (lotsPerBook !== undefined && lotsPerBook !== null) {
+    payload.lots_per_book = Number(lotsPerBook);
+  }
+  return jsonPostFetch(V2_PAPER_API_ROOT, '/control/paper-mode', payload);
 }
 
 export async function postV2StartCollector() {

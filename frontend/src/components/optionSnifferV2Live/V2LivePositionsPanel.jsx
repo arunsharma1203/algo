@@ -14,10 +14,8 @@ export default function V2LivePositionsPanel({ liveStatus, livePositions, onRefr
 
   const openPkgs = livePositions?.open_packages || liveStatus?.open_packages || [];
   const closedPkgs = livePositions?.closed_packages || [];
-
-  if (!liveStatus?.armed && openPkgs.length === 0 && closedPkgs.length === 0) {
-    return null;
-  }
+  const closedTodayCount = Number(livePositions?.closed_today_count ?? 0);
+  const armed = Boolean(liveStatus?.armed);
 
   const handleExit = async (pkgId) => {
     setBusyId(pkgId);
@@ -46,13 +44,26 @@ export default function V2LivePositionsPanel({ liveStatus, livePositions, onRefr
   };
 
   return (
-    <section className="bg-slate-900 border border-amber-500/30 rounded-xl p-4 space-y-3">
+    <section
+      className={`bg-slate-900 border rounded-xl p-4 space-y-3 ${
+        armed ? 'border-amber-500/40' : 'border-slate-800'
+      }`}
+    >
       <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-2">
-          <ShieldAlert className="h-4 w-4 text-amber-400" />
+        <div className="flex items-center gap-2 flex-wrap">
+          <ShieldAlert className={`h-4 w-4 ${armed ? 'text-amber-400' : 'text-slate-400'}`} />
           <h3 className="text-sm font-bold text-white">Live Broker Execution Positions</h3>
+          <span
+            className={`px-2 py-0.5 text-[11px] font-semibold rounded border ${
+              armed
+                ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                : 'bg-slate-800 text-slate-400 border-slate-700'
+            }`}
+          >
+            {armed ? `ARMED • ${liveStatus?.live_book_scope}` : 'DISARMED'}
+          </span>
           <span className="px-2 py-0.5 text-[11px] rounded bg-slate-800 text-slate-300 border border-slate-700">
-            Open: {openPkgs.length} &bull; Closed Today: {closedPkgs.length}
+            Open: {openPkgs.length} &bull; Closed Today: {closedTodayCount} (Total: {closedPkgs.length})
           </span>
         </div>
         <button
@@ -65,6 +76,14 @@ export default function V2LivePositionsPanel({ liveStatus, livePositions, onRefr
           Reconcile Broker
         </button>
       </div>
+
+      {openPkgs.length === 0 && (
+        <div className="text-xs text-slate-400">
+          {armed
+            ? 'Live engine armed — awaiting next validated Book A/B entry signal.'
+            : 'Disarmed — click Arm / Mode in the header to enable live Upstox order execution.'}
+        </div>
+      )}
 
       {err && (
         <div className="p-2 rounded bg-rose-950/60 border border-rose-800 text-xs text-rose-200">

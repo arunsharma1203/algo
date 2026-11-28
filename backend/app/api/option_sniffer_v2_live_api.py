@@ -49,6 +49,7 @@ except ImportError:  # Enables stdlib `/usr/bin/python3 -B` isolated tests witho
 
 
 from app.analytics.option_sniffer_v2_live.v2_live_execution_engine import (
+    OPEN_LIKE_PACKAGE_STATES,
     get_option_sniffer_v2_live_engine,
 )
 
@@ -61,6 +62,13 @@ router = APIRouter(
 @router.get("/status")
 def get_v2_live_status(include_paper_baseline: bool = Query(default=True)) -> Dict[str, Any]:
     return get_option_sniffer_v2_live_engine().get_status(include_paper_baseline=include_paper_baseline)
+
+
+@router.get("/funds-preview")
+def get_v2_live_funds_preview(force_refresh: bool = Query(default=False)) -> Dict[str, Any]:
+    raw = getattr(force_refresh, "default", force_refresh)
+    fr = raw if isinstance(raw, bool) else str(raw).lower() in ("1", "true", "yes")
+    return get_option_sniffer_v2_live_engine().get_funds_preview(force_refresh=fr)
 
 
 @router.get("/positions")
@@ -135,3 +143,19 @@ def post_v2_live_exit_position(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+if _HAS_FASTAPI:
+
+    @router.on_event("startup")
+    def _on_v2_live_startup() -> None:
+        try:
+            from app.data.database import is_testing_environment
+
+            if is_testing_environment():
+                return
+            eng = get_option_sniffer_v2_live_engine()
+            if eng.store.db_exists() and eng.store.list_packages(states=OPEN_LIKE_PACKAGE_STATES):
+                eng.reconcile_with_broker(actor="STARTUP_BOOT_RECONCILE")
+        except Exception:
+            pass

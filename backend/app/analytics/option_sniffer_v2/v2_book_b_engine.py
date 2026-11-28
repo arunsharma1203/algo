@@ -235,12 +235,15 @@ def evaluate_book_b_entry_signal(
     enforce_vrp_gate: bool = False,
     max_vrp_ratio: float = 1.15,
     vrp_status: Optional[str] = None,
+    lot_count_override: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Evaluates V2 Book B (and single-factor ablation variants cleanly when flags are explicitly passed).
     """
     cfg_b = cfg["books"]["V2_BOOK_B_PAID_FLOW"]
     hyg = cfg["quote_hygiene"]
+    eff_lots = max(1, int(lot_count_override if lot_count_override is not None else cfg_b["lot_count"]))
+    eff_cash_cap = round(float(cfg_b["max_entry_outlay_inr"]) * eff_lots, 2)
 
     win_start = int(window_start_override if window_start_override is not None else cfg_b["entry_window_start_hhmm"])
     win_end = int(window_end_override if window_end_override is not None else cfg_b["entry_window_end_hhmm"])
@@ -340,10 +343,11 @@ def evaluate_book_b_entry_signal(
         if not id_ok:
             return {"ok": False, "l5_ok": False, "cash_ok": False, "reason": id_rsn, "outlay": 0.0}
         lot_sz = int(meta["lot_size"])
+        target_qty = eff_lots * lot_sz
         sw = sweep_observed_l5_book(
             quote=q,
             side="BUY",
-            target_qty=int(cfg_b["lot_count"]) * lot_sz,
+            target_qty=target_qty,
             lot_size=lot_sz,
             adverse_ticks=int(hyg["adverse_latency_ticks"]),
             max_age_ms=int(hyg["max_entry_quote_age_ms"]),
@@ -353,8 +357,8 @@ def evaluate_book_b_entry_signal(
         )
         obi = float(q.get("book_obi_l5") if q.get("book_obi_l5") is not None else -999.0)
         l5_ok = bool(sw.get("ok") and obi >= obi_min)
-        outlay = round(float(sw["fill_price"]) * lot_sz, 2) if sw.get("ok") else 0.0
-        cash_ok = bool(sw.get("ok") and 0.0 < outlay <= float(cfg_b["max_entry_outlay_inr"]))
+        outlay = round(float(sw["fill_price"]) * target_qty, 2) if sw.get("ok") else 0.0
+        cash_ok = bool(sw.get("ok") and 0.0 < outlay <= eff_cash_cap)
         rsn = "OK" if (l5_ok and cash_ok) else (sw.get("reason") if not sw.get("ok") else (f"LOW_OBI:{obi:+.2f}" if not l5_ok else f"CASHCAP:{outlay:.0f}"))
         return {
             "ok": bool(l5_ok and cash_ok),
@@ -395,8 +399,8 @@ def evaluate_book_b_entry_signal(
         {"name": "ORB30+VWAP", "passed": dir_ok, "current": f"{spot_close:.1f}", "target": f">{orb30_h:.0f} or <{orb30_l:.0f}"},
         {"name": "BasisGate", "passed": basis_ok, "current": basis_reason, "target": ">=+3 / <=-3" if use_basis_delta else "abs>=5"},
         {"name": "ADX/ER", "passed": adx_ok, "current": adx_cur, "target": f">={adx_min:.0f}/{er_min:.2f}"},
-        {"name": "ObsL5Depth", "passed": bool(chosen_eval.get("l5_ok")), "current": chosen_eval.get("reason", "NA"), "target": f">=1lot & OBI>={obi_min:.2f}"},
-        {"name": "CashCap", "passed": bool(chosen_eval.get("cash_ok")), "current": f"Rs{chosen_eval.get('outlay', 0):,.0f}", "target": f"<=Rs{cfg_b['max_entry_outlay_inr']:,.0f}"},
+        {"name": "ObsL5Depth", "passed": bool(chosen_eval.get("l5_ok")), "current": chosen_eval.get("reason", "NA"), "target": f">={eff_lots}lot & OBI>={obi_min:.2f}"},
+        {"name": "CashCap", "passed": bool(chosen_eval.get("cash_ok")), "current": f"Rs{chosen_eval.get('outlay', 0):,.0f}", "target": f"<=Rs{eff_cash_cap:,.0f}"},
     ]
     if enforce_vrp_gate:
         vrp_ok = vrp_ratio is not None and float(vrp_ratio) <= float(max_vrp_ratio)

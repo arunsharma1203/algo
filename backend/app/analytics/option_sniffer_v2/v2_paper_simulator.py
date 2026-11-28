@@ -209,6 +209,8 @@ class V2PaperSimulator:
         self.run_mode = str(run_mode)
         self.cost_multiplier = max(1.0, float(cost_multiplier))
         self.extra_adverse_slippage_ticks = max(0, int(extra_adverse_slippage_ticks))
+        self.lots_per_book: int = 1
+        self.enable_v2_4_dual_book: bool = False
 
         env = config["account_envelope"]
         self.starting_capital_inr = float(env["starting_capital_inr"])
@@ -482,6 +484,25 @@ class V2PaperSimulator:
         with self._lock:
             self.subscription_evicted_keys.add(str(instrument_key))
 
+    def set_runtime_lot_multiplier(
+        self,
+        lots_per_book: int,
+        *,
+        enable_v2_4_dual_book: Optional[bool] = None,
+    ) -> int:
+        with self._lock:
+            self.lots_per_book = max(1, min(5, int(lots_per_book)))
+            if enable_v2_4_dual_book is not None:
+                self.enable_v2_4_dual_book = bool(enable_v2_4_dual_book)
+            return self.lots_per_book
+
+    def effective_max_capital_reserved_inr(self, lot_count: Optional[int] = None) -> float:
+        base_cap = float(self.config["account_envelope"]["max_capital_reserved_inr"])
+        eff_lots = max(1, int(lot_count if lot_count is not None else self.lots_per_book))
+        if self.enable_v2_4_dual_book:
+            return max(base_cap, round(110000.0 * eff_lots, 2))
+        return round(base_cap * eff_lots, 2)
+
     def _effective_slippage_ticks(self) -> int:
         base_ticks = int(self.config["quote_hygiene"]["adverse_latency_ticks"])
         return base_ticks + self.extra_adverse_slippage_ticks
@@ -559,6 +580,7 @@ class V2PaperSimulator:
         basis_meta: Dict[str, Any],
         used_single_otm_fallback: bool = False,
         allow_partial_lot: bool = False,
+        lot_count_override: Optional[int] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             if self.is_booking_halted(self.config["books"]["V2_BOOK_B_PAID_FLOW"]["book_id"]):
@@ -569,7 +591,8 @@ class V2PaperSimulator:
             hyg = self.config["quote_hygiene"]
             cfg_b = self.config["books"]["V2_BOOK_B_PAID_FLOW"]
             lot_sz = int(contract["lot_size"])
-            target_qty = int(cfg_b["lot_count"]) * lot_sz
+            eff_lots = max(1, int(lot_count_override if lot_count_override is not None else max(int(cfg_b["lot_count"]), self.lots_per_book)))
+            target_qty = eff_lots * lot_sz
 
             sw = sweep_observed_l5_book(
                 quote=quote,
@@ -589,17 +612,18 @@ class V2PaperSimulator:
             filled_qty = int(sw.get("confirmed_lot_qty") or target_qty)
             entry_px = float(sw["fill_price"])
             outlay_inr = round(entry_px * filled_qty, 2)
-            if outlay_inr > float(cfg_b["max_entry_outlay_inr"]):
+            eff_cash_cap = round(float(cfg_b["max_entry_outlay_inr"]) * eff_lots, 2)
+            if outlay_inr > eff_cash_cap:
                 return {"ok": False, "reason": "EXCEEDS_CASH_OUTLAY_CAP", "outlay_inr": outlay_inr}
 
-            env = self.config["account_envelope"]
-            if self.reserved_capital_inr + outlay_inr > float(env["max_capital_reserved_inr"]):
+            if self.reserved_capital_inr + outlay_inr > self.effective_max_capital_reserved_inr(eff_lots):
                 return {"ok": False, "reason": "MAX_RESERVED_CAPITAL_REACHED"}
 
-            # Planned loss = min(20% of filled premium outlay, Rs 1,800) with adverse_buy stop tick so
+            # Planned loss = min(20% of filled premium outlay, Rs 1,800 * lots) with adverse_buy stop tick so
             # planned gross loss <= budget (never exceeded merely by adverse rounding).
             pct_budget = outlay_inr * (float(cfg_b["planned_loss_max_pct_of_outlay"]) / 100.0)
-            planned_loss_inr = round(min(pct_budget, float(cfg_b["planned_loss_max_inr"])), 2)
+            eff_planned_cap = float(cfg_b["planned_loss_max_inr"]) * max(1.0, float(filled_qty) / float(lot_sz))
+            planned_loss_inr = round(min(pct_budget, eff_planned_cap), 2)
             raw_stop = max(0.05, entry_px - (planned_loss_inr / float(filled_qty)))
             hard_stop_px = round_to_nse_tick(raw_stop, mode="adverse_buy", allow_zero_settlement=False)
             planned_stop_loss_inr = round((entry_px - hard_stop_px) * filled_qty, 2)
@@ -783,6 +807,7 @@ class V2PaperSimulator:
         is_bull: bool,
         allow_partial_lot: bool = True,
         book_id_override: Optional[str] = None,
+        lot_count_override: Optional[int] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             cfg_a = self._resolve_book_a_cfg(book_id_override)
@@ -793,11 +818,11 @@ class V2PaperSimulator:
                 return {"ok": False, "reason": "DUPLICATE_SIGNAL_SUPPRESSED"}
 
             hyg = self.config["quote_hygiene"]
-            env = self.config["account_envelope"]
             lot_sz = int(wing_contract["lot_size"])
             if int(short_contract["lot_size"]) != lot_sz:
                 return {"ok": False, "reason": "LOT_SIZE_MISMATCH_ACROSS_LEGS"}
-            target_qty = int(cfg_a["lot_count"]) * lot_sz
+            eff_lots = max(1, int(lot_count_override if lot_count_override is not None else max(int(cfg_a["lot_count"]), self.lots_per_book)))
+            target_qty = eff_lots * lot_sz
 
             sw_w = sweep_observed_l5_book(
                 quote=wing_quote,
@@ -819,10 +844,10 @@ class V2PaperSimulator:
             # If partial fill filled sub-lot contracts (< 1 lot) that cannot back a whole lot short, reject fail-closed
             wing_px = float(sw_w["fill_price"])
             margin_res = max(
-                float(cfg_a["fallback_unverified_margin_reserve_inr"]) * (confirmed_qty / 65.0),
+                float(cfg_a["fallback_unverified_margin_reserve_inr"]) * max(1.0, confirmed_qty / float(lot_sz)),
                 float(cfg_a["spread_width_pts"]) * confirmed_qty,
             )
-            if self.reserved_capital_inr + margin_res > float(env["max_capital_reserved_inr"]):
+            if self.reserved_capital_inr + margin_res > self.effective_max_capital_reserved_inr(eff_lots):
                 return {"ok": False, "reason": "MAX_RESERVED_CAPITAL_REACHED"}
 
             pkg_id = make_stable_id("osv2_pkg", signal_id, wing_contract["instrument_key"], short_contract["instrument_key"], bar_ts)
@@ -1052,14 +1077,16 @@ class V2PaperSimulator:
                     )
                 )
                 struct_loss = float(prov_acc["risk"]["final_package_max_loss_after_friction_inr"])
-                if struct_loss <= float(cfg_a["max_structural_loss_inr"]) * (confirmed_qty / 65.0):
+                lots_scale = max(1.0, float(confirmed_qty) / float(lot_sz))
+                if struct_loss <= float(cfg_a["max_structural_loss_inr"]) * max(lots_scale, float(confirmed_qty) / 65.0):
                     # Complete 2-leg Book A package
                     intent_id = make_stable_id("osv2_int", package_id, "SHORT_LEG", "SELL")
                     fill_id = make_stable_id("osv2_fil", intent_id, sw_s["ts_ms"])
                     seq = int(pkg["transition_seq"]) + 1
-                    per_pt_cap = float(
+                    eff_max_planned_loss = float(
                         cfg_a.get("max_planned_stop_loss_inr") or cfg_a["max_structural_loss_inr"]
-                    ) / float(confirmed_qty)
+                    ) * lots_scale
+                    per_pt_cap = eff_max_planned_loss / float(confirmed_qty)
                     hard_stop_debit = round(
                         min(
                             net_credit * float(cfg_a["close_only_stop_debit_mult"]),
